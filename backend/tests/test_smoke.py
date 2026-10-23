@@ -12,8 +12,9 @@ def test_health_returns_ok():
     resp = client.get("/api/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "ok"
-    assert body["app"] == "director-lab"
+    assert body["status"] in ("healthy", "degraded", "down")
+    assert "database" in body
+    assert "comfyui" in body
 
 
 def test_404_uses_unified_error_format():
