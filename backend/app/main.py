@@ -11,12 +11,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
 
-from app.api.v1 import characters, compose, events, jobs, projects, props, scenes, script, shots
+from app.api.v1 import characters, compose, events, jobs, projects, props, scenes, script, settings, shots, workflows
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
-    app = FastAPI(title=settings.app_name, debug=settings.debug)
+    cfg = get_settings()
+    app = FastAPI(title=cfg.app_name, debug=cfg.debug)
 
     app.include_router(projects.router)
     app.include_router(characters.router)
@@ -27,6 +27,9 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(events.router)
     app.include_router(compose.router)
+    app.include_router(workflows.router)
+    app.include_router(settings.router)
+    app.include_router(settings.health_router)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -49,7 +52,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict:
-        return {"status": "ok", "app": settings.app_name, "version": "0.1.0"}
+        return {"status": "ok", "app": cfg.app_name, "version": "0.1.0"}
 
     return app
 
