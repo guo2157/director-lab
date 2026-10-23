@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# 数据与媒体（不入库）
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 环境
+.env
+.env.local
+
+# 系统
+.DS_Store
