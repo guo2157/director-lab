@@ -206,6 +206,55 @@ def clear_upload_cache() -> dict:
     return result
 
 
+import threading
+_backup_lock = threading.Lock()
+
+
+@router.post("/backup", status_code=202)
+def backup_settings() -> dict:
+    """手动触发一次备份（API.md §11）：备份数据库到 data/backups/。
+    并发触发时若已有备份任务在跑，返回 409 invalid_state_transition。
+    """
+    if not _backup_lock.acquire(blocking=False):
+        raise errors.AppError("invalid_state_transition", "已有备份任务在执行中", 409)
+    try:
+        import hashlib
+        s = get_settings()
+        backup_dir = Path(s.data_dir) / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        db_path = Path(s.database_url.split("///", 1)[1])
+        db_backup = backup_dir / f"director_lab_{ts}.db"
+        if db_path.exists():
+            shutil.copy2(db_path, db_backup)
+        # WAL 模式下需一并备份 -wal/-shm 以保证一致性
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(db_path) + suffix)
+            if side.exists():
+                shutil.copy2(side, backup_dir / f"director_lab_{ts}.db{suffix}")
+        size = db_backup.stat().st_size if db_backup.exists() else 0
+        checksum = ""
+        if db_backup.exists():
+            h = hashlib.sha256()
+            with open(db_backup, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            checksum = f"sha256:{h.hexdigest()}"
+        result = {
+            "file_path": str(db_backup),
+            "size_bytes": size,
+            "checksum": checksum,
+        }
+        return {
+            "id": f"job_backup_{ts}",
+            "job_type": "backup",
+            "status": "succeeded",
+            "result": result,
+        }
+    finally:
+        _backup_lock.release()
+
+
 # --- Health (separate prefix) ---
 health_router = APIRouter(prefix="/api", tags=["health"])
 
