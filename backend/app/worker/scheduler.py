@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import Job
+from app.worker.compose_executor import execute_compose_job
 from app.worker.executor import execute_generate_job
+from app.worker.export_executor import execute_export_job
 from app.worker.parse_executor import execute_parse_job
 
 _RUNNING = True
@@ -84,8 +86,15 @@ def run_worker(once: bool = False) -> None:
             print(f"[worker] 执行解析任务 {job.id}")
             result = execute_parse_job(job.id)
             print(f"[worker] 解析任务 {job.id} 结果: {result}")
+        elif job.job_type == "compose":
+            print(f"[worker] 执行合成任务 {job.id}")
+            result = execute_compose_job(job.id)
+            print(f"[worker] 合成任务 {job.id} 结果: {result}")
+        elif job.job_type == "export":
+            print(f"[worker] 执行导出任务 {job.id}")
+            result = execute_export_job(job.id)
+            print(f"[worker] 导出任务 {job.id} 结果: {result}")
         else:
-            # compose/export 等类型在后续阶段接入对应执行器
             print(f"[worker] 跳过未支持类型 {job.job_type}（任务 {job.id}）")
             db = SessionLocal()
             try:

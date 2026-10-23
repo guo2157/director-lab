@@ -79,6 +79,68 @@ class ParseVersionOut(BaseModel):
     diff_summary: dict | None
 
 
+# --- 合成 ---
+class TimelineTrack(BaseModel):
+    role: str
+    asset_id: str
+    asset_version: int | None = None
+    shot_id: str | None = None
+    scene_id: str | None = None
+    episode: int | None = None
+    start: float | None = None
+    end: float | None = None
+    volume: float | None = None
+    fade_in: float | None = None
+    fade_out: float | None = None
+    loop_policy: str | None = None
+
+
+class ComposeCreate(BaseModel):
+    episode: int | None = Field(default=None, ge=1)
+    include_subtitle: bool = True
+    subtitle_mode: str = Field(default="burn", pattern="^(burn|sidecar)$")
+    bgm_asset_id: str | None = None
+    bgm_volume: float = Field(default=0.3, ge=0, le=1)
+    compose_tolerance: float = Field(default=0.5, ge=0, le=2)
+    timeline_tracks: list[TimelineTrack] | None = None
+
+
+class CompositionOut(BaseModel):
+    composition_id: str
+    episode: int | None
+    duration: float | None
+    stale: bool
+    created_at: datetime | None
+    file_path: str | None
+    status: str
+
+
+class CompositionDetailOut(CompositionOut):
+    source_snapshot: dict | None
+    warnings: list | None
+    job_id: str | None = None
+    srt_path: str | None = None
+
+
+# --- 导出 ---
+class ExportCreate(BaseModel):
+    composition_id: str
+    format: str = Field(default="mp4", pattern="^mp4$")
+    include_subtitle: bool | None = None
+    subtitle_mode: str | None = None
+    delivery_profile: str = Field(default="standard", pattern="^(standard|high_quality)$")
+
+
+class ExportOut(BaseModel):
+    id: str
+    composition_id: str
+    file_name: str | None
+    size: int | None
+    status: str
+    created_at: datetime | None
+    download_url: str
+
+
 # --- 任务 ---
 class JobOut(BaseModel):
     id: str

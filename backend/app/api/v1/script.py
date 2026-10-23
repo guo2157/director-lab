@@ -177,6 +177,30 @@ def confirm_parse_version(project_id: str, parse_version_id: str, payload: Parse
     # 乐观锁：请求携带的当前版本须与实际一致
     if (payload.current_parse_version_id or None) != (p.current_parse_version_id or None):
         raise errors.parse_version_conflict()
+    # 找到产生该候选版本的解析任务，取其 result 做级联落库
+    parse_job = (
+        db.query(Job)
+        .filter(Job.project_id == project_id, Job.job_type == "parse", Job.status == "succeeded")
+        .order_by(Job.finished_at.desc())
+        .all()
+    )
+    target_result = None
+    for j in parse_job:
+        if (j.result or {}).get("parse_version_id") == pv.id:
+            target_result = j.result
+            break
+    if target_result is not None:
+        from app.models import Scene as SceneModel
+        from app.services.script_parse import apply_parse_result
+        current_scene_ids = [
+            row[0] for row in db.query(SceneModel.id).filter(SceneModel.project_id == project_id).all()
+        ]
+        apply_parse_result(
+            db, p, target_result,
+            episode_start=int(target_result.get("episode_start") or 1),
+            episode_count=int(target_result.get("episode_count") or 1),
+            current_scene_ids=current_scene_ids,
+        )
     # 旧版本标记 superseded
     old_id = p.current_parse_version_id
     if old_id:

@@ -212,3 +212,163 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
         scenes_out.append(sc)
     result.data["scenes"] = scenes_out
     return result
+
+
+# --- 候选解析确认后的级联落库（API.md §5 parse-version confirm / PROMPTS.md §3 集级合并规则） ---
+def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, episode_count: int,
+                       current_scene_ids: list | None = None) -> dict:
+    """把候选解析结果落库到实体表：角色/道具按名幂等，场景同名同集复用，
+    镜头按 (scene, episode, seq) upsert，范围外不动；旧镜头中不在新解析内的删除。
+
+    分集规划按锁定集规则合并：locked=true 保留原规划，locked=false 用新解析覆盖。
+    返回落库统计。调用方负责事务提交。
+    """
+    from app.models import Character, Prop, Scene, SceneEpisode, Shot
+    from app.models import ids as id_gen
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stats = {"characters": 0, "props": 0, "scenes": 0, "shots_created": 0,
+             "shots_updated": 0, "shots_deleted": 0}
+
+    # 1. 角色按名幂等 upsert
+    char_map = {c.name: c for c in db.query(Character).filter(Character.project_id == project.id).all()}
+    for c in parse_result.get("characters") or []:
+        name = (c.get("name") or "").strip()
+        if not name:
+            continue
+        existing = char_map.get(name)
+        if existing:
+            existing.description = c.get("description") or existing.description
+            existing.traits = c.get("traits") or existing.traits
+            existing.appearance = c.get("appearance") or existing.appearance
+        else:
+            new_c = Character(id=id_gen.character_id(), project_id=project.id, name=name,
+                              description=c.get("description"), traits=c.get("traits"),
+                              appearance=c.get("appearance"))
+            db.add(new_c)
+            db.flush()
+            char_map[name] = new_c
+            stats["characters"] += 1
+
+    # 2. 道具按名幂等 upsert
+    prop_map = {p.name: p for p in db.query(Prop).filter(Prop.project_id == project.id).all()}
+    for pr in parse_result.get("props") or []:
+        name = (pr.get("name") or "").strip()
+        if not name:
+            continue
+        existing = prop_map.get(name)
+        if existing:
+            existing.description = pr.get("description") or existing.description
+            existing.appearance = pr.get("appearance") or existing.appearance
+        else:
+            new_p = Prop(id=id_gen.prop_id(), project_id=project.id, name=name,
+                         description=pr.get("description"), appearance=pr.get("appearance"))
+            db.add(new_p)
+            db.flush()
+            prop_map[name] = new_p
+            stats["props"] += 1
+
+    # 3. 分集规划合并（locked=true 保留）
+    old_plan = {e.get("episode"): e for e in (project.episode_plan or []) if isinstance(e, dict)}
+    new_plan = dict(old_plan)
+    for e in parse_result.get("episodes") or []:
+        ep_no = e.get("episode")
+        if ep_no is None:
+            continue
+        old_e = old_plan.get(ep_no)
+        if old_e and old_e.get("locked"):
+            continue  # 锁定集保留
+        e = dict(e)
+        e.setdefault("locked", False)
+        new_plan[ep_no] = e
+    project.episode_plan = [new_plan[k] for k in sorted(new_plan)]
+
+    # 4. 场景与镜头落库
+    scene_title_map = {}
+    for s in db.query(Scene).filter(Scene.project_id == project.id).all():
+        scene_title_map[(s.title, s.episode)] = s
+    current_ids = set(current_scene_ids or [])
+    touched_shot_keys = set()  # (scene_id, episode, seq) 本次解析覆盖的镜头
+
+    for sc in parse_result.get("scenes") or []:
+        ep = sc.get("episode")
+        title = (sc.get("title") or "").strip() or f"场景{sc.get('episode')}"
+        scene = scene_title_map.get((title, ep))
+        if scene is None:
+            max_seq = (db.query(Scene.seq).filter(Scene.project_id == project.id)
+                       .order_by(Scene.seq.desc()).first())
+            scene = Scene(id=id_gen.scene_id(), project_id=project.id, episode=int(ep or 1),
+                          seq=(max_seq[0] if max_seq else 0) + 1, title=title,
+                          description=sc.get("description"), time_note=sc.get("time_note"))
+            db.add(scene)
+            db.flush()
+            scene_title_map[(title, ep)] = scene
+            stats["scenes"] += 1
+        else:
+            scene.description = sc.get("description") or scene.description
+            scene.time_note = sc.get("time_note") or scene.time_note
+        # scene_episode 关联（幂等）
+        link = (db.query(SceneEpisode)
+                .filter_by(scene_id=scene.id, episode=int(ep or 1)).first())
+        if link is None:
+            max_se = (db.query(SceneEpisode.seq_in_episode)
+                      .filter(SceneEpisode.scene_id == scene.id)
+                      .order_by(SceneEpisode.seq_in_episode.desc()).first())
+            db.add(SceneEpisode(id=id_gen.scene_episode_id(), scene_id=scene.id,
+                                episode=int(ep or 1),
+                                seq_in_episode=(max_se[0] if max_se else 0) + 1))
+
+        # 镜头 upsert
+        for sh in sc.get("shots") or []:
+            seq = sh.get("seq")
+            if seq is None:
+                continue
+            ep_i = int(sh.get("episode") or ep or 1)
+            key = (scene.id, ep_i, int(seq))
+            touched_shot_keys.add(key)
+            # character_id 名称 → 实体 ID 二次映射
+            char_id = None
+            cname = sh.get("character_id") or sh.get("speaker")
+            if cname and cname in char_map:
+                char_id = char_map[cname].id
+            fields = dict(
+                character_id=char_id, dialogue=sh.get("dialogue"),
+                dialogue_segments=sh.get("dialogue_segments"),
+                shot_kind=sh.get("shot_kind") or "visual",
+                image_prompt=sh.get("image_prompt"), video_prompt=sh.get("video_prompt"),
+                shot_type=sh.get("shot_type"), camera_angle=sh.get("camera_angle"),
+                camera_movement=sh.get("camera_movement"), transition=sh.get("transition"),
+                shot_purpose=sh.get("shot_purpose"), emotion=sh.get("emotion") or "neutral",
+                duration=int(sh.get("duration") or 10),
+                time_jump=bool(sh.get("time_jump")),
+                requires_prev_frame=bool(sh.get("requires_prev_frame")),
+                start_state=sh.get("start_state"), end_state=sh.get("end_state"),
+                beats=sh.get("beats"), emotion_curve=sh.get("emotion_curve"),
+            )
+            existing = (db.query(Shot).filter_by(scene_id=scene.id, episode=ep_i, seq=int(seq))
+                        .first())
+            if existing:
+                for k, v in fields.items():
+                    setattr(existing, k, v)
+                stats["shots_updated"] += 1
+            else:
+                db.add(Shot(id=id_gen.shot_id(), scene_id=scene.id, episode=ep_i,
+                            seq=int(seq), status="pending", **fields))
+                stats["shots_created"] += 1
+
+    # 5. 删除本次解析范围内、但新解析不再包含的旧镜头（仅限当前生效版本的场景）
+    ep_end = episode_start + episode_count - 1
+    if current_ids:
+        stale_shots = (
+            db.query(Shot).join(Scene, Shot.scene_id == Scene.id)
+            .filter(Scene.project_id == project.id,
+                    Scene.id.in_(current_ids),
+                    Shot.episode >= episode_start, Shot.episode <= ep_end)
+            .all()
+        )
+        for s in stale_shots:
+            if (s.scene_id, s.episode, s.seq) not in touched_shot_keys:
+                db.delete(s)
+                stats["shots_deleted"] += 1
+    return stats

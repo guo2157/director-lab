@@ -197,6 +197,84 @@ def test_parse_version_confirm_optimistic_lock(client, monkeypatch):
     assert r.status_code == 409
 
 
+FAKE_PARSE_OUTPUT_V2 = {
+    "project_analysis": {"summary": "教室悬疑v2", "theme": "信任", "highlights": [], "foreshadowing": []},
+    "characters": [{"name": "林晓", "description": "转学生（更新）", "traits": "细心", "appearance": "短发"}],
+    "props": [],
+    "scenes": [{
+        "episode": 1, "title": "教室", "description": "午后教室", "time_note": "白天",
+        "shots": [
+            {"episode": 1, "seq": 1, "scene_id": "教室", "character_id": "林晓",
+             "dialogue": "新台词", "duration": 6, "shot_kind": "dialogue",
+             "image_prompt": "新的 @林晓"},
+        ],
+    }],
+    "episodes": [{"episode": 1, "goal": "新目标", "rhythm_curve": "上扬",
+                  "cliffhanger_type": "危机逼近", "hook_to_next": "承接", "locked": False}],
+}
+
+
+def _run_parse(client, monkeypatch, pid, sv, fake_output):
+    """提交解析任务并用替身执行，返回 parse_version_id。"""
+    r = client.post(f"/api/projects/{pid}/parse",
+                    json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
+                          "episode_start": 1, "episode_count": 1})
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    import app.worker.parse_executor as pe_mod
+
+    class _FakeLLM:
+        def __init__(self, *a, **kw):
+            pass
+
+        def chat_json(self, s, u):
+            return fake_output
+
+    monkeypatch.setattr(pe_mod, "LLMClient", _FakeLLM)
+    res = pe_mod.execute_parse_job(job_id)
+    assert res["ok"] is True
+    return client.get(f"/api/jobs/{job_id}").json()["result"]["parse_version_id"]
+
+
+def test_parse_confirm_cascades_entities(client, monkeypatch):
+    pid = _make_project(client)
+    sv = _save_script(client, pid)
+    _confirmed_estimate(client, pid, sv)
+    # 第一次解析并确认：实体落库
+    pv1 = _run_parse(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT)
+    r = client.post(f"/api/projects/{pid}/parse-versions/{pv1}/confirm",
+                    json={"current_parse_version_id": None})
+    assert r.status_code == 200
+    chars = client.get(f"/api/projects/{pid}/characters").json()
+    assert [c["name"] for c in chars] == ["林晓"]
+    scenes = client.get(f"/api/projects/{pid}/scenes").json()
+    assert len(scenes) == 1 and scenes[0]["title"] == "教室"
+    scene_id = scenes[0]["id"]
+    shots = client.get(f"/api/scenes/{scene_id}/shots?episode=1").json()["items"]
+    assert len(shots) == 2
+    assert shots[0]["status"] == "pending"
+    assert shots[0]["character_id"] == chars[0]["id"]
+    plan = client.get(f"/api/projects/{pid}").json()["episode_plan"]
+    assert plan[0]["goal"] == "建立悬念"
+    # 第二次解析并确认：镜头按范围清理更新，旧版本失效
+    pv2 = _run_parse(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT_V2)
+    r = client.post(f"/api/projects/{pid}/parse-versions/{pv2}/confirm",
+                    json={"current_parse_version_id": pv1})
+    assert r.status_code == 200
+    shots = client.get(f"/api/scenes/{scene_id}/shots?episode=1").json()["items"]
+    assert len(shots) == 1  # 旧 seq=2 被清理
+    assert shots[0]["seq"] == 1 and shots[0]["dialogue"] == "新台词"
+    assert shots[0]["duration"] == 6
+    chars = client.get(f"/api/projects/{pid}/characters").json()
+    assert len(chars) == 1 and chars[0]["description"] == "转学生（更新）"
+    plan = client.get(f"/api/projects/{pid}").json()["episode_plan"]
+    assert plan[0]["goal"] == "新目标"
+    # 旧解析版本已标记 superseded
+    r = client.post(f"/api/projects/{pid}/parse-versions/{pv1}/confirm",
+                    json={"current_parse_version_id": pv2})
+    assert r.status_code == 409
+
+
 def test_parse_llm_failure_classification(client, monkeypatch):
     pid = _make_project(client)
     sv = _save_script(client, pid)

@@ -51,3 +51,60 @@ def get_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
     if j is None:
         raise errors.job_not_found()
     return _to_out(j)
+
+
+_GENERATE_TYPES = {"generate_keyframe", "generate_clip", "generate_audio", "generate_bgm", "generate_sfx"}
+
+
+@router.post("/{job_id}/cancel", status_code=204)
+def cancel_job(job_id: str, db: Session = Depends(get_db)):
+    """取消任务：仅 queued/running 可取消。
+    running 的生成类任务调用 ComfyUI /interrupt（全局中断，§5.2）；
+    其余 running 任务标记取消，worker 在下一检查点确认终态。
+    """
+    from datetime import datetime, timezone
+    from app.models import JobEvent
+    j = db.get(Job, job_id)
+    if j is None:
+        raise errors.job_not_found()
+    if j.status not in ("queued", "running"):
+        raise errors.invalid_state_transition(f"任务状态 {j.status} 不可取消")
+    if j.status == "running" and j.job_type in _GENERATE_TYPES and j.prompt_id:
+        try:
+            from app.integrations.comfyui import ComfyUIClient
+            ComfyUIClient().interrupt()
+        except Exception as e:  # 中断失败不阻断本地取消，记入事件
+            db.add(JobEvent(job_id=j.id, event_type="job.interrupt_failed",
+                            payload={"reason": type(e).__name__},
+                            created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+    j.status = "cancelled"
+    j.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.add(JobEvent(job_id=j.id, event_type="job.cancelled", payload={},
+                    created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+    db.commit()
+    return None
+
+
+@router.post("/{job_id}/retry", status_code=201)
+def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
+    """重试任务：仅 failed/lost 且 retryable 可重试，生成新的任务 ID（§任务）。"""
+    from datetime import datetime, timezone
+    from app.models import ids
+    settings = get_settings()
+    j = db.get(Job, job_id)
+    if j is None:
+        raise errors.job_not_found()
+    if j.status not in ("failed", "lost"):
+        raise errors.invalid_state_transition(f"任务状态 {j.status} 不可重试")
+    if (j.attempts or 0) >= settings.job_max_attempts:
+        raise errors.invalid_request(f"已达重试上限 {settings.job_max_attempts} 次，不可再重试")
+    new_job = Job(
+        id=ids.job_id(), project_id=j.project_id, shot_id=j.shot_id,
+        job_type=j.job_type, workflow_id=j.workflow_id, workflow_version=j.workflow_version,
+        params=j.params, status="queued",
+        attempts=j.attempts,  # 继承累计次数，执行器运行时再 +1
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    db.add(new_job)
+    db.commit()
+    return _to_out(new_job)

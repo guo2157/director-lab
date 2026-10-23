@@ -24,8 +24,11 @@ def _now() -> datetime:
 
 
 def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = None) -> None:
-    """事件与状态同事务写入 outbox。event_seq 由数据库自增。"""
-    db.add(JobEvent(job_id=job.id, event_type=event_type, payload=payload or {}, created_at=_now()))
+    """事件与状态同事务写入 outbox。event_seq 由数据库自增，并回写 job.event_seq 供增量补齐。"""
+    ev = JobEvent(job_id=job.id, event_type=event_type, payload=payload or {}, created_at=_now())
+    db.add(ev)
+    db.flush()
+    job.event_seq = ev.event_seq
 
 
 def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
