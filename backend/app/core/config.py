@@ -57,7 +57,7 @@ class Settings(BaseSettings):
 
     # --- 媒体存储 ---
     media_dir: Path = Path("./data/media")
-    workflow_dir: Path = Path("/home/ubuntu/prd")
+    workflow_dir: Path = Path(__file__).resolve().parents[2] / "data" / "workflows"
 
 
 @lru_cache

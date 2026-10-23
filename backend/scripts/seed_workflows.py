@@ -3,6 +3,8 @@
 
 读取 workflow_dir 下的 wf_*.json 与配套 wf_*.meta.json，逐份用 parse_workflow 校验
 （同一套标记规则，含画布残留键检测），再按 name 幂等更新或插入。
+版本规则：仅当内容（workflow_type/description/trigger/capabilities/definition/parsed_schema）
+实际变化时才 version+1，内容一致的重复播种不改动记录、不虚增版本。
 运行方式：在 backend 目录执行 .venv/bin/python scripts/seed_workflows.py
 """
 import json
@@ -26,6 +28,11 @@ def load_json(p: Path):
         return json.load(f)
 
 
+def canonical(obj):
+    """JSON 字段的内容指纹：键排序后序列化，忽略键序差异。"""
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def seed():
     wf_dir = Path(settings.workflow_dir)
     workflows = sorted(
@@ -36,7 +43,7 @@ def seed():
         sys.exit(1)
     print(f"[event] 发现 {len(workflows)} 份工作流")
     db = SessionLocal()
-    created = updated = 0
+    created = updated = unchanged = 0
     try:
         for wf_path in workflows:
             name = wf_path.stem
@@ -62,6 +69,17 @@ def seed():
             )
             existing = db.query(Workflow).filter_by(name=name).first()
             if existing:
+                changed = (
+                    existing.workflow_type != workflow_type
+                    or existing.description != description
+                    or canonical(existing.trigger) != canonical(trigger)
+                    or canonical(existing.capabilities) != canonical(capabilities)
+                    or canonical(existing.definition) != canonical(definition)
+                    or canonical(existing.parsed_schema) != canonical(parsed_schema)
+                )
+                if not changed:
+                    unchanged += 1
+                    continue
                 existing.workflow_type = workflow_type
                 existing.description = description
                 existing.trigger = trigger
@@ -84,7 +102,7 @@ def seed():
                 ))
                 created += 1
         db.commit()
-        print(f"[done] 新增 {created}，更新 {updated}，共 {created + updated}")
+        print(f"[done] 新增 {created}，更新 {updated}，未变化 {unchanged}，共 {created + updated + unchanged}")
     except Exception as e:
         db.rollback()
         print(f"[failed] {e}")

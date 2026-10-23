@@ -1,6 +1,6 @@
 """工作流标记解析与参数注入引擎：WORKFLOW.md §2 标记语法、§3 统一参数约定、§5 参数对齐。
 
-与 /home/ubuntu/prd/validate_workflows.py 的解析逻辑保持一致（同一套标记规则）。
+与 backend/scripts/validate_workflows.py 的解析逻辑保持一致（同一套标记规则）。
 标记写在节点 _meta.title，不写 inputs；注入时深拷贝工作流定义，不改原定义。
 """
 import copy
@@ -51,7 +51,10 @@ def parse_workflow(wf: dict) -> ParsedWorkflow:
             if not frag.startswith("$"):
                 continue
             if frag.startswith("$output."):
-                result.outputs.add(frag[8:])
+                out_name = frag[8:]
+                if out_name in result.outputs:
+                    result.errors.append(f"节点 {nid} 输出 $output.{out_name} 重复标记")
+                result.outputs.add(out_name)
                 continue
             m = _MARK_RE.fullmatch(frag)
             if not m:
@@ -108,5 +111,8 @@ def find_output_nodes(wf: dict) -> dict:
         title = node.get("_meta", {}).get("title", "")
         for frag in [f.strip() for f in title.split(",")]:
             if frag.startswith("$output."):
-                mapping[frag[8:]] = nid
+                out_name = frag[8:]
+                if out_name in mapping:
+                    raise ValueError(f"输出 $output.{out_name} 被多个节点标记（节点 {mapping[out_name]} 与 {nid}），禁止静默覆盖")
+                mapping[out_name] = nid
     return mapping
