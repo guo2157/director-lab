@@ -1,0 +1,165 @@
+"""核心叙事实体：剧本版本、剧本评估、项目、角色、场景、场景-集关联、道具、镜头。
+
+权威定义：DATABASE.md §2 核心表（逐字段落位）。
+"""
+from datetime import datetime
+
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, TimestampMixin
+from app.models import ids
+
+
+class ScriptVersion(Base):
+    """剧本版本：不可变快照。"""
+
+    __tablename__ = "script_version"
+    __table_args__ = (UniqueConstraint("project_id", "version", name="uq_script_version_project_version"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.script_version_id)
+    project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class ScriptEstimate(Base):
+    """剧本评估。"""
+
+    __tablename__ = "script_estimate"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.script_estimate_id)
+    script_version_id: Mapped[str] = mapped_column(String(32), ForeignKey("script_version.id"), nullable=False, index=True)
+    algorithm_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    user_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class Project(TimestampMixin, Base):
+    """项目。"""
+
+    __tablename__ = "project"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.project_id)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    creation_type: Mapped[str] = mapped_column(String(16), nullable=False, default="novel", server_default="novel")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aspect_ratio: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft", server_default="draft")
+    settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    episode_plan: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    estimated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    estimated_text_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_script_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    current_parse_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Character(TimestampMixin, Base):
+    """角色（项目级资产层）。"""
+
+    __tablename__ = "character"
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_character_project_name"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.character_id)
+    project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    traits: Mapped[str | None] = mapped_column(Text, nullable=True)
+    appearance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voice_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    portrait_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class Scene(TimestampMixin, Base):
+    """场景（项目级资产层，跨集公用）。"""
+
+    __tablename__ = "scene"
+    __table_args__ = (UniqueConstraint("project_id", "seq", name="uq_scene_project_seq"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.scene_id)
+    project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
+    episode: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    baseline_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class SceneEpisode(Base):
+    """场景-集关联：同一地点多集出现只保留一条 scene 记录。"""
+
+    __tablename__ = "scene_episode"
+    __table_args__ = (UniqueConstraint("scene_id", "episode", name="uq_scene_episode_scene_episode"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.scene_episode_id)
+    scene_id: Mapped[str] = mapped_column(String(32), ForeignKey("scene.id"), nullable=False, index=True)
+    episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    seq_in_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class Prop(TimestampMixin, Base):
+    """道具（项目级资产层）。"""
+
+    __tablename__ = "prop"
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_prop_project_name"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.prop_id)
+    project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    appearance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_key_prop: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    anchor_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    anchor_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class Shot(TimestampMixin, Base):
+    """镜头（分镜层，集级独立）。"""
+
+    __tablename__ = "shot"
+    __table_args__ = (UniqueConstraint("scene_id", "episode", "seq", name="uq_shot_scene_episode_seq"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.shot_id)
+    scene_id: Mapped[str] = mapped_column(String(32), ForeignKey("scene.id"), nullable=False, index=True)
+    episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("character.id"), nullable=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    dialogue: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dialogue_segments: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    shot_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    image_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shot_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    camera_angle: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    camera_movement: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    transition: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    shot_purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emotion: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    soundscape: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bgm: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    actual_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    video_actual_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    audio_check_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    dialogue_check_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    av_sync_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    time_jump: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    requires_prev_frame: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    start_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    end_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_frame_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    beats: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    emotion_curve: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+# shot 表建议索引：(scene_id, episode) 支撑分镜看板按场景按集加载
+from sqlalchemy import Index  # noqa: E402
+
+Index("ix_shot_scene_episode", Shot.__table__.c.scene_id, Shot.__table__.c.episode)
