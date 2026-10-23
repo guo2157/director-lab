@@ -11,10 +11,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
 
+from app.api.v1 import characters, projects, props, scenes, shots
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, debug=settings.debug)
+
+    app.include_router(projects.router)
+    app.include_router(characters.router)
+    app.include_router(props.router)
+    app.include_router(scenes.router)
+    app.include_router(shots.router)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
