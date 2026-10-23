@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import Job
 from app.worker.executor import execute_generate_job
+from app.worker.parse_executor import execute_parse_job
 
 _RUNNING = True
 
@@ -79,8 +80,12 @@ def run_worker(once: bool = False) -> None:
             print(f"[worker] 执行任务 {job.id} ({job.job_type})")
             result = execute_generate_job(job.id)
             print(f"[worker] 任务 {job.id} 结果: {result}")
+        elif job.job_type == "parse":
+            print(f"[worker] 执行解析任务 {job.id}")
+            result = execute_parse_job(job.id)
+            print(f"[worker] 解析任务 {job.id} 结果: {result}")
         else:
-            # parse/compose/export 等类型在后续阶段接入对应执行器
+            # compose/export 等类型在后续阶段接入对应执行器
             print(f"[worker] 跳过未支持类型 {job.job_type}（任务 {job.id}）")
             db = SessionLocal()
             try:

@@ -26,9 +26,17 @@ class Settings(BaseSettings):
     comfyui_poll_interval_seconds: float = 2.0
     comfyui_job_timeout_seconds: float = 600.0  # TBD 关联：超时分类 comfy_timeout
 
+    # --- 语言模型（剧本评估与解析，OpenAI 兼容接口，独立于 ComfyUI） ---
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""  # 凭据只走环境变量 DLAB_LLM_API_KEY，禁止写入代码与日志
+    llm_model: str = "gpt-4o-mini"
+    llm_timeout_seconds: float = 120.0
+    llm_max_retries: int = 2
+
     # --- 任务调度（D-03：渲染并发固定为 1，禁止配置化放开） ---
     render_concurrency: int = 1
     worker_poll_interval_seconds: float = 2.0
+    job_max_attempts: int = 3  # §5.7 重试上限（自动+手动累计），范围 1-10
 
     # --- 一致性双阈值（T-04：实测后校准，当前为推荐默认值） ---
     consistency_pass_threshold: float = 0.85

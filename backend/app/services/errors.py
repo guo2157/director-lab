@@ -36,6 +36,20 @@ def prop_not_found() -> HTTPException:
 
 def invalid_state_transition(message: str) -> HTTPException:
     return biz_error(code="invalid_state_transition", http=409, message=message)
+def script_version_not_found() -> HTTPException:
+    return biz_error(code="script_version_not_found", http=404, message="剧本版本不存在")
+def script_version_conflict(message: str = "剧本版本与确认版本不一致") -> HTTPException:
+    return biz_error(code="script_version_conflict", http=409, message=message)
+def estimate_not_found() -> HTTPException:
+    return biz_error(code="estimate_not_found", http=404, message="评估记录不存在")
+def parse_version_not_found() -> HTTPException:
+    return biz_error(code="parse_version_not_found", http=404, message="解析版本不存在")
+def parse_version_conflict(message: str = "当前解析版本已变化，请刷新差异后重试") -> HTTPException:
+    return biz_error(code="parse_version_conflict", http=409, message=message)
+def job_not_found() -> HTTPException:
+    return biz_error(code="job_not_found", http=404, message="任务不存在")
+def invalid_request(message: str) -> HTTPException:
+    return biz_error(code="invalid_request", http=400, message=message)
 
 
 def invalid_request(message: str) -> HTTPException:
