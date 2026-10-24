@@ -80,6 +80,6 @@ tests/          # 单元测试与集成测试
 | --- | --- | --- |
 | ComfyUI | 设置页 ComfyUI 区 | base_url、可选 API Key、视频轮询超时（最小 60 秒，默认 300 秒） |
 | 语言模型 | 设置页语言模型区 | OpenAI 兼容接口（base_url / api_key / model），供应商预设含 DeepSeek / OpenAI / 通义 / Ollama |
-| 三方通道 | 设置页三方通道区 | 仅当本地 ComfyUI 不可用时按启用顺序降级 |
+| ComfyUI 多实例 | 设置页 ComfyUI 区 | 多实例加权轮询负载均衡，实例不可用自动故障转移（替代原三方通道降级机制） |
 
 H3 Partner Node 会将参考图与提示词经 ComfyUI 发送至 Comfy/MiniMax 云端，设置页必须明示并可停用对应工作流（PRD.md 第 3 节已确认决策）。

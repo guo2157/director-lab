@@ -13,7 +13,7 @@ export function regenerateShot(shotId: string, payload: GenerateShotPayload) {
   return post<GenerateResponse>(`/shots/${shotId}/regenerate`, payload)
 }
 
-/** 场景内批量生成（<3 镜头返回 400；并发 1 串行按 seq 升序；前镜视频成功抽末帧后才继续下一镜） */
+/** 场景内批量生成（<3 镜头返回 400；按 seq 升序，前镜视频成功抽末帧后才继续下一镜；worker 并发 = 可用 ComfyUI 实例数） */
 export function generateSceneShots(sceneId: string, payload: {
   shot_ids?: string[]
   target: 'keyframe' | 'clip'
@@ -22,7 +22,7 @@ export function generateSceneShots(sceneId: string, payload: {
   return post<BatchGenerateResponse>(`/scenes/${sceneId}/generate`, payload)
 }
 
-/** 跨场景批量生成（顺序：集数升序→场景出场序→seq 升序全串行；末帧衔接仅同场景同集内成立） */
+/** 跨场景批量生成（顺序：集数升序→场景出场序→seq 升序；末帧衔接仅同场景同集内成立；worker 并发 = 可用 ComfyUI 实例数） */
 export function generateProjectShots(projectId: string, payload: {
   shot_ids?: string[]
   episode_from?: number

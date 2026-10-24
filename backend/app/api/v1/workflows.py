@@ -30,6 +30,7 @@ def _to_dict(wf: Workflow, db: Session) -> dict:
         "definition": wf.definition,
         "parsed_schema": wf.parsed_schema,
         "is_default": wf.is_default,
+        "is_builtin": wf.is_builtin,
         "used_by_jobs": used_by_jobs,
         "created_at": wf.created_at.isoformat() if hasattr(wf, 'created_at') and wf.created_at else None,
         "updated_at": wf.updated_at.isoformat() if hasattr(wf, 'updated_at') and wf.updated_at else None,
@@ -142,6 +143,8 @@ def delete_workflow(workflow_id: str, db: Session = Depends(get_db)):
     wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
     if not wf:
         raise errors.AppError("workflow_not_found", "工作流不存在", 404)
+    if wf.is_builtin:
+        raise errors.AppError("workflow_in_use", "系统内置工作流，禁止删除", 409)
     if wf.is_default:
         raise errors.AppError("workflow_in_use", "工作流为默认，禁止删除", 409)
     job_count = db.query(Job).filter(Job.workflow_id == workflow_id).count()

@@ -15,7 +15,9 @@ export interface Asset {
   status: AssetStatus
   version: number
   file_path?: string
+  thumb_path?: string | null
   url?: string
+  thumb_url?: string | null
   mime_type?: string
   size_bytes?: number
   locked: boolean
@@ -30,7 +32,9 @@ export interface AssetVersion {
   version: number
   asset_id: string
   file_path?: string
+  thumb_path?: string | null
   url?: string
+  thumb_url?: string | null
   created_at: string
   source_job_id?: string | null
 }
@@ -43,9 +47,13 @@ export interface Workflow {
   id: string
   name: string
   workflow_type: WorkflowType
+  description?: string
   version: number
   is_default: boolean
+  is_builtin?: boolean
+  definition?: Record<string, unknown>
   parsed_schema?: WorkflowParsedSchema
+  used_by_jobs?: number
   created_at: string
   updated_at: string
 }

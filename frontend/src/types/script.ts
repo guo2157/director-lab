@@ -7,14 +7,24 @@ export interface ScriptVersion {
 }
 
 /** 剧本估算结果（POST /api/projects/{id}/estimate，须与 script_version 哈希一致） */
+export interface EpisodeBreakdown {
+  episode: number
+  estimated_duration: number
+  estimated_shots: number
+}
+
 export interface ScriptEstimate {
   estimate_id: string
   script_version_id: string
-  episode_count: number
-  scene_count: number
-  shot_count: number
-  estimated_duration_seconds: number
-  created_at: string
+  algorithm_version: string
+  char_count: number
+  dialogue_char_estimate: number
+  estimated_total_duration: number
+  estimated_episodes: number
+  episode_breakdown: EpisodeBreakdown[]
+  exceeds_batch_limit: boolean
+  suggestion: string | null
+  user_confirmed: boolean
 }
 
 /** 解析版本（parse 生成 candidate 候选版本，confirm 乐观锁） */
@@ -74,7 +84,10 @@ export interface ShotConsistency {
 export interface AssetMaterialRef {
   asset_id: string
   version: number
+  file_path?: string
+  thumb_path?: string | null
   url?: string
+  thumb_url?: string | null
 }
 
 export interface ShotCurrentAssets {
@@ -94,12 +107,11 @@ export interface ShotCurrentAssets {
     clip?: AssetMaterialRef | null
     audio?: AssetMaterialRef | null
   }>
-  current_assets?: Array<{
-    asset_id: string
-    role: string
-    version: number
-    url?: string
-  }>
+  current_assets?: {
+    keyframe?: AssetMaterialRef | null
+    clip?: AssetMaterialRef | null
+    audio?: AssetMaterialRef | null
+  }
 }
 
 /** 角色（ID 前缀 chr_，name 项目内唯一） */

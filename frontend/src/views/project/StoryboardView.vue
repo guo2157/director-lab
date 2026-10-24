@@ -167,8 +167,9 @@ function openDrawer(shot: Shot) {
 interface StatusInfo { label: string; color: string; icon?: string }
 function getShotStatus(shot: Shot): StatusInfo {
   const ca = shot.current_assets
-  if (!ca?.current_assets || ca.current_assets.length === 0) {
-    return { label: '未生成', color: '#4B5563' }
+  const has = ca?.current_assets && (ca.current_assets.keyframe || ca.current_assets.clip || ca.current_assets.audio)
+  if (!has) {
+    return { label: '未生成', color: 'var(--text-tertiary)' }
   }
   const con = shot.consistency
   if (con) {
@@ -263,8 +264,8 @@ const targetOptions = [
               <div class="shot-card" @click="openDrawer(shot)">
                 <div class="shot-thumb">
                   <img
-                    v-if="shot.current_assets?.current_assets?.find(a => a.role === 'keyframe')?.url"
-                    :src="shot.current_assets.current_assets.find(a => a.role === 'keyframe')!.url"
+                    v-if="shot.current_assets?.current_assets?.keyframe?.thumb_url || shot.current_assets?.current_assets?.keyframe?.url"
+                    :src="shot.current_assets.current_assets.keyframe!.thumb_url || shot.current_assets.current_assets.keyframe!.url"
                     alt="thumbnail"
                   />
                   <div v-else class="thumb-placeholder">
@@ -294,8 +295,8 @@ const targetOptions = [
         <template v-if="activeShot">
           <div class="drawer-preview">
             <img
-              v-if="activeShot.current_assets?.current_assets?.find(a => a.role === 'keyframe')?.url"
-              :src="activeShot.current_assets.current_assets.find(a => a.role === 'keyframe')!.url"
+              v-if="activeShot.current_assets?.current_assets?.keyframe?.url"
+              :src="activeShot.current_assets.current_assets.keyframe!.url"
               alt="preview"
               class="preview-img"
             />
@@ -340,19 +341,21 @@ const targetOptions = [
 <style scoped>
 .storyboard-page {
   padding: 16px;
-  min-height: calc(100vh - 56px);
+  min-height: calc(100vh - var(--app-header-height, 56px));
 }
 .batch-bar {
   margin-bottom: 16px;
   padding: 8px 12px;
-  background: #18181D;
+  background: var(--bg-panel);
   border-radius: 8px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .batch-info {
   font-size: 13px;
-  color: #9CA3AF;
+  color: var(--text-secondary);
 }
 .page-loading {
   display: flex;
@@ -375,17 +378,17 @@ const targetOptions = [
 }
 .scene-seq {
   font-size: 14px;
-  color: #6366F1;
+  color: var(--brand-primary);
   font-weight: 600;
 }
 .scene-title {
   font-size: 16px;
-  color: #E5E7EB;
+  color: var(--text-primary);
   font-weight: 500;
 }
 .shot-count {
   font-size: 12px;
-  color: #9CA3AF;
+  color: var(--text-secondary);
   margin-left: auto;
 }
 .shots-row {
@@ -407,11 +410,11 @@ const targetOptions = [
 .shot-card {
   width: 220px;
   height: 320px;
-  background: #18181D;
+  background: var(--bg-panel);
   border-radius: 12px;
   overflow: hidden;
   cursor: pointer;
-  border: 1px solid #26262E;
+  border: 1px solid var(--border-subtle);
   transition: box-shadow 0.2s;
 }
 .shot-card:hover {
@@ -421,7 +424,7 @@ const targetOptions = [
   width: 100%;
   height: 200px;
   position: relative;
-  background: #202027;
+  background: var(--bg-elevated);
 }
 .shot-thumb img {
   width: 100%;
@@ -434,7 +437,7 @@ const targetOptions = [
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #4B5563;
+  color: var(--text-tertiary);
   font-size: 14px;
 }
 .status-badge {
@@ -444,7 +447,7 @@ const targetOptions = [
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
-  color: #fff;
+  color: var(--text-on-brand, #fff);
   white-space: nowrap;
 }
 .shot-info {
@@ -452,7 +455,7 @@ const targetOptions = [
 }
 .shot-title {
   font-size: 13px;
-  color: #E5E7EB;
+  color: var(--text-primary);
   margin-bottom: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -462,7 +465,7 @@ const targetOptions = [
   display: flex;
   gap: 8px;
   font-size: 12px;
-  color: #9CA3AF;
+  color: var(--text-secondary);
 }
 .drawer-preview {
   margin-bottom: 16px;
@@ -474,21 +477,41 @@ const targetOptions = [
 .preview-placeholder {
   width: 100%;
   height: 200px;
-  background: #202027;
+  background: var(--bg-elevated);
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #4B5563;
+  color: var(--text-tertiary);
 }
 .field-label {
   display: block;
   font-size: 13px;
-  color: #9CA3AF;
+  color: var(--text-secondary);
   margin-bottom: 4px;
 }
 .drawer-actions {
   display: flex;
   gap: 8px;
+}
+
+/* ===== 窄屏适配 ===== */
+@media (max-width: 768px) {
+  .storyboard-page {
+    padding: 12px;
+  }
+  .scenes-container {
+    gap: 16px;
+  }
+  .shot-card {
+    width: 160px;
+    height: 250px;
+  }
+  .shot-thumb {
+    height: 140px;
+  }
+  .shot-info {
+    padding: 6px 8px;
+  }
 }
 </style>

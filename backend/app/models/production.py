@@ -62,6 +62,7 @@ class Workflow(TimestampMixin, Base):
     definition: Mapped[dict] = mapped_column(JSON, nullable=False)
     parsed_schema: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class Job(Base):

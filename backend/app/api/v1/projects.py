@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
+from app.integrations import comfyui_pool
 from app.models import Job, Project
 from app.schemas.project import PageOut, ProjectCreate, ProjectOut, ProjectUpdate
 from app.services import errors
@@ -28,8 +30,30 @@ def _to_out(db: Session, p: Project) -> ProjectOut:
     return out
 
 
+def _check_runtime_config() -> None:
+    """创建项目前校验语言模型与 ComfyUI 配置（未配置则阻断，引导用户先到设置页配置）。"""
+    s = get_settings()
+    # 语言模型：base_url + model + api_key 均需配置
+    if not (s.llm_base_url and s.llm_model and s.llm_api_key):
+        raise errors.AppError(
+            "llm_not_configured",
+            "语言模型未配置（API URL / API Key / 模型名称），请先在设置页面完成配置",
+            409,
+            reason="llm_not_configured",
+        )
+    # ComfyUI：Mock 模式跳过；否则需至少一个启用实例
+    if not s.render_mock and not comfyui_pool.enabled_instances():
+        raise errors.AppError(
+            "comfyui_not_configured",
+            "ComfyUI 未配置（无启用实例），请先在设置页面完成配置",
+            409,
+            reason="comfyui_not_configured",
+        )
+
+
 @router.post("", status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectOut:
+    _check_runtime_config()
     p = Project(
         name=payload.name,
         aspect_ratio=payload.aspect_ratio,

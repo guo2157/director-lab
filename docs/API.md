@@ -82,7 +82,8 @@
 ### 剧本与分镜
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | /api/projects/{id}/script-versions | 保存剧本并创建不可变版本 |
+| POST | /api/projects/{id}/script-versions | 保存剧本（单版本覆盖，版本号+1） |
+| GET | /api/projects/{id}/script-versions/current | 获取当前剧本文本（回显） |
 | POST | /api/projects/{id}/estimate | 评估可制作集数 |
 | POST | /api/projects/{id}/estimates/{estimate_id}/confirm | 确认评估与制作范围 |
 | POST | /api/projects/{id}/parse | 解析剧本（按选定集范围） |
@@ -116,6 +117,8 @@
 | GET | /api/assets | 资产列表 |
 | POST | /api/assets/upload | 上传资产 |
 | GET | /api/assets/{id} | 资产详情 |
+| GET | /api/assets/{id}/file | 媒体文件服务（原文件/缩略图） |
+| GET | /api/assets/{id}/versions | 资产版本时间线 |
 | POST | /api/assets/{id}/lock | 锁定资产 |
 | POST | /api/assets/{id}/unlock | 解锁资产 |
 | POST | /api/assets/{id}/rollback | 回滚版本 |
@@ -174,11 +177,16 @@
 | POST | /api/settings/test-llm | 测试语言模型连通性 |
 | POST | /api/settings/backup | 手动触发备份 |
 | POST | /api/settings/clear-upload-cache | 清理上传缓存 |
-| GET | /api/settings/channels | 获取三方生成通道配置 |
-| PUT | /api/settings/channels | 更新三方生成通道配置 |
-| POST | /api/settings/channels/{channel_id}/test | 测试三方通道连通性 |
+| GET | /api/settings/comfyui-instances | 获取 ComfyUI 实例列表（多实例加权负载均衡） |
+| PUT | /api/settings/comfyui-instances | 更新 ComfyUI 实例列表 |
+| POST | /api/settings/comfyui-instances/test | 逐实例测试连通性 |
+| GET | /api/settings/prompts | 列出全部提示词（D-15） |
+| GET | /api/settings/prompts/{name} | 读取提示词内容（D-15） |
+| PUT | /api/settings/prompts/{name} | 写入提示词（D-15） |
+| POST | /api/settings/prompts/{name}/reset | 重置提示词为内置默认值（D-15） |
 | GET | /api/health | 服务健康状态 |
 | GET | /api/events | 实时事件流（SSE） |
+| GET | /api/events/backfill | 事件增量补齐（按 event_seq） |
 
 ---
 
@@ -209,7 +217,9 @@
 
 ## 5. 剧本与分镜
 
-**POST /api/projects/{id}/script-versions**：保存/提交剧本文本并创建不可变版本。请求体 `text` 为 1–50000 字符；成功返回 `script_version_id`、`version`、`content_hash`。后续评估与解析均需引用该版本。
+**POST /api/projects/{id}/script-versions**：保存剧本文本（单版本覆盖模式）：每项目仅保留一条当前版本记录，保存时覆盖文本、版本号+1，`script_version_id` 不变。请求体 `text` 为 1–50000 字符；成功返回 `script_version_id`、`version`、`content_hash`。后续评估与解析均需引用该版本。
+
+**GET /api/projects/{id}/script-versions/current**：获取当前剧本（单版本覆盖模式）。返回 `{exists, text, script_version_id, version}`；未保存过时 `exists` 为 false。供前端页面加载回显。
 
 **POST /api/projects/{id}/estimate**：先评估再解析的第一阶段，不产出分镜。
 
@@ -257,7 +267,7 @@
 
 **GET /api/projects/{id}/scenes**：可选 `episode` 按集筛选，可选 `include_shots`（默认 true）。`episode` 筛选依据 scene_episode 关联表（含复用场景）；场景对象含 `episode`（首次出现集数）与 `episodes`（全部出现集数数组）。`include_shots=false` 时只返回场景与 `shot_count`，镜头数超过 100 的项目前端必须使用 `include_shots=false` 分批加载。
 
-**POST /api/scenes**：`project_id`、`title`、`description`、`episode`（可选，默认 1，正整数）、`seq`（可选，缺省追加项目末尾）。创建时自动写入一条 scene_episode 记录。
+**POST /api/scenes**：`project_id`、`title`、`description`、`episode`（可选，默认 1，正整数）、`seq`（可选，缺省追加项目末尾）。创建时自动写入一条 scene_episode 记录。场景标题与角色名不得相同（@引用无法区分），同名返回 409（D-16 修订）。
 
 **POST /api/scenes/{id}/episodes**：追加出现集数，请求体 `episode` 与 `seq_in_episode`。重复添加同一集返回 409。响应对象含 `requires_parse` 布尔值：追加的集数超出当前已解析范围时为 true，提示该集尚无分镜产物、须先追加解析方可进入生成（规则见 PRD.md M2 业务规则）；在已解析范围内时为 false。
 
@@ -269,7 +279,7 @@
 
 **GET /api/projects/{id}/shots**：按集拉取跨场景扁平镜头列表。`episode` 必填，可选 `page`、`page_size`。排序：先按场景在该集出场顺序（scene_episode.seq_in_episode）升序，同场景内按镜头 seq 升序。每条镜头附带 `scene_title`、`scene_seq` 与 `current_assets`。
 
-**GET /api/shots/{id}**：返回镜头对象，含 `consistency` 字段（`score` 0–1，`verdict` 枚举 passed/review/failed），并返回聚合素材：`scene`（id/seq/title/episode）、`character`（id/name/appearance/portrait_asset_id，无则 null）、`props`（id/name/anchor_asset_id 数组）、`current_assets`（keyframe/clip/audio 三键，各含 asset_id/file_path/thumb_path/version，未生成为 null）。
+**GET /api/shots/{id}**：返回镜头对象，含 `consistency` 字段（`score` 0–1，`verdict` 枚举 passed/review/failed），并返回聚合素材：`scene`（id/seq/title/episode）、`character`（id/name/appearance/portrait_asset_id，无则 null）、`props`（id/name/anchor_asset_id 数组）、`current_assets`（keyframe/clip/audio 三键，各含 asset_id/file_path/thumb_path/url/thumb_url/version，未生成为 null）。
 
 `current_assets` 取值口径：取依赖版本与当前输入匹配、状态为 current 且来源任务 succeeded 的产物；完成时间仅用于同一有效输入快照下的排序，不能覆盖更新输入对应的有效产物（详见第 8 节多版本任务有效性规则）。
 
@@ -281,7 +291,7 @@
 
 **GET /api/projects/{id}/characters**：返回项目内角色数组。
 
-**POST /api/characters**：`project_id`、`name`、`description`、`traits`、`appearance`、`voice_id`（可选）。`name` 项目内唯一，重复返回 409。
+**POST /api/characters**：`project_id`、`name`、`description`、`traits`、`appearance`、`voice_id`（可选）。`name` 项目内唯一，重复返回 409；角色名与场景标题不得相同（@引用无法区分），同名返回 409（D-16 修订）。
 
 **POST /api/characters/merge**：合并重复角色（剧本解析审核页使用）。请求体：`source_id`（被合并的源角色）、`target_id`（保留的目标角色）。处理规则：① 全部镜头的 `character_id` 与 `dialogue_segments[].speaker_id` 中引用 source_id 的改为 target_id；② 提示词中的 `@源角色名` 同步改写为 `@目标角色名`（同改名规则）；③ 源角色定妆图处置：目标已有定妆图时，源定妆图转为普通 character 类型资产保留不删除，其镜头 asset_ref 引用一并改指目标定妆图；目标尚无定妆图时，源定妆图转为目标角色的定妆图（回写 `target.portrait_asset_id`），既有镜头引用不变；④ 完成后删除源角色记录，返回目标角色对象与受影响镜头数。同一事务内完成；source 与 target 相同返回 400 `invalid_request`；任一角色不存在返回 404 `character_not_found`。
 
@@ -303,7 +313,8 @@
 
 **POST /api/assets/upload**：multipart，单文件上限 500MB，成功返回 201 与资产对象。
 
-**GET /api/assets/{id}**：返回资产对象，含 `versions` 数组与 `referenced_by` 镜头列表。
+**GET /api/assets/{id}**：返回资产对象，含 `versions` 数组与 `referenced_by` 镜头列表。资产对象含 `url`（原文件服务地址 `/api/assets/{id}/file`）与 `thumb_url`（缩略图服务地址 `/api/assets/{id}/file?thumb=true`，无缩略图为 null）字段，前端列表/看板优先加载 thumb_url。
+**GET /api/assets/{id}/file**：媒体文件服务（D-17 配套）。返回资产原文件；`?thumb=true` 且缩略图存在时返回缩略图，缩略图缺失回退原文件；文件不存在返回 404 `asset_file_missing`。
 
 **POST /api/assets/{id}/lock**：锁定后不可删除。无请求体，返回资产对象。
 
@@ -353,17 +364,18 @@
 
 **POST /api/scenes/{id}/generate-baseline**：生成场景基准图，`target` 固定为 `keyframe`，以场景的 `title` 与 `description` 作为 prompt 基础。成功后新资产以 `asset_type=scene` 落库，并回写 `scene.baseline_asset_id`。
 
-**POST /api/scenes/{id}/generate**：批量生成场景内镜头，可选 `shot_ids` 限定范围；任务按并发 1 串行入队。此接口不生成场景基准图。选中镜头数少于 3 个时返回 400，提示改用单镜生成接口。视频任务串行约束：按 `seq` 升序处理，前一镜头视频成功并抽出末帧后才开始下一镜头；任一镜头失败时仅暂停依赖该镜头产物/末帧的后续镜头，无依赖关系的镜头继续；已完成镜头按状态跳过；显式指定 `shot_ids` 时仍按 `seq` 升序串行，不按传入顺序。
+**POST /api/scenes/{id}/generate**：批量生成场景内镜头，可选 `shot_ids` 限定范围；任务入队后由 worker 按并发 = 可用 ComfyUI 实例数执行（单实例串行，D-18）。此接口不生成场景基准图。选中镜头数少于 3 个时返回 400，提示改用单镜生成接口。视频任务串行约束：按 `seq` 升序处理，前一镜头视频成功并抽出末帧后才开始下一镜头；任一镜头失败时仅暂停依赖该镜头产物/末帧的后续镜头，无依赖关系的镜头继续；已完成镜头按状态跳过；显式指定 `shot_ids` 时仍按 `seq` 升序串行，不按传入顺序。@引用注入（D-16）：keyframe/clip 生成时提示词中的 @角色/@场景 自动携带参考图，与单镜生成行为一致。
 
 **POST /api/projects/{id}/generate**：跨场景批量生成。请求体含 `shot_ids`（可选）、`episode_from`/`episode_to`（可选，集数闭区间）、`scene_ids`（可选）、`target`（必填，keyframe 或 clip）、`workflow_id`（可选）。执行规则：
 
 - 选中镜头数少于 3 个时返回 400，提示改用单镜生成接口
-- 执行顺序固定为集数升序 → 场景在该集的出场顺序 → 镜头 `seq` 升序，全部串行
+- 执行顺序固定为集数升序 → 场景在该集的出场顺序 → 镜头 `seq` 升序；入队后由 worker 按并发 = 可用 ComfyUI 实例数执行（单实例串行，D-18）
+- @引用注入（D-16）：keyframe/clip 生成时逐镜头解析提示词中的 @角色/@场景 自动携带参考图，与单镜生成行为一致；多角色按出现顺序填入角色槽位（ref_identity → ref_image → ref_costume），槽位不足返回 422
 - 末帧衔接只在同场景同集内成立：跨场景或跨集时不注入 `ref_prev_frame`，改由 `start_state` 文字衔接；系统在生成确认弹窗中提示这一降级
 - 任一镜头失败时仅暂停依赖该镜头视频或末帧的后续镜头；独立场景/集继续执行。用户可选择『重试失败项』『从失败点继续』或『忽略失败强制继续』；强制继续需提示可能损失连续性，并在 job 的 warnings 中记录 `prev_frame_skipped`，产物仍标记 succeeded 但 consistency verdict 降级为 review
 - 已存在的 keyframe/clip 产物按状态跳过，不重复生成
 
-**POST /api/shots/{id}/regenerate**：重做单镜，旧资产转为历史版本，不物理删除。
+**POST /api/shots/{id}/regenerate**：重做单镜，旧资产转为历史版本，不物理删除。@引用注入（D-16）：keyframe/clip 重做时同样解析提示词中的 @角色/@场景 携带参考图，与单镜生成行为一致。
 
 ### 同一镜头多版本 job 的有效性判定
 
@@ -433,13 +445,17 @@
 
 **POST /api/settings/clear-upload-cache**：清理上传缓存（设置-存储页使用）。仅删除已入库资产对应的上传临时文件与未被任何资产引用的 upload_record 残留，不影响已生成资产与正在运行任务引用的文件。响应：`freed_bytes`（释放字节数）、`removed_files`（清理文件数）、`skipped_in_use`（因被引用而跳过的数量）。清理前由前端二次确认。频控：60 秒内重复调用不重新扫描文件系统，直接返回上次清理结果并附 `cached: true` 标记。
 
-**GET /api/settings/channels**：返回三方生成通道配置列表（设置-三方通道页使用）。每条通道含 `channel_id`、`provider`（供应商标识）、`name`（显示名）、`base_url`、`api_key`（掩码）、`api_key_set`（是否已配置）、`enabled`（是否启用）、`priority`（降级尝试顺序，数字越小越先尝试）、`supports`（能力声明，如支持的 target 类型）。密钥仅返回掩码，不返回明文。
+**GET /api/settings/comfyui-instances**：返回 ComfyUI 实例列表（设置-ComfyUI 页使用）。每条实例含 `base_url`（实例地址）、`weight`（权重，正整数，越大分配任务越多）、`enabled`（是否启用）。未配置实例时回退为单实例 `comfyui_base_url`。
 
-**PUT /api/settings/channels**：部分更新通道配置。请求体含 `channel_id` 与待更新字段：`name`、`base_url`、`api_key`（传空字符串表示清除，掩码值不视为变更）、`enabled`、`priority`。`priority` 在启用通道内必须唯一，冲突返回 400 `invalid_request`。更新即时生效，不影响已在执行的任务（任务固定使用提交时的通道）。响应返回更新后的通道对象（密钥掩码）。
+**PUT /api/settings/comfyui-instances**：整体更新实例列表。请求体为实例数组，每项含 `base_url`、`weight`、`enabled`。更新即时生效，不影响已在执行的任务（任务固定使用提交时获取的实例）。
+**GET /api/settings/prompts**：列出全部提示词（D-15）。每条含 `name`（提示词名）、`externalized`（是否已外置到 workspace/prompts/）、`sha256_8`（内容哈希前 8 位）、`length`（字符数）。
+**GET /api/settings/prompts/{name}**：读取提示词内容。外置文件优先，缺失回退内置默认值；提示词不存在返回 404。
+**PUT /api/settings/prompts/{name}**：写入提示词（创建或覆盖外置文件），保存即生效（每次调用动态读取，无需重启）。写入前自动备份当前版本（最多保留 5 份 .bak）。空内容返回 400；提示词名仅允许字母/数字/下划线/连字符，非法名称返回 400；未注册的提示词名返回 404。
+**POST /api/settings/prompts/{name}/reset**：重置提示词为内置默认值（删除外置文件）。提示词不存在返回 404。
 
-**POST /api/settings/channels/{channel_id}/test**：测试三方通道连通性。发送一次最小探测请求，不提交生成任务、不产生云端计费。成功返回耗时与回显内容；失败时 `detail.reason` 取值同 test-comfyui（`connection_refused` / `timeout` / `unauthorized` / `invalid_response` / `dns_error`）。
+**POST /api/settings/comfyui-instances/test**：逐实例测试连通性。对每个实例发送最小探测请求（GET /system_stats），不提交生成任务。返回 `{ok, instances: [{base_url, enabled, weight, ok, latency_ms?, reason?, message?}]}`；失败时 `reason` 取值同 test-comfyui（`connection_refused` / `timeout` / `invalid_response`）。
 
-三方通道降级规则（权威定义见 ARCHITECTURE.md 5.8 节）：仅当本地 ComfyUI 不可用（`comfy_unreachable` / `comfy_timeout`）且存在启用通道时，按 `priority` 升序逐个尝试；全部通道失败时任务按原失败分类处理，不静默丢弃。通道切换与降级过程写入 job 的 `input_snapshot` 与 warnings，可追溯。
+多实例负载均衡规则（权威定义见 ARCHITECTURE.md 5.8 节）：生成任务按权重加权轮询选择启用实例；实例不可用时自动切换到其余启用实例（故障转移）；全部实例失败时任务按 `comfy_unreachable` 失败分类处理，不静默丢弃。实际使用的实例写入 job 的 `input_snapshot.comfyui_instance`，可追溯。
 
 **GET /api/health**：返回服务健康状态，含 `status`（healthy/degraded/down）、`database`（ok/error）、`comfyui`（ok/unreachable）、`worker`（ok/idle）、`disk`（剩余空间百分比）。用于设置页关于区域展示。
 

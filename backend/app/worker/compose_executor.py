@@ -59,7 +59,7 @@ def _collect_shots(db: Session, project_id: str, episode: int | None) -> list[Sh
     return rows
 
 
-def _latest_asset(db: Session, shot_id: str, asset_types: tuple[str, ...], role: str | None = None):
+def _latest_asset(db: Session, shot_id: str, asset_types: tuple[str, ...], job_type: str | None = None):
     """取镜头指定类型、当前有效的最新版本资产。
 
     判定口径（ARCHITECTURE.md §4.2，与 progress.py 一致）：
@@ -68,27 +68,24 @@ def _latest_asset(db: Session, shot_id: str, asset_types: tuple[str, ...], role:
     """
     from app.models import Job as JobModel
     q = (
-        db.query(Asset, AssetRef)
-        .join(AssetRef, Asset.id == AssetRef.asset_id)
+        db.query(Asset)
         .join(JobModel, JobModel.id == Asset.source_job_id)
-        .filter(AssetRef.shot_id == shot_id,
+        .filter(JobModel.shot_id == shot_id,
                 Asset.validity == "current", Asset.asset_type.in_(asset_types),
                 JobModel.status == "succeeded")
     )
-    if role is not None:
-        q = q.filter(AssetRef.role == role)
+    if job_type is not None:
+        q = q.filter(JobModel.job_type == job_type)
     return q.order_by(Asset.version.desc()).first()
 
 
 def _to_shot_input(db: Session, shot: Shot, scene: Scene) -> cs.ShotInput:
     """把镜头与其产物整理为合成输入结构。"""
     # 视频产物：clip 类型、当前有效、来源任务成功（§4.2 口径）
-    video = _latest_asset(db, shot.id, ("clip",))
-    audio = None
+    v_asset = _latest_asset(db, shot.id, ("clip",))
+    a_asset = None
     if shot.audio_source == "tts_fallback":
-        audio = _latest_asset(db, shot.id, ("audio",), role="dialogue")
-    v_asset = video[0] if video else None
-    a_asset = audio[0] if audio else None
+        a_asset = _latest_asset(db, shot.id, ("audio",), job_type="generate_audio")
     return cs.ShotInput(
         shot_id=shot.id, episode=shot.episode, seq=shot.seq, scene_seq=scene.seq,
         duration=shot.duration, actual_duration=shot.actual_duration,

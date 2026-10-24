@@ -113,6 +113,14 @@ def create_character(payload: CharacterCreate, db: Session = Depends(get_db)) ->
     )
     if dup > 0:
         raise errors.invalid_state_transition(f"角色名 {payload.name} 在项目内已存在")
+    # 同名校验（D-16 补充）：角色与场景名称不得相同，否则 @引用无法区分
+    scene_dup = (
+        db.query(Scene)
+        .filter(Scene.project_id == payload.project_id, Scene.title == payload.name)
+        .count()
+    )
+    if scene_dup > 0:
+        raise errors.invalid_state_transition(f"名称 {payload.name} 已被项目内场景使用，角色与场景名称不能相同")
     c = Character(**payload.model_dump())
     db.add(c)
     db.commit()
@@ -142,6 +150,14 @@ def update_character(character_id: str, payload: CharacterUpdate, db: Session = 
         )
         if dup > 0:
             raise errors.invalid_state_transition(f"角色名 {new_name} 在项目内已存在")
+        # 同名校验（D-16 补充）：角色与场景名称不得相同
+        scene_dup = (
+            db.query(Scene)
+            .filter(Scene.project_id == c.project_id, Scene.title == new_name)
+            .count()
+        )
+        if scene_dup > 0:
+            raise errors.invalid_state_transition(f"名称 {new_name} 已被项目内场景使用，角色与场景名称不能相同")
     for k, v in data.items():
         setattr(c, k, v)
     if new_name and new_name != old_name:

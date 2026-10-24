@@ -144,6 +144,8 @@ class Shot(TimestampMixin, Base):
     bgm: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    # 静图先行闸口（D-13）：分镜图人工确认标记；重绘/上游失效时回退 False
+    keyframe_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     actual_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     video_actual_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     audio_source: Mapped[str | None] = mapped_column(String(16), nullable=True)

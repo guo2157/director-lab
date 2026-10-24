@@ -12,10 +12,9 @@ def _shot_has_current_asset(db: Session, shot_id: str, asset_type: str) -> bool:
     """镜头是否具备指定类型的当前有效产物（validity=current 且来源任务 succeeded）。"""
     rows = (
         db.query(Asset)
-        .join(AssetRef, AssetRef.asset_id == Asset.id)
         .join(Job, Job.id == Asset.source_job_id)
         .filter(
-            AssetRef.shot_id == shot_id,
+            Job.shot_id == shot_id,
             Asset.asset_type == asset_type,
             Asset.validity == "current",
             Job.status == "succeeded",
@@ -70,9 +69,9 @@ def derive_progress(db: Session, project: Project) -> tuple[int, int, str]:
     if missing_baseline > 0:
         return shot_total, shot_done, "scenes"
 
-    # 规则 6：存在分镜图未完成的镜头
+    # 规则 6：存在分镜图未完成或未人工确认的镜头（D-13 静图先行闸口）
     for s in shots:
-        if not _shot_has_current_asset(db, s.id, "keyframe"):
+        if not _shot_has_current_asset(db, s.id, "keyframe") or not s.keyframe_confirmed:
             return shot_total, shot_done, "keyframes"
 
     # 规则 7：分镜图全部完成，但存在视频未完成的镜头

@@ -43,17 +43,26 @@ export function createScriptVersion(projectId: string, payload: CreateScriptVers
   return post<ScriptVersion>(`/projects/${projectId}/script-versions`, payload)
 }
 
+/** 获取当前剧本（单版本覆盖模式，供页面回显） */
+export function getCurrentScript(projectId: string) {
+  return get<{ exists: boolean; text: string; script_version_id: string | null; version: number | null }>(`/projects/${projectId}/script-versions/current`)
+}
+
 /** 剧本估算（须与 script_version 哈希一致，结果持久化到 script_estimate） */
-export function estimateScript(projectId: string, scriptVersionId: string) {
-  return post<ScriptEstimate>(`/projects/${projectId}/estimate`, { script_version_id: scriptVersionId })
+export function estimateScript(projectId: string, scriptVersionId: string, text: string) {
+  return post<ScriptEstimate>(`/projects/${projectId}/estimate`, { script_version_id: scriptVersionId, text })
 }
 
-/** 确认估算（版本不匹配返回 409 script_version_conflict） */
-export function confirmEstimate(projectId: string, estimateId: string) {
-  return post<ScriptEstimate>(`/projects/${projectId}/estimates/${estimateId}/confirm`)
+/** 确认估算（版本不匹配返回 409 script_version_conflict；episode_start/episode_count 为确认的制作范围） */
+export function confirmEstimate(
+  projectId: string,
+  estimateId: string,
+  payload: { script_version_id: string; episode_start: number; episode_count: number },
+) {
+  return post<ScriptEstimate>(`/projects/${projectId}/estimates/${estimateId}/confirm`, payload)
 }
 
-/** 解析剧本（生成 candidate 候选版本，返回 job_id，SSE job.finished 通知） */
+/** 解析剧本（生成 candidate 候选版本，返回 job_id，SSE job.finished 通知；text/episode_start/episode_count 必填） */
 export function parseScript(projectId: string, payload: ParsePayload) {
   return post<{ job_id: string; parse_version: ParseVersion }>(`/projects/${projectId}/parse`, payload)
 }

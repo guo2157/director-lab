@@ -77,7 +77,11 @@ def estimate_script(text: str, *, episode_duration_target: int = DEFAULT_EPISODE
 
 
 # --- 剧本解析系统提示词（PROMPTS.md §2 模板浓缩，输出 §3 结构 JSON） ---
-PARSE_SYSTEM_PROMPT = """你是专业短剧编剧、商业故事策划和影视剧本顾问。将用户提供的剧本一次性解析为结构化 JSON，供后续资产生成与分镜拆解直接使用。
+# D-15 提示词外置：此常量为内置默认值；运行时经 prompt_store.get_prompt 动态读取，
+# workspace/prompts/parse_system.md 存在时优先生效（UI 编辑保存即生效，无需重启）。
+from app.services.prompt_store import _register_default
+
+PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编剧、商业故事策划和影视剧本顾问。将用户提供的剧本一次性解析为结构化 JSON，供后续资产生成与分镜拆解直接使用。
 
 创作与输出规则：
 1. 角色、场景、道具、镜头一律使用稳定名称/标识；每镜给出参考资产、生成方式、时长、对白、音效与审核条件。
@@ -91,7 +95,7 @@ PARSE_SYSTEM_PROMPT = """你是专业短剧编剧、商业故事策划和影视�
 9. 单集节奏：保住开场钩子、冲突升级、情绪释放、结尾悬念四节拍。episodes 每项含 episode、goal、rhythm_curve、cliffhanger_type（信息缺失/危机逼近/反转揭示/关系破裂）、hook_to_next、locked（默认 false）。
 10. 动作节拍：复合动作拆成可独立拍摄节拍，单镜最多 3 个，单节拍不超 2 秒。
 
-按用户指定的集范围解析，范围外的集不落库。只输出 JSON。"""
+按用户指定的集范围解析，范围外的集不落库。只输出 JSON。""")
 
 
 @dataclass
@@ -240,11 +244,14 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
         existing = char_map.get(name)
         if existing:
             existing.description = c.get("description") or existing.description
-            existing.traits = c.get("traits") or existing.traits
+            _t = c.get("traits")
+            existing.traits = (", ".join(_t) if isinstance(_t, list) else _t) or existing.traits
             existing.appearance = c.get("appearance") or existing.appearance
         else:
+            _t = c.get("traits")
+            _traits = ", ".join(_t) if isinstance(_t, list) else _t
             new_c = Character(id=id_gen.character_id(), project_id=project.id, name=name,
-                              description=c.get("description"), traits=c.get("traits"),
+                              description=c.get("description"), traits=_traits,
                               appearance=c.get("appearance"))
             db.add(new_c)
             db.flush()

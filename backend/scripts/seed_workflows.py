@@ -76,6 +76,7 @@ def seed():
                     or canonical(existing.capabilities) != canonical(capabilities)
                     or canonical(existing.definition) != canonical(definition)
                     or canonical(existing.parsed_schema) != canonical(parsed_schema)
+                    or not existing.is_builtin
                 )
                 if not changed:
                     unchanged += 1
@@ -86,6 +87,7 @@ def seed():
                 existing.capabilities = capabilities
                 existing.definition = definition
                 existing.parsed_schema = parsed_schema
+                existing.is_builtin = True
                 existing.version = (existing.version or 0) + 1
                 updated += 1
             else:
@@ -99,6 +101,7 @@ def seed():
                     parsed_schema=parsed_schema,
                     version=1,
                     is_default=False,
+                    is_builtin=True,
                 ))
                 created += 1
         db.commit()

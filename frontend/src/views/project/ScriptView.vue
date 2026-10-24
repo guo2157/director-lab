@@ -17,12 +17,14 @@ import {
   confirmParseVersion,
   createScriptVersion,
   estimateScript,
+  getCurrentScript,
   getProject,
   parseScript,
 } from '@/api/projects'
-import { listCharacters, listScenes, mergeCharacters } from '@/api/script'
+import { listCharacters, listProps, listScenes, mergeCharacters } from '@/api/script'
+import { generatePropAnchor } from '@/api/storyboard'
 import { getJob } from '@/api/jobs'
-import type { Character, Scene, ScriptEstimate, ScriptVersion, Shot } from '@/types/script'
+import type { Character, Prop, Scene, ScriptEstimate, ScriptVersion, Shot } from '@/types/script'
 
 /* ---------- 路由与基础 ---------- */
 const route = useRoute()
@@ -138,6 +140,7 @@ function locateScene(scene: SceneWithShots) {
 const savedVersion = ref<ScriptVersion | null>(null)
 const estimate = ref<ScriptEstimate | null>(null)
 const estimateConfirmed = ref(false)
+const confirmedRange = ref<{ episode_start: number; episode_count: number } | null>(null)
 const parseJobId = ref<string | null>(null)
 const candidateVersionId = ref<string | null>(null)
 
@@ -149,13 +152,31 @@ const { mutate: saveVersionMut, isPending: saving } = useMutation({
     estimateConfirmed.value = false
     parseJobId.value = null
     candidateVersionId.value = null
-    message.success(`剧本已保存为版本 v${v.version}`)
+    message.success(`剧本已保存（v${v.version}）`)
   },
   onError: (e) => message.error(errMsg(e)),
 })
 
+/* ---------- 加载当前剧本（单版本覆盖模式，回显文本） ---------- */
+const currentScriptQuery = useQuery({
+  queryKey: ['currentScript', projectId],
+  queryFn: () => getCurrentScript(projectId.value),
+  enabled: () => !!projectId.value,
+})
+watch(() => currentScriptQuery.data.value, (data) => {
+  if (data?.exists && data.script_version_id) {
+    text.value = data.text
+    savedVersion.value = {
+      script_version_id: data.script_version_id,
+      version: data.version ?? 1,
+      content_hash: '',
+      created_at: '',
+    }
+  }
+}, { immediate: true })
+
 const { mutate: runEstimate, isPending: estimating } = useMutation({
-  mutationFn: () => estimateScript(projectId.value, savedVersion.value!.script_version_id),
+  mutationFn: () => estimateScript(projectId.value, savedVersion.value!.script_version_id, text.value),
   onSuccess: (est) => {
     estimate.value = est
     message.success('评估完成，请确认后开始解析')
@@ -164,9 +185,15 @@ const { mutate: runEstimate, isPending: estimating } = useMutation({
 })
 
 const { mutate: doConfirmEstimate, isPending: confirmingEstimate } = useMutation({
-  mutationFn: () => confirmEstimate(projectId.value, estimate.value!.estimate_id),
+  mutationFn: () =>
+    confirmEstimate(projectId.value, estimate.value!.estimate_id, {
+      script_version_id: savedVersion.value!.script_version_id,
+      episode_start: 1,
+      episode_count: estimate.value!.estimated_episodes || 1,
+    }),
   onSuccess: () => {
     estimateConfirmed.value = true
+    confirmedRange.value = { episode_start: 1, episode_count: estimate.value!.estimated_episodes || 1 }
     message.success('评估已确认，可以开始解析')
   },
   onError: (e) => message.error(errMsg(e)),
@@ -176,6 +203,9 @@ const { mutate: runParse, isPending: parsing } = useMutation({
   mutationFn: (replace: boolean) =>
     parseScript(projectId.value, {
       script_version_id: savedVersion.value!.script_version_id,
+      text: text.value,
+      episode_start: confirmedRange.value?.episode_start ?? 1,
+      episode_count: confirmedRange.value?.episode_count ?? estimate.value?.estimated_episodes ?? 1,
       replace_existing: replace || undefined,
     }),
   onSuccess: (res) => {
@@ -271,6 +301,31 @@ const { data: charactersData } = useQuery({
   enabled: computed(() => !!projectId.value),
 })
 const characters = computed(() => charactersData.value?.items ?? [])
+
+/* ---------- 道具列表与锚定图生成 ---------- */
+const { data: propsData } = useQuery({
+  queryKey: computed(() => ['props', projectId.value]),
+  queryFn: () => listProps(projectId.value!),
+  enabled: computed(() => !!projectId.value),
+})
+const props = computed(() => propsData.value?.items ?? [])
+const generatingPropId = ref<string | null>(null)
+const generateAnchor = useMutation({
+  mutationFn: (propId: string) => generatePropAnchor(propId),
+  onSuccess: () => {
+    message.success('道具锚定图任务已提交，可在任务中心查看进度')
+    void queryClient.invalidateQueries({ queryKey: ['props', projectId.value] })
+  },
+  onError: (e: unknown) => {
+    message.error(errMsg(e))
+  },
+})
+function handleGenerateAnchor(p: Prop) {
+  generatingPropId.value = p.id
+  generateAnchor.mutate(p.id, {
+    onSettled: () => { generatingPropId.value = null },
+  })
+}
 
 const canParse = computed(
   () => !!savedVersion.value && estimateConfirmed.value && !candidateVersionId.value,
@@ -418,6 +473,7 @@ function handleMerge(target: Character) {
             <div class="candidate-preview">
               候选包含 {{ candidateResult?.scenes?.length ?? 0 }} 个场景 ·
               {{ candidateResult?.characters?.length ?? 0 }} 个角色 ·
+              {{ candidateResult?.props?.length ?? 0 }} 个道具 ·
               {{ candidateResult?.shots?.length ?? 0 }} 个镜头
             </div>
             <div class="rule-note">
@@ -441,11 +497,12 @@ function handleMerge(target: Character) {
         <div v-if="estimate && !estimateConfirmed" class="estimate-panel">
           <div class="pane-label">评估结果</div>
           <div class="estimate-grid">
-            <span>可制作集数 {{ estimate.episode_count }}</span>
-            <span>场景 {{ estimate.scene_count }}</span>
-            <span>镜头 {{ estimate.shot_count }}</span>
-            <span>预计时长 {{ estimate.estimated_duration_seconds }}s</span>
+            <span>可制作集数 {{ estimate.estimated_episodes }}</span>
+            <span>总字数 {{ estimate.char_count }}</span>
+            <span>预计总时长 {{ Math.round(estimate.estimated_total_duration) }}s</span>
+            <span>镜头 {{ estimate.episode_breakdown.reduce((s, e) => s + e.estimated_shots, 0) }}</span>
           </div>
+          <p v-if="estimate.suggestion" class="hint-text" style="margin: 8px 0 0">{{ estimate.suggestion }}</p>
         </div>
 
         <!-- 角色区 -->
@@ -488,6 +545,33 @@ function handleMerge(target: Character) {
             </div>
           </div>
           <NEmpty v-else size="small" description="解析后生成角色" />
+        </div>
+        <!-- 道具区 -->
+        <div class="section">
+          <div class="section-head">
+            <span class="pane-label">道具（{{ props.length }}）</span>
+          </div>
+          <div v-if="props.length" class="char-list">
+            <div v-for="p in props" :key="p.id" class="char-card">
+              <div class="char-avatar">{{ p.name.slice(0, 1) }}</div>
+              <div class="char-info">
+                <div class="char-name">{{ p.name }}</div>
+                <div class="char-desc">{{ p.description || '暂无描述' }}</div>
+              </div>
+              <NTag v-if="p.anchor_asset_id" size="tiny" type="success" :bordered="false">已生成锚定图</NTag>
+              <NButton
+                v-else
+                size="tiny"
+                quaternary
+                type="primary"
+                :loading="generatingPropId === p.id"
+                @click="handleGenerateAnchor(p)"
+              >
+                生成锚定图
+              </NButton>
+            </div>
+          </div>
+          <NEmpty v-else size="small" description="解析后生成道具" />
         </div>
 
         <!-- 场景区 -->
@@ -919,5 +1003,35 @@ function handleMerge(target: Character) {
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+}
+
+/* ===== 窄屏适配 ===== */
+@media (max-width: 768px) {
+  .script-page {
+    height: auto;
+    min-height: calc(100vh - var(--app-header-height, 56px));
+  }
+  .script-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .header-actions {
+    flex-wrap: wrap;
+  }
+  .script-body {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .editor-pane {
+    width: 100%;
+    flex: none;
+    height: 45vh;
+    min-height: 240px;
+  }
+  .result-pane {
+    width: 100%;
+    flex: none;
+    overflow-y: visible;
+  }
 }
 </style>

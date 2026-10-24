@@ -62,22 +62,50 @@ def _activate_if_draft(db: Session, p: Project) -> None:
 @router.post("/{project_id}/script-versions", status_code=201)
 def create_script_version(project_id: str, payload: ScriptVersionCreate,
                           db: Session = Depends(get_db)) -> ScriptVersionOut:
+    """保存剧本（单版本覆盖）：每项目仅保留一条当前版本，保存时覆盖文本、版本号+1。"""
     p = _get_project(db, project_id)
-    max_ver = (
-        db.query(ScriptVersion.version)
+    sv = (
+        db.query(ScriptVersion)
         .filter(ScriptVersion.project_id == project_id)
         .order_by(ScriptVersion.version.desc())
         .first()
     )
-    next_ver = (max_ver[0] if max_ver else 0) + 1
-    sv = ScriptVersion(
-        id=ids.script_version_id(), project_id=project_id, version=next_ver,
-        content_snapshot=payload.text, content_hash=_hash(payload.text), created_at=_now(),
-    )
-    db.add(sv)
-    p.current_script_version_id = sv.id
+    if sv is None:
+        sv = ScriptVersion(
+            id=ids.script_version_id(), project_id=project_id, version=1,
+            content_snapshot=payload.text, content_hash=_hash(payload.text), created_at=_now(),
+        )
+        db.add(sv)
+        p.current_script_version_id = sv.id
+    else:
+        sv.content_snapshot = payload.text
+        sv.content_hash = _hash(payload.text)
+        sv.version += 1
+        sv.created_at = _now()
+        p.current_script_version_id = sv.id
     db.commit()
-    return ScriptVersionOut(script_version_id=sv.id, version=next_ver, content_hash=sv.content_hash)
+    return ScriptVersionOut(script_version_id=sv.id, version=sv.version, content_hash=sv.content_hash)
+
+
+@router.get("/{project_id}/script-versions/current")
+def get_current_script_version(project_id: str,
+                                db: Session = Depends(get_db)) -> dict:
+    """获取当前剧本（单版本覆盖模式）：返回文本与版本信息，供前端回显。"""
+    _get_project(db, project_id)
+    sv = (
+        db.query(ScriptVersion)
+        .filter(ScriptVersion.project_id == project_id)
+        .order_by(ScriptVersion.version.desc())
+        .first()
+    )
+    if sv is None:
+        return {"exists": False, "text": "", "script_version_id": None, "version": None}
+    return {
+        "exists": True,
+        "text": sv.content_snapshot,
+        "script_version_id": sv.id,
+        "version": sv.version,
+    }
 
 
 @router.post("/{project_id}/estimate", status_code=201)

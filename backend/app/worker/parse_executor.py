@@ -15,7 +15,8 @@ from app.core.database import SessionLocal
 from app.integrations.llm import LLMClient, LLMError
 from app.models import Job, JobEvent, ParseVersion, ScriptVersion
 from app.models import ids
-from app.services.script_parse import PARSE_SYSTEM_PROMPT, normalize_parse_output
+from app.services.script_parse import normalize_parse_output
+from app.services.prompt_store import get_prompt
 
 
 def _now() -> datetime:
@@ -79,7 +80,7 @@ def execute_parse_job(job_id: str) -> dict:
         )
         client = LLMClient()
         try:
-            raw = client.chat_json(PARSE_SYSTEM_PROMPT, user_prompt)
+            raw = client.chat_json(get_prompt("parse_system"), user_prompt)
         except LLMError as e:
             _fail_job(db, job, e.code, e.message)
             return {"ok": False, "reason": e.code}

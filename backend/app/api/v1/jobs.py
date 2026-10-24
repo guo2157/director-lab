@@ -45,6 +45,34 @@ def list_jobs(project_id: str = Query(...), status: str | None = Query(None),
     return {"total": total, "items": [_to_out(j).model_dump(mode="json") for j in items]}
 
 
+@router.get("/stats")
+def job_stats(project_id: str | None = Query(None), db: Session = Depends(get_db)) -> dict:
+    """任务统计（API.md §任务）：今日成功/失败、进行中、近 7 日平均耗时。"""
+    from datetime import timedelta
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago = now - timedelta(days=7)
+    q = db.query(Job)
+    if project_id:
+        q = q.filter(Job.project_id == project_id)
+    today_succeeded = q.filter(Job.status == "succeeded", Job.finished_at >= today_start).count()
+    today_failed = q.filter(Job.status.in_(("failed", "lost")), Job.finished_at >= today_start).count()
+    in_progress = q.filter(Job.status.in_(("queued", "running"))).count()
+    finished_week = q.filter(Job.status.in_(("succeeded", "failed", "lost")), Job.finished_at >= week_ago).all()
+    durations = [
+        (j.finished_at - j.started_at).total_seconds()
+        for j in finished_week
+        if j.finished_at and j.started_at
+    ]
+    avg_duration = round(sum(durations) / len(durations), 2) if durations else None
+    return {
+        "today_succeeded": today_succeeded,
+        "today_failed": today_failed,
+        "in_progress": in_progress,
+        "avg_duration_seconds": avg_duration,
+    }
+
+
 @router.get("/{job_id}")
 def get_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
     j = db.get(Job, job_id)
@@ -72,7 +100,9 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     if j.status == "running" and j.job_type in _GENERATE_TYPES and j.prompt_id:
         try:
             from app.integrations.comfyui import ComfyUIClient
-            ComfyUIClient().interrupt()
+            # 多实例：中断任务实际使用的实例（input_snapshot.comfyui_instance）
+            used_url = (j.input_snapshot or {}).get("comfyui_instance")
+            ComfyUIClient(base_url=used_url).interrupt() if used_url else ComfyUIClient().interrupt()
         except Exception as e:  # 中断失败不阻断本地取消，记入事件
             db.add(JobEvent(job_id=j.id, event_type="job.interrupt_failed",
                             payload={"reason": type(e).__name__},
@@ -108,3 +138,50 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
     db.add(new_job)
     db.commit()
     return _to_out(new_job)
+
+
+@router.post("/projects/{project_id}/retry-failed", status_code=201)
+def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """批量重试项目内失败任务（D-14）：按状态筛选 failed/lost 且未达重试上限的任务，
+    逐个创建重试任务（复用单任务重试语义：新任务 ID、继承累计次数）；
+    可选 job_ids 限定范围。返回重试/跳过明细。"""
+    from datetime import datetime, timezone
+    from app.models import ids
+    settings = get_settings()
+    q = db.query(Job).filter(
+        Job.project_id == project_id,
+        Job.status.in_(["failed", "lost"]),
+        Job.attempts < settings.job_max_attempts,
+    )
+    job_ids = payload.get("job_ids")
+    if job_ids:
+        q = q.filter(Job.id.in_(job_ids))
+    retried, skipped = [], []
+    for j in q.all():
+        new_job = Job(
+            id=ids.job_id(), project_id=j.project_id, shot_id=j.shot_id,
+            job_type=j.job_type, workflow_id=j.workflow_id, workflow_version=j.workflow_version,
+            params=j.params, status="queued",
+            attempts=j.attempts,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        db.add(new_job)
+        retried.append({"source_job_id": j.id, "new_job_id": new_job.id})
+    # 已达上限的失败任务单独列出（前端提示不可重试原因）
+    capped = (
+        db.query(Job)
+        .filter(
+            Job.project_id == project_id,
+            Job.status.in_(["failed", "lost"]),
+            Job.attempts >= settings.job_max_attempts,
+        )
+        .all()
+    )
+    skipped = [j.id for j in capped]
+    db.commit()
+    return {
+        "retried": retried,
+        "retried_count": len(retried),
+        "skipped_capped": skipped,
+        "skipped_count": len(skipped),
+    }

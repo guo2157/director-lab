@@ -170,7 +170,7 @@ const assetTypeLabels: Record<string, string> = {
               @click="openDrawer(asset)"
             >
               <div class="asset-thumb">
-                <img v-if="asset.url" :src="asset.url" alt="" />
+                <img v-if="asset.thumb_url || asset.url" :src="asset.thumb_url || asset.url" alt="" />
                 <div v-else class="thumb-placeholder">
                   <span>{{ assetTypeLabels[asset.asset_type] || asset.asset_type }}</span>
                 </div>
@@ -261,44 +261,49 @@ const assetTypeLabels: Record<string, string> = {
 </template>
 
 <style scoped>
-.assets-page { padding: 16px; min-height: calc(100vh - 56px); }
+.assets-page { padding: 16px; min-height: calc(100vh - var(--app-header-height, 56px)); }
 .assets-layout { display: flex; gap: 16px; }
 .category-tree { width: 200px; flex-shrink: 0; }
 .category-item {
-  padding: 8px 12px; cursor: pointer; border-radius: 8px; font-size: 14px; color: #9CA3AF;
+  padding: 8px 12px; cursor: pointer; border-radius: 8px; font-size: 14px; color: var(--text-secondary);
   transition: all 0.2s; margin-bottom: 4px;
 }
-.category-item:hover { background: #202027; color: #E5E7EB; }
-.category-item.active { background: #6366F1; color: #fff; }
-.assets-main { flex: 1; }
-.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.category-item:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.category-item.active { background: var(--brand-primary); color: var(--text-on-brand, #fff); }
+.assets-main { flex: 1; min-width: 0; }
+.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .upload-btn { cursor: pointer; }
 .drop-zone { min-height: 400px; border: 2px dashed transparent; border-radius: 12px; }
 .page-loading { display: flex; justify-content: center; padding: 80px 0; }
 .asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 .asset-card {
-  background: #18181D; border-radius: 12px; overflow: hidden; cursor: pointer;
-  border: 1px solid #26262E; transition: box-shadow 0.2s; position: relative;
+  background: var(--bg-panel); border-radius: 12px; overflow: hidden; cursor: pointer;
+  border: 1px solid var(--border-subtle); transition: box-shadow 0.2s; position: relative;
 }
 .asset-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
-.asset-thumb { width: 100%; height: 160px; position: relative; background: #202027; }
+.asset-thumb { width: 100%; height: 160px; position: relative; background: var(--bg-elevated); }
 .asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
-.thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #4B5563; }
-.version-badge { position: absolute; top: 6px; right: 6px; background: #6366F1; color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 999px; }
+.thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }
+.version-badge { position: absolute; top: 6px; right: 6px; background: var(--brand-primary); color: var(--text-on-brand, #fff); font-size: 11px; padding: 1px 6px; border-radius: 999px; }
 .lock-icon { position: absolute; top: 6px; left: 6px; font-size: 14px; }
 .asset-info { padding: 8px 12px; }
-.asset-name { font-size: 13px; color: #E5E7EB; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asset-name { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-meta { display: flex; align-items: center; gap: 8px; }
-.ref-count { font-size: 12px; color: #9CA3AF; }
+.ref-count { font-size: 12px; color: var(--text-secondary); }
 .asset-actions { position: absolute; bottom: 6px; right: 6px; display: flex; gap: 4px; }
 .drawer-preview { margin-bottom: 16px; }
 .preview-img { width: 100%; border-radius: 8px; }
-.preview-placeholder { width: 100%; height: 200px; background: #202027; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #4B5563; }
-.field-label { color: #9CA3AF; font-size: 13px; }
+.preview-placeholder { width: 100%; height: 200px; background: var(--bg-elevated); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }
+.field-label { color: var(--text-secondary); font-size: 13px; }
 .version-section { margin-top: 8px; }
-.section-title { font-size: 14px; color: #E5E7EB; margin-bottom: 8px; font-weight: 500; }
+.section-title { font-size: 14px; color: var(--text-primary); margin-bottom: 8px; font-weight: 500; }
 .version-list { display: flex; flex-direction: column; gap: 8px; }
-.version-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #202027; border-radius: 8px; }
-.version-num { font-size: 13px; color: #6366F1; font-weight: 600; min-width: 32px; }
-.version-date { font-size: 12px; color: #9CA3AF; flex: 1; }
+.version-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--bg-elevated); border-radius: 8px; }
+.version-num { font-size: 13px; color: var(--brand-primary); font-weight: 600; min-width: 32px; }
+.version-date { font-size: 12px; color: var(--text-secondary); flex: 1; }
+@media (max-width: 768px) {
+  .assets-layout { flex-direction: column; }
+  .category-tree { width: 100%; display: flex; gap: 8px; overflow-x: auto; }
+  .category-item { margin-bottom: 0; white-space: nowrap; }
+}
 </style>

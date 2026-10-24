@@ -71,6 +71,7 @@ export type LlmProvider = 'deepseek' | 'openai' | 'qwen' | 'ollama' | 'custom'
 /** 全局设置（密钥掩码 + api_key_set；密钥传空字符串=清除） */
 export interface AppSettings {
   comfyui_base_url?: string
+  llm_base_url?: string
   llm_provider?: LlmProvider
   llm_model?: string
   llm_api_key?: string
@@ -81,16 +82,21 @@ export interface AppSettings {
   [key: string]: unknown
 }
 
-/** 三方通道（priority 启用通道内唯一，冲突 400） */
-export interface Channel {
-  id: string
-  name: string
-  type: string
+/** ComfyUI 实例（多实例加权负载均衡） */
+export interface ComfyUIInstance {
+  base_url: string
+  weight: number
   enabled: boolean
-  priority: number
-  base_url?: string
-  api_key_set?: boolean
-  [key: string]: unknown
+}
+/** 实例连通性测试结果 */
+export interface ComfyUIInstanceTestResult {
+  base_url: string
+  enabled: boolean
+  weight: number
+  ok: boolean
+  latency_ms?: number
+  reason?: string
+  message?: string
 }
 
 /** 连接测试失败原因枚举 */
@@ -106,8 +112,17 @@ export interface HealthStatus {
   status: string
   database: string
   comfyui: string
+  comfyui_instances?: ComfyUIInstanceHealth[]
   worker: string
   disk: string
+}
+
+/** 单个 ComfyUI 实例健康状态 */
+export interface ComfyUIInstanceHealth {
+  base_url: string
+  enabled: boolean
+  weight: number
+  status: string
 }
 
 /** 清理上传缓存结果（60 秒频控，重复调用返回上次结果 + cached:true） */

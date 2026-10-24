@@ -36,16 +36,20 @@ def _mark_downstream_stale(db: Session, shot_id: str, roles: list[str] | None = 
         asset = db.get(Asset, r.asset_id)
         if asset is not None and asset.validity == "current":
             asset.validity = "stale"
+            # 分镜图失效时确认自动回退（D-13）：需重新生成并重新确认
+            if asset.asset_type == "keyframe":
+                shot = db.get(Shot, shot_id)
+                if shot is not None:
+                    shot.keyframe_confirmed = False
 
 
 def _current_asset_info(db: Session, shot_id: str, asset_type: str) -> dict | None:
     """取依赖版本匹配、validity=current 且来源任务 succeeded 的产物信息。"""
     row = (
         db.query(Asset)
-        .join(AssetRef, AssetRef.asset_id == Asset.id)
         .join(Job, Job.id == Asset.source_job_id)
         .filter(
-            AssetRef.shot_id == shot_id,
+            Job.shot_id == shot_id,
             Asset.asset_type == asset_type,
             Asset.validity == "current",
             Job.status == "succeeded",
@@ -55,7 +59,14 @@ def _current_asset_info(db: Session, shot_id: str, asset_type: str) -> dict | No
     )
     if row is None:
         return None
-    return {"asset_id": row.id, "file_path": row.file_path, "thumb_path": row.thumb_path, "version": row.version}
+    return {
+        "asset_id": row.id,
+        "file_path": row.file_path,
+        "thumb_path": row.thumb_path,
+        "version": row.version,
+        "url": f"/api/assets/{row.id}/file",
+        "thumb_url": f"/api/assets/{row.id}/file?thumb=true" if row.thumb_path else None,
+    }
 
 
 @router.post("/shots", status_code=201)
@@ -178,6 +189,51 @@ def list_scene_shots(
     return {"items": [ShotOut.model_validate(s).model_dump() for s in rows], "total": total, "page": page, "page_size": page_size}
 
 
+@router.post("/shots/{shot_id}/keyframe/confirm", status_code=200)
+def confirm_keyframe(shot_id: str, db: Session = Depends(get_db)) -> dict:
+    """确认分镜图（D-13 静图先行闸口）：确认前须存在当前有效分镜图产物。"""
+    s = _get_shot(db, shot_id)
+    if not _current_asset_info(db, shot_id, "keyframe"):
+        raise errors.biz_error(code="keyframe_not_ready", http=409, message="分镜图尚未生成，无法确认")
+    s.keyframe_confirmed = True
+    db.commit()
+    return {"id": s.id, "keyframe_confirmed": s.keyframe_confirmed}
+
+
+@router.post("/shots/{shot_id}/keyframe/unconfirm", status_code=200)
+def unconfirm_keyframe(shot_id: str, db: Session = Depends(get_db)) -> dict:
+    """取消分镜图确认（D-13）：取消后 clips 生成闸口重新关闭。"""
+    s = _get_shot(db, shot_id)
+    s.keyframe_confirmed = False
+    db.commit()
+    return {"id": s.id, "keyframe_confirmed": s.keyframe_confirmed}
+
+
+@router.post("/projects/{project_id}/keyframe/confirm", status_code=200)
+def confirm_project_keyframes(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """批量确认项目内分镜图（D-13）：仅确认已具备当前有效分镜图的镜头，返回确认/跳过明细。"""
+    p = db.get(Project, project_id)
+    if p is None:
+        raise errors.AppError("project_not_found", "项目不存在", 404)
+    shot_ids = payload.get("shot_ids")
+    q = (
+        db.query(Shot)
+        .join(Scene, Shot.scene_id == Scene.id)
+        .filter(Scene.project_id == project_id)
+    )
+    if shot_ids:
+        q = q.filter(Shot.id.in_(shot_ids))
+    confirmed, skipped = [], []
+    for s in q.all():
+        if _current_asset_info(db, s.id, "keyframe"):
+            s.keyframe_confirmed = True
+            confirmed.append(s.id)
+        else:
+            skipped.append(s.id)
+    db.commit()
+    return {"confirmed": confirmed, "skipped": skipped, "confirmed_count": len(confirmed), "skipped_count": len(skipped)}
+
+
 @router.patch("/shots/{shot_id}")
 def update_shot(shot_id: str, payload: ShotUpdate, db: Session = Depends(get_db)) -> dict:
     s = _get_shot(db, shot_id)
@@ -204,41 +260,6 @@ def update_shot(shot_id: str, payload: ShotUpdate, db: Session = Depends(get_db)
     if warning:
         out["warning"] = warning
     return out
-
-
-@router.post("/shots/{shot_id}/assets")
-def bind_asset_to_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
-    s = _get_shot(db, shot_id)
-    asset_id = payload.get("asset_id")
-    role = payload.get("role")
-    if not asset_id or not role:
-        raise errors.invalid_request("asset_id 和 role 必填")
-    allowed_roles = {"reference", "first_frame", "end_frame", "audio"}
-    if role not in allowed_roles:
-        raise errors.invalid_request(f"role 仅允许 {allowed_roles}")
-    if db.get(Asset, asset_id) is None:
-        raise errors.invalid_request("资产不存在")
-    existing = (
-        db.query(AssetRef)
-        .filter(AssetRef.shot_id == shot_id, AssetRef.asset_id == asset_id)
-               .first()
-    )
-    if existing:
-        raise errors.asset_in_use("该资产已绑定到此镜头")
-    total = db.query(AssetRef).filter(AssetRef.shot_id == shot_id).count()
-    if total >= 6:
-        raise errors.invalid_request("单镜头关联资产不得超过 6 个")
-    ref = AssetRef(
-        id=ids.asset_ref_id(),
-        shot_id=shot_id,
-        asset_id=asset_id,
-        role=role,
-        source_version=1,
-        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-    )
-    db.add(ref)
-    db.commit()
-    return {"shot_id": shot_id, "asset_id": asset_id, "role": role}
 
 
 @router.delete("/shots/{shot_id}/assets/{asset_id}", status_code=204)

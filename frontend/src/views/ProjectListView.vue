@@ -64,7 +64,26 @@ const { mutate: mutateCreate, isPending: creating } = useMutation({
     showModal.value = false
     invalidateProjects()
   },
-  onError: (e) => message.error(errMsg(e)),
+  onError: (e) => {
+    // 配置未完成：阻断并引导用户前往设置页
+    const code = (e as { code?: string })?.code
+    if (code === 'llm_not_configured' || code === 'comfyui_not_configured') {
+      const isLlm = code === 'llm_not_configured'
+      dialog.warning({
+        title: isLlm ? '语言模型未配置' : 'ComfyUI 未配置',
+        content: isLlm
+          ? '创建项目前需要先完成语言模型配置（API URL / API Key / 模型名称）。是否前往设置页面进行配置？'
+          : '创建项目前需要先完成 ComfyUI 配置（至少一个启用实例）。是否前往设置页面进行配置？',
+        positiveText: '前往设置',
+        negativeText: '暂不创建',
+        onPositiveClick: () => {
+          void router.push('/settings')
+        },
+      })
+      return
+    }
+    message.error(errMsg(e))
+  },
 })
 
 const { mutate: mutateArchive } = useMutation({
@@ -94,7 +113,7 @@ function menuOptions(p: Project): DropdownOption[] {
   return [
     { key: 'copy', label: '复制（后续版本支持）', disabled: true },
     { key: 'archive', label: '归档', disabled: p.status === 'archived' },
-    { key: 'delete', label: '删除', props: { style: 'color: #EF4444;' } },
+    { key: 'delete', label: '删除', props: { style: 'color: var(--danger);' } },
   ]
 }
 
@@ -263,8 +282,8 @@ async function handleCreate() {
                 :height="6"
                 :border-radius="3"
                 :show-indicator="false"
-                color="#6366F1"
-                rail-color="#26262E"
+                color="var(--brand-primary)"
+                rail-color="var(--border-subtle)"
               />
               <span class="progress-text">{{ progressOf(p) }}%</span>
             </div>
@@ -339,19 +358,21 @@ async function handleCreate() {
 
 <style scoped>
 .project-list-page {
-  --bg-base: #101014;
-  --bg-panel: #18181d;
-  --bg-elevated: #202027;
-  --border-subtle: #26262e;
-  --border-strong: #3a3a45;
-  --brand-primary: #6366f1;
-  --brand-hover: #818cf8;
-  --danger: #ef4444;
+  --bg-base: var(--bg-base);
+  --bg-panel: var(--bg-panel);
+  --bg-elevated: var(--bg-elevated);
+  --border-subtle: var(--border-subtle);
+  --border-strong: var(--border-strong);
+  --brand-primary: var(--brand-primary);
+  --brand-hover: var(--brand-hover);
+  --danger: var(--danger);
   --text-primary: #e5e7eb;
   --text-secondary: #9ca3af;
 
-  min-height: calc(100vh - 56px);
+  min-height: calc(100vh - var(--app-header-height, 56px));
   padding: 24px;
+  max-width: 1280px;
+  margin: 0 auto;
   background: var(--bg-base);
   color: var(--text-primary);
 }
@@ -360,14 +381,14 @@ async function handleCreate() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin: 4px 0 20px;
 }
 
 .page-title {
   margin: 0;
-  font-size: 24px;
-  line-height: 32px;
-  font-weight: 600;
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 700;
 }
 
 .page-subtitle {
@@ -393,16 +414,17 @@ async function handleCreate() {
 
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: 16px;
 }
 
 .project-card {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-radius: 14px;
   overflow: hidden;
   cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   transition:
     box-shadow 0.2s ease,
     border-color 0.2s ease,
@@ -410,8 +432,8 @@ async function handleCreate() {
 }
 
 .project-card:hover {
-  border-color: var(--border-strong);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  border-color: var(--brand-primary);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.15);
   transform: translateY(-2px);
 }
 
@@ -424,7 +446,7 @@ async function handleCreate() {
 }
 
 .cover-9-16 {
-  background: linear-gradient(135deg, #312e81 0%, #6366f1 100%);
+  background: linear-gradient(135deg, #312e81 0%, var(--brand-primary) 100%);
 }
 
 .cover-16-9 {
@@ -619,9 +641,9 @@ async function handleCreate() {
 </style>
 
 <style>
-/* 删除确认弹窗：确认按钮使用危险色（danger #EF4444） */
+/* 删除确认弹窗：确认按钮使用危险色（danger var(--danger)） */
 .n-dialog.danger-dialog .n-button--primary-type {
-  --n-color: #ef4444 !important;
+  --n-color: var(--danger) !important;
   --n-color-hover: #f87171 !important;
   --n-color-pressed: #dc2626 !important;
   --n-color-focus: #f87171 !important;

@@ -261,26 +261,30 @@ const compositionOptions = computed(() =>
 </template>
 
 <style scoped>
-.compose-page { padding: 16px; min-height: calc(100vh - 56px); }
+.compose-page { padding: 16px; min-height: calc(100vh - var(--app-header-height, 56px)); }
 .compose-layout { display: flex; gap: 16px; }
 .preview-section { flex: 1; max-width: 60%; }
 .records-section { flex: 1; max-width: 40%; }
-.settings-card { background: #18181D; border: 1px solid #26262E; border-radius: 12px; }
+.settings-card { background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 12px; }
 .video-preview { width: 100%; }
 .video-player { width: 100%; border-radius: 8px; }
-.preview-placeholder { width: 100%; height: 240px; background: #202027; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #4B5563; }
-.field-label { display: block; font-size: 13px; color: #9CA3AF; margin-bottom: 4px; }
+.preview-placeholder { width: 100%; height: 240px; background: var(--bg-elevated); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }
+.field-label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
 .record-list { display: flex; flex-direction: column; gap: 8px; }
 .record-item {
-  padding: 10px 12px; background: #202027; border-radius: 8px; cursor: pointer;
+  padding: 10px 12px; background: var(--bg-elevated); border-radius: 8px; cursor: pointer;
   transition: all 0.2s; border: 1px solid transparent;
 }
 .record-item:hover { border-color: #3A3A45; }
-.record-item.active { border-color: #6366F1; }
+.record-item.active { border-color: var(--brand-primary); }
 .record-item.stale { opacity: 0.5; }
 .record-info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-.record-title { font-size: 13px; color: #E5E7EB; }
-.record-date { font-size: 12px; color: #9CA3AF; }
+.record-title { font-size: 13px; color: var(--text-primary); }
+.record-date { font-size: 12px; color: var(--text-secondary); }
 .record-tags { display: flex; align-items: center; gap: 8px; }
-.record-duration { font-size: 12px; color: #9CA3AF; }
+.record-duration { font-size: 12px; color: var(--text-secondary); }
+@media (max-width: 768px) {
+  .compose-layout { flex-direction: column; }
+  .preview-section, .records-section { max-width: 100%; }
+}
 </style>

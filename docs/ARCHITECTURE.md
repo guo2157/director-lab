@@ -12,7 +12,7 @@
 | ComfyUI | 外部独立服务（IP:Port 连接） | 渲染执行，经 ComfyKit 客户端调用 |
 | 语言模型 | 外部服务（OpenAI 兼容接口） | 剧本评估与解析，独立于 ComfyUI 工作流 |
 
-选型理由（关键决策，详见 DECISIONS.md）：SQLite + WAL 匹配单机小团队定位；数据库表 + 单 worker 取代外部消息队列，保证任务状态可直接查询、修改与恢复；并发固定为 1，因为本地 ComfyUI 为串行队列、显存易溢出、且 ComfyUI `/interrupt` 是全局中断。
+选型理由（关键决策，详见 DECISIONS.md）：SQLite + WAL 匹配单机小团队定位；数据库表 + 单 worker 取代外部消息队列，保证任务状态可直接查询、修改与恢复；并发 = 可用 ComfyUI 实例数（D-18 修订 D-03）：单实例串行（ComfyUI 为串行队列、显存易溢出、`/interrupt` 是全局中断），多实例由实例池加权轮询分发并行执行。
 
 ## 2. 主流程与阶段
 
@@ -74,7 +74,7 @@ draft → active 自动激活：不提供显式激活接口。首次调用以下
 3. 存在解析任务但项目内镜头数为 0 → `parse`
 4. 存在角色 `portrait_asset_id` 为空 → `characters`
 5. 全部角色已具备定妆图，但存在场景 `baseline_asset_id` 为空 → `scenes`
-6. 存在分镜图未完成的镜头 → `keyframes`
+6. 存在分镜图未完成或未人工确认（keyframe_confirmed=false）的镜头 → `keyframes`（D-13 静图先行闸口）
 7. 全部分镜图完成，但存在视频未完成的镜头 → `clips`
 8. 全部视频完成，但存在按 `shot_kind` 需要音频且 H3 音频检查未通过、又尚未完成 TTS 补救的镜头 → `audio`
 9. 任一有配音镜头音画时长差超过 `compose_tolerance` 且尚未审核放行 → `audio`（镜头 review，阻止合成）
@@ -112,7 +112,7 @@ review 放行转换条件（镜头制作状态机补充）：镜头因音画时�
 
 ### 5.2 并发控制
 
-并发固定为 1。`POST /api/jobs/{id}/cancel` 在任务 running 时调用 ComfyUI `/interrupt`，该接口中断 ComfyUI 上所有正在执行的任务：若 ComfyUI 与其他使用者共用，取消可能中断他人生成，界面需二次确认并明确提示；建议为 ComfyUI 配置独立实例。
+并发 = 可用 ComfyUI 实例数（D-18 修订 D-03）：Mock 模式/单实例保持串行（与旧行为一致）；多实例时任务由实例池加权轮询分发并行执行，单实例同一时刻至多执行一个任务。主循环为唯一取任务者（无取任务竞态），执行线程池消费，实例配置运行时生效每轮重算并发度。`POST /api/jobs/{id}/cancel` 在任务 running 时调用 ComfyUI `/interrupt`，该接口中断目标 ComfyUI 上所有正在执行的任务：若 ComfyUI 与其他使用者共用，取消可能中断他人生成，界面需二次确认并明确提示；建议为 ComfyUI 配置独立实例。
 
 ### 5.3 持久化差异
 
@@ -169,21 +169,21 @@ worker 启动时扫描 `running`、`submitting`、`submission_unknown` 及有远
 | 队列积压 | 单项目 queued 任务超过 200 个时，新生成类接口返回 429 `too_many_jobs`，提示先等待或取消部分任务；解析/合成/导出类不受此限 |
 | 超大任务 | 批量生成按场景或项目分批入队，单批不超过 `max_episodes_per_batch` 对应的镜头规模，避免单次提交数百任务导致队列长时间占满 |
 
-### 5.8 三方生成通道与降级（P0）
+### 5.8 多 ComfyUI 实例加权负载均衡（P0）
 
-生成通道可切换：本地 ComfyUI 为主通道，三方 API 通道为降级通道（PRD.md M4-05）。通道配置经设置页三方通道区管理，接口见 API.md（GET/PUT /api/settings/channels、POST /api/settings/channels/{channel_id}/test）。
+生成通道可扩展：支持配置多个 ComfyUI 实例，按权重加权轮询分发任务，实例不可用时自动故障转移（替代原三方通道降级机制）。实例配置经设置页 ComfyUI 区管理，接口见 API.md（GET/PUT /api/settings/comfyui-instances、POST /api/settings/comfyui-instances/test）。
 
 | 项 | 约定 |
 | --- | --- |
-| 触发条件 | 仅当本地 ComfyUI 不可用（提交或轮询返回 `comfy_unreachable` / `comfy_timeout`）且存在启用（`enabled=true`）的三方通道时触发降级 |
-| 尝试顺序 | 按 `priority` 升序逐个尝试；`priority` 在启用通道内唯一 |
-| 降级范围 | 降级仅影响新生成任务的提交；已在执行的任务不迁移通道，按原通道完成或失败 |
-| 全部失败 | 所有启用通道均失败时，任务按本地 ComfyUI 的原失败分类处理（环境类可重试），不静默丢弃 |
-| 可追溯性 | 实际使用的通道与降级过程写入 job 的 `input_snapshot` 与 warnings；任务详情展示实际通道 |
-| 计费提示 | 三方通道按量计费，设置页须明示；通道测试接口仅做最小探测，不提交生成任务 |
-| 恢复 | 本地 ComfyUI 恢复可用后，新任务自动回到本地通道，无需人工切换 |
+| 实例配置 | 每个实例含 `base_url`、`weight`（正整数）、`enabled`；未配置实例时回退单实例 `comfyui_base_url` |
+| 分发策略 | 生成任务按权重加权轮询选择启用实例；权重越大分配任务越多 |
+| 故障转移 | 获取客户端时探测实例，不可达则按权重尝试其余启用实例；全部实例失败时任务按 `comfy_unreachable` 失败分类处理（环境类可重试），不静默丢弃 |
+| 切换范围 | 实例选择仅影响新生成任务的提交；已在执行的任务不迁移实例，按原实例完成或失败 |
+| 可追溯性 | 实际使用的实例写入 job 的 `input_snapshot.comfyui_instance`；任务取消时按该实例发送中断 |
+| 测试接口 | 逐实例最小探测（GET /system_stats），不提交生成任务 |
+| 恢复 | 实例恢复可用后，新任务自动重新参与负载均衡，无需人工切换 |
 
-降级判定在 worker 提交前执行，属于短事务外的远端调用；降级尝试本身不得阻塞任务队列超过单次提交超时。
+实例选择在 worker 提交前执行，属于短事务外的远端调用；故障转移尝试本身不得阻塞任务队列超过单次提交超时。
 
 ## 6. 事件持久化与断线补拉（P0）
 
@@ -195,7 +195,7 @@ worker 启动时扫描 `running`、`submitting`、`submission_unknown` 及有远
 | --- | --- |
 | 部署 | 裸机部署，app 与 worker 同机，ComfyUI 为外部独立服务；后续可迁移至 Docker Compose |
 | 资源 | 主应用常驻内存不超过 1GB |
-| 并发 | 单用户，生成任务串行 |
+| 并发 | 单用户，生成任务并发 = 可用 ComfyUI 实例数（单实例串行） |
 | 可用性 | 服务重启后进行中的图像与视频任务均可按远端任务 ID 恢复，不重复消耗算力 |
 | 数据安全 | 素材不对外网暴露，默认仅监听内网；H3 Partner Node 参考图与提示词经 ComfyUI 发送至 Comfy/MiniMax 云端，须在设置页明示并可停用对应工作流 |
 | 可维护性 | 日志可定位到任务 ID 与工作流版本 |

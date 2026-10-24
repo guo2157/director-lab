@@ -34,11 +34,48 @@ function toApiError(err: AxiosError<ApiErrorBody>): ApiError {
   if (err.response) {
     const body = err.response.data
     const errorBody = body && typeof body === 'object' && 'error' in body ? body.error : undefined
+    if (errorBody?.message) {
+      return new ApiError(
+        err.response.status,
+        errorBody.code ?? `http_${err.response.status}`,
+        errorBody.message,
+        errorBody.detail ?? null,
+      )
+    }
+    // 后端统一错误格式：{"detail": {"code": "...", "message": "...", ...}}
+    const detailBody =
+      body && typeof body === 'object' && 'detail' in body &&
+      typeof (body as { detail: unknown }).detail === 'object' && (body as { detail: Record<string, unknown> }).detail !== null
+        ? (body as { detail: Record<string, unknown> }).detail
+        : undefined
+    if (detailBody && typeof detailBody.message === 'string') {
+      return new ApiError(
+        err.response.status,
+        typeof detailBody.code === 'string' ? detailBody.code : `http_${err.response.status}`,
+        detailBody.message,
+        detailBody,
+      )
+    }
+    // FastAPI 请求校验错误（422）：{"detail": [{loc, msg, type}, ...]}，转为可读信息
+    if (
+      err.response.status === 422 &&
+      body && typeof body === 'object' && 'detail' in body &&
+      Array.isArray((body as { detail: unknown }).detail)
+    ) {
+      const items = (body as { detail: Array<{ loc?: unknown[]; msg?: string }> }).detail
+      const msg = items
+        .map((d) => {
+          const field = Array.isArray(d.loc) ? d.loc.filter((p) => p !== 'body').join('.') : ''
+          return field ? `${field}: ${d.msg ?? '校验失败'}` : (d.msg ?? '校验失败')
+        })
+        .join('；')
+      return new ApiError(422, 'validation_error', `请求参数校验失败：${msg}`, null)
+    }
     return new ApiError(
       err.response.status,
-      errorBody?.code ?? `http_${err.response.status}`,
-      errorBody?.message ?? err.message,
-      errorBody?.detail ?? null,
+      `http_${err.response.status}`,
+      err.message,
+      null,
     )
   }
   if (err.code === 'ECONNABORTED') {

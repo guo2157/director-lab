@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import Project, Scene, SceneEpisode, Shot
+from app.models import Character, Project, Scene, SceneEpisode, Shot
 from app.schemas.storyboard import SceneCreate, SceneEpisodeAdd, SceneOut, SceneUpdate
 from app.services import errors
 
@@ -58,6 +58,14 @@ def create_scene(payload: SceneCreate, db: Session = Depends(get_db)) -> SceneOu
         )
         if dup > 0:
             raise errors.invalid_state_transition(f"场景序号 {seq} 已被占用")
+    # 同名校验（D-16 补充）：场景标题与角色名不得相同，否则 @引用无法区分
+    char_dup = (
+        db.query(Character)
+        .filter(Character.project_id == payload.project_id, Character.name == payload.title)
+        .count()
+    )
+    if char_dup > 0:
+        raise errors.invalid_state_transition(f"名称 {payload.title} 已被项目内角色使用，角色与场景名称不能相同")
     s = Scene(
         project_id=payload.project_id,
         title=payload.title,
@@ -99,7 +107,18 @@ def get_scene(scene_id: str, db: Session = Depends(get_db)) -> SceneOut:
 @router.patch("/scenes/{scene_id}")
 def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_db)) -> SceneOut:
     s = _get_scene(db, scene_id)
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    new_title = data.get("title")
+    if new_title and new_title != s.title:
+        # 同名校验（D-16 补充）：场景标题与角色名不得相同
+        char_dup = (
+            db.query(Character)
+            .filter(Character.project_id == s.project_id, Character.name == new_title)
+            .count()
+        )
+        if char_dup > 0:
+            raise errors.invalid_state_transition(f"名称 {new_title} 已被项目内角色使用，角色与场景名称不能相同")
+    for k, v in data.items():
         setattr(s, k, v)
     db.commit()
     db.refresh(s)

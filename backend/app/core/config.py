@@ -20,8 +20,12 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     database_url: str = "sqlite:///./data/director_lab.db"
 
+    # --- Mock 渲染（D-11：开启后跳过 ComfyUI 交互，生成占位产物，用于无 ComfyUI 环境的演示与端到端测试） ---
+    render_mock: bool = False
     # --- ComfyUI 集成（远端渲染底座） ---
-    comfyui_base_url: str = "https://a9195446196041a3b9feec31c4e2f4ca--8188.ap-shanghai2.cloudstudio.club"
+    comfyui_base_url: str = "https://6006-cpod-1wurfc7eoilo.pod.compshare.cn"
+    # 多实例配置（JSON 数组：[{base_url, weight, enabled}]），为空时回退单实例 comfyui_base_url
+    comfyui_instances_json: str = ""
     comfyui_timeout_seconds: float = 30.0
     comfyui_poll_interval_seconds: float = 2.0
     comfyui_job_timeout_seconds: float = 600.0  # TBD 关联：超时分类 comfy_timeout
@@ -33,7 +37,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 2
 
-    # --- 任务调度（D-03：渲染并发固定为 1，禁止配置化放开） ---
+    # --- 任务调度（D-18 修订 D-03：并发 = 可用 ComfyUI 实例数，单实例串行排队，多实例负载均衡并行） ---
     render_concurrency: int = 1
     worker_poll_interval_seconds: float = 2.0
     job_max_attempts: int = 3  # §5.7 重试上限（自动+手动累计），范围 1-10

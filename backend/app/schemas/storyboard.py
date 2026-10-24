@@ -107,6 +107,7 @@ class ShotOut(BaseModel):
     bgm: str | None
     duration: int
     status: str
+    keyframe_confirmed: bool = False
     actual_duration: float | None
     video_actual_duration: float | None
     audio_source: str | None

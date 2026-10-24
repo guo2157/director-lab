@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
-  NCard, NButton, NSpace, NSpin, NEmpty, NTag, NDataTable, NSelect,
+  NCard, NButton, NSpin, NEmpty, NTag, NDataTable, NSelect,
   NTooltip, NStatistic, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -156,55 +156,109 @@ import { h } from 'vue'
 
 <template>
   <div class="jobs-page">
+    <div class="page-header">
+      <div>
+        <h2 class="page-title">任务队列</h2>
+        <p class="page-subtitle">生成任务实时状态，5 秒自动刷新</p>
+      </div>
+    </div>
+
     <!-- Stats cards -->
     <div class="stats-row">
-      <n-card class="stat-card">
+      <n-card class="stat-card" :bordered="false">
         <n-statistic label="今日成功" :value="statsQuery.data.value?.today_succeeded ?? 0" />
       </n-card>
-      <n-card class="stat-card">
+      <n-card class="stat-card" :bordered="false">
         <n-statistic label="今日失败" :value="statsQuery.data.value?.today_failed ?? 0" />
       </n-card>
-      <n-card class="stat-card">
+      <n-card class="stat-card" :bordered="false">
         <n-statistic label="进行中" :value="statsQuery.data.value?.in_progress ?? 0" />
       </n-card>
-      <n-card class="stat-card">
+      <n-card class="stat-card" :bordered="false">
         <n-statistic label="平均耗时(秒)" :value="Math.round(statsQuery.data.value?.avg_duration_seconds ?? 0)" />
       </n-card>
     </div>
 
-    <!-- Filters -->
-    <div class="filters">
-      <n-space align="center">
-        <n-select v-model:value="typeFilter" :options="typeOptions" size="small" style="width: 140px" clearable />
-        <n-select v-model:value="statusFilter" :options="statusOptions" size="small" style="width: 140px" clearable />
-      </n-space>
-    </div>
-
     <!-- Table -->
-    <n-spin v-if="jobsQuery.isLoading.value" class="page-loading" />
-    <n-empty v-else-if="jobsQuery.data.value?.items?.length === 0" description="暂无任务" />
-    <n-data-table
-      v-else
-      :columns="columns"
-      :data="jobsQuery.data.value?.items || []"
-      :bordered="false"
-      :single-line="false"
-      size="small"
-      :pagination="{
-        page: page,
-        pageSize: pageSize,
-        itemCount: jobsQuery.data.value?.total ?? 0,
-        onUpdatePage: (p: number) => { page = p },
-        showSizePicker: false,
-      }"
-    />
+    <n-card class="settings-card" :bordered="false">
+      <div class="wf-toolbar">
+        <div class="filter-row">
+          <n-select v-model:value="typeFilter" :options="typeOptions" size="small" style="width: 150px" clearable />
+          <n-select v-model:value="statusFilter" :options="statusOptions" size="small" style="width: 150px" clearable />
+        </div>
+        <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
+      </div>
+      <n-spin v-if="jobsQuery.isLoading.value" class="page-loading" />
+      <n-empty v-else-if="jobsQuery.data.value?.items?.length === 0" description="暂无任务" style="padding: 24px 0" />
+      <n-data-table
+        v-else
+        :columns="columns"
+        :data="jobsQuery.data.value?.items || []"
+        :bordered="false"
+        :single-line="false"
+        size="small"
+        :pagination="{
+          page: page,
+          pageSize: pageSize,
+          itemCount: jobsQuery.data.value?.total ?? 0,
+          onUpdatePage: (p: number) => { page = p },
+          showSizePicker: false,
+        }"
+      />
+    </n-card>
   </div>
 </template>
 
 <style scoped>
-.jobs-page { padding: 16px; min-height: calc(100vh - 56px); }
-.stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-.stat-card { background: #18181D; border: 1px solid #26262E; border-radius: 12px; }
-.filters { margin-bottom: 16px; }
+.jobs-page {
+  padding: 24px;
+  max-width: 1280px;
+  margin: 0 auto;
+  min-height: calc(100vh - var(--app-header-height, 56px));
+}
+.page-header {
+  margin: 4px 0 16px;
+}
+.page-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: var(--text-primary);
+}
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.stat-card {
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.settings-card {
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.wf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .page-loading { display: flex; justify-content: center; padding: 80px 0; }
+@media (max-width: 768px) {
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .wf-toolbar { flex-direction: column; align-items: stretch; }
+}
 </style>

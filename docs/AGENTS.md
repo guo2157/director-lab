@@ -28,7 +28,7 @@
 
 1. **权威定义唯一**：接口以 docs/API.md 为准；表结构以 docs/DATABASE.md 为准；状态机以 docs/ARCHITECTURE.md 为准；工作流契约以 docs/WORKFLOW.md 为准。发现文档间冲突时必须停下来在 DECISIONS.md 记录并上报，禁止自行二选一静默实现。
 2. **不得修改已确认技术选型**：FastAPI + uvicorn 单进程、SQLite + WAL、SQLAlchemy 2.0 + Alembic、Vue 3 + TypeScript + Naive UI + Pinia + TanStack Query、ComfyKit 客户端。版本下限：Python 3.11、Node 20、ffmpeg 6.0。
-3. **并发固定为 1**：本地 ComfyUI 串行队列，取消接口 `/interrupt` 是全局中断；禁止引入并行提交。
+3. **并发 = 可用 ComfyUI 实例数（D-18 修订 D-03）**：单实例串行（ComfyUI 串行队列，取消接口 `/interrupt` 是全局中断）；多实例由实例池加权轮询分发并行执行，单实例同一时刻至多执行一个任务；禁止绕过实例池自行并行提交。
 4. **事务纪律**：所有网络、上传、生成、下载、ffprobe、FFmpeg 调用必须在短数据库事务之外执行，禁止持事务等待远端。
 5. **事件纪律**：任务状态与事件同事务写入 outbox，提交前禁止发布事件；事件必须带全局递增 `event_seq`，重复事件幂等。
 6. **三套枚举禁止混用**：`asset_type` / `workflow_type` / `job_type` 语义独立，同名取值（如 clip）不得交叉赋值。

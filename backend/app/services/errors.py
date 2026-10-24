@@ -12,6 +12,11 @@ def biz_error(*, code: str, http: int, message: str, **extra) -> HTTPException:
     return HTTPException(status_code=http, detail=detail)
 
 
+def AppError(code: str, message: str, http: int, **extra) -> HTTPException:
+    """兼容构造：位置参数 (code, message, http)，等价 biz_error。"""
+    return biz_error(code=code, http=http, message=message, **extra)
+
+
 # --- 常用错误快捷构造 ---
 
 def project_not_found() -> HTTPException:
