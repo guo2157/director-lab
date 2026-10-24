@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
@@ -54,6 +54,7 @@ interface DiffSummary {
   deleted_episodes?: number[] | number
 }
 interface ParseJobResult {
+  parse_version_id?: string
   project_analysis?: { summary?: string; theme?: string }
   characters?: Array<{ name: string; description?: string }>
   props?: Array<{ name: string; description?: string }>
@@ -177,6 +178,10 @@ watch(() => currentScriptQuery.data.value, (data) => {
 
 const { mutate: runEstimate, isPending: estimating } = useMutation({
   mutationFn: () => estimateScript(projectId.value, savedVersion.value!.script_version_id, text.value),
+  onMutate: () => {
+    estimateElapsed.value = 0
+    ensureElapsedTimer()
+  },
   onSuccess: (est) => {
     estimate.value = est
     message.success('评估完成，请确认后开始解析')
@@ -208,9 +213,12 @@ const { mutate: runParse, isPending: parsing } = useMutation({
       episode_count: confirmedRange.value?.episode_count ?? estimate.value?.estimated_episodes ?? 1,
       replace_existing: replace || undefined,
     }),
+  onMutate: () => {
+    parseElapsed.value = 0
+    ensureElapsedTimer()
+  },
   onSuccess: (res) => {
     parseJobId.value = res.job_id
-    candidateVersionId.value = res.parse_version.parse_version_id
     message.success('解析任务已提交')
   },
   onError: (e) => message.error(errMsg(e)),
@@ -243,10 +251,44 @@ const { data: parseJobData } = useQuery({
   },
 })
 const parseJob = computed(() => parseJobData.value ?? null)
+const parseJobRunning = computed(
+  () =>
+    !!parseJobId.value &&
+    (!parseJob.value || parseJob.value.status === 'queued' || parseJob.value.status === 'running'),
+)
+/* ---------- 耗时计时（评估 / 解析进行中每秒 +1，全部空闲后自动停止） ---------- */
+const estimateElapsed = ref(0)
+const parseElapsed = ref(0)
+let elapsedTimerId: ReturnType<typeof setInterval> | null = null
+function ensureElapsedTimer() {
+  if (elapsedTimerId !== null) return
+  elapsedTimerId = setInterval(() => {
+    let active = false
+    if (estimating.value) {
+      estimateElapsed.value += 1
+      active = true
+    }
+    if (parseJobRunning.value) {
+      parseElapsed.value += 1
+      active = true
+    }
+    if (!active && elapsedTimerId !== null) {
+      clearInterval(elapsedTimerId)
+      elapsedTimerId = null
+    }
+  }, 1000)
+}
+onUnmounted(() => {
+  if (elapsedTimerId !== null) clearInterval(elapsedTimerId)
+})
 const candidateReady = computed(() => parseJob.value?.status === 'succeeded')
 const candidateResult = computed<ParseJobResult | null>(
   () => (parseJob.value?.result as ParseJobResult | undefined) ?? null,
 )
+// 任务完成后从结果中取候选解析版本 ID（后端 parse 接口仅返回 job_id，版本 ID 在任务 result 中）
+watch(() => candidateResult.value?.parse_version_id, (v) => {
+  if (v && !candidateVersionId.value) candidateVersionId.value = v
+}, { immediate: true })
 const diff = computed(() => candidateResult.value?.diff_summary ?? null)
 
 function diffCount(v: DiffSummary['added_shots']): number {
@@ -398,6 +440,10 @@ function handleMerge(target: Character) {
         <NButton size="small" type="primary" :disabled="!canParse" :loading="parsing" @click="handleParse()">
           {{ hasResults ? '重新解析' : '解析' }}
         </NButton>
+        <span v-if="estimating" class="task-elapsed-hint">评估中…已耗时 {{ estimateElapsed }}s</span>
+        <span v-else-if="parseJobRunning" class="task-elapsed-hint">
+          {{ parseJob?.status === 'queued' ? '解析排队中' : '解析进行中' }}…已耗时 {{ parseElapsed }}s
+        </span>
       </div>
     </header>
 
@@ -429,7 +475,7 @@ function handleMerge(target: Character) {
       <!-- 右 60%：解析结果 -->
       <div class="result-pane">
         <!-- 候选解析版本 -->
-        <div v-if="candidateVersionId" class="candidate-panel">
+        <div v-if="parseJobId" class="candidate-panel">
           <div class="candidate-head">
             <span class="candidate-badge">候选解析版本</span>
             <span class="candidate-note">确认切换前，当前分镜与产物不受影响</span>
@@ -489,7 +535,7 @@ function handleMerge(target: Character) {
           </template>
           <div v-else class="candidate-loading">
             <NSpin size="small" />
-            <span>解析进行中…</span>
+            <span>{{ parseJob?.status === 'queued' ? '排队中，等待 worker 领取' : '解析进行中' }}…已耗时 {{ parseElapsed }}s（每 2s 自动刷新状态）</span>
           </div>
         </div>
 
@@ -791,6 +837,11 @@ function handleMerge(target: Character) {
   font-size: 13px;
   color: var(--text-secondary);
   padding: 4px 0;
+}
+.task-elapsed-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 .diff-tags {
   display: flex;
