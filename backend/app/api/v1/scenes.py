@@ -90,6 +90,12 @@ def list_scenes(
     return [_to_out(db, s) for s in rows]
 
 
+@router.get("/scenes/{scene_id}")
+def get_scene(scene_id: str, db: Session = Depends(get_db)) -> SceneOut:
+    s = _get_scene(db, scene_id)
+    return _to_out(db, s)
+
+
 @router.patch("/scenes/{scene_id}")
 def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_db)) -> SceneOut:
     s = _get_scene(db, scene_id)

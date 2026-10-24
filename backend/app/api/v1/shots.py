@@ -5,12 +5,15 @@
 - 修改 duration 超出 H3 范围（4–15 秒）时返回 warning 字段提示 duration_out_of_range，仍接受修改
 - 详情含 consistency 与聚合素材（scene/character/props/current_assets）
 """
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import Asset, AssetRef, Character, DependencyRef, Job, Project, Prop, Scene, SceneEpisode, Shot
+from app.models import ids
 from app.schemas.storyboard import ShotCreate, ShotOrderUpdate, ShotOut, ShotUpdate
 from app.services import errors
 
@@ -201,6 +204,55 @@ def update_shot(shot_id: str, payload: ShotUpdate, db: Session = Depends(get_db)
     if warning:
         out["warning"] = warning
     return out
+
+
+@router.post("/shots/{shot_id}/assets")
+def bind_asset_to_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    s = _get_shot(db, shot_id)
+    asset_id = payload.get("asset_id")
+    role = payload.get("role")
+    if not asset_id or not role:
+        raise errors.invalid_request("asset_id 和 role 必填")
+    allowed_roles = {"reference", "first_frame", "end_frame", "audio"}
+    if role not in allowed_roles:
+        raise errors.invalid_request(f"role 仅允许 {allowed_roles}")
+    if db.get(Asset, asset_id) is None:
+        raise errors.invalid_request("资产不存在")
+    existing = (
+        db.query(AssetRef)
+        .filter(AssetRef.shot_id == shot_id, AssetRef.asset_id == asset_id)
+               .first()
+    )
+    if existing:
+        raise errors.asset_in_use("该资产已绑定到此镜头")
+    total = db.query(AssetRef).filter(AssetRef.shot_id == shot_id).count()
+    if total >= 6:
+        raise errors.invalid_request("单镜头关联资产不得超过 6 个")
+    ref = AssetRef(
+        id=ids.asset_ref_id(),
+        shot_id=shot_id,
+        asset_id=asset_id,
+        role=role,
+        source_version=1,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    db.add(ref)
+    db.commit()
+    return {"shot_id": shot_id, "asset_id": asset_id, "role": role}
+
+
+@router.delete("/shots/{shot_id}/assets/{asset_id}", status_code=204)
+def unbind_asset_from_shot(shot_id: str, asset_id: str, db: Session = Depends(get_db)) -> None:
+    _get_shot(db, shot_id)
+    ref = (
+        db.query(AssetRef)
+        .filter(AssetRef.shot_id == shot_id, AssetRef.asset_id == asset_id)
+        .first()
+    )
+    if ref is None:
+        raise errors.invalid_request("该资产未绑定到此镜头")
+    db.delete(ref)
+    db.commit()
 
 
 @router.delete("/shots/{shot_id}", status_code=204)

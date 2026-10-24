@@ -62,7 +62,7 @@ let eventSource: EventSource | null = null
 
 onMounted(() => {
   try {
-    eventSource = new EventSource('/api/jobs/events')
+    eventSource = new EventSource('/api/events')
     eventSource.onmessage = () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] })
       queryClient.invalidateQueries({ queryKey: ['jobStats'] })
