@@ -61,6 +61,21 @@ class AssetStatsInput(BaseModel):
     project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
 
 
+class ListAssetsInput(BaseModel):
+    """list_assets 入参。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+    asset_type: str | None = Field(
+        default=None,
+        description="可选：资产类型过滤（keyframe/clip/character/scene/prop/reference 等）",
+    )
+    validity: str | None = Field(
+        default=None,
+        description="可选：有效性过滤（current/stale/superseded）",
+    )
+    limit: int = Field(default=8, ge=1, le=30, description="可选：返回条数上限，默认 8，最大 30")
+
+
 @dataclass
 class ToolResult:
     """工具执行结果：ok=False 时携带错误码与用户可读信息。"""
@@ -145,6 +160,56 @@ def tool_asset_stats(db: Session, project_id: str) -> dict:
     }
 
 
+def tool_list_assets(
+    db: Session,
+    project_id: str,
+    asset_type: str | None = None,
+    validity: str | None = None,
+    limit: int = 8,
+) -> dict:
+    """项目资产清单（最新优先）：类型/名称/版本/有效性/质量状态/可渲染标识。
+
+    只读查询，返回 asset_id 供前端拼媒体 URL（/api/assets/{id}/file?thumb=true），
+    不返回文件系统路径，避免泄露服务器目录结构。
+    """
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    q = select(Asset).where(Asset.project_id == project_id)
+    if asset_type:
+        q = q.where(Asset.asset_type == asset_type)
+    if validity:
+        q = q.where(Asset.validity == validity)
+    # 注意：Asset 模型没有时间戳字段（仅 TimestampMixin 之外的业务表），
+    # 因此按版本倒序（同类型内新版本优先）排序，避免依赖不存在的 created_at
+    assets = (
+        db.scalars(
+            q.order_by(Asset.asset_type.asc(), Asset.version.desc()).limit(min(max(1, limit), 30))
+        )
+        .unique()
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "asset_id": a.id,
+                "asset_type": a.asset_type,
+                "name": a.name,
+                "version": a.version,
+                "validity": a.validity,
+                "quality_status": a.quality_status,
+                "has_file": bool(a.file_path),
+                "has_thumb": bool(a.thumb_path),
+                "source_job_id": a.source_job_id,
+                "locked": a.locked,
+                "ref_count": a.ref_count,
+            }
+            for a in assets
+        ],
+        "count": len(assets),
+    }
+
+
 # --- 注册表（Schema 化：每工具含 input_model 与风险/超时/重试元数据） ---
 
 TOOL_REGISTRY: dict = {
@@ -191,12 +256,30 @@ TOOL_REGISTRY: dict = {
         "params": {"project_id": "项目 ID"},
         "fn": tool_asset_stats,
     },
+    "list_assets": {
+        "description": "查询项目生成的资产清单（图片/视频等）：类型、名称、版本、有效性、质量状态，可返回给前端展示缩略图",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListAssetsInput,
+        "params": {
+            "project_id": "项目 ID",
+            "asset_type": "可选：资产类型过滤（keyframe/clip/character/scene/prop/reference）",
+            "validity": "可选：有效性过滤（current/stale/superseded）",
+            "limit": "可选：返回条数上限，默认 8，最大 30",
+        },
+        "fn": tool_list_assets,
+    },
 }
 
 # 意图 → 候选工具映射（只向模型暴露当前意图需要的工具，降低选错/越权/Token 消耗）
 INTENT_TOOL_MAPPING: dict[str, list[str]] = {
-    "query": ["project_overview", "list_jobs", "asset_stats"],
-    "analysis": ["project_overview", "asset_stats", "list_jobs"],
+    "query": ["project_overview", "list_jobs", "asset_stats", "list_assets"],
+    "analysis": ["project_overview", "asset_stats", "list_jobs", "list_assets"],
 }
 
 

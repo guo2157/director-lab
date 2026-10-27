@@ -334,6 +334,9 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # （历史窗口仅取 user/assistant），仅作审计与追踪用途
     system_prompt = _DIRECTOR_SYSTEM_PROMPT
     tool_event_seq = max_seq + 1  # user 消息为 max_seq+1，tool_event 从 max_seq+2 起
+    # 本轮可展示的资产引用（供前端气泡内渲染缩略图；只含 asset_id 等元数据，
+    # 不含文件系统路径，前端经 /api/assets/{id}/file?thumb=true 取图）
+    asset_refs: list[dict] = []
     if s.project_id:
         from app.services.agent_tools import execute_tool, get_allowed_tools
 
@@ -345,6 +348,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             ("project_overview", {"project_id": s.project_id}),
             ("asset_stats", {"project_id": s.project_id}),
             ("list_jobs", {"project_id": s.project_id, "limit": 5}),
+            ("list_assets", {"project_id": s.project_id, "limit": 6}),
         ):
             if tool_name not in allowed_tools:
                 continue
@@ -352,6 +356,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         overview = next((r for n, _, r in tool_calls if n == "project_overview"), None)
         stats = next((r for n, _, r in tool_calls if n == "asset_stats"), None)
         jobs = next((r for n, _, r in tool_calls if n == "list_jobs"), None)
+        assets = next((r for n, _, r in tool_calls if n == "list_assets"), None)
         # 工具调用审计落库（LLM 失败也不丢失审计记录，故在此即提交）
         for tool_name, tool_args, result in tool_calls:
             tool_event_seq += 1
@@ -389,6 +394,25 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 for j in jobs.data["items"]
             )
             ctx_lines.append(f"最近任务（新→旧）：{job_lines}")
+        if assets is not None and assets.ok and assets.data and assets.data["count"] > 0:
+            # 资产清单：注入文本上下文，并收集 asset_refs 供前端气泡渲染缩略图
+            asset_refs = [
+                {
+                    "asset_id": it["asset_id"],
+                    "asset_type": it["asset_type"],
+                    "name": it["name"],
+                    "has_thumb": it["has_thumb"],
+                    "validity": it["validity"],
+                }
+                for it in assets.data["items"]
+            ]
+            asset_lines = ", ".join(
+                f"{it['asset_type']}({it['name']} v{it['version']})"
+                for it in assets.data["items"][:6]
+            )
+            ctx_lines.append(
+                f"最近生成的资产（新→旧，本次展示 {assets.data['count']} 项）：{asset_lines}"
+            )
         if ctx_lines:
             system_prompt += "\n以下是当前关联项目的真实状态（由系统查询提供，回答项目相关问题以此为准）：\n" + "\n".join(
                 ctx_lines
@@ -452,6 +476,8 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             "intent_goal": intent.goal,
             "risk_level": intent.risk_level,
             "confidence": intent.confidence,
+            # 资产引用：前端据此渲染缩略图（assistant 气泡内）
+            "asset_refs": asset_refs,
         },
         seq=tool_event_seq + 1,
         created_at=datetime.now(),

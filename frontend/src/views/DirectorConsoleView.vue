@@ -103,6 +103,23 @@ async function removeSession(s: AgentSession) {
 
 // --- 中栏：对话与执行主区 ---
 const messages = ref<AgentMessage[]>([])
+
+/** 气泡内可展示的资产引用（由后端 assistant payload.asset_refs 提供） */
+interface AssetRef {
+  asset_id: string
+  asset_type: string
+  name: string
+  has_thumb: boolean
+  validity: string
+}
+function assetRefsOf(m: AgentMessage): AssetRef[] {
+  const p = m.payload as { asset_refs?: AssetRef[] } | null
+  return Array.isArray(p?.asset_refs) ? (p.asset_refs as AssetRef[]) : []
+}
+/** 视频类资产无法用 img 直出，降级为链接卡片 */
+function isImageAsset(t: string): boolean {
+  return !['clip', 'video'].includes(t)
+}
 const messagesLoading = ref(false)
 const inputText = ref('')
 const sending = ref(false)
@@ -425,6 +442,38 @@ onMounted(() => {
                 {{ m.role === 'user' ? '我' : m.role === 'assistant' ? '导演台助手' : m.role }}
               </div>
               <div class="message-content">{{ m.content }}</div>
+              <div
+                v-if="m.role === 'assistant' && assetRefsOf(m).length"
+                class="asset-thumbs"
+              >
+                <template v-for="a in assetRefsOf(m)" :key="a.asset_id">
+                  <a
+                    v-if="isImageAsset(a.asset_type)"
+                    class="asset-thumb"
+                    :href="`/api/assets/${a.asset_id}/file`"
+                    target="_blank"
+                    rel="noopener"
+                    :title="`${a.name}（${a.asset_type}）`"
+                  >
+                    <img
+                      :src="`/api/assets/${a.asset_id}/file?thumb=true`"
+                      :alt="a.name"
+                      loading="lazy"
+                    />
+                    <span class="asset-thumb-label">{{ a.asset_type }}</span>
+                  </a>
+                  <a
+                    v-else
+                    class="asset-thumb-link"
+                    :href="`/api/assets/${a.asset_id}/file`"
+                    target="_blank"
+                    rel="noopener"
+                    :title="`${a.name}（${a.asset_type}）`"
+                  >
+                    ▶ {{ a.asset_type }}
+                  </a>
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -711,6 +760,52 @@ onMounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.6;
+}
+/* 气泡内资产缩略图（agent asset_refs） */
+.asset-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.asset-thumb {
+  position: relative;
+  display: block;
+  width: 96px;
+  height: 96px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  background: #000;
+}
+.asset-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.asset-thumb-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  font-size: 10px;
+  padding: 2px 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  text-align: center;
+}
+.asset-thumb-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 96px;
+  height: 96px;
+  border-radius: 8px;
+  border: 1px dashed var(--border-subtle, #e5e7eb);
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  text-decoration: none;
 }
 .chat-input {
   display: flex;

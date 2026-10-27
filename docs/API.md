@@ -510,6 +510,13 @@
 | project_overview | read | low | 无 | 否 |
 | list_jobs | read | low | 无 | 否 |
 | asset_stats | read | low | 无 | 否 |
+| list_assets | read | low | 无 | 否 |
+
+`list_assets` 返回项目资产清单（asset_id / asset_type / name / version / validity / quality_status / has_file / has_thumb / source_job_id / locked / ref_count），**不返回文件系统路径**；前端据 `asset_id` 通过 `GET /api/assets/{asset_id}/file?thumb=true` 取缩略图。
+
+### 资产引用（asset_refs）
+
+assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用数组（每项含 asset_id / asset_type / name / has_thumb / validity，最多 6 条），供前端在助手气泡内渲染缩略图；视频类（clip/video）前端降级为链接卡片。该字段为空数组时前端不渲染图片区。
 
 - 入参经 Pydantic Schema 校验（model_validate），校验失败返回 `tool_invalid_args`。
 - `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前三个工具均无需审批）。
