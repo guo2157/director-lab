@@ -201,3 +201,65 @@ def test_chat_llm_error_mapping(client: TestClient, monkeypatch):
     r = client.post(f"/api/agent/sessions/{sid}/chat", json={"content": "hi again"})
     assert r.status_code == 502
     assert r.json()["detail"]["code"] == "llm_timeout"
+
+
+def test_chat_asset_refs_gated_by_keywords(client: TestClient, monkeypatch):
+    """资产类消息（含『看看/图』等关键词）注入 list_assets 并回传 asset_refs；
+    进展类消息不注入缩略图，避免每条回复都附带图片（UI 噪音与无谓带宽）。
+    """
+    import app.api.v1.agent as agent_mod
+    import app.core.database as db_mod
+    from datetime import datetime
+    from app.models import Asset, Job
+    from app.models.ids import asset_id, job_id
+
+    monkeypatch.setattr(
+        agent_mod.LLMClient,
+        "chat_messages",
+        lambda self, messages, *, json_mode=False: "这是助手的回复",
+    )
+    r = client.post("/api/projects", json={"name": "气泡缩略图", "aspect_ratio": "9:16"})
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+
+    db = db_mod.SessionLocal()
+    now = datetime.now()
+    job = Job(id=job_id(), project_id=pid, job_type="image", status="succeeded", created_at=now)
+    db.add(job)
+    asset = Asset(
+        id=asset_id(), project_id=pid, asset_type="character", name="小红帽", version=1,
+        source_job_id=job.id, file_path="/tmp/a.png", thumb_path="/tmp/a.webp", validity="current",
+    )
+    db.add(asset)
+    db.commit()
+    aid = asset.id
+    db.close()
+
+    r = client.post("/api/agent/sessions", json={"title": "缩略图", "project_id": pid})
+    sid = r.json()["id"]
+
+    # 1) 资产类消息：命中关键词 → 执行 list_assets → payload.asset_refs 供前端渲染缩略图
+    r = client.post(f"/api/agent/sessions/{sid}/chat", json={"content": "看看角色图长什么样"})
+    assert r.status_code == 200, r.text
+    refs = r.json()["assistant_message"]["payload"]["asset_refs"]
+    assert [x["asset_id"] for x in refs] == [aid]
+    assert refs[0]["asset_type"] == "character"
+    assert refs[0]["has_thumb"] is True
+    # 只暴露元数据，不泄露服务器目录结构
+    assert "file_path" not in refs[0]
+    assert "thumb_path" not in refs[0]
+    # 审计：list_assets 的 tool_event 已落库
+    msgs = client.get(f"/api/agent/sessions/{sid}/messages").json()["items"]
+    tool_names = [m["payload"]["tool_name"] for m in msgs if m["role"] == "tool_event"]
+    assert "list_assets" in tool_names
+
+    # 2) 进展类消息：不含关键词 → 不执行 list_assets，asset_refs 为空数组
+    r = client.post(f"/api/agent/sessions/{sid}/chat", json={"content": "项目进展如何"})
+    assert r.status_code == 200, r.text
+    assert r.json()["assistant_message"]["payload"]["asset_refs"] == []
+    msgs = client.get(f"/api/agent/sessions/{sid}/messages").json()["items"]
+    tool_names = [m["payload"]["tool_name"] for m in msgs if m["role"] == "tool_event"]
+    assert tool_names.count("list_assets") == 1
+    # tool_event 不进入对话上下文（仅 user/assistant 参与）
+    roles = {m["role"] for m in msgs}
+    assert "tool_event" in roles

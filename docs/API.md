@@ -512,7 +512,9 @@
 | asset_stats | read | low | 无 | 否 |
 | list_assets | read | low | 无 | 否 |
 
-`list_assets` 返回项目资产清单（asset_id / asset_type / name / version / validity / quality_status / has_file / has_thumb / source_job_id / locked / ref_count），**不返回文件系统路径**；前端据 `asset_id` 通过 `GET /api/assets/{asset_id}/file?thumb=true` 取缩略图。
+`list_assets` 返回项目资产清单（asset_id / asset_type / name / version / validity / quality_status / has_file / has_thumb / source_job_id / locked / ref_count / generated_at），以及 `count`（本次返回条数）与 `offset`（本次起始偏移），**不返回文件系统路径**；前端据 `asset_id` 通过 `GET /api/assets/{asset_id}/file?thumb=true` 取缩略图。
+
+排序规则：按产出该资产的 `Job.created_at` 倒序（`Asset` 无自身时间戳字段），无关联任务的资产排在最后，`generated_at` 即该任务的创建时间（无关联任务时为 null）。参数 `limit` 默认 8、取值 1–30；`offset` 需大于等于 0，用于分页。
 
 ### 资产引用（asset_refs）
 

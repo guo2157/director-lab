@@ -120,6 +120,16 @@ function assetRefsOf(m: AgentMessage): AssetRef[] {
 function isImageAsset(t: string): boolean {
   return !['clip', 'video'].includes(t)
 }
+/** 缩略图加载失败的资产（历史消息中资产可能已失效或被清理，失败即隐藏避免破图） */
+const failedAssetIds = ref<Set<string>>(new Set())
+function onThumbError(assetId: string): void {
+  const next = new Set(failedAssetIds.value)
+  next.add(assetId)
+  failedAssetIds.value = next
+}
+function visibleAssetRefs(m: AgentMessage): AssetRef[] {
+  return assetRefsOf(m).filter((a) => !failedAssetIds.value.has(a.asset_id))
+}
 const messagesLoading = ref(false)
 const inputText = ref('')
 const sending = ref(false)
@@ -443,10 +453,10 @@ onMounted(() => {
               </div>
               <div class="message-content">{{ m.content }}</div>
               <div
-                v-if="m.role === 'assistant' && assetRefsOf(m).length"
+                v-if="m.role === 'assistant' && visibleAssetRefs(m).length"
                 class="asset-thumbs"
               >
-                <template v-for="a in assetRefsOf(m)" :key="a.asset_id">
+                <template v-for="a in visibleAssetRefs(m)" :key="a.asset_id">
                   <a
                     v-if="isImageAsset(a.asset_type)"
                     class="asset-thumb"
@@ -459,6 +469,7 @@ onMounted(() => {
                       :src="`/api/assets/${a.asset_id}/file?thumb=true`"
                       :alt="a.name"
                       loading="lazy"
+                      @error="onThumbError(a.asset_id)"
                     />
                     <span class="asset-thumb-label">{{ a.asset_type }}</span>
                   </a>

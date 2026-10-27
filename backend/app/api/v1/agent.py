@@ -343,13 +343,23 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         # 意图-工具映射（B 档）：只执行当前意图候选的工具，降低选错/越权/Token 消耗；
         # 识别失败降级为 query 时映射到全部只读工具，行为与阶段 E 一致
         allowed_tools = get_allowed_tools(intent.intent)
-        tool_calls = []
-        for tool_name, tool_args in (
+        base_tools = [
             ("project_overview", {"project_id": s.project_id}),
             ("asset_stats", {"project_id": s.project_id}),
             ("list_jobs", {"project_id": s.project_id, "limit": 5}),
-            ("list_assets", {"project_id": s.project_id, "limit": 6}),
-        ):
+        ]
+        # 资产缩略图仅在用户明确想看图片/视频时注入，避免每条消息都附带缩略图（UI 噪音 +
+        # 无谓带宽）；只查 validity=current 的资产，避免历史消息渲染到失效文件
+        _asset_hint = ("图", "视频", "片段", "素材", "缩略", "画面", "看看", "长什么样")
+        if any(k in payload.content for k in _asset_hint):
+            base_tools.append(
+                (
+                    "list_assets",
+                    {"project_id": s.project_id, "validity": "current", "limit": 6},
+                )
+            )
+        tool_calls = []
+        for tool_name, tool_args in base_tools:
             if tool_name not in allowed_tools:
                 continue
             tool_calls.append((tool_name, tool_args, execute_tool(db, tool_name, **tool_args)))

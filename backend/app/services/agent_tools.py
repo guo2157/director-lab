@@ -74,6 +74,7 @@ class ListAssetsInput(BaseModel):
         description="可选：有效性过滤（current/stale/superseded）",
     )
     limit: int = Field(default=8, ge=1, le=30, description="可选：返回条数上限，默认 8，最大 30")
+    offset: int = Field(default=0, ge=0, description="可选：偏移量（翻页用），默认 0")
 
 
 @dataclass
@@ -166,31 +167,36 @@ def tool_list_assets(
     asset_type: str | None = None,
     validity: str | None = None,
     limit: int = 8,
+    offset: int = 0,
 ) -> dict:
-    """项目资产清单（最新优先）：类型/名称/版本/有效性/质量状态/可渲染标识。
+    """项目资产清单（最近生成优先）：类型/名称/版本/有效性/质量状态/可渲染标识。
 
+    排序：按产出该资产的 Job.created_at 倒序（Asset 自身无时间戳字段）；
+    无关联任务（source_job_id 为空或任务已缺失）的资产排在最后。
     只读查询，返回 asset_id 供前端拼媒体 URL（/api/assets/{id}/file?thumb=true），
     不返回文件系统路径，避免泄露服务器目录结构。
     """
     p = db.get(Project, project_id)
     if not p:
         raise ToolError("project_not_found", "项目不存在")
-    q = select(Asset).where(Asset.project_id == project_id)
+    q = (
+        select(Asset, Job.created_at)
+        .outerjoin(Job, Asset.source_job_id == Job.id)
+        .where(Asset.project_id == project_id)
+    )
     if asset_type:
         q = q.where(Asset.asset_type == asset_type)
     if validity:
         q = q.where(Asset.validity == validity)
-    # 注意：Asset 模型没有时间戳字段（仅 TimestampMixin 之外的业务表），
-    # 因此按版本倒序（同类型内新版本优先）排序，避免依赖不存在的 created_at
-    assets = (
-        db.scalars(
-            q.order_by(Asset.asset_type.asc(), Asset.version.desc()).limit(min(max(1, limit), 30))
-        )
-        .unique()
-        .all()
-    )
-    return {
-        "items": [
+    # 无关联任务的资产（Job.created_at 为 NULL）排在最后：布尔升序 False(0) 先于 True(1)
+    rows = db.execute(
+        q.order_by(Job.created_at.is_(None).asc(), Job.created_at.desc(), Asset.id.asc())
+        .offset(max(0, offset))
+        .limit(min(max(1, limit), 30))
+    ).all()
+    items = []
+    for a, job_created_at in rows:
+        items.append(
             {
                 "asset_id": a.id,
                 "asset_type": a.asset_type,
@@ -203,10 +209,13 @@ def tool_list_assets(
                 "source_job_id": a.source_job_id,
                 "locked": a.locked,
                 "ref_count": a.ref_count,
+                "generated_at": job_created_at.isoformat() if job_created_at else None,
             }
-            for a in assets
-        ],
-        "count": len(assets),
+        )
+    return {
+        "items": items,
+        "count": len(items),
+        "offset": max(0, offset),
     }
 
 
@@ -271,6 +280,7 @@ TOOL_REGISTRY: dict = {
             "asset_type": "可选：资产类型过滤（keyframe/clip/character/scene/prop/reference）",
             "validity": "可选：有效性过滤（current/stale/superseded）",
             "limit": "可选：返回条数上限，默认 8，最大 30",
+            "offset": "可选：偏移量（翻页用），默认 0",
         },
         "fn": tool_list_assets,
     },
