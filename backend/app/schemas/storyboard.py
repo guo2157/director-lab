@@ -56,6 +56,8 @@ class ShotCreate(BaseModel):
     video_prompt: str | None = None
     duration: int = Field(ge=1)
     character_id: str | None = None
+    # 尾帧依赖声明（P0）：为 True 时生成 clip 必须有上一镜可用尾帧，否则 409
+    requires_prev_frame: bool = False
 
     @field_validator("shot_kind")
     @classmethod
@@ -79,6 +81,8 @@ class ShotUpdate(BaseModel):
     soundscape: str | None = None
     bgm: str | None = None
     character_id: str | None = None
+    # 尾帧依赖声明（P0）：可随时开关，变更会经由既有失效传播标记下游
+    requires_prev_frame: bool | None = None
 
 
 class ShotOrderUpdate(BaseModel):

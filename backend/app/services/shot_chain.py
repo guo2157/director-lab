@@ -1,0 +1,182 @@
+"""镜头链尾帧依赖服务（P0 整改）。
+
+设计约定（对应首尾帧依赖与跨镜头连续性整改）：
+- 镜头顺序以 (episode, scene.seq, shot.seq) 为准，与调度/前端口径一致
+- 第 N 镜的参考尾帧取自第 N-1 镜实际生成视频解码得到的最后一帧，
+  不使用预估帧、分镜图或其他镜头的尾帧
+- 尾帧落为 Asset(asset_type="last_frame")，由 shot.last_frame_asset_id 绑定；
+  旧尾帧置 superseded 保留追溯，避免新旧版本混用
+- 尾帧提取失败只记录事件，不阻断 clip 任务成功（由后续重试或人工处理）
+- 依赖关系写入 DependencyRef，便于失效传播与排查
+"""
+import os
+
+from sqlalchemy.orm import Session
+
+from app.models import Asset, DependencyRef, Scene, Shot, ids
+
+
+def ordered_episode_shots(db: Session, project_id: str, episode: int) -> list:
+    """按集内镜头顺序返回：场景出场顺序 → 镜头 seq。"""
+    return (
+        db.query(Shot)
+        .join(Scene, Shot.scene_id == Scene.id)
+        .filter(Scene.project_id == project_id, Shot.episode == episode)
+        .order_by(Scene.seq, Shot.seq)
+        .all()
+    )
+
+
+def shot_project_id(db: Session, shot: Shot) -> str:
+    """取镜头所属项目 ID。"""
+    scene = db.get(Scene, shot.scene_id)
+    return scene.project_id if scene is not None else ""
+
+
+def previous_shot(db: Session, shot: Shot) -> Shot | None:
+    """返回同集内的前一个镜头；没有前序镜头时返回 None。"""
+    project_id = shot_project_id(db, shot)
+    if not project_id:
+        return None
+    prev = None
+    for item in ordered_episode_shots(db, project_id, shot.episode):
+        if item.id == shot.id:
+            return prev
+        prev = item
+    return None
+
+
+def resolve_prev_frame(db: Session, shot: Shot) -> dict | None:
+    """解析当前镜头可用的上一镜实际尾帧。
+
+    仅当前一个镜头的尾帧绑定存在、资产有效、文件可读时才返回；
+    否则返回 None，由调用方决定拦截或降级，不用其他图片顶替。
+    """
+    prev = previous_shot(db, shot)
+    if prev is None or not prev.last_frame_asset_id:
+        return None
+    asset = db.get(Asset, prev.last_frame_asset_id)
+    if asset is None or asset.validity != "current" or not asset.file_path:
+        return None
+    if not os.path.exists(asset.file_path):
+        return None
+    return {
+        "file_path": asset.file_path,
+        "asset_id": asset.id,
+        "version": asset.version,
+        "prev_shot_id": prev.id,
+    }
+
+
+def store_shot_last_frame(db: Session, shot: Shot, clip_asset: Asset, media_dir: str) -> dict:
+    """从 clip 产物提取实际末帧并绑定到 shot.last_frame_asset_id。
+
+    成功返回 {ok: True, asset_id, file_path, frame_hash, timestamp, fallback_used}；
+    失败返回 {ok: False, error}，调用方记录事件但不阻断任务成功。
+    """
+    from app.services.frame_extract import extract_last_frame, validate_frame_image
+
+    if clip_asset is None or not clip_asset.file_path:
+        return {"ok": False, "error": "clip_asset_missing"}
+    if not os.path.exists(clip_asset.file_path):
+        return {"ok": False, "error": "clip_file_missing"}
+
+    frame_dir = os.path.join(media_dir, "last_frames")
+    os.makedirs(frame_dir, exist_ok=True)
+    new_asset_id = ids.asset_id()
+    frame_path = os.path.join(frame_dir, f"{new_asset_id}_last_frame.png")
+
+    result = extract_last_frame(clip_asset.file_path, frame_path)
+    if not result.ok or not result.frame_path:
+        return {"ok": False, "error": result.error or "extract_failed"}
+    valid, err = validate_frame_image(result.frame_path)
+    if not valid:
+        return {"ok": False, "error": err or "frame_invalid"}
+
+    old_id = shot.last_frame_asset_id
+    if old_id:
+        old = db.get(Asset, old_id)
+        if old is not None and old.id != new_asset_id:
+            old.validity = "superseded"
+
+    asset = Asset(
+        id=new_asset_id,
+        project_id=shot_project_id(db, shot),
+        asset_type="last_frame",
+        name=f"{shot.id}_lastframe",
+        version=((db.get(Asset, old_id).version + 1) if old_id and db.get(Asset, old_id) else 1),
+        file_path=result.frame_path,
+        thumb_path=None,
+        source_job_id=clip_asset.source_job_id,
+        validity="current",
+        input_snapshot={
+            "source_clip_asset_id": clip_asset.id,
+            "source_clip_version": clip_asset.version,
+            "source_shot_id": shot.id,
+            "frame_timestamp": result.timestamp,
+            "frame_hash": result.frame_hash,
+            "video_duration": result.video_duration,
+            "video_fps": result.video_fps,
+            "fallback_used": result.fallback_used,
+            "fallback_reason": result.fallback_reason,
+        },
+    )
+    db.add(asset)
+    db.flush()
+
+    shot.last_frame_asset_id = asset.id
+
+    db.add(
+        DependencyRef(
+            id=ids.dependency_ref_id(),
+            source_type="asset",
+            source_id=clip_asset.id,
+            source_version=clip_asset.version,
+            target_type="shot",
+            target_id=shot.id,
+            dependency_role="last_frame",
+            validity="current",
+        )
+    )
+    return {
+        "ok": True,
+        "asset_id": asset.id,
+        "file_path": result.frame_path,
+        "frame_hash": result.frame_hash,
+        "timestamp": result.timestamp,
+        "fallback_used": result.fallback_used,
+    }
+
+
+def invalidate_chain_after_regenerate(
+    db: Session, shot: Shot, *, reset_keyframe_confirmed: bool = False
+) -> dict:
+    """当前镜头重生成后的失效传播。
+
+    - 旧尾帧置 superseded：下游解析前序尾帧时自然拿不到旧版本
+    - keyframe 重做时分镜图会被重绘，需回退确认状态；clip 重做不改分镜图，
+      不得让本镜关键帧确认失效，否则会把已确认镜头打回未确认造成误拦
+    - 返回下游镜头清单供前端提示影响范围，不批量自动重生成
+    """
+    affected: list = []
+    old_id = shot.last_frame_asset_id
+    if old_id:
+        old = db.get(Asset, old_id)
+        if old is not None:
+            old.validity = "superseded"
+    if reset_keyframe_confirmed:
+        shot.keyframe_confirmed = False
+    project_id = shot_project_id(db, shot)
+    if project_id:
+        hit = False
+        for item in ordered_episode_shots(db, project_id, shot.episode):
+            if item.id == shot.id:
+                hit = True
+                continue
+            if hit:
+                affected.append(item.id)
+    return {
+        "cleared_last_frame": bool(old_id),
+        "keyframe_confirmed_reset": bool(reset_keyframe_confirmed),
+        "downstream_shot_ids": affected,
+    }

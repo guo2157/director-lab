@@ -99,6 +99,7 @@ def create_shot(payload: ShotCreate, db: Session = Depends(get_db)) -> ShotOut:
         video_prompt=payload.video_prompt,
         duration=payload.duration,
         character_id=payload.character_id,
+        requires_prev_frame=payload.requires_prev_frame,
         seq=seq,
     )
     db.add(s)

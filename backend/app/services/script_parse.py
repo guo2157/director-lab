@@ -96,7 +96,7 @@ def estimate_script(text: str, *, episode_duration_target: int = DEFAULT_EPISODE
 # --- 剧本解析系统提示词（PROMPTS.md §2 模板浓缩，输出 §3 结构 JSON） ---
 # D-15 提示词外置：此常量为内置默认值；运行时经 prompt_store.get_prompt 动态读取，
 # workspace/prompts/parse_system.md 存在时优先生效（UI 编辑保存即生效，无需重启）。
-from app.services.prompt_store import _register_default
+from app.services.prompt_store import _register_default, get_prompt
 
 PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编剧、商业故事策划和影视剧本顾问。将用户提供的剧本一次性解析为结构化 JSON，供后续资产生成与分镜拆解直接使用。
 
@@ -237,10 +237,76 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
     return result
 
 
+# ── video_prompt 兜底模板（P1 外置）：LLM 未生成时按状态衔接模板拼装 ───
+# 首镜版：无上一镜尾帧，仅 <Picture 1> 分镜图；
+# 非首镜版：<Picture 1> 上镜尾帧 + <Picture 2> 当前分镜图
+_register_default("video_prompt_first", """任务：Ref2VA 第 {episode}-{seq} 镜
+
+【<Picture 1>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。
+
+【身份约束】参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。
+
+开场状态（按剧情与分镜图推断）：
+{start_state}
+
+剧情与动作：
+本镜头剧情：{shot_purpose}
+人物动作：{beats}
+镜头运动：{camera_movement}
+画面衔接：开场按剧情自然进入当前镜头分镜图的构图与动作。
+
+目标状态（对齐当前镜头分镜图）：
+{end_state}
+
+必须保持：
+1. 人物面部特征、发型、服装与配饰一致
+2. 场景布局与光线色调连续
+3. 道具位置与持有状态连续
+
+禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。
+
+对白与声音：{sound}
+
+输出：时长 {duration} 秒，按项目画幅，高质量输出。""")
+
+_register_default("video_prompt_body", """任务：Ref2VA 第 {episode}-{seq} 镜
+
+【<Picture 1>：上一镜头尾帧】本镜头开始时的连续状态基准：人物位置、站姿、朝向、表情、视线、道具与空间关系。
+
+【<Picture 2>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。
+
+【身份约束】两张参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。
+
+开场状态（承接上一镜头尾帧 <Picture 1>）：
+{start_state}
+
+剧情与动作：
+本镜头剧情：{shot_purpose}
+人物动作：{beats}
+镜头运动：{camera_movement}
+画面衔接：开场保持 <Picture 1> 的位置、姿态、视线与道具状态，随动作自然过渡到 <Picture 2> 的构图与动作。
+
+目标状态（对齐 <Picture 2>）：
+{end_state}
+
+必须保持：
+1. 人物面部特征、发型、服装与配饰一致
+2. 场景布局与光线色调连续
+3. 道具位置与持有状态连续
+
+禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。
+
+对白与声音：{sound}
+
+输出：时长 {duration} 秒，按项目画幅，高质量输出。""")
+
+
 def _assemble_video_prompt(sh: dict, is_first: bool = False) -> str:
     """video_prompt 为空时按 PROMPTS.md §5.2 状态衔接模板拼装（系统侧兜底）。
-    从 shot 结构化字段（start_state/end_state/beats/camera_movement/dialogue 等）生成，
-    保证缺失 LLM 提示词的镜头仍有可用的结构化视频提示词。
+
+    静态模板从 workspace/prompts/video_prompt_{first,body}.md 读取（缺失回退 DEFAULT_PROMPTS），
+    变量 {episode}/{seq}/{beats}/{shot_purpose}/{camera_movement}/{start_state}/{end_state}/{sound}/{duration}
+    由代码运行时注入；节拍格式化与状态序列化逻辑保留在代码内。
     """
     def _state_lines(state) -> str:
         if not state:
@@ -255,53 +321,19 @@ def _assemble_video_prompt(sh: dict, is_first: bool = False) -> str:
     ) or "（无节拍，按剧情自然表演）"
     dialogue = (sh.get("dialogue") or "").strip()
     sound = "；".join(x for x in [dialogue, sh.get("soundscape"), sh.get("bgm")] if x) or "（无对白，环境声按场景）"
-    if is_first:
-        # 每集首镜：无上一镜头尾帧，仅注入 1 张分镜图，按连线顺序为 <Picture 1>
-        lines = [
-            f"任务：Ref2VA 第 {sh.get('episode') or 1}-{sh.get('seq') or 1} 镜",
-            "【<Picture 1>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。",
-            "【身份约束】参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。",
-            "开场状态（按剧情与分镜图推断）：",
-            _state_lines(sh.get("start_state")),
-            "剧情与动作：",
-            f"本镜头剧情：{sh.get('shot_purpose') or '（按分镜图）'}",
-            f"人物动作：{beat_desc}",
-            f"镜头运动：{sh.get('camera_movement') or '固定'}",
-            "画面衔接：开场按剧情自然进入当前镜头分镜图的构图与动作。",
-            "目标状态（对齐当前镜头分镜图）：",
-            _state_lines(sh.get("end_state")),
-            "必须保持：",
-            "1. 人物面部特征、发型、服装与配饰一致",
-            "2. 场景布局与光线色调连续",
-            "3. 道具位置与持有状态连续",
-            "禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。",
-            f"对白与声音：{sound}",
-            f"输出：时长 {sh.get('duration') or 10} 秒，按项目画幅，高质量输出。",
-        ]
-        return "\n".join(lines)
-    lines = [
-        f"任务：Ref2VA 第 {sh.get('episode') or 1}-{sh.get('seq') or 1} 镜",
-        "【<Picture 1>：上一镜头尾帧】本镜头开始时的连续状态基准：人物位置、站姿、朝向、表情、视线、道具与空间关系。",
-        "【<Picture 2>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。",
-        "【身份约束】两张参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。",
-        "开场状态（承接上一镜头尾帧 <Picture 1>）：",
-        _state_lines(sh.get("start_state")),
-        "剧情与动作：",
-        f"本镜头剧情：{sh.get('shot_purpose') or '（按分镜图）'}",
-        f"人物动作：{beat_desc}",
-        f"镜头运动：{sh.get('camera_movement') or '固定'}",
-        "画面衔接：开场保持 <Picture 1> 的位置、姿态、视线与道具状态，随动作自然过渡到 <Picture 2> 的构图与动作。",
-        "目标状态（对齐 <Picture 2>）：",
-        _state_lines(sh.get("end_state")),
-        "必须保持：",
-        "1. 人物面部特征、发型、服装与配饰一致",
-        "2. 场景布局与光线色调连续",
-        "3. 道具位置与持有状态连续",
-        "禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。",
-        f"对白与声音：{sound}",
-        f"输出：时长 {sh.get('duration') or 10} 秒，按项目画幅，高质量输出。",
-    ]
-    return "\n".join(lines)
+    template_name = "video_prompt_first" if is_first else "video_prompt_body"
+    template = get_prompt(template_name)
+    return template.format(
+        episode=sh.get("episode") or 1,
+        seq=sh.get("seq") or 1,
+        beats=beat_desc,
+        shot_purpose=sh.get("shot_purpose") or "（按分镜图）",
+        camera_movement=sh.get("camera_movement") or "固定",
+        start_state=_state_lines(sh.get("start_state")),
+        end_state=_state_lines(sh.get("end_state")),
+        sound=sound,
+        duration=sh.get("duration") or 10,
+    )
 
 
 # --- 候选解析确认后的级联落库（API.md §5 parse-version confirm / PROMPTS.md §3 集级合并规则） ---

@@ -65,19 +65,44 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
 # ---------- 多角色槽位注入 ----------
 
 def test_multi_character_slot_priority(client: TestClient):
-    """多角色按出现顺序填入 ref_identity → ref_image → ref_costume。"""
+    """多角色按出现顺序填入 ref_identity → ref_costume（ref_image 为分镜图保留槽位）。"""
     from app.core.database import SessionLocal
     from app.services import ref_inject
-    pid, names, _ = _mk_char_scene_assets(client, n_chars=3)
+    pid, names, _ = _mk_char_scene_assets(client, n_chars=2)
     db = SessionLocal()
-    prompt = f"@{names[0]} 和 @{names[1]} 与 @{names[2]} 在对话"
+    prompt = f"@{names[0]} 和 @{names[1]} 在对话"
     media = ref_inject.build_media_params(db, pid, prompt, None)
     db.close()
     assert media == {
         "ref_identity": "/tmp/p0.png",
-        "ref_image": "/tmp/p1.png",
-        "ref_costume": "/tmp/p2.png",
+        "ref_costume": "/tmp/p1.png",
     }
+
+
+def test_character_never_occupies_ref_image(client: TestClient):
+    """P0 回归：角色引用不得占用 ref_image（当前分镜图槽位），避免分镜图被覆盖。"""
+    from app.core.database import SessionLocal
+    from app.services import ref_inject
+    pid, names, _ = _mk_char_scene_assets(client, n_chars=1)
+    db = SessionLocal()
+    # 工作流声明 ref_identity 与 ref_image 均可用
+    media = ref_inject.build_media_params(db, pid, f"@{names[0]} 独白", ["ref_identity", "ref_image"])
+    db.close()
+    assert "ref_image" not in media
+    assert media == {"ref_identity": "/tmp/p0.png"}
+
+
+def test_character_slot_overflow_with_ref_image_declared(client: TestClient):
+    """3 个角色仅 2 个角色槽位（ref_image 不计数）时返回 422，不静默丢弃参考。"""
+    from app.core.database import SessionLocal
+    from app.services import ref_inject
+    pid, names, _ = _mk_char_scene_assets(client, n_chars=3)
+    db = SessionLocal()
+    prompt = f"@{names[0]} 和 @{names[1]} 与 @{names[2]}"
+    with pytest.raises(HTTPException) as ei:
+        ref_inject.build_media_params(db, pid, prompt, ["ref_identity", "ref_image", "ref_costume"])
+    assert ei.value.status_code == 422
+    db.close()
 
 
 def test_multi_character_slot_overflow_422(client: TestClient):

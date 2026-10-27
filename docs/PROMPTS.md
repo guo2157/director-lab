@@ -316,6 +316,7 @@
 ### 6.1 模板实现与版本
 
 - 实现位置：`backend/app/services/asset_prompts.py`，模板版本常量 `ASSET_PROMPTS_VERSION`（当前 2.0）。
+- 外置机制（P1）：静态模板文本外置为 `workspace/prompts/asset_*.md`（可 UI 编辑），动态变量 `{name}/{identity}/{style}` 由代码运行时 `str.format()` 注入。外置文件缺失时回退到模块内 `DEFAULT_PROMPTS` 兜底模板（零配置可用）。3 个构造器 `build_character_prompt` / `build_scene_prompt` / `build_prop_prompt` 已统一为 `get_prompt(name)` + `.format()` 模式，静态文本不再是代码的一部分。必填校验（`_require_identity`）、负面约束（`negative_for_asset_type`）、默认风格（`_DEFAULT_STYLE`）与版本标记保留在代码内，不进入外置模板。
 - 版本追溯：生成任务创建时版本写入 `job.params.__asset_prompt_version__`；executor 执行时剥离该标记并持久化到 `job.input_snapshot.asset_prompt_version`，不作为参数提交给工作流。
 - 必填校验：名称/外观/描述全部为空时构建函数抛 `ValueError`（`*_prompt_missing_identity`），API 层返回 422，不静默生成占位提示词；仅有名称时名称作为身份兜底，不虚构外观。
 
@@ -336,3 +337,23 @@
 - 角色模板只读取当前角色的名称/外观/简介；场景模板只读取当前场景的标题/描述；道具模板只读取当前道具的名称/外观/简介。
 - 分镜提示词（`shot.image_prompt`）由剧本解析按 §5.1 模板生成，出场角色/场景未显式 @引用 时由 `inject_asset_refs` 自动补入（仅注入有正式资产图的实体）。
 - 视频提示词（`shot.video_prompt`）按 §5.2 状态衔接模板生成，executor 自动注入当前分镜图（ref_image）、上一镜尾帧（ref_prev_frame）与跨集首帧（first_frame）。
+
+### 6.5 video_prompt 兜底模板外置（P1）
+
+当 LLM 未生成 `video_prompt` 时，`_assemble_video_prompt()` 从外置模板拼装兜底提示词（首镜/非首镜各一版）。静态文本已外置为 `workspace/prompts/video_prompt_{first,body}.md`，变量 `{episode}/{seq}/{beats}/{shot_purpose}/{camera_movement}/{start_state}/{end_state}/{sound}/{duration}` 由代码运行时注入。文件缺失时回退到模块内 `DEFAULT_PROMPTS`。
+
+## 7. 外置模板文件清单
+
+以下模板通过 `prompt_store` 统一管理，外置文件位于 `backend/workspace/prompts/`，可通过 `POST/PUT/DELETE /api/settings/prompts` 接口在 UI 中编辑，修改即时生效，写入自动备份 `.bak`（最多 5 份）。外置文件缺失时回退到代码内 `DEFAULT_PROMPTS`。
+
+| 模板名 | 文件 | 类型 | 用途 |
+| --- | --- | --- | --- |
+| `parse_system` | `parse_system.md` | LLM | 剧本解析系统提示词 |
+| `script_create_system` | — | LLM | 剧本创作（仅硬编码兜底） |
+| `script_expand_system` | — | LLM | 梗概扩写（仅硬编码兜底） |
+| `script_evaluation_system` | — | LLM | 剧本评估（仅硬编码兜底） |
+| `asset_character` | `asset_character.md` | 生图 | 角色定妆图模板（`{name}/{identity}/{style}`） |
+| `asset_scene` | `asset_scene.md` | 生图 | 场景基准图模板（`{name}/{identity}/{style}`） |
+| `asset_prop` | `asset_prop.md` | 生图 | 道具锚定图模板（`{name}/{identity}/{style}`） |
+| `video_prompt_first` | `video_prompt_first.md` | 生视频 | 集首镜兜底模板（9 个变量） |
+| `video_prompt_body` | `video_prompt_body.md` | 生视频 | 非首镜兜底模板（9 个变量） |

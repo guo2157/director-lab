@@ -143,6 +143,84 @@ def prune_unbound_media_inputs(wf: dict, values: dict) -> tuple[dict, list[str]]
     return out, pruned
 
 
+# H3 ref2va 的参考图键：ref_images.ref_image_0..N（autogrow 命名，从 0 起）
+_REF_KEY_RE = re.compile(r"^(ref_images\.ref_image_)(\d+)$")
+# 提示词中的图片引用语法（H3 ref2va meta: prompt_ref_syntax = "<Picture N>"）
+_PICTURE_RE = re.compile(r"<Picture\s*(\d+)>")
+
+
+def compact_reference_slots(wf: dict) -> tuple[dict, dict]:
+    """把 ref_images.ref_image_N 压缩为连续编号（P0 整改）。
+
+    剔除未注入的参考图槽位后，键名会出现断档（如只剩 ref_image_1、ref_image_2）。
+    autogrow 槽位要求从 0 起连续编号，且下游按连线顺序解释 <Picture N>，
+    断档会让模型收到的图片顺序与提示词描述不一致（参考图错位）。
+
+    返回 (压缩后的工作流, {节点ID: {旧序号: 新序号}})。
+    """
+    out = copy.deepcopy(wf)
+    mappings: dict = {}
+    for nid, node in out.items():
+        if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict):
+            continue
+        inputs = node["inputs"]
+        keys = []
+        for key, val in inputs.items():
+            m = _REF_KEY_RE.match(key)
+            if m and isinstance(val, list) and val:
+                keys.append((int(m.group(2)), key))
+        if not keys:
+            continue
+        keys.sort()
+        remap = {old: new for new, (old, _k) in enumerate(keys)}
+        values = {old: inputs[k] for old, k in keys}
+        for _old, key in keys:
+            del inputs[key]
+        for old, _new in remap.items():
+            inputs[f"ref_images.ref_image_{remap[old]}"] = values[old]
+        mappings[nid] = remap
+    return out, mappings
+
+
+def remap_picture_refs(prompt: str, mappings: dict) -> tuple[str, list[int], int]:
+    """按槽位压缩结果重写提示词中的 <Picture N>（P0 整改）。
+
+    <Picture N> 为 1-based，对应第 N 张参考图（即 ref_image_(N-1)）。
+    被剔除槽位对应的提示词行（如『上一镜头尾帧』职责行、承接描述行）整行移除，
+    避免提示词描述一张模型实际并未收到的图片。
+    返回 (重写后的提示词, 被移除的引用编号列表, 被移除的行数)。
+    """
+    if not prompt or not mappings:
+        return prompt, [], 0
+    remap: dict = {}
+    for m in mappings.values():
+        remap.update(m)
+    if not remap:
+        return prompt, [], 0
+    dropped: list[int] = []
+    kept_lines: list[str] = []
+    removed_lines = 0
+
+    def _repl(match: re.Match) -> str:
+        n = int(match.group(1))
+        old = n - 1
+        if old not in remap:
+            return match.group(0)
+        return f"<Picture {remap[old] + 1}>"
+
+    for line in prompt.split("\n"):
+        nums = [int(x) for x in _PICTURE_RE.findall(line)]
+        missing = [n for n in nums if (n - 1) not in remap]
+        if missing:
+            removed_lines += 1
+            for n in missing:
+                if n not in dropped:
+                    dropped.append(n)
+            continue
+        kept_lines.append(_PICTURE_RE.sub(_repl, line))
+    return "\n".join(kept_lines), dropped, removed_lines
+
+
 def find_output_nodes(wf: dict) -> dict:
     """返回输出名 → 节点 ID 的映射，用于产物提取。"""
     mapping = {}

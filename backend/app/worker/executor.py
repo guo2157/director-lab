@@ -103,6 +103,49 @@ def _probe_clip_and_update_shot(db: Session, job: Job, created_assets: list[dict
             pass
 
 
+def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) -> None:
+    """clip 成功后提取实际末帧并绑定到 shot.last_frame_asset_id（P0 整改）。
+
+    整改前 shot.last_frame_asset_id 只有读取、没有任何写入点，
+    导致后续镜头永远拿不到上一镜尾帧，镜间连续性实际未生效。
+    尾帧必须来自本次生成视频实际解码的最后一帧（extract_last_frame 含黑屏回退），
+    不使用分镜图或预估帧；提取失败只记录事件，不阻断任务成功。
+    """
+    if job.job_type != "generate_clip" or not job.shot_id:
+        return
+    clip = next((a for a in created_assets if a.get("asset_type") == "clip"), None)
+    if clip is None:
+        return
+    shot = db.get(Shot, job.shot_id)
+    if shot is None:
+        return
+    clip_asset = db.get(Asset, clip["asset_id"])
+    if clip_asset is None:
+        return
+    try:
+        from app.services.shot_chain import store_shot_last_frame
+        result = store_shot_last_frame(db, shot, clip_asset, get_settings().media_dir)
+    except Exception as e:  # noqa: BLE001
+        _write_event(db, job, "shot.last_frame_failed", {
+            "shot_id": shot.id,
+            "error": f"{type(e).__name__}: {e}"[:300],
+        })
+        return
+    if result.get("ok"):
+        _write_event(db, job, "shot.last_frame", {
+            "shot_id": shot.id,
+            "asset_id": result["asset_id"],
+            "frame_timestamp": result.get("timestamp"),
+            "frame_hash": result.get("frame_hash"),
+            "fallback_used": result.get("fallback_used"),
+        })
+    else:
+        _write_event(db, job, "shot.last_frame_failed", {
+            "shot_id": shot.id,
+            "error": result.get("error"),
+        })
+
+
 def _preferred_instance_for_shot(db: Session, job: Job, exclude_instances: list[str]) -> dict | None:
     """同镜头亲和性（D-22）：查询同镜头最近成功任务使用的实例，优先复用。
 
@@ -396,6 +439,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             _write_event(db, job, "job.succeeded", {"assets": len(created_assets)})
                             # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
                             _probe_clip_and_update_shot(db, job, created_assets)
+                            # P0：实际尾帧落库（对账续跑路径同样需要绑定尾帧）
+                            _persist_shot_last_frame(db, job, created_assets)
                             # 镜头状态派生
                             if job.shot_id:
                                 _shot = db.get(Shot, job.shot_id)
@@ -462,12 +507,46 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         # 2. 注入参数（P4 整改：先剔除未注入媒体的参考图节点及连线，
         # 防止工作流内置占位图 placeholder_*.png 污染生成结果）
         try:
-            from app.services.workflow_inject import prune_unbound_media_inputs
+            from app.services.workflow_inject import (
+                compact_reference_slots,
+                prune_unbound_media_inputs,
+                remap_picture_refs,
+            )
             wf_definition, _pruned = prune_unbound_media_inputs(wf_record.definition, params)
             if _pruned:
                 _write_event(db, job, "job.media_pruned", {"pruned_slots": _pruned})
                 db.commit()
+            # P0 整改：剔除槽位后 ref_images.ref_image_N 会出现断档，
+            # 先压缩为连续编号，再按同一映射重写提示词中的 <Picture N>，
+            # 保证模型收到的图片顺序与提示词描述严格一致（不重映射会整段错位）。
+            wf_definition, _slot_remap = compact_reference_slots(wf_definition)
+            _prompt_key = "prompt"
+            _remap_info = None
+            if _slot_remap and isinstance(params.get(_prompt_key), str):
+                _new_prompt, _dropped, _removed_lines = remap_picture_refs(
+                    params[_prompt_key], _slot_remap
+                )
+                if _dropped:
+                    _remap_info = {
+                        "slot_remap": {k: dict(v) for k, v in _slot_remap.items()},
+                        "dropped_pictures": _dropped,
+                        "removed_lines": _removed_lines,
+                    }
+                    _write_event(db, job, "job.picture_remap", _remap_info)
+                params[_prompt_key] = _new_prompt
+                db.commit()
+            elif _slot_remap:
+                _remap_info = {"slot_remap": {k: dict(v) for k, v in _slot_remap.items()}}
             injected_wf, snapshot = inject_params(wf_definition, params, seed=seed)
+            if _slot_remap or _remap_info:
+                _snap = dict(job.input_snapshot or {})
+                _snap["reference_layout"] = {
+                    "pruned_slots": _pruned,
+                    "slot_remap": {k: dict(v) for k, v in _slot_remap.items()},
+                }
+                _snap["params"] = snapshot
+                job.input_snapshot = _snap
+                db.commit()
         except ValueError as e:
             _fail_job(db, job, "workflow_marker_missing", str(e))
             return {"ok": False, "reason": "inject_failed"}
@@ -734,6 +813,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         _write_event(db, job, "job.finished", {"status": "succeeded", "result": job.result})
         # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
         _probe_clip_and_update_shot(db, job, created_assets)
+        # P0：从本次实际生成视频提取末帧并绑定 shot.last_frame_asset_id，
+        # 供后续镜头首帧/尾帧引用；失败只记录事件，不阻断任务成功
+        _persist_shot_last_frame(db, job, created_assets)
         # 7.5 镜头状态派生（§3.2/§4.2）：必需产物齐全 → done，否则回 pending（阶段内部分完成是正常状态）
         if job.shot_id:
             _shot = db.get(Shot, job.shot_id)

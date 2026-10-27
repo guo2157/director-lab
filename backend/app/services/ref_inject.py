@@ -19,13 +19,17 @@ from app.services import errors
 # @引用语法：@后跟非空白字符（中文/字母/数字/下划线）
 _REF_RE = re.compile(r"@([\w\u4e00-\u9fff]+)")
 
-# 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），
-# 第 2 个 → ref_image（通用参考图，ref2va 工作流），第 3 个 → ref_costume（服装参考）
-_CHARACTER_SLOTS = ["ref_identity", "ref_image", "ref_costume"]
+# 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），第 2 个 → ref_costume（服装参考）
+# P0 整改：ref_image 为当前镜头分镜图专用槽位（H3 ref2va 的 ref_image_1、Qwen Edit 的 image1），
+# 此前被多角色引用占用，导致分镜图被角色定妆图覆盖而丢失；角色引用不再占用该槽位
+_CHARACTER_SLOTS = ["ref_identity", "ref_costume"]
 # 场景槽位：仅 ref_scene 一个
 _SCENE_SLOTS = ["ref_scene"]
 # 道具槽位：仅 ref_prop 一个（ref2va 工作流）
 _PROP_SLOTS = ["ref_prop"]
+
+# 系统保留槽位：由生成流程按镜头/连续性规则写入，@引用不得占用
+RESERVED_SLOTS = frozenset({"ref_image", "ref_prev_frame", "first_frame", "end_frame"})
 
 
 def extract_refs(text: str) -> list[str]:
@@ -146,6 +150,9 @@ def build_media_params(db: Session, project_id: str, prompt: str,
             422,
         )
     for name, slot in zip(char_names, avail_char):
+        if slot in RESERVED_SLOTS:
+            # 防御：即便工作流声明把系统槽位当角色槽位，也不覆盖分镜图/首尾帧
+            continue
         media[slot] = refs[name]["file_path"]
     # 场景引用：按顺序填入可用场景槽位
     if len(scene_names) > len(avail_scene):

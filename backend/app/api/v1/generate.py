@@ -190,6 +190,79 @@ def _inject_continuity_first_frame(db: Session, shot: Shot, target: str, wf: Wor
     return flf2v_wf
 
 
+def _inject_prev_shot_frame(db: Session, shot: Shot, target: str, params: dict) -> dict:
+    """镜间尾帧依赖注入与校验（P0 整改）。
+
+    - 同集非首镜生成 clip 时，注入前一镜实际尾帧为 __media__.ref_prev_frame
+    - shot.requires_prev_frame 为 True 但拿不到可解码尾帧时明确报错（409），
+      不静默绕过，也不用分镜图或其他镜头尾帧顶替
+    - 集首镜由跨集连续性流程处理，此处不干预
+    返回注入明细，供写入任务 input_snapshot 追溯。
+    """
+    info: dict = {"injected": False, "reason": None}
+    if target != "clip":
+        return info
+    if _is_first_shot_of_episode(db, shot):
+        # 仅集首镜交给跨集连续性流程；第 1 集首镜无上一集，自然不会注入
+        info["reason"] = "first_shot_handled_by_continuity"
+        return info
+    from app.services.shot_chain import previous_shot, resolve_prev_frame
+    prev = previous_shot(db, shot)
+    if prev is None:
+        info["reason"] = "no_previous_shot"
+        return info
+    frame = resolve_prev_frame(db, shot)
+    if frame is None:
+        if shot.requires_prev_frame:
+            raise errors.AppError(
+                "prev_frame_missing",
+                f"镜头 {shot.id} 声明需要上一镜尾帧，但镜头 {prev.id} 尚无可用尾帧；"
+                f"请先成功生成该镜头视频并完成尾帧提取",
+                409,
+            )
+        info["reason"] = "prev_frame_unavailable"
+        info["prev_shot_id"] = prev.id
+        return info
+    media = params.get("__media__", {})
+    media.setdefault("ref_prev_frame", frame["file_path"])
+    params["__media__"] = media
+    info.update({
+        "injected": True,
+        "prev_shot_id": prev.id,
+        "frame_asset_id": frame["asset_id"],
+        "frame_version": frame["version"],
+    })
+    return info
+
+
+def _assert_prev_frames_available(db: Session, shots: list, target: str) -> None:
+    """批量 clip 提交前的尾帧依赖预检（P0）。
+
+    批量接口在循环中逐个入队，若循环中途因缺少上一镜尾帧抛错，
+    会出现部分任务已入队、部分未入队的半成品状态。因此先整体校验，
+    存在声明需要尾帧却不可用的镜头时统一返回 409，不静默降级。
+    """
+    if target != "clip":
+        return
+    from app.services.shot_chain import previous_shot, resolve_prev_frame
+    missing: list = []
+    for shot in shots:
+        if not shot.requires_prev_frame or _is_first_shot_of_episode(db, shot):
+            continue
+        if previous_shot(db, shot) is None:
+            continue
+        if resolve_prev_frame(db, shot) is None:
+            missing.append(shot.id)
+    if missing:
+        ids = ", ".join(missing[:10])
+        raise errors.AppError(
+            "prev_frame_missing",
+            f"以下镜头声明需要上一镜尾帧但当前不可用（{ids}{' 等' if len(missing) > 10 else ''}），"
+            f"请先生成前序镜头视频并完成尾帧提取",
+            409,
+        )
+
+
 def _project_id_from_shot(db: Session, shot: Shot) -> str:
     """从镜头获取项目 ID。"""
     scene = db.get(Scene, shot.scene_id)
@@ -300,8 +373,15 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
                 _existing = params.get("__media__", {})
                 _existing.update(media)
                 params["__media__"] = _existing
+    # 镜间尾帧依赖（P0）：非首镜使用前序镜头实际尾帧，缺失时按声明决定拦截或记录
+    prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
                       generation_mode=payload.get("generation_mode"))
+    if target == "clip":
+        # 无论是否注入成功都记录判定依据，便于事后追溯串图与缺帧问题
+        _snap = dict(job.input_snapshot or {})
+        _snap["prev_frame"] = prev_frame_info
+        job.input_snapshot = _snap
     db.commit()
     return _job_out(job)
 
@@ -318,10 +398,16 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
         _check_keyframe_gate(db, [shot.id])
     # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重复提交
     _check_inflight_duplicate(db, shot.id, target)
-    # 旧资产转历史版本
-    if target == "keyframe":
-        # 重做分镜图后确认自动失效（D-13）：需重新生成并重新确认
-        shot.keyframe_confirmed = False
+    # 旧资产转历史版本 + 下游失效传播
+    # - keyframe 重做：分镜图会被重绘，本镜确认状态回退（D-13）
+    # - clip 重做：分镜图不变，不回退确认状态；旧尾帧置 superseded，
+    #   使下游镜头解析前序尾帧时拿不到旧版本（P0 失效传播）
+    chain_info: dict = {}
+    if target in ("keyframe", "clip"):
+        from app.services.shot_chain import invalidate_chain_after_regenerate
+        chain_info = invalidate_chain_after_regenerate(
+            db, shot, reset_keyframe_confirmed=(target == "keyframe")
+        )
     old_type = {"keyframe": "keyframe", "clip": "clip", "audio": "audio", "bgm": "bgm"}.get(target)
     if old_type:
         olds = (
@@ -360,7 +446,16 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
                 _existing = params.get("__media__", {})
                 _existing.update(media)
                 params["__media__"] = _existing
+    # 镜间尾帧依赖（P0）：重做与单镜生成行为一致
+    prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
     job = _create_job(db, scene.project_id, shot.id, target, wf, params)
+    if target == "clip" or chain_info:
+        _snap = dict(job.input_snapshot or {})
+        if target == "clip":
+            _snap["prev_frame"] = prev_frame_info
+        if chain_info:
+            _snap["chain_invalidation"] = chain_info
+        job.input_snapshot = _snap
     db.commit()
     return _job_out(job)
 
@@ -474,6 +569,8 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
         )
     if target == "clip":
         _check_keyframe_gate(db, [s.id for s in shots])
+        # 尾帧依赖预检（P0）：避免循环中途失败导致部分任务已入队
+        _assert_prev_frames_available(db, shots, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"))
     # @引用注入（D-16，P0 修复）：与单镜生成/项目批量生成行为一致，
     # 解析每个镜头提示词中的 @角色/@场景/@道具，自动携带参考图
@@ -503,7 +600,14 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
                     _existing = params.get("__media__", {})
                     _existing.update(media)
                     params["__media__"] = _existing
-        jobs.append(_create_job(db, sc.project_id, shot.id, target, shot_wf, params))
+        # 镜间尾帧依赖（P0）：批量与单镜生成行为一致
+        prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
+        _job = _create_job(db, sc.project_id, shot.id, target, shot_wf, params)
+        if target == "clip":
+            _snap = dict(_job.input_snapshot or {})
+            _snap["prev_frame"] = prev_frame_info
+            _job.input_snapshot = _snap
+        jobs.append(_job)
     db.commit()
     return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs), "skipped": skipped}
 
@@ -543,6 +647,8 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
         )
     if target == "clip":
         _check_keyframe_gate(db, [s.id for s in shots])
+        # 尾帧依赖预检（P0）：避免循环中途失败导致部分任务已入队
+        _assert_prev_frames_available(db, shots, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"))
     jobs = []
     slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
@@ -570,7 +676,14 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
                     _existing = params.get("__media__", {})
                     _existing.update(media)
                     params["__media__"] = _existing
-        jobs.append(_create_job(db, project_id, shot.id, target, shot_wf, params))
+        # 镜间尾帧依赖（P0）：批量与单镜生成行为一致
+        prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
+        _job = _create_job(db, project_id, shot.id, target, shot_wf, params)
+        if target == "clip":
+            _snap = dict(_job.input_snapshot or {})
+            _snap["prev_frame"] = prev_frame_info
+            _job.input_snapshot = _snap
+        jobs.append(_job)
     db.commit()
     return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs), "skipped": skipped}
 
