@@ -161,6 +161,33 @@ def _apply_intent_rules(user_content: str, result: IntentResult) -> IntentResult
     return result
 
 
+# 规则路径的目标描述：只用确定性模板说明意图类别，不从消息里抽取实体或参数
+# （P0：不虚构用户没有提供的信息；具体实体仍由 LLM 结构化识别填写）
+_RULE_GOALS: dict[str, str] = {
+    "query": "查询项目、任务或资产相关信息",
+    "generate_request": "请求生成图片/视频等产物（需到对应页面发起）",
+    "unsafe": "请求涉及不安全操作（索要凭据/删除数据/绕过规则）",
+}
+
+
+def _rule_intent(intent: str, reason: str, risk_level: str, user_content: str) -> IntentResult:
+    """规则命中结果的统一收口：补 goal 描述，并复用高风险关键词提级。
+
+    修复点：此前三个规则分支各自直接 return，导致
+    - goal 恒为空（规则路径的意图目标丢失）；
+    - 含『删除』等敏感词的查询仍是 low（风险等级被低估）。
+    """
+    result = IntentResult(
+        intent,
+        reason,
+        goal=_RULE_GOALS.get(intent, ""),
+        risk_level=risk_level,
+        confidence=1.0,
+        source="rules",
+    )
+    return _apply_intent_rules(user_content, result)
+
+
 def apply_fast_path_rules(user_content: str) -> IntentResult | None:
     """确定性规则快路径：unsafe > generate_request > query。
 
@@ -171,31 +198,13 @@ def apply_fast_path_rules(user_content: str) -> IntentResult | None:
     text = user_content[:8000]
     for pattern in _UNSAFE_RULES:
         if pattern.search(text):
-            return IntentResult(
-                "unsafe",
-                f"规则命中 unsafe 模式",
-                risk_level="high",
-                confidence=1.0,
-                source="rules",
-            )
+            return _rule_intent("unsafe", "规则命中 unsafe 模式", "high", text)
     for pattern in _GENERATE_RULES:
         if pattern.search(text):
-            return IntentResult(
-                "generate_request",
-                "规则命中生成请求模式",
-                risk_level="medium",
-                confidence=1.0,
-                source="rules",
-            )
+            return _rule_intent("generate_request", "规则命中生成请求模式", "medium", text)
     for pattern in _QUERY_RULES:
         if pattern.search(text):
-            return IntentResult(
-                "query",
-                "规则命中查询模式",
-                risk_level="low",
-                confidence=1.0,
-                source="rules",
-            )
+            return _rule_intent("query", "规则命中查询模式", "low", text)
     return None
 
 

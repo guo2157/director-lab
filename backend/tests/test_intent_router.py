@@ -119,3 +119,39 @@ def test_clarification_question_lists_missing_information():
     q = build_clarification_question(["项目名称", "角色名称"])
     assert "项目名称" in q and "角色名称" in q
     assert build_clarification_question([]) is not None
+
+
+@pytest.mark.parametrize(
+    "text,expected_intent",
+    [
+        ("项目进展如何", "query"),
+        ("资产统计", "query"),
+        ("重新生成关键帧", "generate_request"),
+        ("删除所有项目数据", "unsafe"),
+    ],
+)
+def test_fast_path_fills_goal(text: str, expected_intent: str):
+    """规则路径也要给出意图目标描述，不能留空（此前 goal 恒为空）。"""
+    r = apply_fast_path_rules(text)
+    assert r is not None and r.intent == expected_intent
+    assert r.goal, f"{text} 的规则结果缺少目标描述"
+    assert r.source == "rules"
+    assert r.confidence == 1.0
+
+
+def test_fast_path_query_with_sensitive_word_raised_to_high():
+    """含敏感词的查询风险等级需提级：『删除旧的分镜后再看看进展』不是 low。
+
+    修复前该消息走 query 规则分支直接返回 low，风险等级被低估。
+    """
+    r = apply_fast_path_rules("删除旧的分镜后再看看项目进展")
+    assert r is not None
+    assert r.intent == "query"
+    assert r.risk_level == "high"
+
+
+def test_fast_path_ordinary_query_keeps_low_risk():
+    """普通查询不受提级影响，风险等级仍为 low（避免一律提高风险）。"""
+    r = apply_fast_path_rules("项目进展如何")
+    assert r is not None and r.intent == "query"
+    assert r.risk_level == "low"
