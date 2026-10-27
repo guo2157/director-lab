@@ -300,6 +300,56 @@ def execute_approval(
     return {"confirmation_id": confirmation_id, **(result.data or {})}
 
 
+def _try_create_generate_approval(
+    db: Session, session: AgentSession, session_id: str, text: str
+) -> tuple[str, dict | None]:
+    """把对话中的生成请求落地为审批申请（只建申请，绝不执行生成）。
+
+    只有在消息明确给出镜头标识时才创建申请；定位不到时返回澄清提示，
+    不猜测目标（猜错会生成错镜头，浪费算力与成本）。
+    """
+    from app.services.agent_tools import execute_tool
+    from app.services.generate_intent import resolve_shot, resolve_target
+
+    if not session.project_id:
+        return (
+            "当前会话未关联项目，无法提交生成申请。请先在右侧关联项目后再发起。",
+            None,
+        )
+
+    shot, reason = resolve_shot(db, session.project_id, text)
+    if shot is None:
+        hints = {
+            "shot_unspecified": "请明确要生成的镜头，例如『为第 3 镜生成关键帧』，或直接给出镜头 ID（sht_ 开头）。",
+            "shot_not_found": "没有找到你提到的镜头，请确认镜头编号是否存在。",
+            "shot_not_in_project": "该镜头不属于当前项目，请确认后重试。",
+            "shot_ambiguous": "『第 N 镜』在本项目内命中多个镜头，请补充场景或直接给出镜头 ID。",
+        }
+        return hints.get(reason or "shot_unspecified", "无法确定要生成的镜头，请补充镜头信息。"), None
+
+    target = resolve_target(text)
+    result = execute_tool(
+        db,
+        "request_generate",
+        session_id=session_id,
+        project_id=session.project_id,
+        shot_id=shot.id,
+        target=target,
+    )
+    if not result.ok:
+        return f"生成申请提交失败：{result.error_message}", {
+            "ok": False,
+            "error_code": result.error_code,
+        }
+
+    data = result.data or {}
+    reply = (
+        f"已提交生成申请（{target} · 镜头 {shot.id}），审批编号 {data.get('confirmation_id')}。"
+        "请在右侧『待审批生成』中批准后点执行，任务才会真正创建；我不会在对话中直接触发生成。"
+    )
+    return reply, {"ok": True, **data}
+
+
 class ChatRequest(BaseModel):
     """聊天请求：用户输入文本。"""
 
@@ -386,10 +436,12 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     if action in ("reject", "guide", "clarify"):
         # unsafe：直接拒绝；generate_request：不执行生成，引导到对应页面（P0：生成不在 Agent 直接执行范围）；
         # clarify：信息不足，向用户澄清缺失信息（确定性拼接，不调用模型）
+        approval_info: dict | None = None
         if action == "reject":
             reply = UNSAFE_REJECT_MESSAGE
         elif action == "guide":
-            reply = GENERATE_GUIDE_MESSAGE
+            # 生成请求：能唯一定位到镜头则落地为审批申请，否则澄清洗明（不猜测目标）
+            reply, approval_info = _try_create_generate_approval(db, s, session_id, payload.content)
         else:
             reply = build_clarification_question(intent.missing_information)
         assistant_msg = AgentMessage(
@@ -405,6 +457,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 "intent_goal": intent.goal,
                 "risk_level": intent.risk_level,
                 "confidence": intent.confidence,
+                "approval": approval_info,
             },
             seq=max_seq + 2,
             created_at=datetime.now(),
