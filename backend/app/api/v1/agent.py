@@ -230,21 +230,34 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     if s.status == "archived":
         raise biz_error(code="session_archived", http=409, message="会话已归档，不能发送消息")
 
-    # 1. 持久化用户消息
-    max_seq = (
-        db.scalar(select(func.max(AgentMessage.seq)).where(AgentMessage.session_id == session_id))
-        or 0
-    )
-    user_msg = AgentMessage(
-        id=agent_message_id(),
-        session_id=session_id,
-        role="user",
-        content=payload.content,
-        seq=max_seq + 1,
-        created_at=datetime.now(),
-    )
-    db.add(user_msg)
-    db.commit()
+    # 1. 持久化用户消息（seq 并发冲突重试：并发 chat 撞 (session_id, seq) 唯一索引时
+    # 回滚并重新计算 max_seq，最多 3 次，避免直接 500）
+    from sqlalchemy.exc import IntegrityError
+
+    user_msg: AgentMessage | None = None
+    for _seq_attempt in range(3):
+        max_seq = (
+            db.scalar(select(func.max(AgentMessage.seq)).where(AgentMessage.session_id == session_id))
+            or 0
+        )
+        user_msg = AgentMessage(
+            id=agent_message_id(),
+            session_id=session_id,
+            role="user",
+            content=payload.content,
+            seq=max_seq + 1,
+            created_at=datetime.now(),
+        )
+        db.add(user_msg)
+        try:
+            db.commit()
+            break
+        except IntegrityError:
+            db.rollback()
+            user_msg = None
+            continue
+    if user_msg is None:
+        raise biz_error(code="seq_conflict", http=503, message="消息序号冲突，请重试")
     db.refresh(user_msg)
 
     # 1.4 意图路由（阶段 E：意图路由工具化，单 Agent 框架 P1-2）

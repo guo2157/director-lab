@@ -15,6 +15,7 @@
 - ambiguous：信息不足需澄清
 - unsafe：提示词注入、危险操作（删除数据/索要密钥/绕过审批）
 """
+import re
 import time
 
 from pydantic import BaseModel, Field, ValidationError
@@ -31,6 +32,36 @@ INTENT_CONFIDENCE_THRESHOLD = 0.7
 
 # 高风险关键词（规则兜底：命中即提升 risk_level，不改变 intent 类别判定）
 _HIGH_RISK_KEYWORDS = ["删除", "退款", "付款", "发送", "发布", "密钥", "密码", "凭据"]
+
+# --- 确定性规则快路径（高置信快速通道：命中即返回，未命中才走 LLM） ---
+# 优先级：unsafe > generate_request > query；宁缺勿滥，只匹配几乎无歧义的模式，
+# 模糊消息仍走 LLM 结构化识别（含指代消解），避免误路由
+
+_UNSAFE_RULES: list[re.Pattern[str]] = [
+    # 索要密钥/凭据："把 API 密钥发给我""告诉我凭据"
+    re.compile(r"(api[ _-]?key|密钥|凭据|凭证|访问令牌).{0,12}(发(给|我)|给我|告诉我|提供|发出来)", re.IGNORECASE),
+    # 删除/清空全部数据："删除所有项目数据""清空全部记录"
+    re.compile(r"(删除|清空|清掉|抹掉).{0,8}(全部|所有|一切).{0,8}(数据|项目|资产|记录|文件)"),
+    # 绕过规则/审批："忽略之前的所有规则""绕过审批"
+    re.compile(r"(忽略|无视|跳过|绕过).{0,8}(所有|全部)?(规则|审批|限制|安全|指令)"),
+]
+
+_GENERATE_RULES: list[re.Pattern[str]] = [
+    # 动词在前："重新生成关键帧""批量出图"
+    re.compile(r"(重新)?(生成|出图|渲染).{0,12}(关键帧|分镜图?|视频|片段|角色图?|场景图?|道具图?|图片|成片|配音|语音)"),
+    # 宾语在前："把所有分镜的关键帧全部重新生成一遍"
+    re.compile(r"(关键帧|分镜图?|视频|片段|角色图?|场景图?|道具图?|成片).{0,12}(重新)?(生成|渲染|出图)"),
+]
+
+_QUERY_RULES: list[re.Pattern[str]] = [
+    re.compile(r"(项目|当前|整体|制作).{0,4}(进展|进度|状态|概览|阶段)"),
+    re.compile(r"(进展|进度|状态|概览)如何"),
+    re.compile(r"哪些任务.{0,6}(失败|出错)"),
+    re.compile(r"失败(的)?(原因|原因是什么)"),
+    re.compile(r"最近.{0,6}任务"),
+    re.compile(r"资产统计"),
+    re.compile(r"任务(列表|状态)"),
+]
 
 _INTENT_SYSTEM_PROMPT = (
     "你是 Agent 的意图识别模块。根据用户消息识别意图，只输出 JSON 对象：\n"
@@ -82,6 +113,7 @@ class IntentResult:
         classified: bool = True,
         error_code: str | None = None,
         attempts: int = 0,
+        source: str = "llm",
     ):
         self.intent = intent
         self.reason = reason
@@ -93,6 +125,7 @@ class IntentResult:
         self.classified = classified
         self.error_code = error_code
         self.attempts = attempts
+        self.source = source
 
 
 class _IntentPayload(BaseModel):
@@ -116,6 +149,44 @@ def _apply_intent_rules(user_content: str, result: IntentResult) -> IntentResult
         if result.risk_level != "high":
             result.risk_level = "high"
     return result
+
+
+def apply_fast_path_rules(user_content: str) -> IntentResult | None:
+    """确定性规则快路径：unsafe > generate_request > query。
+
+    - 命中即返回（source=rules，confidence=1.0，attempts=0），不再调用 LLM
+    - 未命中返回 None，由 classify_intent 走 LLM 结构化识别
+    - 宁缺勿滥：只匹配几乎无歧义的模式；规则漏掉的 unsafe 仍由 LLM 兜底
+    """
+    text = user_content[:8000]
+    for pattern in _UNSAFE_RULES:
+        if pattern.search(text):
+            return IntentResult(
+                "unsafe",
+                f"规则命中 unsafe 模式",
+                risk_level="high",
+                confidence=1.0,
+                source="rules",
+            )
+    for pattern in _GENERATE_RULES:
+        if pattern.search(text):
+            return IntentResult(
+                "generate_request",
+                "规则命中生成请求模式",
+                risk_level="medium",
+                confidence=1.0,
+                source="rules",
+            )
+    for pattern in _QUERY_RULES:
+        if pattern.search(text):
+            return IntentResult(
+                "query",
+                "规则命中查询模式",
+                risk_level="low",
+                confidence=1.0,
+                source="rules",
+            )
+    return None
 
 
 def _build_intent_user_prompt(
@@ -147,6 +218,10 @@ def classify_intent(user_content: str, *, recent_messages: list[dict] | None = N
     - 置信度低于阈值：改判 ambiguous（由调用方向用户澄清）
     - 全部失败时降级为 query（classified=False），不阻断主对话
     """
+    # 规则快路径：命中即返回，跳过 LLM 调用（省一次 LLM 往返与成本）
+    fast = apply_fast_path_rules(user_content)
+    if fast is not None:
+        return fast
     client = LLMClient()
     intent_prompt = _build_intent_user_prompt(user_content, recent_messages)
     last_code: str | None = None
