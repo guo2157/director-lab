@@ -37,6 +37,7 @@
 | script_version_conflict | 409 | 剧本版本与用户确认版本不一致 |
 | parse_version_conflict | 409 | 候选解析版本已过期或当前版本已变化 |
 | job_submission_unknown | 409 | 远端提交结果未知，需要对账后处理 |
+| prev_frame_missing | 409 | 镜头声明需要上一镜尾帧（requires_prev_frame=True）但前一镜尚无可用尾帧，需先生成前序镜头视频并完成尾帧提取 |
 | composition_stale | 409 | 合成版本已失效，需重新合成后再导出 |
 | composition_required | 409 | 不存在成功的合成版本，需先合成 |
 | workflow_format_invalid | 422 | 非 API 格式或结构不合规 |
@@ -290,7 +291,7 @@
 
 **PATCH /api/scenes/{id}** 与 **DELETE /api/scenes/{id}**：删除级联其下镜头，需前端二次确认。
 
-**POST /api/shots**：`scene_id`、`episode`（必填）、`shot_kind`（必填，枚举 dialogue/narration/visual/transition）、`dialogue`（可选；shot_kind 为 dialogue/narration 时必填）、`image_prompt`、`video_prompt`（可选）、`duration`。约束：`(scene_id, episode)` 必须在 scene_episode 中存在，否则返回 422；该约束由创建接口校验，不依赖数据库外键。
+**POST /api/shots**：`scene_id`、`episode`（必填）、`shot_kind`（必填，枚举 dialogue/narration/visual/transition）、`dialogue`（可选；shot_kind 为 dialogue/narration 时必填）、`image_prompt`、`video_prompt`（可选）、`duration`、`requires_prev_frame`（可选，默认 false，P0 尾帧依赖声明：为 true 时生成 clip 必须有上一镜可用尾帧，否则返回 409 `prev_frame_missing`）。约束：`(scene_id, episode)` 必须在 scene_episode 中存在，否则返回 422；该约束由创建接口校验，不依赖数据库外键。
 
 **GET /api/projects/{id}/shots**：按集拉取跨场景扁平镜头列表。`episode` 必填，可选 `page`、`page_size`。排序：先按场景在该集出场顺序（scene_episode.seq_in_episode）升序，同场景内按镜头 seq 升序。每条镜头附带 `scene_title`、`scene_seq` 与 `current_assets`。
 
@@ -298,7 +299,7 @@
 
 `current_assets` 取值口径：取依赖版本与当前输入匹配、状态为 current 且来源任务 succeeded 的产物；完成时间仅用于同一有效输入快照下的排序，不能覆盖更新输入对应的有效产物（详见第 8 节多版本任务有效性规则）。
 
-**PATCH /api/shots/{id}**：修改 `image_prompt`、`video_prompt`、`dialogue`、`duration` 或镜头结构字段后，按依赖矩阵标记相关产物 `stale`，不自动触发任务。仅修改 `video_prompt` 时只影响视频，分镜图不受影响。修改 `duration` 时若新值超出 H3 支持范围（4–15 整数秒），返回 warning 字段提示 `duration_out_of_range`，同时仍接受修改并标记相关产物 `stale`。
+**PATCH /api/shots/{id}**：可修改 `image_prompt`、`video_prompt`、`dialogue`、`duration`、`requires_prev_frame` 或镜头结构字段。修改 `requires_prev_frame` 不触发 stale 标记（仅影响后续生成时的尾帧预检行为），其余字段变更后按依赖矩阵标记相关产物 `stale`，不自动触发任务。仅修改 `video_prompt` 时只影响视频，分镜图不受影响。修改 `duration` 时若新值超出 H3 支持范围（4–15 整数秒），返回 warning 字段提示 `duration_out_of_range`，同时仍接受修改并标记相关产物 `stale`。
 
 **GET /api/scenes/{id}/shots**：返回该场景镜头数组，按 seq 升序。`episode` 必填；可选 `page`、`page_size`。同一场景在不同集的镜头相互独立。
 
@@ -498,9 +499,11 @@
 
 ### 聊天流程（POST /chat）
 1. 持久化 user 消息。
-2. **结构化意图识别**（B 档）：LLM 输出经 Pydantic Schema 校验，提取 intent/goal/entities/missing_information/risk_level/confidence；规则兜底高风险关键词；置信度 < 0.7 或信息缺失时返回澄清问题（route_action=clarify），不进入主对话。
+2. **意图识别**（B 档）：先走确定性**规则快路径**（`apply_fast_path_rules`，结果 `source=rules`），未命中再调用 LLM 结构化识别（`source=llm`）。规则优先级 unsafe > generate_request > query，命中即返回（confidence=1.0，省一次 LLM 往返）：unsafe 拦索要密钥/凭据、删除或清空全部数据、绕过规则或审批；generate_request 要求生成动作 + 产物词（生成/出图/渲染 + 关键帧/分镜/视频/角色图等），并带负向断言排除描述性表述（『最近生成的角色图长什么样』是在查看已有产物，判为 query 而不是生成请求）；query 覆盖进展/进度/状态/概览、失败原因、任务列表、资产统计，以及查看类表述（看看/看一下/给我看看/长什么样 + 图/视频/片段/素材/角色/场景/道具/关键帧/分镜/资产）。未命中规则的模糊消息交由 LLM 输出经 Pydantic Schema 校验，提取 intent/goal/entities/missing_information/risk_level/confidence；规则兜底高风险关键词；置信度 < 0.7 或信息缺失时返回澄清问题（route_action=clarify），不进入主对话。
 3. **确定性路由**：unsafe → 拒绝（reject）；generate_request → 引导到对应页面（guide）；识别失败降级 query 继续主对话。
-4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（project_overview/asset_stats/list_jobs），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
+4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（query/analysis → project_overview、asset_stats、list_jobs；其余意图不授予任何工具），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
+
+   `list_assets` 为**条件注入**：仅当用户消息命中资产类关键词（图/视频/片段/素材/缩略/画面/看看/长什么样）时，才以 `validity=current, limit=6` 追加查询。既避免每条回复都附带缩略图（UI 噪音与无谓带宽），也只展示仍然有效的资产。
 5. **LLM 回复**：历史窗口最近 40 条 user/assistant 消息；瞬态错误指数退避重试最多 3 次；`llm_unconfigured` → 409，其余失败 → 502（用户消息已持久化，可重试）。
 6. assistant 消息 payload 记录：`intent` / `intent_reason` / `intent_classified` / `route_action` / `intent_goal` / `risk_level` / `confidence`。
 
@@ -518,10 +521,15 @@
 
 ### 资产引用（asset_refs）
 
-assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用数组（每项含 asset_id / asset_type / name / has_thumb / validity，最多 6 条），供前端在助手气泡内渲染缩略图；视频类（clip/video）前端降级为链接卡片。该字段为空数组时前端不渲染图片区。
+assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用数组（每项含 asset_id / asset_type / name / has_thumb / validity，最多 6 条），供前端在助手气泡内渲染缩略图；视频类（clip/video）前端降级为链接卡片。该字段为空数组时前端不渲染图片区（进展类问答即为空数组）。
+
+前端渲染约定：
+- 气泡内图片只请求 `GET /api/assets/{asset_id}/file?thumb=true` 并加 `loading=lazy`，不直接加载原图；
+- 点击缩略图进入预览层查看原图（naive-ui `NImage`，`preview-src` 指向不带 `thumb` 的原图 URL，支持缩放/旋转/下载），不再新开标签页直接加载数 MB 原图；
+- 缩略图加载失败（资产已失效或被清理）时前端记录失败 asset_id 并隐藏该项，避免历史消息出现破图。
 
 - 入参经 Pydantic Schema 校验（model_validate），校验失败返回 `tool_invalid_args`。
-- `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前三个工具均无需审批）。
+- `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前四个工具均无需审批）。
 
 ### Agent 任务/计划/审批表（B 档）
 - `agent_task`：结构化意图识别结果落库（intent/intent_goal/risk_level/confidence/success_criteria/status）。

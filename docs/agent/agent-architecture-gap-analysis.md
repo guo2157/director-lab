@@ -228,3 +228,53 @@
 - 差距 3（意图识别）：已消除（结构化 IntentResult + 置信度阈值 + 澄清流程 + 意图-工具映射）
 - 差距 4（结果验证器）：部分缓解（success_criteria 字段已落库，验证器逻辑未实施）
 - 差距 5（记忆层）：保持缺失（C 档范围）
+
+
+## 11. B 档后续修复记录（2026-10-27 18:00-18:25 用户确认后执行）
+
+本轮按用户反馈修复已知问题，并顺带修掉端到端复测时暴露的一处真实缺陷。
+
+### 11.1 `list_assets` 排序与分页（提交 fc09c3c）
+- 原实现按 `Asset` 排序，但 `Asset` 模型**没有时间戳字段**（列为 id/project_id/asset_type/name/version/parent_id/file_path/thumb_path/source_job_id/ref_count/locked/validity/input_snapshot/quality_status/quality_issues），按 `created_at` 排序会直接抛 `AttributeError` 崩溃。
+- 改为 `select(Asset, Job.created_at).outerjoin(Job, Asset.source_job_id == Job.id)`，排序 `Job.created_at.is_(None).asc(), Job.created_at.desc(), Asset.id.asc()`：有任务的资产按生成时间倒序，无关联任务的排在最后。
+- 新增 `offset` 入参与返回 `generated_at` / `offset` 字段；`count` 语义为「本次返回条数」。
+- 排查过一例疑似重复：6 条结果里 `cover_f19dc8` 出现两次，取 30 条时 `returned 30 / unique 30 / dups []`，确认是不同 asset_id 同名，不是 outerjoin 放大。
+
+### 11.2 资产缩略图按关键词条件注入（提交 fc09c3c）
+- 工具列表拆为 `base_tools`（project_overview/asset_stats/list_jobs），仅当用户消息命中关键词 `图/视频/片段/素材/缩略/画面/看看/长什么样` 时才追加 `list_assets(validity="current", limit=6)`。
+- 目的：避免每条回复都附带缩略图（UI 噪音 + 无谓带宽），且只展示仍有效的资产。
+- 复测结果：资产类消息 `asset_refs=6`（全部 `has_thumb=True`）；进展类消息 `asset_refs=0` 且 `list_assets` 只执行 1 次。
+
+### 11.3 前端破图兜底 + 预览层（提交 fc09c3c、03ed39f）
+- 破图兜底：新增 `failedAssetIds` 集合、`onThumbError(assetId)`、`visibleAssetRefs(m)`，`img @error` 时记录并隐藏该项，容器 `v-if` 改为按可见列表判断——历史消息中资产被清理后不再出现破图。
+- 坑 5 修复（原问题：点缩略图新开标签页直接加载数 MB PNG）：图片类资产由 `<a target="_blank">` 改为 naive-ui `NImage`，气泡内仍只请求 `?thumb=true`，`preview-src` 指向原图，点击进入预览层（缩放/旋转/下载），样式加 `cursor: zoom-in`。
+- 构建：`npm run build` 通过，`DirectorConsoleView-_qV9FSjX.js` 13.27 kB，新增懒加载分包 `Image-DUTQtE7_.js` 29.01 kB。
+
+### 11.4 意图规则快路径误判（提交 96c05b3）
+- 现象：端到端复测「资产统计，顺便看看最近生成的角色图长什么样」被判为 `generate_request` → 返回生成引导文案、`asset_refs=0`。
+- 原因：生成规则把「生成…的角色图」这类**描述性表述**当成了生成请求。
+- 修复：
+  - 生成规则加负向断言，排除「最近生成的角色图」这类描述性表述；
+  - 新增查看类 query 规则（看看/看一下/给我看看/长什么样 + 图/视频/片段/素材/角色/场景/道具/关键帧/分镜/资产）；
+  - 补「批量出图/重新渲染」等无宾语的生成规则，避免退化到 LLM。
+- 效果：15 条规则用例从 3 个 FAIL 收敛到 0 FAIL；复测同一句话 → `intent=query`、`route=chat`、`asset_refs=6`。
+
+### 11.5 新增回归测试（净增 40 个用例）
+| 文件 | 覆盖内容 | 结果 |
+| --- | --- | --- |
+| `tests/test_agent_tools.py` | 注册表四工具只读断言；list_assets 排序与字段、不泄露 file_path/thumb_path、分页、过滤、limit/offset 边界 | 12 passed |
+| `tests/test_agent_sessions.py` | asset_refs 关键词门控：资产类消息注入 list_assets 且审计落库；进展类消息 refs 为空、list_assets 只执行 1 次；tool_event 不进上下文 | 9 passed |
+| `tests/test_intent_router.py`（新建） | 规则快路径 query/generate/unsafe、描述性查看非生成请求、模糊消息回落 LLM、高风险关键词提级、意图-工具映射只读白名单、澄清文案 | 22 passed |
+
+全量 pytest：**160 passed, 4 warnings**（本轮起点 120 passed）。前端 `npm run build` 通过。
+
+### 11.6 验证证据
+- 后端重启加载新代码（pid 2739950），`/api/health` → 200；缩略图接口 `GET /api/assets/ast_f884db6705a2/file?thumb=true` → 200 / image/webp / 6934B。
+- 端到端（会话 ags_ee08e6b35b15）：
+  - 「资产统计，顺便看看最近生成的角色图长什么样」→ intent=query / route=chat / risk=low / asset_refs=6，回复真实引用资产统计（角色 5、场景等）；
+  - 「项目进展如何」→ intent=query / asset_refs=0（不注入缩略图）。
+
+### 11.7 仍未处理
+- 规则快路径的 `risk_level` 提级与 `intent_goal` 仍只在 LLM 路径生效：规则命中 query 时 `risk_level` 恒为 low、`goal` 为空（「含删除的查询」仍可能被判 low）。
+- 生成类能力（文生图/参考图生图/视频）仍未注册为 Agent 工具（需审批门禁 + 幂等键 + 成本闸口）。
+- C 档（记忆层、Token/成本采集、评估集）未启动。
