@@ -56,6 +56,8 @@ def parse_version_id() -> str:
 
 def scene_episode_id() -> str:
     return new_id("sep")
+def episode_parse_record_id() -> str:
+    return new_id("epr")
 
 
 def asset_ref_id() -> str:
@@ -76,3 +78,26 @@ def composition_id() -> str:
 
 def export_id() -> str:
     return new_id("exp")
+
+def episode_continuity_id() -> str:
+    return new_id("ect")
+
+
+def agent_session_id() -> str:
+    return new_id("ags")
+
+
+def agent_task_id() -> str:
+    return new_id("agt")
+
+
+def agent_plan_step_id() -> str:
+    return new_id("aps")
+
+
+def agent_confirmation_id() -> str:
+    return new_id("agc")
+
+
+def agent_message_id() -> str:
+    return new_id("agm")

@@ -87,7 +87,7 @@ def test_resolve_refs_character_and_scene(client: TestClient):
     pid = client.post("/api/projects", json={"name": "引用项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
     # 角色（有定妆图）与场景（无基准图）
-    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe", name="portrait",
+    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character", name="portrait",
               version=1, file_path="/tmp/p.png", validity="current")
     db.add(a)
     db.flush()
@@ -121,9 +121,9 @@ def test_build_media_params_slot_filter(client: TestClient):
 
     pid = client.post("/api/projects", json={"name": "槽位项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
-    a1 = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe", name="p1",
+    a1 = Asset(id=ids.asset_id(), project_id=pid, asset_type="character", name="p1",
                version=1, file_path="/tmp/p1.png", validity="current")
-    a2 = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe", name="p2",
+    a2 = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene", name="p2",
                version=1, file_path="/tmp/p2.png", validity="current")
     db.add_all([a1, a2])
     db.flush()
@@ -159,7 +159,7 @@ def test_resolve_refs_prop(client: TestClient):
     from app.services import ref_inject
     pid = client.post("/api/projects", json={"name": "道具引用项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
-    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe", name="anchor",
+    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="prop", name="anchor",
               version=1, file_path="/tmp/prop.png", validity="current")
     db.add(a)
     db.flush()
@@ -199,7 +199,7 @@ def test_build_media_params_prop_slot(client: TestClient):
     from app.services import ref_inject
     pid = client.post("/api/projects", json={"name": "道具槽位项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
-    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe", name="anchor",
+    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="prop", name="anchor",
               version=1, file_path="/tmp/prop.png", validity="current")
     db.add(a)
     db.flush()

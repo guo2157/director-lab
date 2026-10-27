@@ -25,3 +25,7 @@ backend/data/
 # 运行日志
 uvicorn.log
 *.log
+
+# 备份文件（防止环境配置/代码备份误提交）
+*.bak
+.env.bak

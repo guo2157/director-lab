@@ -3,12 +3,12 @@ import { ref, computed, watch } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NCard, NButton, NSpin, NInput, NInputNumber, NSelect, NSwitch,
-  NTag, NDivider, NEmpty, NUpload, NTooltip, NModal, useMessage,
+  NTag, NEmpty, NUpload, NTooltip, NModal, NPopconfirm, useMessage,
 } from 'naive-ui'
 import type { UploadFileInfo } from 'naive-ui'
 import {
   getSettings, updateSettings, testLlm, listLlmModels,
-  listComfyuiInstances, updateComfyuiInstances, testComfyuiInstances,
+  listComfyuiInstances, updateComfyuiInstances, testComfyui,
 } from '@/api/settings'
 import {
   listWorkflows, uploadWorkflow, validateWorkflow,
@@ -67,6 +67,22 @@ const confirmAddInstance = () => {
   }
   editInstances.value.push({ ...instanceForm.value, base_url: instanceForm.value.base_url.trim() })
   showInstanceModal.value = false
+  saveInstancesMutation.mutate(editInstances.value)
+}
+
+// 删除实例行（自动保存）
+const removeInstance = (idx: number) => {
+  editInstances.value.splice(idx, 1)
+  saveInstancesMutation.mutate(editInstances.value)
+}
+
+// 行内编辑（权重/启用）自动保存（防抖 500ms，避免高频 API 调用）
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+const handleInstanceChange = () => {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    saveInstancesMutation.mutate(editInstances.value)
+  }, 500)
 }
 
 const saveInstancesMutation = useMutation({
@@ -80,18 +96,21 @@ const saveInstancesMutation = useMutation({
 
 // 逐实例连通性测试结果（base_url -> 结果）
 const instanceTestResults = ref<Record<string, ComfyUIInstanceTestResult>>({})
-const testInstancesMutation = useMutation({
-  mutationFn: () => testComfyuiInstances(),
-  onSuccess: (data: any) => {
-    const map: Record<string, ComfyUIInstanceTestResult> = {}
-    for (const r of data?.instances ?? []) map[r.base_url] = r
-    instanceTestResults.value = map
-    const okCount = (data?.instances ?? []).filter((r: any) => r.ok).length
-    const total = (data?.instances ?? []).length
-    if (okCount === total && total > 0) message.success(`全部 ${total} 个实例连接正常`)
-    else message.warning(`${okCount}/${total} 个实例连接正常`)
+const testingUrl = ref('')
+const testInstanceMutation = useMutation({
+  mutationFn: (baseUrl: string) => testComfyui(baseUrl),
+  onMutate: (baseUrl: string) => { testingUrl.value = baseUrl },
+  onSuccess: (data: any, baseUrl: string) => {
+    const inst = editInstances.value.find((i) => i.base_url === baseUrl)
+    instanceTestResults.value = {
+      ...instanceTestResults.value,
+      [baseUrl]: { base_url: baseUrl, enabled: inst?.enabled ?? true, weight: inst?.weight ?? 1, ok: data?.ok ?? false, latency_ms: data?.latency_ms, message: data?.message },
+    }
+    if (data?.ok) message.success(`连接正常（${data?.latency_ms ?? 0}ms）`)
+    else message.error(`连接失败: ${data?.message || '未知错误'}`)
   },
   onError: (e: any) => message.error(`测试失败: ${e?.message ?? e}`),
+  onSettled: () => { testingUrl.value = '' },
 })
 
 // --- LLM test ---
@@ -109,6 +128,18 @@ const llmProviderOptions = [
   { label: 'Ollama', value: 'ollama' },
   { label: '自定义', value: 'custom' },
 ]
+// 提供商 → 默认 API URL（切换时自动填充，用户仍可手动修改）
+const LLM_PROVIDER_URLS: Record<string, string> = {
+  deepseek: 'https://api.deepseek.com/v1',
+  openai: 'https://api.openai.com/v1',
+  qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  ollama: 'http://127.0.0.1:11434/v1',
+}
+function handleProviderChange(value: string) {
+  editSettings.value.llm_provider = value as AppSettings['llm_provider']
+  const url = LLM_PROVIDER_URLS[value]
+  if (url) editSettings.value.llm_base_url = url
+}
 // --- LLM 模型列表（查询下拉选择） ---
 const llmModelOptions = ref<Array<{ label: string; value: string }>>([])
 const llmModelsLoading = ref(false)
@@ -264,11 +295,12 @@ const downloadWorkflow = (wf: Workflow) => {
                 <span class="col-weight">权重</span>
                 <span class="col-enabled">启用</span>
                 <span class="col-test">测试结果</span>
+                <span class="col-actions">操作</span>
               </div>
               <div v-for="(inst, idx) in editInstances" :key="idx" class="wf-tr">
                 <span class="col-name inst-url">{{ inst.base_url || '（未填写）' }}</span>
-                <span class="col-weight"><n-input-number v-model:value="inst.weight" :min="1" size="small" style="width: 90px" /></span>
-                <span class="col-enabled"><n-switch v-model:value="inst.enabled" size="small" /></span>
+                <span class="col-weight"><n-input-number v-model:value="inst.weight" :min="1" size="small" style="width: 90px" @update:value="handleInstanceChange" /></span>
+                <span class="col-enabled"><n-switch v-model:value="inst.enabled" size="small" @update:value="handleInstanceChange" /></span>
                 <span class="col-test">
                   <n-tag
                     v-if="instanceTestResults[inst.base_url]"
@@ -280,20 +312,16 @@ const downloadWorkflow = (wf: Workflow) => {
                   </n-tag>
                   <span v-else class="hint-text">未测试</span>
                 </span>
-
+                <span class="col-actions">
+                  <n-button size="tiny" quaternary @click="testInstanceMutation.mutate(inst.base_url)" :loading="testingUrl === inst.base_url">测试</n-button>
+                  <n-popconfirm @positive-click="removeInstance(idx)">
+                    <template #trigger>
+                      <n-button size="tiny" quaternary type="error">删除</n-button>
+                    </template>
+                    确认删除该实例？
+                  </n-popconfirm>
+                </span>
               </div>
-            </div>
-            <n-divider />
-            <div class="form-grid">
-              <div class="form-item">
-                <label class="field-label">视频轮询超时（秒）</label>
-                <n-input-number v-model:value="editSettings.video_poll_timeout_seconds" :min="60" style="width: 100%" />
-              </div>
-
-            </div>
-            <div class="card-actions">
-              <n-button type="primary" :loading="saveInstancesMutation.isPending.value" @click="saveInstancesMutation.mutate(editInstances)">保存实例配置</n-button>
-              <n-button :loading="testInstancesMutation.isPending.value" @click="testInstancesMutation.mutate()">测试全部实例</n-button>
             </div>
           </n-card>
 
@@ -334,7 +362,7 @@ const downloadWorkflow = (wf: Workflow) => {
             <div class="form-grid">
               <div class="form-item">
                 <label class="field-label">模型提供商</label>
-                <n-select v-model:value="editSettings.llm_provider" :options="llmProviderOptions" />
+                <n-select v-model:value="editSettings.llm_provider" :options="llmProviderOptions" @update:value="handleProviderChange" />
               </div>
               <div class="form-item">
                 <label class="field-label">模型 API URL</label>
@@ -469,6 +497,14 @@ const downloadWorkflow = (wf: Workflow) => {
             <div class="about-brand">🎬</div>
             <h3 class="about-title">Director Lab 漫剧生产系统</h3>
             <p class="hint-text">基于 ComfyUI 的 AI 漫剧生产工作台</p>
+            <div class="about-summary">
+              <p class="summary-text">
+                <strong>完全免费 · 本地化部署</strong>：所有算力来自自建 ComfyUI 实例，无需云端 API，零持续费用。支持多台闲置 GPU 机器组池，配合内网穿透即可扩展。
+              </p>
+              <p class="summary-text">
+                <strong>三层负载均衡</strong>：实例健康熔断（心跳探测 + 自动摘除恢复）→ 实时负载调度（least-connections 按队列深度派发）→ 任务级故障转移（提交失败自动换实例重试），三重保障高可用。
+              </p>
+            </div>
           </n-card>
         </template>
       </div>
@@ -488,6 +524,8 @@ const downloadWorkflow = (wf: Workflow) => {
   padding: 24px;
   align-items: stretch;
   min-height: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
 }
 
 /* --- Sidebar --- */
@@ -585,7 +623,7 @@ const downloadWorkflow = (wf: Workflow) => {
 /* --- Instance table --- */
 .inst-table .wf-thead,
 .inst-table .wf-tr {
-  grid-template-columns: minmax(200px, 1fr) 100px 80px 150px auto;
+  grid-template-columns: minmax(200px, 1fr) 90px 70px 120px 120px;
 }
 .meta-item {
   display: inline-flex;
@@ -748,6 +786,21 @@ const downloadWorkflow = (wf: Workflow) => {
   font-size: 13px;
   color: var(--text-secondary);
   margin: 0;
+}
+.about-summary {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.summary-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+.summary-text strong {
+  color: var(--text-primary);
 }
 .page-loading {
   display: flex;

@@ -3,14 +3,13 @@
 配置优先级：环境变量 > .env 文件 > 默认值。
 对应文档：DEVELOPMENT.md、DECISIONS.md 第 3 节（TBD 回填前以默认值 + 可配置形式存在）。
 """
-from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DLAB_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="DLAB_", extra="ignore")
 
     # --- 基础 ---
     app_name: str = "director-lab"
@@ -23,7 +22,7 @@ class Settings(BaseSettings):
     # --- Mock 渲染（D-11：开启后跳过 ComfyUI 交互，生成占位产物，用于无 ComfyUI 环境的演示与端到端测试） ---
     render_mock: bool = False
     # --- ComfyUI 集成（远端渲染底座） ---
-    comfyui_base_url: str = "https://6006-cpod-1wurfc7eoilo.pod.compshare.cn"
+    comfyui_base_url: str = ""
     # 多实例配置（JSON 数组：[{base_url, weight, enabled}]），为空时回退单实例 comfyui_base_url
     comfyui_instances_json: str = ""
     comfyui_timeout_seconds: float = 30.0
@@ -31,15 +30,24 @@ class Settings(BaseSettings):
     comfyui_job_timeout_seconds: float = 600.0  # TBD 关联：超时分类 comfy_timeout
 
     # --- 语言模型（剧本评估与解析，OpenAI 兼容接口，独立于 ComfyUI） ---
-    llm_base_url: str = "https://api.openai.com/v1"
+    llm_provider: str = ""  # deepseek/openai/qwen/ollama/custom
+    llm_base_url: str = ""
     llm_api_key: str = ""  # 凭据只走环境变量 DLAB_LLM_API_KEY，禁止写入代码与日志
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = ""
     llm_timeout_seconds: float = 120.0
+    # 流式接收空闲超时（httpx read timeout 语义）：远端连续该时长不吐数据即抛 llm_timeout，
+    # 避免 LLM 流式中途停摆时任务线程永久阻塞，把串行队列堵死
+    llm_stream_idle_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
 
     # --- 任务调度（D-18 修订 D-03：并发 = 可用 ComfyUI 实例数，单实例串行排队，多实例负载均衡并行） ---
     render_concurrency: int = 1
+    # script-agent 首批自动+后续半自动：true 时首次调用仅解析首批（≤max_episodes_per_batch），
+    # result.has_more 提示前端『继续分析』；false 时单次调用解析全部批次范围
+    agent_first_batch_auto: bool = True
     worker_poll_interval_seconds: float = 2.0
+    # 运行期自愈阈值：LLM 类任务处于 running 且长时间无事件、且本进程无执行线程时回收
+    llm_job_stall_seconds: float = 300.0
     job_max_attempts: int = 3  # §5.7 重试上限（自动+手动累计），范围 1-10
 
     # --- 一致性双阈值（T-04：实测后校准，当前为推荐默认值） ---
@@ -64,6 +72,91 @@ class Settings(BaseSettings):
     workflow_dir: Path = Path(__file__).resolve().parents[2] / "data" / "workflows"
 
 
-@lru_cache
+_settings_cache: Settings | None = None
+_runtime_settings_mtime: float | None = None
+
+
 def get_settings() -> Settings:
-    return Settings()
+    """获取全局配置（进程内缓存）。
+
+    P1-3 修复（FINAL_CODE_AUDIT_REPORT.md）：设置页保存的配置写入
+    data/runtime_settings.json 后，独立 worker 进程需在运行时感知变更。
+    以文件 mtime 失效缓存：文件更新后下一次调用返回新配置，无需重启进程。
+    """
+    global _settings_cache, _runtime_settings_mtime
+    p = _runtime_settings_path()
+    mtime = None
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _settings_cache is not None and mtime == _runtime_settings_mtime:
+        return _settings_cache
+    s = Settings()
+    load_runtime_settings(s)
+    _settings_cache = s
+    _runtime_settings_mtime = mtime
+    return s
+
+
+def clear_settings_cache() -> None:
+    """强制清空配置缓存（测试与显式刷新场景使用，等价原 lru_cache 的 cache_clear）。"""
+    global _settings_cache, _runtime_settings_mtime
+    _settings_cache = None
+    _runtime_settings_mtime = None
+
+
+# --- 运行时配置持久化（设置页管理，JSON 文件存储；语言模型与 ComfyUI 配置不再从 .env/环境变量读取） ---
+# 持久化字段：设置页保存的配置项，重启后保留
+_PERSISTED_FIELDS = [
+    "comfyui_base_url", "comfyui_instances_json",
+    "comfyui_timeout_seconds", "comfyui_job_timeout_seconds",
+    "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "llm_timeout_seconds",
+    "llm_stream_idle_timeout_seconds",
+    "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
+]
+
+
+def _runtime_settings_path() -> Path:
+    return Path("./data/runtime_settings.json")
+
+
+def load_runtime_settings(s: Settings) -> None:
+    """启动时从 JSON 文件加载设置页管理的配置（覆盖环境变量/.env 值，实现配置以设置页为准）。"""
+    import json
+    p = _runtime_settings_path()
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for key in _PERSISTED_FIELDS:
+        if key in data and data[key] is not None:
+            try:
+                setattr(s, key, data[key])
+            except Exception:
+                continue
+
+
+def save_runtime_settings(s: Settings) -> None:
+    """将设置页管理的配置写入 JSON 文件（原子写，避免写坏旧文件）。"""
+    import json
+    import os
+    import tempfile
+    p = _runtime_settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = {key: getattr(s, key) for key in _PERSISTED_FIELDS}
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

@@ -2,12 +2,17 @@ import { get, post, patch, put, del } from './client'
 import type { Paginated, PaginationParams } from '@/types/common'
 import type { Scene, Shot, Character, Prop, ProjectShotItem, ShotKind } from '@/types/script'
 
+/** 后端兼容归一化：接口可能返回纯数组或分页结构，统一为 Paginated */
+function normalizeList<T>(res: unknown): Paginated<T> {
+  if (Array.isArray(res)) return { items: res as T[], total: res.length, page: 1, page_size: res.length }
+  return res as Paginated<T>
+}
 /** 场景列表（episode 筛选依据 scene_episode 关联表；镜头数 >100 的项目必须 include_shots=false 分批加载） */
-export function listScenes(
+export async function listScenes(
   projectId: string,
   params?: PaginationParams & { episode?: number; include_shots?: boolean },
 ) {
-  return get<Paginated<Scene>>(`/projects/${projectId}/scenes`, params)
+  return normalizeList<Scene>(await get<unknown>(`/projects/${projectId}/scenes`, params))
 }
 
 /** 场景详情 */
@@ -89,8 +94,8 @@ export async function deleteShot(id: string) {
 }
 
 /** 角色列表 */
-export function listCharacters(projectId: string, params?: PaginationParams) {
-  return get<Paginated<Character>>(`/projects/${projectId}/characters`, params)
+export async function listCharacters(projectId: string, params?: PaginationParams) {
+  return normalizeList<Character>(await get<unknown>(`/projects/${projectId}/characters`, params))
 }
 
 /** 新建角色（name 项目内唯一，重复 409） */
@@ -114,8 +119,8 @@ export function mergeCharacters(sourceId: string, targetId: string) {
 }
 
 /** 道具列表 */
-export function listProps(projectId: string, params?: PaginationParams) {
-  return get<Paginated<Prop>>(`/projects/${projectId}/props`, params)
+export async function listProps(projectId: string, params?: PaginationParams) {
+  return normalizeList<Prop>(await get<unknown>(`/projects/${projectId}/props`, params))
 }
 
 /** 新建道具 */

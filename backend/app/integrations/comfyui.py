@@ -113,6 +113,85 @@ class ComfyUIClient:
                 result[node_id] = items
         return result
 
+    def wait_for_job_ws(
+        self,
+        prompt_id: str,
+        client_id: str = "director-lab",
+        on_progress=None,
+        poll_deadline: float | None = None,
+    ) -> tuple[bool, str | None]:
+        """通过 WebSocket 等待任务完成，返回 (是否完成, 失败错误码或 None)。
+
+        - 订阅 ComfyUI 的 /ws?clientId=... 事件流，接收进度事件（progress/executing/executed）
+        - on_progress(payload) 回调用于进度上报（如 {"value": 3, "max": 5, "node": "12"}）
+        - WebSocket 异常或超时时降级为 HTTP 轮询 get_history，保证任务不因 WS 断连而丢失
+        - poll_deadline 为 Unix 时间戳截止时刻；None 表示不设截止（由调用方控制）
+        """
+        import asyncio
+        import time as _time
+
+        ws_url = self.base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+
+        async def _run() -> tuple[bool, str | None]:
+            try:
+                import websockets
+
+                async with websockets.connect(
+                    f"{ws_url}/ws?clientId={client_id}",
+                    open_timeout=10,
+                    close_timeout=5,
+                    max_size=2**22,
+                ) as ws:
+                    while True:
+                        if poll_deadline is not None and _time.time() >= poll_deadline:
+                            return False, None
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        if isinstance(raw, bytes):
+                            continue  # 预览帧二进制数据，跳过
+                        try:
+                            msg = json.loads(raw)
+                        except (TypeError, ValueError):
+                            continue
+                        mtype = msg.get("type", "")
+                        data = msg.get("data", {}) or {}
+                        if mtype == "progress" and on_progress:
+                            try:
+                                on_progress({
+                                    "value": data.get("value"),
+                                    "max": data.get("max"),
+                                    "node": data.get("node"),
+                                })
+                            except Exception:
+                                pass
+                        elif mtype == "executing":
+                            # node=None 且 prompt_id 匹配表示该任务执行完毕
+                            if data.get("prompt_id") == prompt_id and data.get("node") is None:
+                                # 执行结束，通过 history 确认终态
+                                return True, None
+                        elif mtype == "execution_error":
+                            if data.get("prompt_id") == prompt_id:
+                                detail = json.dumps(data, ensure_ascii=False)[:300]
+                                return True, f"comfy_execution_error:{detail}"
+                        elif mtype == "execution_success":
+                            if data.get("prompt_id") == prompt_id:
+                                return True, None
+            except Exception:
+                # WebSocket 不可用：降级为 HTTP 轮询
+                return False, None
+            return False, None
+
+        done, err = asyncio.run(_run())
+        if done:
+            return True, err
+        # WS 未确认终态（断连/超时/无事件）：降级 HTTP 轮询确认
+        history = self.get_history(prompt_id)
+        if history is None:
+            return False, None
+        return self.is_job_done(history)
+
     def is_job_done(self, history_entry: dict) -> tuple[bool, str | None]:
         """判断历史记录是否为终态。返回 (是否完成, 失败错误码或 None)。"""
         status = history_entry.get("status", {})

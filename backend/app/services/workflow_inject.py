@@ -102,6 +102,47 @@ def inject_params(wf: dict, values: dict, seed: int | None = None) -> tuple[dict
     return out, snapshot
 
 
+def prune_unbound_media_inputs(wf: dict, values: dict) -> tuple[dict, list[str]]:
+    """剔除未提供媒体的参考图节点及其连线（P4 整改）。
+
+    工作流定义中的 LoadImage 节点带有占位图（placeholder_*.png）。
+    此前未注入槽位时占位图连线被原样提交，占位图会污染生成结果
+    （资产图混入陌生主体/无关元素的根因之一）。
+    现按工作流 meta 约定：未注入的参考图槽位在提交前剔除 image 连线。
+
+    返回 (剔除后的工作流, 被剔除的参数名列表)。
+    """
+    parsed = parse_workflow(wf)
+    if parsed.errors:
+        # 标记非法的工作流不做剔除，交由 inject_params 报错
+        return wf, []
+    out = copy.deepcopy(wf)
+    pruned: list[str] = []
+    for name, binding in parsed.params.items():
+        if not binding.media:
+            continue
+        if name in values and values[name] is not None:
+            continue
+        if binding.required:
+            # 必填媒体参数缺失：不剔除，交由 inject_params 报必填参数缺失
+            continue
+        node_id = binding.node_id
+        pruned.append(name)
+        # 剔除所有消费该节点的连线（同一 LoadImage 可能被正/负提示词节点共同引用）
+        for nid, node in out.items():
+            if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict):
+                continue
+            inputs = node["inputs"]
+            for key in [
+                k for k, v in inputs.items()
+                if isinstance(v, list) and v and str(v[0]) == str(node_id)
+            ]:
+                del inputs[key]
+        # 连线已全部剔除，删除 LoadImage 节点本身，避免占位图被执行
+        out.pop(node_id, None)
+    return out, pruned
+
+
 def find_output_nodes(wf: dict) -> dict:
     """返回输出名 → 节点 ID 的映射，用于产物提取。"""
     mapping = {}

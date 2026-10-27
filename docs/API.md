@@ -84,9 +84,11 @@
 | --- | --- | --- |
 | POST | /api/projects/{id}/script-versions | 保存剧本（单版本覆盖，版本号+1） |
 | GET | /api/projects/{id}/script-versions/current | 获取当前剧本文本（回显） |
-| POST | /api/projects/{id}/estimate | 评估可制作集数 |
-| POST | /api/projects/{id}/estimates/{estimate_id}/confirm | 确认评估与制作范围 |
-| POST | /api/projects/{id}/parse | 解析剧本（按选定集范围） |
+| POST | /api/projects/{id}/script-agent | 剧本一体化分析（Agent：评估+解析合并，集数由 Agent 决定） |
+| GET | /api/projects/{id}/script-agent/status | Agent 分析状态（job + 口径 + 集级记录） |
+| POST | /api/projects/{id}/estimate | 评估可制作集数（兼容保留，新流程由 script-agent 替代） |
+| POST | /api/projects/{id}/estimates/{estimate_id}/confirm | 确认评估与制作范围（兼容保留） |
+| POST | /api/projects/{id}/parse | 解析剧本（按选定集范围；兼容保留） |
 | POST | /api/projects/{id}/parse-versions/{parse_version_id}/confirm | 确认候选解析版本 |
 | GET | /api/projects/{id}/scenes | 场景列表，可选 include_shots |
 | POST | /api/scenes | 创建场景 |
@@ -234,6 +236,19 @@
 估算算法：对白语速模型只作为估算输入之一；应结合旁白、动作/纯视觉、停顿和转场的估算时长形成区间，并记录算法/提示词版本及主要假设。字符数/语速计算仅可作为缺少结构信息时的 fallback，不可作为唯一的集数判定依据。评估结果必须持久化到 `script_estimate`；`project.estimated_at` 与 `estimated_text_hash` 仅作进度推导/兼容缓存，不替代评估历史记录。
 
 **POST /api/projects/{id}/estimates/{estimate_id}/confirm**：确认评估结果与制作范围。请求体含 `script_version_id`、用户确认的 `episode_start`、`episode_count` 及可选时长调整；评估版本与选择不匹配时返回 409 `script_version_conflict`。确认后 `script_estimate.user_confirmed=true`。
+
+**POST /api/projects/{id}/script-agent**：剧本一体化分析（Agent 流程，推荐入口）。评估与解析合并为一次任务，集数由 Agent 决定，无需用户确认集数。
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| script_version_id | string | 是 | 不可变剧本版本 |
+| text | string | 是 | 1–50000 字符；内容哈希必须与 script_version_id 一致 |
+| episode_start | int | 否 | 缺省 1；后续批次继续分析时传入首个未完成集数 |
+
+内部流程：算法预检（estimate_script，不落库）→ 软闸口评估（evaluate_script，失败不阻断，仅记录 agent.eval_info 事件）→ 自动分批 LLM 解析（复用 parse_system 提示词，每批 ≤ max_episodes_per_batch）→ 口径锁定（首批成功后 total_episodes + script_hash 写入 ParseVersion）→ 集级记录（EpisodeParseRecord，状态机同 parse）。返回 `job_id`（202）。
+
+首批自动 + 后续半自动：`agent_first_batch_auto=true`（默认）时首次调用仅解析首批（≤ max_episodes_per_batch 集），`job.result.has_more=true` 提示前端展示『继续分析』入口；后续批次由前端携带 episode_start 再次触发。剧本 hash 变化则口径失效，需重新全量分析。
+
+**GET /api/projects/{id}/script-agent/status**：返回最近一个 script_agent 任务（job 含 status/error/result）、口径（scope：total_episodes/script_hash/parse_version_id/parse_version_status）与集级记录（records：episode_no/status/asset_count/error_msg）。前端进度时间线与集数网格数据源。
 
 **POST /api/projects/{id}/parse**
 
@@ -459,7 +474,52 @@
 
 **GET /api/health**：返回服务健康状态，含 `status`（healthy/degraded/down）、`database`（ok/error）、`comfyui`（ok/unreachable）、`worker`（ok/idle）、`disk`（剩余空间百分比）。用于设置页关于区域展示。
 
-## 12. 事件流
+## 12. 导演台 Agent 会话
+
+### 路由总览
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | /api/agent/sessions | 创建会话（201） |
+| GET | /api/agent/sessions | 会话列表（分页） |
+| GET | /api/agent/sessions/{session_id} | 会话详情 |
+| PATCH | /api/agent/sessions/{session_id} | 更新会话（标题/关联项目/模型） |
+| DELETE | /api/agent/sessions/{session_id} | 归档会话（软删除，status=archived） |
+| POST | /api/agent/sessions/{session_id}/restore | 恢复归档会话 |
+| POST | /api/agent/sessions/{session_id}/messages | 追加消息 |
+| GET | /api/agent/sessions/{session_id}/messages | 消息列表（支持 after_seq 增量） |
+| POST | /api/agent/sessions/{session_id}/chat | 聊天（意图识别 → 工具审计 → LLM 回复） |
+
+### 会话与消息
+- 会话 `project_id` 可空：未关联项目时为通用问答，不执行项目工具。
+- 会话 `model` 字段可覆盖默认模型（快照，切换模型不回写历史消息）。
+- 消息 `role` 取值：`user` / `assistant` / `system` / `tool_event`（工具调用事件）/ `approval`（人工审批事件）。
+- 消息 `seq` 会话内自增（唯一索引兜底并发），前端按 seq 排序与增量加载（`after_seq`）。
+- 归档会话只读：追加消息/聊天返回 409 `session_archived`。
+
+### 聊天流程（POST /chat）
+1. 持久化 user 消息。
+2. **结构化意图识别**（B 档）：LLM 输出经 Pydantic Schema 校验，提取 intent/goal/entities/missing_information/risk_level/confidence；规则兜底高风险关键词；置信度 < 0.7 或信息缺失时返回澄清问题（route_action=clarify），不进入主对话。
+3. **确定性路由**：unsafe → 拒绝（reject）；generate_request → 引导到对应页面（guide）；识别失败降级 query 继续主对话。
+4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（project_overview/asset_stats/list_jobs），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
+5. **LLM 回复**：历史窗口最近 40 条 user/assistant 消息；瞬态错误指数退避重试最多 3 次；`llm_unconfigured` → 409，其余失败 → 502（用户消息已持久化，可重试）。
+6. assistant 消息 payload 记录：`intent` / `intent_reason` / `intent_classified` / `route_action` / `intent_goal` / `risk_level` / `confidence`。
+
+### 工具注册表（TOOL_REGISTRY）
+| 工具 | 权限 | 风险 | 副作用 | 审批 |
+| --- | --- | --- | --- | --- |
+| project_overview | read | low | 无 | 否 |
+| list_jobs | read | low | 无 | 否 |
+| asset_stats | read | low | 无 | 否 |
+
+- 入参经 Pydantic Schema 校验（model_validate），校验失败返回 `tool_invalid_args`。
+- `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前三个工具均无需审批）。
+
+### Agent 任务/计划/审批表（B 档）
+- `agent_task`：结构化意图识别结果落库（intent/intent_goal/risk_level/confidence/success_criteria/status）。
+- `agent_plan_step`：任务执行计划步骤（step_type=tool_call/clarification/reply，模型提议、代码裁决）。
+- `agent_confirmation`：高风险工具审批门禁（pending/approved/rejected）。
+
+## 13. 事件流
 
 **GET /api/events**：SSE 实时事件流。
 

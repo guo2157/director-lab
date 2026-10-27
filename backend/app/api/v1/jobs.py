@@ -1,8 +1,12 @@
-"""任务查询接口：API.md §任务 契约（阶段 4 先落地读取部分）。
-- GET /api/jobs/{id}：任务详情，含 error_code/error_msg/retryable/result
-- GET /api/jobs：项目内任务列表（供分镜页轮询解析任务状态）
+"""任务查询接口：API.md §任务 契约。
+- GET /api/jobs：任务列表（分页 page/page_size + 增量补齐 updated_since_seq）
+- GET /api/jobs/stats：任务统计（今日成功/失败、进行中、近 7 日平均耗时）
+- GET /api/jobs/{id}：任务详情，含 error_code/error_msg/retryable/result/seq
+- POST /api/jobs/{id}/retry：重试（新任务 ID，继承累计次数与 input_snapshot）
+- POST /api/jobs/{id}/cancel：取消（running 生成任务调用 ComfyUI 中断）
+- POST /api/jobs/projects/{id}/retry-failed：批量重试（D-14）
 retryable 判定：failed/lost 且 attempts < job_max_attempts（§5.7）。
-取消/重试/SSE 在后续批次接入。
+SSE 事件流见 events.py（/api/events）。
 """
 from datetime import datetime, timezone
 
@@ -11,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.models import Job
+from app.models import Job, JobEvent, Project, Scene, Shot
 from app.schemas.script import JobOut
 from app.services import errors
 
@@ -20,29 +24,59 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 _RETRYABLE_STATUS = ("failed", "lost")
 
 
-def _to_out(j: Job) -> JobOut:
+def _to_out(j: Job, db: Session | None = None) -> JobOut:
     settings = get_settings()
     retryable = j.status in _RETRYABLE_STATUS and (j.attempts or 0) < settings.job_max_attempts
+    project_name = episode = scene_title = shot_seq = None
+    if db is not None:
+        project = db.get(Project, j.project_id)
+        project_name = project.name if project else None
+        if j.shot_id:
+            shot = db.get(Shot, j.shot_id)
+            if shot:
+                shot_seq = shot.seq
+                episode = shot.episode
+                scene = db.get(Scene, shot.scene_id)
+                scene_title = scene.title if scene else None
     return JobOut(
         id=j.id, project_id=j.project_id, job_type=j.job_type, status=j.status,
+        project_name=project_name, episode=episode, scene_title=scene_title, shot_seq=shot_seq,
         error_code=j.error_code, error_msg=j.error_msg, retryable=retryable,
-        result=j.result, attempts=j.attempts or 0,
+        result=j.result, attempts=j.attempts or 0, seq=j.event_seq,
         created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at,
     )
 
 
 @router.get("")
-def list_jobs(project_id: str = Query(...), status: str | None = Query(None),
+def list_jobs(project_id: str | None = Query(None), status: str | None = Query(None),
               job_type: str | None = Query(None), limit: int = Query(50, ge=1, le=200),
+              page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+              updated_since_seq: int | None = Query(None, ge=0),
+              updated_since: datetime | None = Query(None),
               db: Session = Depends(get_db)) -> dict:
-    q = db.query(Job).filter(Job.project_id == project_id)
+    q = db.query(Job)
+    if project_id:
+        q = q.filter(Job.project_id == project_id)
     if status:
         q = q.filter(Job.status == status)
     if job_type:
         q = q.filter(Job.job_type == job_type)
+    # 增量补齐（API.md §9/§12）：updated_since_seq 为准（seq 严格大于，升序）；
+    # updated_since 时间戳仅兼容保留，同一毫秒内多条更新可能漏取或重复
+    if updated_since_seq is not None:
+        q = q.filter(Job.event_seq > updated_since_seq)
+        total = q.count()
+        items = q.order_by(Job.event_seq.asc()).limit(limit).all()
+        return {"total": total, "items": [_to_out(j, db).model_dump(mode="json") for j in items]}
+    if updated_since is not None:
+        q = q.filter(Job.created_at >= updated_since)
     total = q.count()
-    items = q.order_by(Job.created_at.desc()).limit(limit).all()
-    return {"total": total, "items": [_to_out(j).model_dump(mode="json") for j in items]}
+    # 分页：page/page_size 优先（API.md §9 契约），limit 作为兼容参数
+    if page_size:
+        items = q.order_by(Job.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    else:
+        items = q.order_by(Job.created_at.desc()).limit(limit).all()
+    return {"total": total, "items": [_to_out(j, db).model_dump(mode="json") for j in items]}
 
 
 @router.get("/stats")
@@ -78,7 +112,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
     j = db.get(Job, job_id)
     if j is None:
         raise errors.job_not_found()
-    return _to_out(j)
+    return _to_out(j, db)
 
 
 _GENERATE_TYPES = {"generate_keyframe", "generate_clip", "generate_audio", "generate_bgm", "generate_sfx"}
@@ -128,16 +162,34 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
         raise errors.invalid_state_transition(f"任务状态 {j.status} 不可重试")
     if (j.attempts or 0) >= settings.job_max_attempts:
         raise errors.invalid_request(f"已达重试上限 {settings.job_max_attempts} 次，不可再重试")
+    # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重试，避免产生重复任务
+    if j.shot_id:
+        dup = (
+            db.query(Job)
+            .filter(
+                Job.shot_id == j.shot_id,
+                Job.job_type == j.job_type,
+                Job.status.in_(("queued", "running")),
+            )
+            .first()
+        )
+        if dup is not None:
+            raise errors.AppError(
+                "job_in_flight",
+                f"该镜头已有同目标在途任务（{dup.id}，状态 {dup.status}），请等待完成或先取消",
+                409,
+            )
     new_job = Job(
         id=ids.job_id(), project_id=j.project_id, shot_id=j.shot_id,
         job_type=j.job_type, workflow_id=j.workflow_id, workflow_version=j.workflow_version,
         params=j.params, status="queued",
         attempts=j.attempts,  # 继承累计次数，执行器运行时再 +1
+        input_snapshot=j.input_snapshot,  # 复制输入快照（含 comfyui_instance，供取消定位实例）
         created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(new_job)
     db.commit()
-    return _to_out(new_job)
+    return _to_out(new_job, db)
 
 
 @router.post("/projects/{project_id}/retry-failed", status_code=201)
@@ -157,12 +209,23 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
     if job_ids:
         q = q.filter(Job.id.in_(job_ids))
     retried, skipped = [], []
+    # 预取在途任务（shot_id, job_type）集合，用于批量重试去重
+    inflight = {
+        (x.shot_id, x.job_type)
+        for x in db.query(Job)
+        .filter(Job.status.in_(("queued", "running")), Job.shot_id.isnot(None))
+        .all()
+    }
     for j in q.all():
+        if j.shot_id and (j.shot_id, j.job_type) in inflight:
+            skipped.append({"source_job_id": j.id, "reason": "job_in_flight"})
+            continue
         new_job = Job(
             id=ids.job_id(), project_id=j.project_id, shot_id=j.shot_id,
             job_type=j.job_type, workflow_id=j.workflow_id, workflow_version=j.workflow_version,
             params=j.params, status="queued",
             attempts=j.attempts,
+            input_snapshot=j.input_snapshot,  # 复制输入快照（含 comfyui_instance，供取消定位实例）
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         db.add(new_job)
@@ -185,3 +248,21 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
         "skipped_capped": skipped,
         "skipped_count": len(skipped),
     }
+
+
+@router.get("/{job_id}/llm-stream")
+def get_llm_stream(job_id: str, db: Session = Depends(get_db)) -> dict:
+    """LLM 流式输出回放：返回该任务已累积的 agent.llm_delta 文本与最新事件 seq。
+    前端中途打开解析页时先调用本接口回放历史，再从 last_seq 订阅 SSE 增量，避免重复。"""
+    j = db.get(Job, job_id)
+    if j is None:
+        raise errors.job_not_found()
+    rows = (
+        db.query(JobEvent)
+        .filter(JobEvent.job_id == job_id, JobEvent.event_type == "agent.llm_delta")
+        .order_by(JobEvent.event_seq)
+        .all()
+    )
+    text = "".join((ev.payload or {}).get("delta") or "" for ev in rows)
+    last_seq = rows[-1].event_seq if rows else 0
+    return {"job_id": job_id, "text": text, "last_seq": last_seq, "chunk_count": len(rows)}

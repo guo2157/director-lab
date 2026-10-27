@@ -40,12 +40,12 @@ const composeMutation = useMutation({
     queryClient.invalidateQueries({ queryKey: ['compositions', projectId] })
   },
   onError: (e: any) => {
-    const detail = e?.response?.data?.error?.detail
-    if (detail === 'output_missing') {
+    const code = e?.code
+    if (code === 'output_missing') {
       message.error('存在缺失产物，无法合成')
-    } else if (detail === 'duration_mismatch_review_required') {
+    } else if (code === 'duration_mismatch_review_required') {
       message.error('存在待审核产物，需先处理后再合成')
-    } else if (detail === 'speaker_mapping_required') {
+    } else if (code === 'speaker_mapping_required') {
       message.error('缺少角色配音映射，请先配置')
     } else {
       message.error(`合成失败: ${e?.message ?? e}`)
@@ -80,8 +80,8 @@ const exportMutation = useMutation({
     queryClient.invalidateQueries({ queryKey: ['exports', projectId] })
   },
   onError: (e: any) => {
-    const detail = e?.response?.data?.error?.detail
-    if (detail === 'composition_stale') {
+    const code = e?.code
+    if (code === 'composition_stale') {
       message.error('合成版本已失效，请重新合成')
     } else {
       message.error(`导出失败: ${e?.message ?? e}`)

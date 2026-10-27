@@ -20,6 +20,8 @@
 
 生产阶段枚举：`estimate`、`select_range`、`parse`、`characters`、`scenes`、`keyframes`、`clips`、`audio`、`compose`、`export`、`done`。合成与导出是两个独立阶段；创建项目/输入剧本属前置准备，人工审核属人工闸口，一致性校验属分镜图阶段内判定，均不产生独立阶段。
 
+资产分层与前端流转（2026-10-25，D-21）：解析产出的角色定妆图/场景基准图/道具锚定图为**项目级公共资产**（对应阶段 characters/scenes 与道具，跨集复用，按实体名称绑定，供 @名称 引用解析与生成六槽位注入）；分镜图/分镜视频/末帧为**集级资产**（对应阶段 keyframes/clips，按集归属）。前端顶级导航收敛为 4 阶段：剧本（保存→评估→解析子流程）→ 资产库（公共资产生图）→ 分镜（集级分镜图/提示词/视频）→ 合成与导出；页面单一出口流转链：解析完成→去资产库、公共资产齐全→去分镜、分镜图+视频就绪→去合成导出，禁止跨级跳转。
+
 ## 3. 四套状态机（P0，必须分别保存，不得互相替代）
 
 ### 3.1 项目生命周期状态机
@@ -169,21 +171,105 @@ worker 启动时扫描 `running`、`submitting`、`submission_unknown` 及有远
 | 队列积压 | 单项目 queued 任务超过 200 个时，新生成类接口返回 429 `too_many_jobs`，提示先等待或取消部分任务；解析/合成/导出类不受此限 |
 | 超大任务 | 批量生成按场景或项目分批入队，单批不超过 `max_episodes_per_batch` 对应的镜头规模，避免单次提交数百任务导致队列长时间占满 |
 
-### 5.8 多 ComfyUI 实例加权负载均衡（P0）
+### 5.8 多 ComfyUI 实例负载均衡（三层调度 + 故障转移，D-19/D-21/D-22/D-23）
 
-生成通道可扩展：支持配置多个 ComfyUI 实例，按权重加权轮询分发任务，实例不可用时自动故障转移（替代原三方通道降级机制）。实例配置经设置页 ComfyUI 区管理，接口见 API.md（GET/PUT /api/settings/comfyui-instances、POST /api/settings/comfyui-instances/test）。
+生成通道可扩展：支持配置多个 ComfyUI 实例，采用三层负载均衡策略分发任务。实例配置经设置页 ComfyUI 区管理，接口见 API.md（GET/PUT /api/settings/comfyui-instances、POST /api/settings/comfyui-instances/test、GET /api/settings/comfyui-instances/status）。
+
+#### 5.8.1 实例配置
 
 | 项 | 约定 |
 | --- | --- |
 | 实例配置 | 每个实例含 `base_url`、`weight`（正整数）、`enabled`；未配置实例时回退单实例 `comfyui_base_url` |
-| 分发策略 | 生成任务按权重加权轮询选择启用实例；权重越大分配任务越多 |
-| 故障转移 | 获取客户端时探测实例，不可达则按权重尝试其余启用实例；全部实例失败时任务按 `comfy_unreachable` 失败分类处理（环境类可重试），不静默丢弃 |
-| 切换范围 | 实例选择仅影响新生成任务的提交；已在执行的任务不迁移实例，按原实例完成或失败 |
 | 可追溯性 | 实际使用的实例写入 job 的 `input_snapshot.comfyui_instance`；任务取消时按该实例发送中断 |
 | 测试接口 | 逐实例最小探测（GET /system_stats），不提交生成任务 |
-| 恢复 | 实例恢复可用后，新任务自动重新参与负载均衡，无需人工切换 |
+| 监控面板 | GET /api/settings/comfyui-instances/status 返回各实例在线状态、显存（vram_total/free）、队列深度（pending/running）、熔断状态 |
 
-实例选择在 worker 提交前执行，属于短事务外的远端调用；故障转移尝试本身不得阻塞任务队列超过单次提交超时。
+#### 5.8.2 第一层：实例健康筛选（熔断机制，D-19）
+
+后台心跳线程（daemon，随 worker 启动）定期探测所有启用实例的可达性，维护进程内熔断状态：
+
+| 项 | 约定 |
+| --- | --- |
+| 心跳间隔 | 30 秒一轮，遍历所有启用实例调用 GET /system_stats |
+| 熔断阈值 | 连续 3 次探测失败 → 熔断摘除 60 秒 |
+| 半开恢复 | 熔断到期后进入半开状态（10 秒探测间隔），探测成功即恢复，再失败则重新熔断 |
+| 调度过滤 | pick_instance / pick_instance_by_load 优先从健康实例中选择；全部熔断时降级为直接尝试（不静默丢弃） |
+| 健康摘要 | get_health_summary() 返回各实例 fail_count / circuit_open / last_check，供监控面板展示 |
+
+#### 5.8.3 第二层：实时负载调度（least-connections，D-19）
+
+任务分发从静态加权轮询升级为按实时负载选择最空闲实例：
+
+| 项 | 约定 |
+| --- | --- |
+| 负载查询 | 对每个健康实例调用 GET /queue，load = queue_pending 数量 + queue_running 数量 |
+| 评分公式 | score = load / weight（权重越高可承担越多负载）；选评分最低的实例 |
+| 同分处理 | 同分时取权重高的实例 |
+| 降级策略 | 全部实例无法查询负载时（如 /queue 不可用），降级为加权轮询 pick_instance() |
+| exclude 参数 | 支持排除指定 base_url 列表（任务级故障转移重试时跳过已失败实例） |
+
+#### 5.8.4 第三层：任务级故障转移重试（D-21）
+
+提交前阶段失败时，在未尝试过的实例间自动换实例重试：
+
+| 阶段 | 失败行为 |
+| --- | --- |
+| 获取客户端 | acquire_client_by_load 内部故障转移：探测失败 → 记录健康状态 → 按权重尝试其余实例 |
+| 上传媒体 | 有剩余未尝试实例 → 写 job.retry 事件 → 返回 retriable=True → 外层循环换实例重试 |
+| 提交 prompt | 有剩余未尝试实例 → 写 job.retry 事件 → 返回 retriable=True → 外层循环换实例重试 |
+| 等待完成 | 不换实例，保持原失败语义（超时/执行错误直接失败） |
+| 下载产物 | 不换实例，直接失败 |
+
+重试时 exclude 列表累加失败实例 base_url，直到全部实例尝试完毕才最终 _fail_job。重试时 seed 从 job.params 复用（首次生成后持久化），保证重试产出一致。
+
+#### 5.8.5 同镜头任务亲和性（D-22）
+
+| 项 | 约定 |
+| --- | --- |
+| 亲和查询 | _preferred_instance_for_shot：查询同镜头最近成功任务（status=succeeded）的 input_snapshot.comfyui_instance |
+| 复用条件 | 该实例仍在启用列表且未被 exclude |
+| 传入方式 | 作为 preferred 参数传入 acquire_client_by_load，优先使用；不可用时降级为 least-connections |
+| 作用 | 同镜头 keyframe→clip 存在输入依赖（clip 用 keyframe 做首帧），复用同实例可复用已上传媒体文件 |
+
+#### 5.8.6 优先级队列（D-22）
+
+| 项 | 约定 |
+| --- | --- |
+| 字段 | Job.priority（整数，默认 0），alembic 迁移 d8f3a2b6c9e1 已执行 |
+| 排序 | _next_job 按 priority DESC, created_at ASC 取任务 |
+| 重试提权 | 重试任务（attempts>0）调度时 priority + 100，保障失败任务尽快重跑 |
+| 索引 | ix_job_status_priority（status + priority 联合索引） |
+
+#### 5.8.7 WebSocket 进度推送（D-19）
+
+| 项 | 约定 |
+| --- | --- |
+| WS 等待 | wait_for_job_ws：订阅 /ws?clientId=... 事件流，监听 progress / executing / execution_error / execution_success |
+| 进度回调 | on_progress 回调将 value/max/node 写入 job.progress 事件（事件与状态同事务），前端可展示进度条 |
+| 降级策略 | WS 断连/不可用时自动降级为 HTTP 轮询 get_history，任务不因 WS 故障丢失 |
+| 预览帧 | 跳过 WS 二进制预览帧数据 |
+| 等待窗口 | 每 15 秒为一个 WS 等待窗口，窗口间检查取消状态；总截止为 comfyui_job_timeout_seconds |
+
+#### 5.8.8 submission_unknown 对账自动化（D-23）
+
+worker 启动时自动对账带 prompt_id 的 submission_unknown 任务：
+
+| 远端状态 | 处理 |
+| --- | --- |
+| history 有结果且成功 | 保持 submission_unknown，executor 续跑分支直接下载产物（跳过上传/提交/等待），写 job.reconciled 事件 |
+| history 有结果但失败 | _fail_job 记录错误 |
+| 无结果且不在远端队列 | 确认未提交成功，重置 queued + 清除 prompt_id，安全重提 |
+| 无结果但仍在远端队列 | 保持 submission_unknown，下轮启动再对账 |
+| 实例不可达 | 跳过，保持现状，下轮再对账 |
+
+#### 5.8.9 单实例 / Mock 模式退化
+
+- 单实例：least-connections 只有一个候选，亲和性总是命中同一实例，exclude 无剩余实例不触发重试 → 行为与改造前一致
+- Mock 模式：跳过所有实例池逻辑，mock_outputs 生成占位产物 → 行为与改造前一致
+
+#### 5.8.10 切换范围与纪律
+
+实例选择在 worker 提交前执行，属于短事务外的远端调用；故障转移尝试本身不得阻塞任务队列超过单次提交超时。已在执行的任务不迁移实例，按原实例完成或失败。
 
 ## 6. 事件持久化与断线补拉（P0）
 

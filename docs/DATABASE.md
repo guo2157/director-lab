@@ -250,6 +250,8 @@
 | version | int | 项目内递增版本号 |
 | status | string | candidate / current / superseded / failed |
 | diff_summary | json | 新增、删除、修改的场景/镜头与受影响任务/资产摘要 |
+| total_episodes | int | 可空。script-agent 口径锁定：首批解析成功后锁定的总集数，后续增量解析不可超出 |
+| script_hash | string(64) | 可空。口径对应的剧本文本哈希；剧本变化则口径失效，需重新全量分析 |
 | created_at / confirmed_at | datetime | 创建/确认时间 |
 
 ### dependency_ref（依赖关系，权威来源）

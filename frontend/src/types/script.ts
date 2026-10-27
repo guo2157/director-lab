@@ -68,6 +68,7 @@ export interface Shot {
   duration: number
   character_id?: string | null
   speaker_id?: string | null
+  keyframe_confirmed?: boolean
   current_assets?: ShotCurrentAssets
   consistency?: ShotConsistency
   created_at: string
@@ -90,28 +91,11 @@ export interface AssetMaterialRef {
   thumb_url?: string | null
 }
 
+/** 镜头聚合素材（与后端返回一致：current_assets.{keyframe, clip, audio} 扁平结构） */
 export interface ShotCurrentAssets {
-  scene?: {
-    keyframe?: AssetMaterialRef | null
-    clip?: AssetMaterialRef | null
-    audio?: AssetMaterialRef | null
-  }
-  character?: {
-    keyframe?: AssetMaterialRef | null
-    clip?: AssetMaterialRef | null
-    audio?: AssetMaterialRef | null
-  }
-  props?: Array<{
-    prop_id: string
-    keyframe?: AssetMaterialRef | null
-    clip?: AssetMaterialRef | null
-    audio?: AssetMaterialRef | null
-  }>
-  current_assets?: {
-    keyframe?: AssetMaterialRef | null
-    clip?: AssetMaterialRef | null
-    audio?: AssetMaterialRef | null
-  }
+  keyframe?: AssetMaterialRef | null
+  clip?: AssetMaterialRef | null
+  audio?: AssetMaterialRef | null
 }
 
 /** 角色（ID 前缀 chr_，name 项目内唯一） */
@@ -149,7 +133,27 @@ export interface CreateScriptVersionPayload {
 
 export interface ParsePayload {
   script_version_id: string
-  episode_from?: number
-  episode_to?: number
+  text: string
+  episode_start: number
+  /** 两种输入模式二选一：episode_count（起始+数量）或 episode_end（起止集数） */
+  episode_count?: number
+  episode_end?: number
   replace_existing?: boolean
+}
+
+/** 集级解析记录（集数网格视图） */
+export interface EpisodeParseStatusItem {
+  episode_no: number
+  asset_type: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  attempt_count: number
+  error_msg: string | null
+  asset_count: number | null
+  parse_version_id: string | null
+  updated_at: string | null
+}
+
+export interface ParseStatus {
+  total_episodes: number | null
+  records: EpisodeParseStatusItem[]
 }

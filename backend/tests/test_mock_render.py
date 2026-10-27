@@ -144,12 +144,28 @@ def test_anchor_writeback_prop_character_scene(client: TestClient):
         assert p.anchor_asset_id, "道具 anchor_asset_id 未回写"
         assert c.portrait_asset_id, "角色 portrait_asset_id 未回写"
         assert s.baseline_asset_id, "场景 baseline_asset_id 未回写"
-        # 回写的资产必须是 succeeded 任务的 keyframe 产物
+        # 回写的资产必须是 succeeded 任务产出，且按实体归属落正确类型
         from app.models import Asset, Job
-        for aid in (p.anchor_asset_id, c.portrait_asset_id, s.baseline_asset_id):
+        expected = {
+            p.anchor_asset_id: "prop",
+            c.portrait_asset_id: "character",
+            s.baseline_asset_id: "scene",
+        }
+        for aid, want_type in expected.items():
             a = db.get(Asset, aid)
-            assert a is not None and a.asset_type == "keyframe" and a.validity == "current"
+            assert a is not None and a.validity == "current"
+            assert a.asset_type == want_type, f"资产 {aid} 类型应为 {want_type}，实际 {a.asset_type}"
             j = db.get(Job, a.source_job_id)
             assert j is not None and j.status == "succeeded"
     finally:
         db.close()
+
+    # 资产库分类过滤：每类只能返回自身类型，非法值必须 422
+    for at, want in (("character", "character"), ("scene", "scene"), ("prop", "prop")):
+        r = client.get("/api/assets", params={"project_id": pid, "asset_type": at})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total"] >= 1, f"{at} 分类应至少有一条资产"
+        assert all(i["asset_type"] == want for i in body["items"]), f"{at} 分类混入其他类型"
+    r = client.get("/api/assets", params={"project_id": pid, "asset_type": "portrait"})
+    assert r.status_code == 422, "非法分类值应返回 422"

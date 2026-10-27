@@ -186,7 +186,16 @@ def list_scene_shots(
     )
     total = q.count()
     rows = q.offset((page - 1) * page_size).limit(page_size).all()
-    return {"items": [ShotOut.model_validate(s).model_dump() for s in rows], "total": total, "page": page, "page_size": page_size}
+    items = []
+    for s in rows:
+        d = ShotOut.model_validate(s).model_dump()
+        d["current_assets"] = {
+            "keyframe": _current_asset_info(db, s.id, "keyframe"),
+            "clip": _current_asset_info(db, s.id, "clip"),
+            "audio": _current_asset_info(db, s.id, "audio"),
+        }
+        items.append(d)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.post("/shots/{shot_id}/keyframe/confirm", status_code=200)

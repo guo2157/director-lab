@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.core import database as _db
 from app.integrations.comfyui import ComfyUIClient, ComfyUIError
 from app.integrations import comfyui_pool
-from app.models import Asset, Job, JobEvent, Shot, Workflow
+from app.models import Asset, Character, Job, JobEvent, Project, Prop, Scene, Shot, Workflow
 from app.services.workflow_inject import find_output_nodes, inject_params
 
 
@@ -33,6 +33,7 @@ def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = 
 
 
 def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
+    print(f"[worker] 任务失败 {job.id} ({job.job_type}) shot={job.shot_id} code={code} msg={message[:300]}", flush=True)
     job.status = "failed"
     job.error_code = code
     job.error_msg = message[:2000]
@@ -46,8 +47,112 @@ def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
     db.commit()
 
 
+def _probe_clip_and_update_shot(db: Session, job: Job, created_assets: list[dict]) -> None:
+    """clip 产物 ffprobe 检测（compose 对齐依赖）：回写 Shot 时长与音频来源。
+
+    - actual_duration / video_actual_duration：视频实际时长（秒）
+    - audio_source：存在音频流 → h3_va（H3 VA 内嵌音频），否则 none
+    ffprobe 失败不阻断任务成功：记录 clip.probe_failed 事件，字段保持原值，
+    由后续对账/音频补救流程处理。
+    """
+    if job.job_type != "generate_clip" or not job.shot_id:
+        return
+    clip = next((a for a in created_assets if a.get("asset_type") == "clip"), None)
+    if clip is None:
+        return
+    import json
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-show_streams", "-show_format", clip["file_path"]],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "ffprobe failed").strip()[:200])
+        info = json.loads(proc.stdout)
+        streams = info.get("streams", [])
+        has_video = any(s.get("codec_type") == "video" for s in streams)
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        if not has_video:
+            raise RuntimeError("no video stream")
+        duration = None
+        for s in streams:
+            if s.get("codec_type") == "video" and s.get("duration"):
+                duration = float(s["duration"])
+                break
+        if duration is None:
+            fmt_dur = (info.get("format") or {}).get("duration")
+            if fmt_dur:
+                duration = float(fmt_dur)
+        shot = db.get(Shot, job.shot_id)
+        if shot is not None:
+            if duration is not None and duration > 0:
+                shot.actual_duration = duration
+                shot.video_actual_duration = duration
+            shot.audio_source = "h3_va" if has_audio else "none"
+        _write_event(db, job, "clip.probe", {
+            "shot_id": job.shot_id,
+            "duration": duration,
+            "audio_source": "h3_va" if has_audio else "none",
+        })
+    except Exception as e:  # noqa: BLE001
+        try:
+            _write_event(db, job, "clip.probe_failed", {"error": str(e)[:200]})
+        except Exception:
+            pass
+
+
+def _preferred_instance_for_shot(db: Session, job: Job, exclude_instances: list[str]) -> dict | None:
+    """同镜头亲和性（D-22）：查询同镜头最近成功任务使用的实例，优先复用。
+
+    依据：同镜头的 keyframe/clip/audio 存在输入依赖（clip 用 keyframe 做首帧），
+    复用同实例可复用已上传的媒体文件，减少跨实例上传与下载。
+    返回实例配置 dict（{base_url, weight, enabled}）或 None（无亲和记录）。"""
+    if not job.shot_id:
+        return None
+    try:
+        prev = (
+            db.query(Job)
+            .filter(
+                Job.shot_id == job.shot_id,
+                Job.status == "succeeded",
+                Job.id != job.id,
+            )
+            .order_by(Job.finished_at.desc())
+            .first()
+        )
+    except Exception:
+        return None
+    if prev is None:
+        return None
+    snapshot = prev.input_snapshot or {}
+    base_url = snapshot.get("comfyui_instance")
+    if not base_url or base_url in exclude_instances:
+        return None
+    # 仅当该实例仍在启用列表中才复用
+    for inst in comfyui_pool.enabled_instances():
+        if inst["base_url"] == base_url:
+            return inst
+    return None
+
+
 def execute_generate_job(job_id: str) -> dict:
-    """执行一个生成类任务。返回执行结果摘要（供 worker 记录）。"""
+    """执行一个生成类任务（任务级故障转移重试入口，D-21）。
+
+    提交前阶段失败（实例不可达/上传失败/提交失败）在未尝试过的实例间自动换实例
+    重试；提交后阶段的错误（超时/执行错误）不换实例，保持原失败语义。
+    返回执行结果摘要（供 worker 记录）。"""
+    exclude_instances: list[str] = []
+    result = _execute_generate_job_once(job_id, exclude_instances)
+    while (not result.get("ok")) and result.get("retriable"):
+        exclude_instances = result.get("exclude_instances", exclude_instances)
+        result = _execute_generate_job_once(job_id, exclude_instances)
+    return result
+
+
+def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dict:
+    """单次执行一个生成类任务。exclude_instances 为本次尝试需排除的实例 base_url。"""
     settings = get_settings()
     # 运行时查找 SessionLocal：跟随 app.core.database 的当前绑定（测试替换引擎时保持一致）
     db: Session = _db.SessionLocal()
@@ -55,19 +160,21 @@ def execute_generate_job(job_id: str) -> dict:
         job = db.get(Job, job_id)
         if job is None:
             return {"ok": False, "reason": "job_not_found"}
-        if job.status not in ("queued", "submission_unknown"):
+        # running 状态允许进入：任务级故障转移重试场景（首次为 queued/submission_unknown）
+        if job.status not in ("queued", "submission_unknown", "running"):
             return {"ok": False, "reason": f"invalid_status:{job.status}"}
 
-        job.status = "running"
-        job.started_at = _now()
-        job.attempts = (job.attempts or 0) + 1
-        _write_event(db, job, "job.started", {"attempt": job.attempts})
-        # 镜头状态流转：进入生成中（§3.2）
-        if job.shot_id:
-            _shot = db.get(Shot, job.shot_id)
-            if _shot is not None and _shot.status != "generating":
-                _shot.status = "generating"
-        db.commit()
+        if job.status != "running":
+            job.status = "running"
+            job.started_at = _now()
+            job.attempts = (job.attempts or 0) + 1
+            _write_event(db, job, "job.started", {"attempt": job.attempts})
+            # 镜头状态流转：进入生成中（§3.2）
+            if job.shot_id:
+                _shot = db.get(Shot, job.shot_id)
+                if _shot is not None and _shot.status != "generating":
+                    _shot.status = "generating"
+            db.commit()
 
         wf_record = db.get(Workflow, job.workflow_id) if job.workflow_id else None
         if wf_record is None:
@@ -76,17 +183,252 @@ def execute_generate_job(job_id: str) -> dict:
 
         params = dict(job.params or {})
         media_files = params.pop("__media__", {})  # {param_name: local_file_path}
+        # P4 整改：资产图提示词模板版本从提交参数剥离，持久化到 input_snapshot 供追溯
+        _prompt_version = params.pop("__asset_prompt_version__", None)
+        if _prompt_version:
+            _pv_snap = dict(job.input_snapshot or {})
+            _pv_snap["asset_prompt_version"] = _prompt_version
+            _pv_params = _pv_snap.get("params")
+            if isinstance(_pv_params, dict):
+                _pv_snap["params"] = {k: v for k, v in _pv_params.items() if k != "__asset_prompt_version__"}
+            job.input_snapshot = _pv_snap
+            db.commit()
+        # 实体锚定图类型（D-21）：定妆图/基准图/锚定图按实体归属落 character/scene/prop，
+        # 与 enums.ASSET_TYPE（权威枚举，DATABASE.md §asset）及前端资产库分类保持一致；
+        # 分镜产物仍为 keyframe/clip/audio，不受影响。
+        # 同时取实体名称作为资产名：资产库按名称搜索（Asset.name contains）才能命中角色/场景/道具名
+        _entity_asset_type = None
+        _entity_asset_name = None
+        _ceid = params.get("__character_id__")
+        _seid = params.get("__scene_id__")
+        _peid = params.get("__prop_id__")
+        if _ceid:
+            _entity_asset_type = "character"
+            _entity_obj = db.get(Character, _ceid)
+            _entity_asset_name = getattr(_entity_obj, "name", None) if _entity_obj else None
+        elif _seid:
+            _entity_asset_type = "scene"
+            _entity_obj = db.get(Scene, _seid)
+            if _entity_obj is not None:
+                _entity_asset_name = _entity_obj.title or _seid
+        elif _peid:
+            _entity_asset_type = "prop"
+            _entity_obj = db.get(Prop, _peid)
+            _entity_asset_name = getattr(_entity_obj, "name", None) if _entity_obj else None
         seed = params.get("seed")
         if seed is None:
             seed = random.randint(0, 2**31 - 1)  # random 策略：本 job 内所有种子共用
         params["seed"] = seed
+        # 持久化 seed 到 job.params，重试时复用相同 seed（D-21 修复）
+        if job.params is None:
+            job.params = {}
+        if job.params.get("seed") is None:
+            job.params["seed"] = seed
+            db.commit()
+        # clip 任务自动参数注入（WORKFLOW.md §5.2/§8/§13.1）：
+        # - 当前镜头分镜图 → ref_image（未显式提供时）
+        # - 上一镜头末帧 → ref_prev_frame（存在时）
+        # - 按 project.aspect_ratio 注入 H3 width/height（§5.2 分辨率表）
+        # - 按 shot.duration 对齐帧数 length（fps=24，步长 17，offset 5，范围 124-362）
+        if job.job_type == "generate_clip" and job.shot_id:
+            _shot = db.get(Shot, job.shot_id)
+            if _shot is not None:
+                if "ref_image" not in media_files:
+                    _kf = (
+                        db.query(Asset)
+                        .join(Job, Job.id == Asset.source_job_id)
+                        .filter(Job.shot_id == _shot.id, Asset.validity == "current",
+                                Asset.asset_type == "keyframe", Job.status == "succeeded")
+                        .order_by(Asset.version.desc())
+                        .first()
+                    )
+                    if _kf is not None:
+                        media_files["ref_image"] = _kf.file_path
+                if "ref_prev_frame" not in media_files and _shot.last_frame_asset_id:
+                    _lf = db.get(Asset, _shot.last_frame_asset_id)
+                    if _lf is not None:
+                        media_files["ref_prev_frame"] = _lf.file_path
+                # 跨集连续性：非第 1 集的首镜 clip，注入上一集末帧作为 first_frame
+                # （连续性校验通过时才注入；校验不通过则无首帧约束，由连续性流程处理）
+                if "first_frame" not in media_files and _shot.episode > 1:
+                    try:
+                        _is_first_shot = (
+                            db.query(Shot)
+                            .join(Scene, Shot.scene_id == Scene.id)
+                            .filter(Scene.project_id == job.project_id,
+                                    Shot.episode == _shot.episode)
+                            .order_by(Scene.seq, Shot.seq)
+                            .first()
+                        )
+                        if _is_first_shot is not None and _is_first_shot.id == _shot.id:
+                            from app.services.continuity import get_first_frame_for_episode
+                            _ff = get_first_frame_for_episode(db, job.project_id, _shot.episode)
+                            if _ff:
+                                media_files["first_frame"] = _ff
+                    except Exception:
+                        pass  # 首帧注入失败不阻断生成，回退为无首帧约束
+                _project = db.get(Project, job.project_id)
+                if _project is not None and "width" not in params and "height" not in params:
+                    _h3_wh = {"9:16": (736, 1312), "16:9": (1312, 736), "1:1": (768, 768)}
+                    if _project.aspect_ratio in _h3_wh:
+                        params["width"], params["height"] = _h3_wh[_project.aspect_ratio]
+                if "length" not in params and _shot.duration:
+                    _target = float(_shot.duration) * 24
+                    _n = max(7, min(21, round((_target - 5) / 17)))
+                    params["length"] = 17 * _n + 5
+                # 持久化注入参数到 input_snapshot（可追溯：实际提交的生成参数与参考图）
+                _snap = dict(job.input_snapshot or {})
+                _snap["injected_params"] = {
+                    k: params[k] for k in ("width", "height", "length") if k in params
+                }
+                _snap["injected_media"] = dict(media_files)
+                job.input_snapshot = _snap
+                db.commit()
 
-        # 0. 从实例池获取客户端（加权轮询负载均衡 + 故障转移）；Mock 模式跳过（D-11）
+        # 0. submission_unknown 续跑分支（D-23 修复）：已有 prompt_id 时跳过上传/提交，
+        # 直接查远端 history 续跑下载，避免重新提交浪费算力。
+        if not settings.render_mock and job.status == "submission_unknown" and job.prompt_id:
+            snapshot = job.input_snapshot or {}
+            inst_url = snapshot.get("comfyui_instance")
+            if inst_url:
+                try:
+                    client = ComfyUIClient(base_url=inst_url)
+                    used_instance = {"base_url": inst_url, "weight": 1, "enabled": True}
+                    history = client.get_history(job.prompt_id)
+                    if history is not None:
+                        done, err = client.is_job_done(history)
+                        if done and not err:
+                            # 远端已完成：直接跳到产物提取下载（跳过上传/提交/等待）
+                            _write_event(db, job, "job.reconciled", {
+                                "prompt_id": job.prompt_id,
+                                "instance": inst_url,
+                            })
+                            db.commit()
+                            # 跳转到产物提取（第 5 步）
+                            outputs = client.extract_outputs(history)
+                            output_map = find_output_nodes(wf_record.definition)
+                            downloaded = []
+                            try:
+                                for out_name, node_id in output_map.items():
+                                    items = outputs.get(node_id, [])
+                                    if not items:
+                                        _fail_job(db, job, "output_missing", f"输出 {out_name}（节点 {node_id}）未产出文件")
+                                        return {"ok": False, "reason": "output_missing"}
+                                    for item in items:
+                                        content = client.download_file(item["filename"], item.get("subfolder", ""), item.get("type", "output"))
+                                        downloaded.append({"out_name": out_name, "item": item, "content": content})
+                            except ComfyUIError as e:
+                                _fail_job(db, job, e.code, e.message)
+                                return {"ok": False, "reason": e.code}
+                            # 跳转到资产落库（第 6 步）——使用 goto 模式：设置标志后跳过后续步骤
+                            # 由于 Python 没有 goto，这里直接内联资产落库逻辑
+                            from app.models import ids as id_gen
+                            import os
+                            media_dir = settings.media_dir
+                            os.makedirs(media_dir, exist_ok=True)
+                            created_assets = []
+                            for d in downloaded:
+                                out_name = d["out_name"]
+                                item = d["item"]
+                                content = d["content"]
+                                ext = (item["filename"].rsplit(".", 1)[-1] or "png").lower()
+                                asset_id = id_gen.asset_id()
+                                version = 1
+                                filename = f"{asset_id}_v{version}.{ext}"
+                                filepath = os.path.join(media_dir, filename)
+                                with open(filepath, "wb") as f_out:
+                                    f_out.write(content)
+                                asset_type_map = {"cover": "keyframe", "clip": "clip", "voice": "audio", "bgm": "audio", "sfx": "audio"}
+                                asset_type = asset_type_map.get(out_name, "keyframe")
+                                if asset_type == "keyframe" and _entity_asset_type:
+                                    asset_type = _entity_asset_type
+                                asset = Asset(
+                                    id=asset_id, project_id=job.project_id,
+                                    asset_type=asset_type,
+                                    name=(
+                                        _entity_asset_name
+                                        if (_entity_asset_name and _entity_asset_type)
+                                        else f"{out_name}_{job.id[-6:]}"
+                                    ),
+                                    version=version, file_path=filepath,
+                                    thumb_path=None,
+                                    source_job_id=job.id,
+                                    validity="current",
+                                    input_snapshot=job.input_snapshot,
+                                )
+                                db.add(asset)
+                                db.flush()
+                                # 缩略图（D-17，失败不阻断）
+                                try:
+                                    from app.services.thumbnail import make_thumb
+                                    thumb_path = make_thumb(filepath, asset_id, media_dir)
+                                    asset.thumb_path = thumb_path
+                                except Exception:
+                                    asset.thumb_path = None
+                                created_assets.append({"asset_id": asset_id, "out_name": out_name, "file_path": filepath})
+                            # 锚定图回写（D-20）
+                            _prop_id = (job.params or {}).get("__prop_id__")
+                            _character_id = (job.params or {}).get("__character_id__")
+                            _scene_id = (job.params or {}).get("__scene_id__")
+                            if _prop_id:
+                                _p = db.get(Prop, _prop_id)
+                                if _p and not _p.anchor_asset_id:
+                                    _kf = [a for a in created_assets if a["out_name"] == "cover"]
+                                    if _kf:
+                                        _p.anchor_asset_id = _kf[0]["asset_id"]
+                            if _character_id:
+                                _c = db.get(Character, _character_id)
+                                if _c and not _c.portrait_asset_id:
+                                    _kf = [a for a in created_assets if a["out_name"] == "cover"]
+                                    if _kf:
+                                        _c.portrait_asset_id = _kf[0]["asset_id"]
+                            if _scene_id:
+                                _s = db.get(Scene, _scene_id)
+                                if _s and not _s.baseline_asset_id:
+                                    _kf = [a for a in created_assets if a["out_name"] == "cover"]
+                                    if _kf:
+                                        _s.baseline_asset_id = _kf[0]["asset_id"]
+                            # 成功终态
+                            print(f"[worker] 任务成功 {job.id} ({job.job_type}) shot={job.shot_id} assets={len(created_assets)}", flush=True)
+                            job.status = "succeeded"
+                            job.finished_at = _now()
+                            job.result = {"assets": created_assets, "prompt_id": job.prompt_id, "seed": seed}
+                            _write_event(db, job, "job.succeeded", {"assets": len(created_assets)})
+                            # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
+                            _probe_clip_and_update_shot(db, job, created_assets)
+                            # 镜头状态派生
+                            if job.shot_id:
+                                _shot = db.get(Shot, job.shot_id)
+                                if _shot is not None and _shot.status == "generating":
+                                    _all_jobs = db.query(Job).filter(Job.shot_id == job.shot_id).all()
+                                    _has_kf = any(j.status == "succeeded" and j.job_type == "generate_keyframe" for j in _all_jobs)
+                                    _has_clip = any(j.status == "succeeded" and j.job_type == "generate_clip" for j in _all_jobs)
+                                    _has_audio = any(j.status == "succeeded" and j.job_type in ("generate_audio", "generate_bgm", "generate_sfx") for j in _all_jobs)
+                                    if _shot.dialogue or _shot.narration:
+                                        _shot.status = "done" if (_has_kf and _has_clip and _has_audio) else "pending"
+                                    else:
+                                        _shot.status = "done" if (_has_kf and _has_clip) else "pending"
+                            db.commit()
+                            return {"ok": True, "reason": "reconciled"}
+                        elif done and err:
+                            code, _, msg = err.partition(":")
+                            _fail_job(db, job, code, msg)
+                            return {"ok": False, "reason": code}
+                    # history 为 None 或实例不可达：降级走正常流程重新提交
+                except ComfyUIError:
+                    pass  # 实例不可达：降级走正常流程
+
+        # 0. 从实例池获取客户端（按实时负载调度 least-connections + 故障转移，D-19/D-21）；
+        # Mock 模式跳过（D-11）。exclude_instances 为前次尝试失败的实例（任务级故障转移）。
         client = None
         used_instance = None
         if not settings.render_mock:
+            # 同镜头亲和性（D-22）：优先复用同镜头最近成功任务的实例
+            preferred_inst = _preferred_instance_for_shot(db, job, exclude_instances)
             try:
-                client, used_instance = comfyui_pool.acquire_client()
+                client, used_instance = comfyui_pool.acquire_client_by_load(
+                    preferred=preferred_inst, exclude=exclude_instances
+                )
             except ComfyUIError as e:
                 _fail_job(db, job, e.code, e.message)
                 return {"ok": False, "reason": e.code}
@@ -98,13 +440,34 @@ def execute_generate_job(job_id: str) -> dict:
                 for name, local_path in media_files.items():
                     uploaded[name] = client.upload_image(local_path)
             except ComfyUIError as e:
+                # 提交前阶段失败：还有未尝试实例时换实例重试（D-21 任务级故障转移）
+                remaining = [
+                    i for i in comfyui_pool.enabled_instances()
+                    if i["base_url"] not in exclude_instances
+                    and used_instance is not None
+                    and i["base_url"] != used_instance["base_url"]
+                ]
+                if used_instance is not None and remaining:
+                    _write_event(db, job, "job.retry", {
+                        "stage": "upload", "error_code": e.code,
+                        "failed_instance": used_instance["base_url"],
+                    })
+                    db.commit()
+                    return {"ok": False, "reason": e.code, "retriable": True,
+                            "exclude_instances": exclude_instances + [used_instance["base_url"]]}
                 _fail_job(db, job, e.code, e.message)
                 return {"ok": False, "reason": e.code}
         params.update(uploaded)
 
-        # 2. 注入参数
+        # 2. 注入参数（P4 整改：先剔除未注入媒体的参考图节点及连线，
+        # 防止工作流内置占位图 placeholder_*.png 污染生成结果）
         try:
-            injected_wf, snapshot = inject_params(wf_record.definition, params, seed=seed)
+            from app.services.workflow_inject import prune_unbound_media_inputs
+            wf_definition, _pruned = prune_unbound_media_inputs(wf_record.definition, params)
+            if _pruned:
+                _write_event(db, job, "job.media_pruned", {"pruned_slots": _pruned})
+                db.commit()
+            injected_wf, snapshot = inject_params(wf_definition, params, seed=seed)
         except ValueError as e:
             _fail_job(db, job, "workflow_marker_missing", str(e))
             return {"ok": False, "reason": "inject_failed"}
@@ -139,6 +502,22 @@ def execute_generate_job(job_id: str) -> dict:
                 prompt_id = client.submit_prompt(injected_wf)
             except ComfyUIError as e:
                 job.submission_state = "submission_unknown"
+                db.commit()
+                # 提交失败：还有未尝试实例时换实例重试（D-21 任务级故障转移）
+                remaining = [
+                    i for i in comfyui_pool.enabled_instances()
+                    if i["base_url"] not in exclude_instances
+                    and used_instance is not None
+                    and i["base_url"] != used_instance["base_url"]
+                ]
+                if used_instance is not None and remaining:
+                    _write_event(db, job, "job.retry", {
+                        "stage": "submit", "error_code": e.code,
+                        "failed_instance": used_instance["base_url"],
+                    })
+                    db.commit()
+                    return {"ok": False, "reason": e.code, "retriable": True,
+                            "exclude_instances": exclude_instances + [used_instance["base_url"]]}
                 _fail_job(db, job, e.code, f"提交失败: {e.message}")
                 return {"ok": False, "reason": e.code}
             job.prompt_id = prompt_id
@@ -146,10 +525,30 @@ def execute_generate_job(job_id: str) -> dict:
             _write_event(db, job, "job.submitted", {"prompt_id": prompt_id})
             db.commit()
 
-            # 4. 轮询（事务外，超时按 comfy_timeout 处理）
+            # 4. 等待完成（事务外，超时按 comfy_timeout 处理）
+            # WebSocket 优先：订阅 /ws 事件流接收进度并写 job.progress 事件；
+            # WS 断连/不可用时自动降级为 HTTP 轮询（与旧行为一致）。
             import time
             deadline = time.time() + settings.comfyui_job_timeout_seconds
             history = None
+            done, err = False, None
+            _last_progress = {"value": None}
+
+            def _on_progress(p: dict) -> None:
+                # 进度回调：value 变化时写 job.progress 事件（事件与状态同事务）
+                if p.get("value") == _last_progress["value"]:
+                    return
+                _last_progress["value"] = p.get("value")
+                try:
+                    _write_event(db, job, "job.progress", {
+                        "value": p.get("value"),
+                        "max": p.get("max"),
+                        "node": p.get("node"),
+                    })
+                    db.commit()
+                except Exception:
+                    pass  # 进度事件失败不阻断任务执行
+
             while time.time() < deadline:
                 db.refresh(job)
                 if job.status == "cancelled":
@@ -158,6 +557,15 @@ def execute_generate_job(job_id: str) -> dict:
                         _shot.status = "pending"
                         db.commit()
                     return {"ok": False, "reason": "cancelled"}
+                # WS 等待窗口：取消检查间隔与总截止的较小值
+                window_end = min(deadline, time.time() + 15.0)
+                try:
+                    done, err = client.wait_for_job_ws(prompt_id, on_progress=_on_progress, poll_deadline=window_end)
+                except ComfyUIError:
+                    done, err = False, None
+                if done:
+                    break
+                # WS 未确认终态（断连/超时/无事件）：HTTP 轮询兜底
                 try:
                     history = client.get_history(prompt_id)
                 except ComfyUIError:
@@ -167,12 +575,25 @@ def execute_generate_job(job_id: str) -> dict:
                     if done:
                         break
                 time.sleep(settings.comfyui_poll_interval_seconds)
+            # WS 确认完成后拉取 history 用于提取产物
             if history is None:
-                _fail_job(db, job, "comfy_timeout", f"轮询超时（{settings.comfyui_job_timeout_seconds}s）")
-                return {"ok": False, "reason": "comfy_timeout"}
+                for _ in range(3):
+                    try:
+                        history = client.get_history(prompt_id)
+                    except ComfyUIError:
+                        history = None
+                    if history is not None:
+                        break
+                    time.sleep(1.0)
+            if history is None:
+                if not done:
+                    _fail_job(db, job, "comfy_timeout", f"等待超时（{settings.comfyui_job_timeout_seconds}s）")
+                    return {"ok": False, "reason": "comfy_timeout"}
+                _fail_job(db, job, "output_missing", "任务已完成但无法获取产物历史")
+                return {"ok": False, "reason": "output_missing"}
             done, err = client.is_job_done(history)
             if not done:
-                _fail_job(db, job, "comfy_timeout", "轮询超时未完成")
+                _fail_job(db, job, "comfy_timeout", "等待超时未完成")
                 return {"ok": False, "reason": "comfy_timeout"}
             if err:
                 db.refresh(job)
@@ -215,6 +636,9 @@ def execute_generate_job(job_id: str) -> dict:
             filename = rec["item"]["filename"]
             ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
             asset_type = asset_type_map.get(out_name, "keyframe")
+            # 定妆图/基准图/锚定图按实体归属落 character/scene/prop（否则前端资产库分类永远查不到）
+            if asset_type == "keyframe" and _entity_asset_type:
+                asset_type = _entity_asset_type
             version = 1
             aid = id_gen.asset_id()
             stored_name = f"{aid}_v{version}.{ext}"
@@ -228,7 +652,11 @@ def execute_generate_job(job_id: str) -> dict:
                 id=aid,
                 project_id=job.project_id,
                 asset_type=asset_type,
-                name=f"{out_name}_{job.id[-6:]}",
+                name=(
+                    _entity_asset_name
+                    if (_entity_asset_name and _entity_asset_type)
+                    else f"{out_name}_{job.id[-6:]}"
+                ),
                 version=version,
                 file_path=str(stored_path),
                 thumb_path=thumb_path,
@@ -237,17 +665,22 @@ def execute_generate_job(job_id: str) -> dict:
                 input_snapshot=job.input_snapshot,
             )
             db.add(asset)
-            created_assets.append({"asset_id": aid, "asset_type": asset_type, "file_path": str(stored_path)})
+            created_assets.append({
+                "asset_id": aid, "asset_type": asset_type,
+                "out_name": out_name, "file_path": str(stored_path),
+            })
 
         # 7.0 锚定图/定妆图/基准图回写（D-20）：generate 端点将 __prop_id__ / __character_id__ / __scene_id__
-        # 写入 job.params，生成成功后将首个 keyframe 产物回写到对应记录
-        from app.models import Character, Prop, Scene
+        # 写入 job.params，生成成功后将首个实体产物回写到对应记录
         _anchor_map = [
             ("__prop_id__", Prop, "anchor_asset_id"),
             ("__character_id__", Character, "portrait_asset_id"),
             ("__scene_id__", Scene, "baseline_asset_id"),
         ]
-        _kf_asset = next((a for a in created_assets if a["asset_type"] == "keyframe"), None)
+        _kf_asset = next(
+            (a for a in created_assets if a["asset_type"] in ("keyframe", "character", "scene", "prop")),
+            None,
+        )
         if _kf_asset is not None:
             for _key, _model, _field in _anchor_map:
                 _tid = (job.params or {}).get(_key)
@@ -256,11 +689,51 @@ def execute_generate_job(job_id: str) -> dict:
                 _obj = db.get(_model, _tid)
                 if _obj is not None:
                     setattr(_obj, _field, _kf_asset["asset_id"])
+        # 6.5 图片质量检查（P3）：图片类产物自动验收；不合格换 seed 重试，超限标记失败
+        # Mock 模式产物为占位图（带边框文字），跳过检查以保证演示与端到端测试可用
+        if not settings.render_mock:
+            _IMAGE_TYPES = ("keyframe", "character", "scene", "prop")
+            _img_assets = [a for a in created_assets if a.get("asset_type") in _IMAGE_TYPES]
+            _quality_failed = []
+            for _a in _img_assets:
+                try:
+                    from app.services.image_quality import check_image_quality
+                    _qr = check_image_quality(_a["file_path"], asset_type=_a["asset_type"])
+                except Exception as _qe:  # noqa: BLE001
+                    _qr = {"passed": False, "issues": [f"质量检查异常: {type(_qe).__name__}"], "checks": {}}
+                _qa = db.get(Asset, _a["asset_id"])
+                if _qa is not None:
+                    _qa.quality_status = "passed" if _qr["passed"] else "failed"
+                    _qa.quality_issues = _qr["issues"] or None
+                if not _qr["passed"]:
+                    _quality_failed.append({"asset_id": _a["asset_id"], "issues": _qr["issues"]})
+            if _quality_failed:
+                _max_attempts = settings.job_max_attempts
+                if (job.attempts or 0) < _max_attempts:
+                    # 不合格产物转历史版本，换 seed 重新生成
+                    for _qf in _quality_failed:
+                        _bad = db.get(Asset, _qf["asset_id"])
+                        if _bad is not None:
+                            _bad.validity = "superseded"
+                    job.status = "queued"
+                    if job.params:
+                        job.params.pop("seed", None)
+                    _write_event(db, job, "job.quality_retry", {
+                        "attempt": job.attempts, "failed": _quality_failed,
+                    })
+                    db.commit()
+                    return {"ok": False, "reason": "quality_check_failed", "retriable": True}
+                _fail_job(db, job, "quality_check_failed",
+                          f"图片质量检查不合格（已重试 {job.attempts} 次）: {_quality_failed}")
+                return {"ok": False, "reason": "quality_check_failed"}
         # 7. 成功终态
+        print(f"[worker] 任务成功 {job.id} ({job.job_type}) shot={job.shot_id} assets={len(created_assets)}", flush=True)
         job.status = "succeeded"
         job.result = {"assets": created_assets, "prompt_id": prompt_id, "seed": seed}
         job.finished_at = _now()
         _write_event(db, job, "job.finished", {"status": "succeeded", "result": job.result})
+        # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
+        _probe_clip_and_update_shot(db, job, created_assets)
         # 7.5 镜头状态派生（§3.2/§4.2）：必需产物齐全 → done，否则回 pending（阶段内部分完成是正常状态）
         if job.shot_id:
             _shot = db.get(Shot, job.shot_id)
@@ -278,6 +751,35 @@ def execute_generate_job(job_id: str) -> dict:
                     _shot.status = "done"
                 else:
                     _shot.status = "pending"
+
+                # 跨集连续性：记录首帧使用（对应改造第五/八节）
+                if job.job_type == "generate_clip":
+                    try:
+                        from app.services.continuity import record_opening_frame_usage
+                        _scene = db.get(Scene, _shot.scene_id)
+                        if _scene is not None:
+                            _is_first = (
+                                db.query(Shot)
+                                .join(Scene, Shot.scene_id == Scene.id)
+                                .filter(Scene.project_id == _scene.project_id, Shot.episode == _shot.episode)
+                                .order_by(Scene.seq, Shot.seq)
+                                .first()
+                            )
+                            if _is_first is not None and _is_first.id == _shot.id and _shot.episode > 1:
+                                # __media__ 已被 pop 到 media_files，从 media_files 读取首帧路径
+                                _ff_path = media_files.get("first_frame") or media_files.get("ref_prev_frame")
+                                if _ff_path:
+                                    _clip_asset = next(
+                                        (a for a in created_assets if a.get("asset_type") == "clip"),
+                                        None,
+                                    )
+                                    record_opening_frame_usage(
+                                        db, job.project_id, _shot.episode,
+                                        _ff_path,
+                                        asset_id=_clip_asset["asset_id"] if _clip_asset else None,
+                                    )
+                    except Exception:
+                        pass  # 连续性记录失败不影响生成结果
         db.commit()
         return {"ok": True, "assets": created_assets, "seed": seed}
     except Exception as e:  # 兜底：未预期异常按执行错误记录

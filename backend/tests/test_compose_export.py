@@ -28,9 +28,9 @@ def env(tmp_path, monkeypatch):
     media_dir = tmp_path / "media"
     media_dir.mkdir()
     import app.core.config as cfg_mod
-    cfg_mod.get_settings.cache_clear()
+    cfg_mod.clear_settings_cache()
     monkeypatch.setenv("DLAB_MEDIA_DIR", str(media_dir))
-    cfg_mod.get_settings.cache_clear()
+    cfg_mod.clear_settings_cache()
     client = TestClient(app)
     return client, tmp_path, new_session
 

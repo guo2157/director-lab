@@ -29,6 +29,9 @@ class Asset(Base):
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     validity: Mapped[str] = mapped_column(String(16), nullable=False, default="current", server_default="current")
     input_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 图片质量检查（P3）：pending=待检查 / passed=通过 / failed=失败；issues 记录具体问题
+    quality_status: Mapped[str | None] = mapped_column(String(16), nullable=True, default="pending", server_default="pending")
+    quality_issues: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 Index("ix_asset_project_type_validity", Asset.__table__.c.project_id, Asset.__table__.c.asset_type, Asset.__table__.c.validity)
@@ -80,6 +83,7 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued", server_default="queued")
     prompt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
     error_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -96,6 +100,7 @@ Index("ix_job_project_status", Job.__table__.c.project_id, Job.__table__.c.statu
 Index("ix_job_prompt_id", Job.__table__.c.prompt_id)
 Index("ix_job_status_type", Job.__table__.c.status, Job.__table__.c.job_type)
 Index("ix_job_created_at", Job.__table__.c.created_at)
+Index("ix_job_status_priority", Job.__table__.c.status, Job.__table__.c.priority)
 
 
 class ParseVersion(Base):
@@ -110,6 +115,9 @@ class ParseVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="candidate", server_default="candidate")
     diff_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # script-agent 口径锁定：首批解析成功后锁定总集数；script_hash 变化则口径失效
+    total_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    script_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

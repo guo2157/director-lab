@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.core.config import get_settings
+from app.core.config import get_settings, save_runtime_settings
 from app.core.database import get_db, engine
 from app.services import errors
 from app.integrations import comfyui_pool
@@ -32,12 +32,28 @@ def _mask_key(key: str) -> str:
     return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
+def _derive_provider(base_url: str) -> str:
+    """根据 base_url 推导提供商（兼容旧配置未持久化 llm_provider 时的回显）。"""
+    u = (base_url or "").lower()
+    if not u:
+        return ""
+    if "deepseek" in u:
+        return "deepseek"
+    if "openai" in u:
+        return "openai"
+    if "dashscope" in u or "aliyun" in u:
+        return "qwen"
+    if "11434" in u or "ollama" in u:
+        return "ollama"
+    return "custom"
+
+
 def _settings_to_dict(s) -> dict:
     return {
         "comfyui_base_url": s.comfyui_base_url,
         "comfyui_timeout_seconds": s.comfyui_timeout_seconds,
-        "comfyui_poll_interval_seconds": s.comfyui_poll_interval_seconds,
         "comfyui_job_timeout_seconds": s.comfyui_job_timeout_seconds,
+        "llm_provider": s.llm_provider or _derive_provider(s.llm_base_url),
         "llm_base_url": s.llm_base_url,
         "llm_api_key": _mask_key(s.llm_api_key),
         "llm_api_key_set": bool(s.llm_api_key),
@@ -48,7 +64,6 @@ def _settings_to_dict(s) -> dict:
         "job_max_attempts": s.job_max_attempts,
         "consistency_pass_threshold": s.consistency_pass_threshold,
         "consistency_review_threshold": s.consistency_review_threshold,
-        "video_poll_timeout_seconds": int(s.comfyui_job_timeout_seconds),
         "default_concurrency": s.render_concurrency,
     }
 
@@ -62,24 +77,22 @@ def get_settings_api() -> dict:
 @router.put("")
 def update_settings_api(payload: dict) -> dict:
     s = get_settings()
-    # 仅更新允许的字段（运行时不可持久化到 .env，返回更新后的视图）
-    result = _settings_to_dict(s)
+    # 真实写入 Settings 对象并持久化到 data/runtime_settings.json（重启后保留）
     updatable = [
         "comfyui_base_url", "comfyui_timeout_seconds", "comfyui_job_timeout_seconds",
-        "llm_base_url", "llm_model", "llm_timeout_seconds",
+        "llm_provider", "llm_base_url", "llm_model", "llm_timeout_seconds",
         "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
     ]
     for key in updatable:
         if key in payload:
-            result[key] = payload[key]
+            setattr(s, key, payload[key])
     if "llm_api_key" in payload:
         if payload["llm_api_key"] == "":
-            result["llm_api_key"] = ""
-            result["llm_api_key_set"] = False
-        elif payload["llm_api_key"] and not payload["llm_api_key"].startswith("*"):
-            result["llm_api_key"] = _mask_key(payload["llm_api_key"])
-            result["llm_api_key_set"] = True
-    return result
+            s.llm_api_key = ""
+        elif payload["llm_api_key"] and not str(payload["llm_api_key"]).startswith("*"):
+            s.llm_api_key = str(payload["llm_api_key"])
+    save_runtime_settings(s)
+    return _settings_to_dict(s)
 
 
 @router.post("/test-comfyui")
@@ -169,6 +182,56 @@ async def list_llm_models(payload: dict = None) -> dict:
 @router.get("/comfyui-instances")
 def list_comfyui_instances() -> list[dict]:
     return comfyui_pool.list_instances()
+
+
+@router.get("/comfyui-instances/status")
+def comfyui_instances_status() -> list[dict]:
+    """实例监控面板（D-23）：健康摘要 + 实时系统状态（显存/队列深度/在线状态）。"""
+    from app.integrations.comfyui import ComfyUIClient, ComfyUIError
+
+    result = []
+    for inst in comfyui_pool.list_instances():
+        url = inst["base_url"]
+        entry = {
+            "base_url": url,
+            "weight": inst["weight"],
+            "enabled": inst["enabled"],
+            "online": False,
+            "system_stats": None,
+            "queue_pending": None,
+            "queue_running": None,
+        }
+        if inst["enabled"]:
+            try:
+                client = ComfyUIClient(base_url=url, timeout=5.0)
+                stats = client.test_connection()
+                entry["online"] = True
+                entry["system_stats"] = {
+                    "system": stats.get("system", {}),
+                    "devices": [
+                        {
+                            "name": d.get("name"),
+                            "type": d.get("type"),
+                            "vram_total": d.get("vram_total"),
+                            "vram_free": d.get("vram_free"),
+                        }
+                        for d in stats.get("devices", [])
+                    ],
+                }
+                queue = client.get_queue()
+                entry["queue_pending"] = len(queue.get("queue_pending", []))
+                entry["queue_running"] = len(queue.get("queue_running", []))
+            except (ComfyUIError, Exception):
+                pass
+        result.append(entry)
+    # 合并健康熔断状态
+    health = {h["base_url"]: h for h in comfyui_pool.get_health_summary()}
+    for entry in result:
+        h = health.get(entry["base_url"])
+        if h:
+            entry["fail_count"] = h["fail_count"]
+            entry["circuit_open"] = h["circuit_open"]
+    return result
 
 
 @router.put("/comfyui-instances")
@@ -371,7 +434,13 @@ def health_check() -> dict:
     except Exception:
         disk_ok = True
 
-    status = "healthy" if all([db_ok, comfyui_ok, disk_ok]) else "degraded"
+    # 数据库不可用视为 down；其余任一依赖异常为 degraded（API.md：healthy/degraded/down 三态）
+    if not db_ok:
+        status = "down"
+    elif all([comfyui_ok, disk_ok]):
+        status = "healthy"
+    else:
+        status = "degraded"
     return {
         "status": status,
         "database": "ok" if db_ok else "error",

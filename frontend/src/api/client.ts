@@ -74,7 +74,7 @@ function toApiError(err: AxiosError<ApiErrorBody>): ApiError {
     return new ApiError(
       err.response.status,
       `http_${err.response.status}`,
-      err.message,
+      httpStatusMessage(err.response.status),
       null,
     )
   }
@@ -82,6 +82,37 @@ function toApiError(err: AxiosError<ApiErrorBody>): ApiError {
     return new ApiError(0, 'timeout', '请求超时，请稍后重试')
   }
   return new ApiError(0, 'network_error', '网络错误，请检查连接后重试')
+}
+
+/** 按 HTTP 状态码生成可读的中文错误原因（不透出英文错误码） */
+function httpStatusMessage(status: number): string {
+  switch (status) {
+    case 400:
+      return '请求参数有误，请检查输入后重试'
+    case 401:
+      return '未授权或凭证无效，请检查 API Key 等配置'
+    case 403:
+      return '没有权限执行此操作'
+    case 404:
+      return '请求的资源不存在，可能已被删除或地址有误'
+    case 409:
+      return '操作与当前状态冲突，请刷新页面后重试'
+    case 413:
+      return '上传内容过大，请减小文件后重试'
+    case 422:
+      return '请求参数校验失败，请检查输入后重试'
+    case 429:
+      return '请求过于频繁，请稍后重试'
+    case 500:
+      return '服务器内部错误，请稍后重试；若持续出现请查看后端日志或联系管理员'
+    case 502:
+    case 504:
+      return '后端服务无响应，请确认服务是否正常运行'
+    case 503:
+      return '服务暂不可用，可能正在维护或重启，请稍后重试'
+    default:
+      return `请求失败（HTTP ${status}），请稍后重试`
+  }
 }
 
 /**

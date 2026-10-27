@@ -35,6 +35,9 @@ class ScriptEstimate(Base):
     algorithm_version: Mapped[str] = mapped_column(String(64), nullable=False)
     result: Mapped[dict] = mapped_column(JSON, nullable=False)
     user_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 确认时锁定的总集数快照：确认后不可修改，保证多轮解析口径一致
+    total_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
@@ -67,6 +70,8 @@ class Character(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.character_id)
     project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 归一化名（去括号别名/空白/小写）：跨集跨轮解析近名去重匹配用
+    normalized_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     traits: Mapped[str | None] = mapped_column(Text, nullable=True)
     appearance: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -85,6 +90,8 @@ class Scene(TimestampMixin, Base):
     episode: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 归一化名（地点+时段复合键，保留括号区分子场景）：场景去重匹配用
+    normalized_name: Mapped[str | None] = mapped_column(String(220), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     time_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     baseline_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -111,6 +118,8 @@ class Prop(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.prop_id)
     project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 归一化名（去括号别名/空白/小写）：跨集跨轮解析近名去重匹配用
+    normalized_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     appearance: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_key_prop: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
@@ -165,3 +174,31 @@ class Shot(TimestampMixin, Base):
 from sqlalchemy import Index  # noqa: E402
 
 Index("ix_shot_scene_episode", Shot.__table__.c.scene_id, Shot.__table__.c.episode)
+
+
+class EpisodeParseRecord(Base):
+    """集级解析记录：按『集 × 资产类型』双粒度跟踪解析状态。
+
+    唯一键 (project_id, episode_no, asset_type)；Job 仍是任务入口，本表为集级明细。
+    状态机：pending → running → succeeded/failed；failed 可重试回 running。
+    """
+
+    __tablename__ = "episode_parse_record"
+    __table_args__ = (
+        UniqueConstraint("project_id", "episode_no", "asset_type", name="uq_epr_project_episode_type"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.episode_parse_record_id)
+    project_id: Mapped[str] = mapped_column(String(32), ForeignKey("project.id"), nullable=False, index=True)
+    episode_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 资产类型：characters/scenes/props/shots（对应解析输出的实体分组）
+    asset_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 乐观锁版本：并发提交终态校验用
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    asset_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parse_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

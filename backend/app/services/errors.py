@@ -53,8 +53,6 @@ def parse_version_conflict(message: str = "当前解析版本已变化，请刷�
     return biz_error(code="parse_version_conflict", http=409, message=message)
 def job_not_found() -> HTTPException:
     return biz_error(code="job_not_found", http=404, message="任务不存在")
-def invalid_request(message: str) -> HTTPException:
-    return biz_error(code="invalid_request", http=400, message=message)
 
 
 def invalid_request(message: str) -> HTTPException:

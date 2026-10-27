@@ -11,6 +11,7 @@
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
@@ -29,10 +30,56 @@ def _handle_signal(signum, frame):
     _RUNNING = False
 
 
+def _reconcile_submission_unknown(db: Session) -> int:
+    """submission_unknown 自动对账（D-23，§5.4 优先续跑）：
+    - 查远端 history：有结果 → 置回 queued 续跑（executor 会走 submission_unknown 分支续跑下载）
+    - 无结果且队列中无该 prompt_id → 确认未提交成功，重置 queued 安全重提
+    - 无结果但仍在远端队列 → 保持 submission_unknown，下轮启动再对账
+    返回对账处理数。"""
+    from app.integrations.comfyui import ComfyUIClient, ComfyUIError
+
+    reconciled = 0
+    unknown_jobs = db.query(Job).filter(
+        Job.status == "submission_unknown", Job.prompt_id.isnot(None)
+    ).all()
+    for job in unknown_jobs:
+        snapshot = job.input_snapshot or {}
+        base_url = snapshot.get("comfyui_instance")
+        if not base_url:
+            continue
+        try:
+            client = ComfyUIClient(base_url=base_url, timeout=10.0)
+            history = client.get_history(job.prompt_id)
+        except (ComfyUIError, Exception):
+            continue  # 实例不可达：保持现状，下轮再对账
+        if history is not None:
+            # 远端有结果：保持 submission_unknown，executor 续跑分支直接下载产物（D-23 修复）
+            # 不置回 queued，避免重新提交浪费算力
+            reconciled += 1
+            continue
+        # 远端无结果：检查是否仍在队列中
+        try:
+            queue = client.get_queue()
+        except (ComfyUIError, Exception):
+            continue
+        in_queue = any(
+            item and len(item) > 1 and item[1] == job.prompt_id
+            for item in (queue.get("queue_pending", []) + queue.get("queue_running", []))
+        )
+        if not in_queue:
+            # 确认未提交成功：重置 queued 安全重提
+            job.status = "queued"
+            job.prompt_id = None
+            job.submission_state = "not_submitted"
+            reconciled += 1
+    db.commit()
+    return reconciled
+
+
 def _recover_interrupted_jobs(db: Session) -> int:
     """启动恢复：将 worker 宕机时残留的 running/submission_unknown 任务重置为 queued 续跑。
     规则（§5.4）：优先续跑，确认远端无该任务后再重跑；此处采用保守策略——
-    有 prompt_id 的 submission_unknown 保留待对账（不自动重提），running 重置为 queued。
+    running 重置为 queued；submission_unknown 交由 _reconcile_submission_unknown 自动对账。
     """
     recovered = 0
     stale = db.query(Job).filter(Job.status == "running").all()
@@ -43,12 +90,56 @@ def _recover_interrupted_jobs(db: Session) -> int:
     return recovered
 
 
+def _recover_stalled_llm_jobs(db: Session, active_job_ids: set) -> int:
+    """运行期自愈：回收长时间无进展的 LLM 任务（script_agent / parse）。
+
+    背景：LLM 流式中途停摆时任务线程可能永久阻塞，串行队列被堵死。
+    llm.py 的流式空闲超时是第一道防线，此处做第二道兜底：
+    running 且 started_at 早于 llm_job_stall_seconds 之前、且本进程没有对应执行线程的任务，
+    按重试上限决定重新入队（未达上限）或标记失败（已达上限）。
+    """
+    settings = get_settings()
+    stall_seconds = float(getattr(settings, "llm_job_stall_seconds", 300.0) or 300.0)
+    max_attempts = int(getattr(settings, "job_max_attempts", 3) or 3)
+    deadline = datetime.now() - timedelta(seconds=stall_seconds)
+    stale = (
+        db.query(Job)
+        .filter(
+            Job.status == "running",
+            Job.job_type.in_(("script_agent", "parse")),
+            Job.started_at.isnot(None),
+            Job.started_at < deadline,
+        )
+        .all()
+    )
+    recovered = 0
+    for job in stale:
+        if job.id in active_job_ids:
+            continue
+        if (job.attempts or 0) < max_attempts:
+            job.status = "queued"
+        else:
+            job.status = "failed"
+            job.error_code = "job_stalled"
+            job.error_msg = f"任务运行超过 {stall_seconds:.0f} 秒无进展，已达重试上限"
+            job.finished_at = datetime.now()
+        recovered += 1
+    if recovered:
+        db.commit()
+    return recovered
+
+
 def _next_job(db: Session) -> Job | None:
-    """按入队顺序取下一个 queued 任务（先进先出）。"""
+    """按优先级取下一个 queued 任务：priority 降序，同优先级按入队顺序（先进先出）。
+    重试任务（attempts>0）在调度时提升优先级（+100），保障失败任务尽快重跑（D-22）。"""
+    from sqlalchemy import case
     return (
         db.query(Job)
         .filter(Job.status == "queued")
-        .order_by(Job.created_at)
+        .order_by(
+            (Job.priority + case((Job.attempts > 0, 100), else_=0)).desc(),
+            Job.created_at,
+        )
         .first()
     )
 
@@ -72,6 +163,9 @@ def _execute_job(job_id: str, job_type: str) -> dict:
     """在工作线程中执行单个任务（每线程独立数据库会话由执行器内部创建）。"""
     if job_type in _GENERATE_TYPES:
         return execute_generate_job(job_id)
+    if job_type == "script_agent":
+        from app.services.script_agent import execute_script_agent_job
+        return execute_script_agent_job(job_id)
     if job_type == "parse":
         return execute_parse_job(job_id)
     if job_type == "compose":
@@ -102,9 +196,16 @@ def run_worker(once: bool = False) -> None:
     recovered = _recover_interrupted_jobs(db)
     if recovered:
         print(f"[worker] 恢复 {recovered} 个中断任务为 queued")
+    reconciled = _reconcile_submission_unknown(db)
+    if reconciled:
+        print(f"[worker] 对账 {reconciled} 个 submission_unknown 任务")
     db.close()
+    # 启动 ComfyUI 实例健康心跳（熔断机制后台探测，幂等）
+    comfyui_pool.start_heartbeat()
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dlab-worker")
-    in_flight: set = set()
+    # future -> job_id 映射：运行期失联回收时据此排除本进程正在执行的任务
+    in_flight: dict = {}
+    last_stall_check = 0.0
     try:
         while _RUNNING:
             # 每轮重算并发度（实例配置运行时生效）；线程池按需扩容
@@ -112,11 +213,18 @@ def run_worker(once: bool = False) -> None:
             if pool._max_workers != concurrency:  # noqa: SLF001
                 pool.shutdown(wait=False)
                 pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="dlab-worker")
-                in_flight = set()
+                # 旧线程池的在途任务仍保留在 in_flight，避免被失联回收误判
             # 回收已完成任务
-            in_flight = {f for f in in_flight if not f.done()}
+            in_flight = {f: jid for f, jid in in_flight.items() if not f.done()}
             db = SessionLocal()
             try:
+                # 运行期自愈（节流 30 秒）：LLM 类任务长时间无进展且本进程无执行线程时重新入队
+                now_ts = time.monotonic()
+                if now_ts - last_stall_check >= 30.0:
+                    last_stall_check = now_ts
+                    stalled = _recover_stalled_llm_jobs(db, set(in_flight.values()))
+                    if stalled:
+                        print(f"[worker] 回收 {stalled} 个长时间无进展的 LLM 任务为 queued")
                 job = _next_job(db)
             finally:
                 db.close()
@@ -127,7 +235,7 @@ def run_worker(once: bool = False) -> None:
                 continue
             print(f"[worker] 调度任务 {job.id} ({job.job_type})，并发={concurrency}，在途={len(in_flight)}")
             fut = pool.submit(_execute_job, job.id, job.job_type)
-            in_flight.add(fut)
+            in_flight[fut] = job.id
             if once:
                 # 测试模式：等待该任务完成后结束（保持旧串行语义）
                 fut.result()
@@ -135,7 +243,7 @@ def run_worker(once: bool = False) -> None:
             # 并发已满时等待任一任务完成再继续取任务，避免任务在内存中堆积
             while len(in_flight) >= concurrency and _RUNNING:
                 time.sleep(0.2)
-                in_flight = {f for f in in_flight if not f.done()}
+                in_flight = {f: jid for f, jid in in_flight.items() if not f.done()}
         # 优雅停止：等待在途任务完成
         for f in in_flight:
             try:

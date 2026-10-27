@@ -25,6 +25,23 @@ DEFAULT_SHOTS_PER_EPISODE = 9
 _DIALOGUE_RE = re.compile(r'["“](.*?)["”]|[:：]\s*["“](.*?)["”]', re.DOTALL)
 
 
+# --- 归一化去重（两级归一化策略：精确名 → 归一化名） ---
+def normalize_entity_name(name: str) -> str:
+    """角色/道具归一化：去成对中/英文括号内容（定位/别名）→ 去空白 → 小写。"""
+    s = (name or "").strip()
+    s = re.sub(r'[（(][^（）()]*[)）]', "", s)
+    s = re.sub(r'[（(].*$', "", s)
+    s = re.sub(r"[\s\u3000]+", "", s)
+    return s.lower()
+
+
+def normalize_scene_name(title: str, time_note) -> str:
+    """场景归一化：地点+时段复合键（保留括号区分子场景）。"""
+    t = re.sub(r"[\s\u3000]+", "", (title or "")).lower()
+    tn = re.sub(r"[\s\u3000]+", "", (time_note or "")).lower()
+    return t + "|" + tn if tn else t
+
+
 def estimate_script(text: str, *, episode_duration_target: int = DEFAULT_EPISODE_DURATION,
                     max_episodes_per_batch: int = 10) -> dict:
     """评估剧本可制作集数。返回评估对象（API.md §5 estimate 响应结构）。
@@ -94,6 +111,8 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 8. 情绪设计：每镜情绪曲线给出起点情绪、触发事件、转折秒数、终点情绪与外化表现，不只标情绪词。
 9. 单集节奏：保住开场钩子、冲突升级、情绪释放、结尾悬念四节拍。episodes 每项含 episode、goal、rhythm_curve、cliffhanger_type（信息缺失/危机逼近/反转揭示/关系破裂）、hook_to_next、locked（默认 false）。
 10. 动作节拍：复合动作拆成可独立拍摄节拍，单镜最多 3 个，单节拍不超 2 秒。
+11. image_prompt 必须按结构化分段模板输出（PROMPTS.md §5.1），固定分段依次为：任务（任务类型，如多参考图人物一致性生成）、参考图职责（仅描述实际注入的参考图：出场角色定妆图在前、所属场景基准图在后，逐行对应；禁止描述道具参考图，道具一律写入目标画面的画面描述中）、美术风格（固定为：童话绘本写实风格，柔和饱和色彩，温暖光照，细腻质感，全图统一）、目标画面（主体、动作、构图、景别、光线、质感，一段连续描述）、必须保持（跨图一致性要求，逐项列出 3–6 项，聚焦身份与外观）、允许变化（可自由发挥项，可省略）、禁止（人物畸形、换脸、无关元素、水印等，逐项列出）、输出（产物形态与清晰度要求）。禁止输出无分段的自由文本。
+12. video_prompt 必须按状态衔接结构模板输出（PROMPTS.md §5.2），固定分段依次为：任务（生成方式 T2VA/I2VA/Ref2VA 与镜号）、参考图职责（按连线顺序以 <Picture N> 语法引用：非首镜为 <Picture 1> 上一镜头尾帧、<Picture 2> 当前镜头分镜图；每集首镜无上一镜头尾帧，仅引用 <Picture 1> 当前镜头分镜图）、美术风格（固定为：童话绘本写实风格，柔和饱和色彩，温暖光照，细腻质感，全图统一）、身份约束（同一人物面部特征、发型、服装、体型与配饰一致；道具掉落、损毁、易手等状态变化必须明确道具当前位置与时机，禁止与剧情矛盾的默认穿戴）、开场状态（六项枚举：人物位置/身体姿态/视线方向/道具状态/情绪状态/空间与机位，与 start_state 同源）、剧情与动作（本镜头剧情一句话、人物动作按 beats 逐拍、情绪触发与走向、镜头运动与 camera_movement 一致、画面衔接从 <Picture 1> 过渡到 <Picture 2>（首镜从开场状态过渡到 <Picture 1> 分镜图））、目标状态（六项枚举，与 end_state 同源）、必须保持（3–6 项，聚焦身份、服装、道具与空间关系）、允许变化（可省略）、禁止（换脸、服装跳变、道具消失、多余肢体、文字水印等）、对白与声音（台词与 dialogue 一致、环境声、动作音效、背景音乐）、输出（时长按 duration、画幅与质量要求）。禁止输出无分段的自由文本。
 
 按用户指定的集范围解析，范围外的集不落库。只输出 JSON。""")
 
@@ -218,6 +237,73 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
     return result
 
 
+def _assemble_video_prompt(sh: dict, is_first: bool = False) -> str:
+    """video_prompt 为空时按 PROMPTS.md §5.2 状态衔接模板拼装（系统侧兜底）。
+    从 shot 结构化字段（start_state/end_state/beats/camera_movement/dialogue 等）生成，
+    保证缺失 LLM 提示词的镜头仍有可用的结构化视频提示词。
+    """
+    def _state_lines(state) -> str:
+        if not state:
+            return "（未提供，按分镜图与剧情推断）"
+        if isinstance(state, dict):
+            return "\n".join(f"{k}：{v}" for k, v in state.items())
+        return str(state)
+    beats = sh.get("beats") or []
+    beat_desc = "；".join(
+        f"第{i + 1}拍 {b.get('action') or ''}（{b.get('start_pose') or ''} → {b.get('end_pose') or ''}，约{b.get('duration') or 2}秒）"
+        for i, b in enumerate(beats) if isinstance(b, dict)
+    ) or "（无节拍，按剧情自然表演）"
+    dialogue = (sh.get("dialogue") or "").strip()
+    sound = "；".join(x for x in [dialogue, sh.get("soundscape"), sh.get("bgm")] if x) or "（无对白，环境声按场景）"
+    if is_first:
+        # 每集首镜：无上一镜头尾帧，仅注入 1 张分镜图，按连线顺序为 <Picture 1>
+        lines = [
+            f"任务：Ref2VA 第 {sh.get('episode') or 1}-{sh.get('seq') or 1} 镜",
+            "【<Picture 1>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。",
+            "【身份约束】参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。",
+            "开场状态（按剧情与分镜图推断）：",
+            _state_lines(sh.get("start_state")),
+            "剧情与动作：",
+            f"本镜头剧情：{sh.get('shot_purpose') or '（按分镜图）'}",
+            f"人物动作：{beat_desc}",
+            f"镜头运动：{sh.get('camera_movement') or '固定'}",
+            "画面衔接：开场按剧情自然进入当前镜头分镜图的构图与动作。",
+            "目标状态（对齐当前镜头分镜图）：",
+            _state_lines(sh.get("end_state")),
+            "必须保持：",
+            "1. 人物面部特征、发型、服装与配饰一致",
+            "2. 场景布局与光线色调连续",
+            "3. 道具位置与持有状态连续",
+            "禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。",
+            f"对白与声音：{sound}",
+            f"输出：时长 {sh.get('duration') or 10} 秒，按项目画幅，高质量输出。",
+        ]
+        return "\n".join(lines)
+    lines = [
+        f"任务：Ref2VA 第 {sh.get('episode') or 1}-{sh.get('seq') or 1} 镜",
+        "【<Picture 1>：上一镜头尾帧】本镜头开始时的连续状态基准：人物位置、站姿、朝向、表情、视线、道具与空间关系。",
+        "【<Picture 2>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。",
+        "【身份约束】两张参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。",
+        "开场状态（承接上一镜头尾帧 <Picture 1>）：",
+        _state_lines(sh.get("start_state")),
+        "剧情与动作：",
+        f"本镜头剧情：{sh.get('shot_purpose') or '（按分镜图）'}",
+        f"人物动作：{beat_desc}",
+        f"镜头运动：{sh.get('camera_movement') or '固定'}",
+        "画面衔接：开场保持 <Picture 1> 的位置、姿态、视线与道具状态，随动作自然过渡到 <Picture 2> 的构图与动作。",
+        "目标状态（对齐 <Picture 2>）：",
+        _state_lines(sh.get("end_state")),
+        "必须保持：",
+        "1. 人物面部特征、发型、服装与配饰一致",
+        "2. 场景布局与光线色调连续",
+        "3. 道具位置与持有状态连续",
+        "禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。",
+        f"对白与声音：{sound}",
+        f"输出：时长 {sh.get('duration') or 10} 秒，按项目画幅，高质量输出。",
+    ]
+    return "\n".join(lines)
+
+
 # --- 候选解析确认后的级联落库（API.md §5 parse-version confirm / PROMPTS.md §3 集级合并规则） ---
 def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, episode_count: int,
                        current_scene_ids: list | None = None) -> dict:
@@ -227,7 +313,7 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     分集规划按锁定集规则合并：locked=true 保留原规划，locked=false 用新解析覆盖。
     返回落库统计。调用方负责事务提交。
     """
-    from app.models import Character, Prop, Scene, SceneEpisode, Shot
+    from app.models import AssetRef, Character, Job, Prop, Scene, SceneEpisode, Shot
     from app.models import ids as id_gen
     from datetime import datetime, timezone
 
@@ -235,13 +321,17 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     stats = {"characters": 0, "props": 0, "scenes": 0, "shots_created": 0,
              "shots_updated": 0, "shots_deleted": 0}
 
-    # 1. 角色按名幂等 upsert
+    # 1. 角色按名幂等 upsert（精确名 → 归一化名二级匹配）
     char_map = {c.name: c for c in db.query(Character).filter(Character.project_id == project.id).all()}
+    char_norm_map = {
+        (c.normalized_name or normalize_entity_name(c.name)): c
+        for c in char_map.values()
+    }
     for c in parse_result.get("characters") or []:
         name = (c.get("name") or "").strip()
         if not name:
             continue
-        existing = char_map.get(name)
+        existing = char_map.get(name) or char_norm_map.get(normalize_entity_name(name))
         if existing:
             existing.description = c.get("description") or existing.description
             _t = c.get("traits")
@@ -251,29 +341,37 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             _t = c.get("traits")
             _traits = ", ".join(_t) if isinstance(_t, list) else _t
             new_c = Character(id=id_gen.character_id(), project_id=project.id, name=name,
+                              normalized_name=normalize_entity_name(name),
                               description=c.get("description"), traits=_traits,
                               appearance=c.get("appearance"))
             db.add(new_c)
             db.flush()
             char_map[name] = new_c
+            char_norm_map[new_c.normalized_name] = new_c
             stats["characters"] += 1
 
-    # 2. 道具按名幂等 upsert
+    # 2. 道具按名幂等 upsert（精确名 → 归一化名二级匹配）
     prop_map = {p.name: p for p in db.query(Prop).filter(Prop.project_id == project.id).all()}
+    prop_norm_map = {
+        (p.normalized_name or normalize_entity_name(p.name)): p
+        for p in prop_map.values()
+    }
     for pr in parse_result.get("props") or []:
         name = (pr.get("name") or "").strip()
         if not name:
             continue
-        existing = prop_map.get(name)
+        existing = prop_map.get(name) or prop_norm_map.get(normalize_entity_name(name))
         if existing:
             existing.description = pr.get("description") or existing.description
             existing.appearance = pr.get("appearance") or existing.appearance
         else:
             new_p = Prop(id=id_gen.prop_id(), project_id=project.id, name=name,
+                         normalized_name=normalize_entity_name(name),
                          description=pr.get("description"), appearance=pr.get("appearance"))
             db.add(new_p)
             db.flush()
             prop_map[name] = new_p
+            prop_norm_map[new_p.normalized_name] = new_p
             stats["props"] += 1
 
     # 3. 分集规划合并（locked=true 保留）
@@ -291,26 +389,34 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
         new_plan[ep_no] = e
     project.episode_plan = [new_plan[k] for k in sorted(new_plan)]
 
-    # 4. 场景与镜头落库
+    # 4. 场景与镜头落库（场景按「标题+集」精确匹配 → 归一化「地点+时段」二级匹配）
     scene_title_map = {}
+    scene_norm_map = {}
     for s in db.query(Scene).filter(Scene.project_id == project.id).all():
         scene_title_map[(s.title, s.episode)] = s
+        scene_norm_map[(s.normalized_name or normalize_scene_name(s.title, s.time_note), s.episode)] = s
     current_ids = set(current_scene_ids or [])
     touched_shot_keys = set()  # (scene_id, episode, seq) 本次解析覆盖的镜头
+    _seen_episodes = set()  # 已出现镜头的集号，用于判定每集首镜（无上一镜头尾帧）
 
     for sc in parse_result.get("scenes") or []:
         ep = sc.get("episode")
         title = (sc.get("title") or "").strip() or f"场景{sc.get('episode')}"
         scene = scene_title_map.get((title, ep))
         if scene is None:
+            _norm_key = (normalize_scene_name(title, sc.get("time_note")), int(ep or 1))
+            scene = scene_norm_map.get(_norm_key)
+        if scene is None:
             max_seq = (db.query(Scene.seq).filter(Scene.project_id == project.id)
                        .order_by(Scene.seq.desc()).first())
             scene = Scene(id=id_gen.scene_id(), project_id=project.id, episode=int(ep or 1),
                           seq=(max_seq[0] if max_seq else 0) + 1, title=title,
+                          normalized_name=normalize_scene_name(title, sc.get("time_note")),
                           description=sc.get("description"), time_note=sc.get("time_note"))
             db.add(scene)
             db.flush()
             scene_title_map[(title, ep)] = scene
+            scene_norm_map[(scene.normalized_name, scene.episode)] = scene
             stats["scenes"] += 1
         else:
             scene.description = sc.get("description") or scene.description
@@ -332,6 +438,8 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             if seq is None:
                 continue
             ep_i = int(sh.get("episode") or ep or 1)
+            _is_first_shot = ep_i not in _seen_episodes  # 每集首镜：仅引用 <Picture 1> 分镜图
+            _seen_episodes.add(ep_i)
             key = (scene.id, ep_i, int(seq))
             touched_shot_keys.add(key)
             # character_id 名称 → 实体 ID 二次映射
@@ -343,7 +451,8 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                 character_id=char_id, dialogue=sh.get("dialogue"),
                 dialogue_segments=sh.get("dialogue_segments"),
                 shot_kind=sh.get("shot_kind") or "visual",
-                image_prompt=sh.get("image_prompt"), video_prompt=sh.get("video_prompt"),
+                image_prompt=sh.get("image_prompt"),
+                video_prompt=sh.get("video_prompt") or _assemble_video_prompt(sh, _is_first_shot),
                 shot_type=sh.get("shot_type"), camera_angle=sh.get("camera_angle"),
                 camera_movement=sh.get("camera_movement"), transition=sh.get("transition"),
                 shot_purpose=sh.get("shot_purpose"), emotion=sh.get("emotion") or "neutral",
@@ -376,6 +485,10 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
         )
         for s in stale_shots:
             if (s.scene_id, s.episode, s.seq) not in touched_shot_keys:
+                # 解除引用：Job.shot_id 置 NULL 保留任务审计记录；
+                # AssetRef.shot_id 不可空，随旧镜头一并删除
+                db.query(Job).filter(Job.shot_id == s.id).update({"shot_id": None})
+                db.query(AssetRef).filter(AssetRef.shot_id == s.id).delete()
                 db.delete(s)
                 stats["shots_deleted"] += 1
     return stats

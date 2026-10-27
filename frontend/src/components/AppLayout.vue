@@ -4,6 +4,7 @@ import logoUrl from '@/assets/logo.svg'
 import { useRoute, useRouter } from 'vue-router'
 import { NLayout, NLayoutHeader, NLayoutContent, NMenu } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
+import ProjectProgressRail from '@/components/ProjectProgressRail.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -12,6 +13,7 @@ const projectId = computed(() => route.params.id as string | undefined)
 const isProjectPage = computed(() => Boolean(projectId.value))
 
 const topMenuOptions: MenuOption[] = [
+  { label: '导演台', key: 'director' },
   { label: '项目', key: 'projects' },
   { label: '任务中心', key: 'jobs' },
   { label: '设置', key: 'settings' },
@@ -19,8 +21,8 @@ const topMenuOptions: MenuOption[] = [
 
 const projectMenuOptions: MenuOption[] = [
   { label: '剧本', key: 'script' },
-  { label: '分镜看板', key: 'storyboard' },
   { label: '资产库', key: 'assets' },
+  { label: '分镜看板', key: 'storyboard' },
   { label: '合成与导出', key: 'compose' },
 ]
 
@@ -55,7 +57,12 @@ const menuOptions = computed(() => (isProjectPage.value ? projectMenuOptions : t
       </div>
     </n-layout-header>
     <n-layout-content class="app-content">
-      <slot />
+      <div class="content-body">
+        <ProjectProgressRail v-if="isProjectPage && projectId" :project-id="projectId" />
+        <div class="content-main">
+          <slot />
+        </div>
+      </div>
     </n-layout-content>
   </n-layout>
 </template>
@@ -109,6 +116,14 @@ const menuOptions = computed(() => (isProjectPage.value ? projectMenuOptions : t
   height: calc(100vh - var(--app-header-height, 56px));
   height: calc(100dvh - var(--app-header-height, 56px));
   overflow-y: auto;
+}
+.content-body {
+  display: flex;
+  min-height: 100%;
+}
+.content-main {
+  flex: 1;
+  min-width: 0;
 }
 
 @media (max-width: 768px) {

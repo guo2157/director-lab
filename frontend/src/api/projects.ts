@@ -1,7 +1,7 @@
 import { get, post, patch, del } from './client'
 import type { Paginated, PaginationParams } from '@/types/common'
 import type { Project, CreateProjectPayload, UpdateProjectPayload } from '@/types/project'
-import type { ScriptVersion, ScriptEstimate, ParseVersion, CreateScriptVersionPayload, ParsePayload } from '@/types/script'
+import type { ScriptVersion, ScriptEstimate, ParseVersion, CreateScriptVersionPayload, ParsePayload, ParseStatus } from '@/types/script'
 
 /** 项目列表（分页） */
 export function listProjects(params?: PaginationParams & { status?: string; keyword?: string }) {
@@ -62,12 +62,38 @@ export function confirmEstimate(
   return post<ScriptEstimate>(`/projects/${projectId}/estimates/${estimateId}/confirm`, payload)
 }
 
-/** 解析剧本（生成 candidate 候选版本，返回 job_id，SSE job.finished 通知；text/episode_start/episode_count 必填） */
+/** 解析剧本（生成 candidate 候选版本，返回 job_id/status，SSE job.finished 通知；episode_count/episode_end 二选一） */
 export function parseScript(projectId: string, payload: ParsePayload) {
-  return post<{ job_id: string; parse_version: ParseVersion }>(`/projects/${projectId}/parse`, payload)
+  return post<{ job_id: string; status: string }>(`/projects/${projectId}/parse`, payload)
+}
+/** 剧本一体化分析（Agent）：评估+解析合并，集数由 Agent 决定，无需用户确认集数 */
+export function runScriptAgent(projectId: string, scriptVersionId: string, text: string, episodeStart?: number) {
+  return post<{ job_id: string; status: string }>(`/projects/${projectId}/script-agent`, {
+    script_version_id: scriptVersionId,
+    text,
+    ...(episodeStart && episodeStart > 1 ? { episode_start: episodeStart } : {}),
+  })
+}
+/** Agent 分析状态查询（job + 口径 + 集级记录） */
+export function getScriptAgentStatus(projectId: string) {
+  return get<{
+    job: { id: string; status: string; error_code: string | null; error_msg: string | null; result: Record<string, unknown> | null } | null
+    scope: { total_episodes: number | null; script_hash: string | null; parse_version_id: string | null; parse_version_status: string | null }
+    records: Array<{ episode_no: number; status: string; asset_count: number | null; error_msg: string | null }>
+  }>(`/projects/${projectId}/script-agent/status`)
+}
+/** 集级解析状态查询（集数网格视图数据源） */
+export function getParseStatus(projectId: string) {
+  return get<ParseStatus>(`/projects/${projectId}/parse/status`)
+}
+/** 重试失败的集级解析记录（仅 failed 集重新入队） */
+export function retryParse(projectId: string) {
+  return post<{ job_id: string; retried_episodes: number[] }>(`/projects/${projectId}/parse/retry`)
 }
 
 /** 确认解析版本（乐观锁，冲突返回 409 parse_version_conflict） */
-export function confirmParseVersion(projectId: string, parseVersionId: string) {
-  return post<ParseVersion>(`/projects/${projectId}/parse-versions/${parseVersionId}/confirm`)
+export function confirmParseVersion(projectId: string, parseVersionId: string, currentParseVersionId?: string | null) {
+  return post<ParseVersion>(`/projects/${projectId}/parse-versions/${parseVersionId}/confirm`, {
+    current_parse_version_id: currentParseVersionId ?? null,
+  })
 }

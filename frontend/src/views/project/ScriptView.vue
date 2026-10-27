@@ -1,68 +1,27 @@
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import {
-  NButton,
-  NCollapse,
-  NCollapseItem,
-  NEmpty,
-  NSpin,
-  NTag,
-  useDialog,
-  useMessage,
-} from 'naive-ui'
-import {
-  confirmEstimate,
-  confirmParseVersion,
-  createScriptVersion,
-  estimateScript,
-  getCurrentScript,
-  getProject,
-  parseScript,
-} from '@/api/projects'
-import { listCharacters, listProps, listScenes, mergeCharacters } from '@/api/script'
-import { generatePropAnchor } from '@/api/storyboard'
-import { getJob } from '@/api/jobs'
-import type { Character, Prop, Scene, ScriptEstimate, ScriptVersion, Shot } from '@/types/script'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useQuery, useMutation } from '@tanstack/vue-query'
+import { NButton, useMessage } from 'naive-ui'
+import { createScriptVersion, getCurrentScript, getProject, runScriptAgent } from '@/api/projects'
+import { useScriptFlowStore } from '@/stores/scriptFlow'
+import FlowNav from '@/components/FlowNav.vue'
 
-/* ---------- 路由与基础 ---------- */
 const route = useRoute()
-const dialog = useDialog()
+const router = useRouter()
 const message = useMessage()
-const queryClient = useQueryClient()
+const flow = useScriptFlowStore()
 const projectId = computed(() => String(route.params.id ?? ''))
-
 const MAX_CHARS = 50000
 
-/* ---------- 本地扩展类型 ---------- */
-interface SceneWithShots extends Scene {
-  shots?: Shot[]
-}
-interface DiffItem {
-  title?: string
-  dialogue?: string
-  seq?: number
-  episode?: number
-}
-interface DiffSummary {
-  added_shots?: DiffItem[] | number
-  changed_shots?: DiffItem[] | number
-  deleted_shots?: DiffItem[] | number
-  added_episodes?: number[] | number
-  changed_episodes?: number[] | number
-  deleted_episodes?: number[] | number
-}
-interface ParseJobResult {
-  parse_version_id?: string
-  project_analysis?: { summary?: string; theme?: string }
-  characters?: Array<{ name: string; description?: string }>
-  props?: Array<{ name: string; description?: string }>
-  scenes?: Array<{ episode?: number; title: string; description?: string }>
-  shots?: Array<Record<string, unknown>>
-  episodes?: Array<{ episode: number; title?: string }>
-  diff_summary?: DiffSummary
-}
+/* 项目切换时重置流程状态（防止其他项目残留的剧本/评估状态误显示对号） */
+watch(
+  projectId,
+  (id) => {
+    if (id) flow.ensureProject(id)
+  },
+  { immediate: true },
+)
 
 function errMsg(e: unknown): string {
   if (e && typeof e === 'object' && 'message' in e) {
@@ -80,19 +39,17 @@ const { data: projectData } = useQuery({
 })
 const project = computed(() => projectData.value)
 
-/* ---------- 左侧编辑器（含高亮镜像层） ---------- */
+/* ---------- 编辑器 ---------- */
 const text = ref('')
 const editorRef = ref<HTMLTextAreaElement | null>(null)
 const mirrorRef = ref<HTMLDivElement | null>(null)
 const hlStart = ref<number | null>(null)
 const hlEnd = ref<number | null>(null)
 const textValid = computed(() => text.value.length >= 1 && text.value.length <= MAX_CHARS)
-
 watch(text, () => {
   hlStart.value = null
   hlEnd.value = null
 })
-
 const segments = computed(() => {
   const s = hlStart.value
   const e = hlEnd.value
@@ -107,348 +64,79 @@ const segments = computed(() => {
   if (text.value.endsWith('\n')) segs.push({ text: '\n', hl: false })
   return segs
 })
-
 function syncScroll(e: Event) {
   const ta = e.target as HTMLTextAreaElement
   if (mirrorRef.value) mirrorRef.value.scrollTop = ta.scrollTop
 }
 
-function locateScene(scene: SceneWithShots) {
-  let idx = text.value.indexOf(scene.title)
-  let len = scene.title.length
-  if (idx < 0 && scene.summary) {
-    const alt = scene.summary.slice(0, 12)
-    idx = text.value.indexOf(alt)
-    len = alt.length
-  }
-  if (idx < 0 || len <= 0) {
-    message.warning('未在左侧原文中找到该场景对应段落')
-    return
-  }
-  hlStart.value = idx
-  hlEnd.value = idx + len
-  void nextTick(() => {
-    const mark = mirrorRef.value?.querySelector('.hl-mark') as HTMLElement | null
-    if (mark && editorRef.value && mirrorRef.value) {
-      const top = Math.max(0, mark.offsetTop - editorRef.value.clientHeight / 2)
-      editorRef.value.scrollTop = top
-      mirrorRef.value.scrollTop = top
-    }
-  })
-}
-
-/* ---------- 版本 / 评估 / 解析流程状态 ---------- */
-const savedVersion = ref<ScriptVersion | null>(null)
-const estimate = ref<ScriptEstimate | null>(null)
-const estimateConfirmed = ref(false)
-const confirmedRange = ref<{ episode_start: number; episode_count: number } | null>(null)
-const parseJobId = ref<string | null>(null)
-const candidateVersionId = ref<string | null>(null)
-
+/* ---------- 保存并开始分析（Agent 一体化：评估+解析合并，集数由 Agent 决定） ---------- */
 const { mutate: saveVersionMut, isPending: saving } = useMutation({
   mutationFn: () => createScriptVersion(projectId.value, { text: text.value }),
   onSuccess: (v) => {
-    savedVersion.value = v
-    estimate.value = null
-    estimateConfirmed.value = false
-    parseJobId.value = null
-    candidateVersionId.value = null
-    message.success(`剧本已保存（v${v.version}）`)
+    flow.scriptVersionId = v.script_version_id
+    flow.scriptText = text.value
+    flow.resetAfterSave()
+    // 保存成功后直接触发 Agent 一体化分析（无需评估/确认集数）
+    runAgentMut({ scriptVersionId: v.script_version_id, text: text.value })
   },
   onError: (e) => message.error(errMsg(e)),
 })
-
-/* ---------- 加载当前剧本（单版本覆盖模式，回显文本） ---------- */
-const currentScriptQuery = useQuery({
-  queryKey: ['currentScript', projectId],
-  queryFn: () => getCurrentScript(projectId.value),
-  enabled: () => !!projectId.value,
-})
-watch(() => currentScriptQuery.data.value, (data) => {
-  if (data?.exists && data.script_version_id) {
-    text.value = data.text
-    savedVersion.value = {
-      script_version_id: data.script_version_id,
-      version: data.version ?? 1,
-      content_hash: '',
-      created_at: '',
-    }
-  }
-}, { immediate: true })
-
-const { mutate: runEstimate, isPending: estimating } = useMutation({
-  mutationFn: () => estimateScript(projectId.value, savedVersion.value!.script_version_id, text.value),
-  onMutate: () => {
-    estimateElapsed.value = 0
-    ensureElapsedTimer()
-  },
-  onSuccess: (est) => {
-    estimate.value = est
-    message.success('评估完成，请确认后开始解析')
-  },
-  onError: (e) => message.error(errMsg(e)),
-})
-
-const { mutate: doConfirmEstimate, isPending: confirmingEstimate } = useMutation({
-  mutationFn: () =>
-    confirmEstimate(projectId.value, estimate.value!.estimate_id, {
-      script_version_id: savedVersion.value!.script_version_id,
-      episode_start: 1,
-      episode_count: estimate.value!.estimated_episodes || 1,
-    }),
-  onSuccess: () => {
-    estimateConfirmed.value = true
-    confirmedRange.value = { episode_start: 1, episode_count: estimate.value!.estimated_episodes || 1 }
-    message.success('评估已确认，可以开始解析')
-  },
-  onError: (e) => message.error(errMsg(e)),
-})
-
-const { mutate: runParse, isPending: parsing } = useMutation({
-  mutationFn: (replace: boolean) =>
-    parseScript(projectId.value, {
-      script_version_id: savedVersion.value!.script_version_id,
-      text: text.value,
-      episode_start: confirmedRange.value?.episode_start ?? 1,
-      episode_count: confirmedRange.value?.episode_count ?? estimate.value?.estimated_episodes ?? 1,
-      replace_existing: replace || undefined,
-    }),
-  onMutate: () => {
-    parseElapsed.value = 0
-    ensureElapsedTimer()
-  },
+const { mutate: runAgentMut, isPending: analyzing } = useMutation({
+  mutationFn: (p: { scriptVersionId: string; text: string }) =>
+    runScriptAgent(projectId.value, p.scriptVersionId, p.text),
   onSuccess: (res) => {
-    parseJobId.value = res.job_id
-    message.success('解析任务已提交')
+    flow.parseJobId = res.job_id
+    message.success('已开始分析，Agent 将自动完成评估与解析')
+    setTimeout(() => router.push(`/project/${projectId.value}/parse`), 600)
   },
-  onError: (e) => message.error(errMsg(e)),
-})
-
-function handleParse() {
-  if (!savedVersion.value || !estimateConfirmed.value) return
-  if (hasResults.value) {
-    dialog.warning({
-      title: '重新解析',
-      content:
-        '将基于当前剧本版本生成候选解析版本，确认切换前当前分镜与产物不受影响。是否继续？',
-      positiveText: '重新解析',
-      negativeText: '取消',
-      onPositiveClick: () => runParse(true),
-    })
-  } else {
-    runParse(false)
-  }
-}
-
-/* ---------- 解析任务轮询 ---------- */
-const { data: parseJobData } = useQuery({
-  queryKey: computed(() => ['job', parseJobId.value]),
-  queryFn: () => getJob(parseJobId.value!),
-  enabled: computed(() => !!parseJobId.value),
-  refetchInterval: (query) => {
-    const data = query.state.data
-    return data && (data.status === 'queued' || data.status === 'running') ? 2000 : false
-  },
-})
-const parseJob = computed(() => parseJobData.value ?? null)
-const parseJobRunning = computed(
-  () =>
-    !!parseJobId.value &&
-    (!parseJob.value || parseJob.value.status === 'queued' || parseJob.value.status === 'running'),
-)
-/* ---------- 耗时计时（评估 / 解析进行中每秒 +1，全部空闲后自动停止） ---------- */
-const estimateElapsed = ref(0)
-const parseElapsed = ref(0)
-let elapsedTimerId: ReturnType<typeof setInterval> | null = null
-function ensureElapsedTimer() {
-  if (elapsedTimerId !== null) return
-  elapsedTimerId = setInterval(() => {
-    let active = false
-    if (estimating.value) {
-      estimateElapsed.value += 1
-      active = true
-    }
-    if (parseJobRunning.value) {
-      parseElapsed.value += 1
-      active = true
-    }
-    if (!active && elapsedTimerId !== null) {
-      clearInterval(elapsedTimerId)
-      elapsedTimerId = null
-    }
-  }, 1000)
-}
-onUnmounted(() => {
-  if (elapsedTimerId !== null) clearInterval(elapsedTimerId)
-})
-const candidateReady = computed(() => parseJob.value?.status === 'succeeded')
-const candidateResult = computed<ParseJobResult | null>(
-  () => (parseJob.value?.result as ParseJobResult | undefined) ?? null,
-)
-// 任务完成后从结果中取候选解析版本 ID（后端 parse 接口仅返回 job_id，版本 ID 在任务 result 中）
-watch(() => candidateResult.value?.parse_version_id, (v) => {
-  if (v && !candidateVersionId.value) candidateVersionId.value = v
-}, { immediate: true })
-const diff = computed(() => candidateResult.value?.diff_summary ?? null)
-
-function diffCount(v: DiffSummary['added_shots']): number {
-  if (Array.isArray(v)) return v.length
-  return typeof v === 'number' ? v : 0
-}
-function diffItems(v: DiffSummary['added_shots']): DiffItem[] {
-  return Array.isArray(v) ? v : []
-}
-function diffItemLabel(it: DiffItem): string {
-  return it.title || it.dialogue || `镜头 ${it.seq ?? ''}`
-}
-function diffEpisodes(v: DiffSummary['added_episodes']): string {
-  if (Array.isArray(v)) return v.join('、')
-  return typeof v === 'number' ? String(v) : ''
-}
-
-/* ---------- 确认 / 放弃候选版本 ---------- */
-const { mutate: doConfirmParse, isPending: confirmingParse } = useMutation({
-  mutationFn: () => confirmParseVersion(projectId.value, candidateVersionId.value!),
-  onSuccess: () => {
-    message.success('已切换到新解析版本，旧版本已标记为 superseded')
-    parseJobId.value = null
-    candidateVersionId.value = null
-    void queryClient.invalidateQueries({ queryKey: ['scenes', projectId.value] })
-    void queryClient.invalidateQueries({ queryKey: ['characters', projectId.value] })
-    void queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
-  },
-  onError: (e) => message.error(errMsg(e)),
-})
-
-function discardCandidate() {
-  parseJobId.value = null
-  candidateVersionId.value = null
-  message.info('已放弃候选版本，当前分镜未受影响')
-}
-
-/* ---------- 当前解析结果（角色 / 场景） ---------- */
-const { data: scenesData, isLoading: scenesLoading } = useQuery({
-  queryKey: computed(() => ['scenes', projectId.value]),
-  queryFn: () => listScenes(projectId.value, { page_size: 100 }),
-  enabled: computed(() => !!projectId.value),
-})
-const scenes = computed<SceneWithShots[]>(
-  () => (scenesData.value?.items as SceneWithShots[] | undefined) ?? [],
-)
-const hasResults = computed(() => scenes.value.length > 0)
-
-const { data: charactersData } = useQuery({
-  queryKey: computed(() => ['characters', projectId.value]),
-  queryFn: () => listCharacters(projectId.value, { page_size: 100 }),
-  enabled: computed(() => !!projectId.value),
-})
-const characters = computed(() => charactersData.value?.items ?? [])
-
-/* ---------- 道具列表与锚定图生成 ---------- */
-const { data: propsData } = useQuery({
-  queryKey: computed(() => ['props', projectId.value]),
-  queryFn: () => listProps(projectId.value!),
-  enabled: computed(() => !!projectId.value),
-})
-const props = computed(() => propsData.value?.items ?? [])
-const generatingPropId = ref<string | null>(null)
-const generateAnchor = useMutation({
-  mutationFn: (propId: string) => generatePropAnchor(propId),
-  onSuccess: () => {
-    message.success('道具锚定图任务已提交，可在任务中心查看进度')
-    void queryClient.invalidateQueries({ queryKey: ['props', projectId.value] })
-  },
-  onError: (e: unknown) => {
+  onError: (e) => {
     message.error(errMsg(e))
+    // 分析提交失败时仍跳转解析页，可从解析页重试
+    setTimeout(() => router.push(`/project/${projectId.value}/parse`), 800)
   },
 })
-function handleGenerateAnchor(p: Prop) {
-  generatingPropId.value = p.id
-  generateAnchor.mutate(p.id, {
-    onSettled: () => { generatingPropId.value = null },
-  })
-}
 
-const canParse = computed(
-  () => !!savedVersion.value && estimateConfirmed.value && !candidateVersionId.value,
+/* ---------- 加载当前剧本 ---------- */
+const { data: scriptData } = useQuery({
+  queryKey: computed(() => ['currentScript', projectId.value]),
+  queryFn: () => getCurrentScript(projectId.value),
+  enabled: computed(() => !!projectId.value),
+})
+watch(
+  () => scriptData.value,
+  (sv) => {
+    if (sv?.exists && sv.script_version_id) {
+      text.value = sv.text ?? ''
+      flow.scriptVersionId = sv.script_version_id
+      flow.scriptText = sv.text ?? ''
+    }
+  },
+  { immediate: true },
 )
 
-/* ---------- 角色合并 ---------- */
-const mergeSourceId = ref<string | null>(null)
-const mergeSource = computed(() => characters.value.find((c) => c.id === mergeSourceId.value) ?? null)
-const { mutate: doMerge, isPending: merging } = useMutation({
-  mutationFn: (p: { source: string; target: string }) => mergeCharacters(p.source, p.target),
-  onSuccess: () => {
-    message.success('角色已合并，相关镜头引用与提示词已同步改写')
-    mergeSourceId.value = null
-    void queryClient.invalidateQueries({ queryKey: ['characters', projectId.value] })
-  },
-  onError: (e) => message.error(errMsg(e)),
-})
-
-function handleMerge(target: Character) {
-  const source = mergeSource.value
-  if (!source) return
-  dialog.warning({
-    title: '合并角色',
-    content: `将把『${source.name}』合并到『${target.name}』：镜头引用与提示词中的 @名称 将同步改写，源角色将被删除。是否继续？`,
-    positiveText: '合并',
-    negativeText: '取消',
-    onPositiveClick: () => doMerge({ source: source.id, target: target.id }),
-  })
-}
 </script>
 
 <template>
-  <section class="page script-page">
+  <section class="script-page">
     <header class="script-header">
       <div class="header-left">
         <h1 class="page-title">剧本</h1>
-        <span v-if="project" class="project-name" :title="project.name">{{ project.name }}</span>
-        <NTag v-if="savedVersion" size="small" :bordered="false" type="info">
-          v{{ savedVersion.version }}
-        </NTag>
-        <NTag v-if="estimateConfirmed" size="small" :bordered="false" type="success">评估已确认</NTag>
+        <FlowNav :project-id="projectId" />
+        <span class="project-name">{{ project?.name ?? '' }}</span>
       </div>
       <div class="header-actions">
         <NButton
           size="small"
-          :disabled="!textValid || saving"
-          :loading="saving"
+          type="primary"
+          :disabled="!textValid || saving || analyzing"
+          :loading="saving || analyzing"
           @click="saveVersionMut()"
         >
-          保存版本
+          {{ saving ? '保存中…' : analyzing ? '开始分析…' : '开始分析' }}
         </NButton>
-        <NButton
-          size="small"
-          :disabled="!savedVersion || estimating || estimateConfirmed"
-          :loading="estimating"
-          @click="runEstimate()"
-        >
-          评估
-        </NButton>
-        <NButton
-          v-if="estimate && !estimateConfirmed"
-          size="small"
-          type="primary"
-          secondary
-          :loading="confirmingEstimate"
-          @click="doConfirmEstimate()"
-        >
-          确认评估
-        </NButton>
-        <NButton size="small" type="primary" :disabled="!canParse" :loading="parsing" @click="handleParse()">
-          {{ hasResults ? '重新解析' : '解析' }}
-        </NButton>
-        <span v-if="estimating" class="task-elapsed-hint">评估中…已耗时 {{ estimateElapsed }}s</span>
-        <span v-else-if="parseJobRunning" class="task-elapsed-hint">
-          {{ parseJob?.status === 'queued' ? '解析排队中' : '解析进行中' }}…已耗时 {{ parseElapsed }}s
-        </span>
       </div>
     </header>
-
     <div class="script-body">
-      <!-- 左 40%：Markdown 编辑器 -->
       <div class="editor-pane">
         <div class="pane-toolbar">
           <span class="pane-label">Markdown 剧本</span>
@@ -471,197 +159,6 @@ function handleMerge(target: Character) {
           ></textarea>
         </div>
       </div>
-
-      <!-- 右 60%：解析结果 -->
-      <div class="result-pane">
-        <!-- 候选解析版本 -->
-        <div v-if="parseJobId" class="candidate-panel">
-          <div class="candidate-head">
-            <span class="candidate-badge">候选解析版本</span>
-            <span class="candidate-note">确认切换前，当前分镜与产物不受影响</span>
-          </div>
-          <div v-if="parseJob && parseJob.status === 'failed'" class="candidate-failed">
-            <span>解析失败：{{ parseJob.error?.message || '未知错误' }}</span>
-            <NButton size="tiny" @click="handleParse()">重试</NButton>
-          </div>
-          <div
-            v-else-if="parseJob && (parseJob.status === 'cancelled' || parseJob.status === 'lost')"
-            class="candidate-failed"
-          >
-            <span>任务已{{ parseJob.status === 'cancelled' ? '取消' : '丢失' }}</span>
-            <NButton size="tiny" @click="handleParse()">重新解析</NButton>
-          </div>
-          <template v-else-if="candidateReady">
-            <div class="diff-tags">
-              <NTag type="success" size="small" :bordered="false">新增 {{ diffCount(diff?.added_shots) }}</NTag>
-              <NTag type="warning" size="small" :bordered="false">变化 {{ diffCount(diff?.changed_shots) }}</NTag>
-              <NTag type="error" size="small" :bordered="false">删除 {{ diffCount(diff?.deleted_shots) }}</NTag>
-            </div>
-            <div
-              v-if="diffEpisodes(diff?.added_episodes) || diffEpisodes(diff?.changed_episodes) || diffEpisodes(diff?.deleted_episodes)"
-              class="diff-episodes"
-            >
-              <template v-if="diffEpisodes(diff?.added_episodes)">新增集：{{ diffEpisodes(diff?.added_episodes) }}　</template>
-              <template v-if="diffEpisodes(diff?.changed_episodes)">变化集：{{ diffEpisodes(diff?.changed_episodes) }}　</template>
-              <template v-if="diffEpisodes(diff?.deleted_episodes)">删除集：{{ diffEpisodes(diff?.deleted_episodes) }}</template>
-            </div>
-            <ul class="diff-list">
-              <li v-for="(it, i) in diffItems(diff?.added_shots).slice(0, 8)" :key="'a' + i" class="diff-item add">
-                ＋ {{ diffItemLabel(it) }}
-              </li>
-              <li v-for="(it, i) in diffItems(diff?.changed_shots).slice(0, 8)" :key="'c' + i" class="diff-item change">
-                ± {{ diffItemLabel(it) }}
-              </li>
-              <li v-for="(it, i) in diffItems(diff?.deleted_shots).slice(0, 8)" :key="'d' + i" class="diff-item del">
-                － {{ diffItemLabel(it) }}
-              </li>
-            </ul>
-            <div class="candidate-preview">
-              候选包含 {{ candidateResult?.scenes?.length ?? 0 }} 个场景 ·
-              {{ candidateResult?.characters?.length ?? 0 }} 个角色 ·
-              {{ candidateResult?.props?.length ?? 0 }} 个道具 ·
-              {{ candidateResult?.shots?.length ?? 0 }} 个镜头
-            </div>
-            <div class="rule-note">
-              确认切换后：新增镜头→pending；变化镜头→redo、旧产物标 stale；删除镜头产物→archived；旧版本标记
-              superseded。
-            </div>
-            <div class="candidate-actions">
-              <NButton size="small" @click="discardCandidate">放弃候选</NButton>
-              <NButton size="small" type="primary" :loading="confirmingParse" @click="doConfirmParse()">
-                确认切换
-              </NButton>
-            </div>
-          </template>
-          <div v-else class="candidate-loading">
-            <NSpin size="small" />
-            <span>{{ parseJob?.status === 'queued' ? '排队中，等待 worker 领取' : '解析进行中' }}…已耗时 {{ parseElapsed }}s（每 2s 自动刷新状态）</span>
-          </div>
-        </div>
-
-        <!-- 评估结果 -->
-        <div v-if="estimate && !estimateConfirmed" class="estimate-panel">
-          <div class="pane-label">评估结果</div>
-          <div class="estimate-grid">
-            <span>可制作集数 {{ estimate.estimated_episodes }}</span>
-            <span>总字数 {{ estimate.char_count }}</span>
-            <span>预计总时长 {{ Math.round(estimate.estimated_total_duration) }}s</span>
-            <span>镜头 {{ estimate.episode_breakdown.reduce((s, e) => s + e.estimated_shots, 0) }}</span>
-          </div>
-          <p v-if="estimate.suggestion" class="hint-text" style="margin: 8px 0 0">{{ estimate.suggestion }}</p>
-        </div>
-
-        <!-- 角色区 -->
-        <div class="section">
-          <div class="section-head">
-            <span class="pane-label">角色（{{ characters.length }}）</span>
-            <NButton v-if="mergeSourceId" size="tiny" quaternary @click="mergeSourceId = null">
-              取消合并
-            </NButton>
-          </div>
-          <div v-if="mergeSource" class="merge-banner">
-            已选择『{{ mergeSource.name }}』为源角色，点击目标角色的『合并到此』完成合并（引用与提示词将同步改写）。
-          </div>
-          <div v-if="characters.length" class="char-list">
-            <div v-for="ch in characters" :key="ch.id" class="char-card">
-              <div class="char-avatar">{{ ch.name.slice(0, 1) }}</div>
-              <div class="char-info">
-                <div class="char-name">{{ ch.name }}</div>
-                <div class="char-desc">{{ ch.description || '暂无描述' }}</div>
-              </div>
-              <NButton
-                v-if="!mergeSourceId"
-                size="tiny"
-                quaternary
-                :disabled="characters.length < 2"
-                @click="mergeSourceId = ch.id"
-              >
-                合并
-              </NButton>
-              <NButton
-                v-else-if="mergeSourceId !== ch.id"
-                size="tiny"
-                type="primary"
-                secondary
-                :loading="merging"
-                @click="handleMerge(ch)"
-              >
-                合并到此
-              </NButton>
-            </div>
-          </div>
-          <NEmpty v-else size="small" description="解析后生成角色" />
-        </div>
-        <!-- 道具区 -->
-        <div class="section">
-          <div class="section-head">
-            <span class="pane-label">道具（{{ props.length }}）</span>
-          </div>
-          <div v-if="props.length" class="char-list">
-            <div v-for="p in props" :key="p.id" class="char-card">
-              <div class="char-avatar">{{ p.name.slice(0, 1) }}</div>
-              <div class="char-info">
-                <div class="char-name">{{ p.name }}</div>
-                <div class="char-desc">{{ p.description || '暂无描述' }}</div>
-              </div>
-              <NTag v-if="p.anchor_asset_id" size="tiny" type="success" :bordered="false">已生成锚定图</NTag>
-              <NButton
-                v-else
-                size="tiny"
-                quaternary
-                type="primary"
-                :loading="generatingPropId === p.id"
-                @click="handleGenerateAnchor(p)"
-              >
-                生成锚定图
-              </NButton>
-            </div>
-          </div>
-          <NEmpty v-else size="small" description="解析后生成道具" />
-        </div>
-
-        <!-- 场景区 -->
-        <div class="section">
-          <div class="section-head">
-            <span class="pane-label">场景（{{ scenes.length }}）</span>
-          </div>
-          <NSpin v-if="scenesLoading" size="small" class="section-spin" />
-          <NCollapse
-            v-else-if="scenes.length"
-            class="scene-collapse"
-            :default-expanded-names="[scenes[0].id]"
-          >
-            <NCollapseItem v-for="sc in scenes" :key="sc.id" :name="sc.id">
-              <template #header>
-                <span class="scene-title" @click.stop="locateScene(sc)">
-                  <span class="scene-seq">#{{ sc.seq }}</span>
-                  <span class="scene-name">{{ sc.title }}</span>
-                </span>
-              </template>
-              <template #header-extra>
-                <NTag size="tiny" :bordered="false">{{ sc.shot_count ?? sc.shots?.length ?? 0 }} 镜头</NTag>
-              </template>
-              <div class="scene-body">
-                <p v-if="sc.summary" class="scene-summary">{{ sc.summary }}</p>
-                <div v-if="sc.episodes?.length" class="scene-episodes">
-                  <NTag v-for="ep in sc.episodes" :key="ep" size="tiny" :bordered="false">
-                    第 {{ ep }} 集
-                  </NTag>
-                </div>
-                <ul v-if="sc.shots?.length" class="shot-list">
-                  <li v-for="sh in sc.shots" :key="sh.id" class="shot-item">
-                    <span class="shot-seq">S{{ sh.episode }}-{{ sh.seq }}</span>
-                    <span class="shot-kind">{{ sh.shot_kind }}</span>
-                    <span class="shot-text">{{ sh.title || sh.dialogue || sh.description || '—' }}</span>
-                    <span class="shot-duration">{{ sh.duration }}s</span>
-                  </li>
-                </ul>
-              </div>
-            </NCollapseItem>
-          </NCollapse>
-          <NEmpty v-else size="small" description="解析后生成场景" />
-        </div>
-      </div>
     </div>
   </section>
 </template>
@@ -671,418 +168,41 @@ function handleMerge(target: Character) {
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 0;
+  overflow: hidden;
 }
 .script-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 12px;
-}
-.header-left {
-  display: flex;
-  align-items: center;
   gap: 12px;
-  min-width: 0;
-}
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-}
-.project-name {
-  font-size: 13px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle, #e5e7eb);
   flex-shrink: 0;
 }
-.script-body {
-  flex: 1;
-  display: flex;
-  gap: 16px;
-  min-height: 0;
-}
-
-/* 左侧编辑器 */
+.header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.page-title { font-size: 16px; font-weight: 600; margin: 0; }
+.project-name { font-size: 12px; color: var(--text-secondary, #64748b); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.script-body { display: flex; flex: 1; min-height: 0; }
 .editor-pane {
-  width: 40%;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  overflow: hidden;
-  min-height: 0;
-}
-.pane-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
-}
-.pane-label {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.char-count {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-.char-count.over {
-  color: var(--danger);
-}
-.editor-wrap {
-  position: relative;
   flex: 1;
-  min-height: 0;
-}
-.editor-mirror,
-.editor-input {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  padding: 12px;
-  box-sizing: border-box;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
-  font-size: 13px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  tab-size: 4;
-  border: none;
-}
-.editor-mirror {
-  color: transparent;
-  overflow: hidden;
-  pointer-events: none;
-}
-.hl-mark {
-  background: rgba(99, 102, 241, 0.4);
-  border-radius: 2px;
-}
-.editor-input {
   width: 100%;
-  height: 100%;
-  background: transparent;
-  color: var(--text-primary);
-  caret-color: var(--brand-primary);
-  outline: none;
-  resize: none;
-  overflow-y: auto;
-}
-.editor-input::placeholder {
-  color: var(--text-disabled, #4b5563);
-}
-
-/* 右侧解析结果 */
-.result-pane {
-  width: 60%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  overflow-y: auto;
-  min-height: 0;
-}
-.candidate-panel {
-  background: var(--bg-panel);
-  border: 1px solid var(--brand-primary);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.candidate-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.candidate-badge {
-  font-size: 12px;
-  color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.15);
-  border-radius: 999px;
-  padding: 2px 10px;
-}
-.candidate-note {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.candidate-failed {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--danger);
-}
-.candidate-loading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  padding: 4px 0;
-}
-.task-elapsed-hint {
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.diff-tags {
-  display: flex;
-  gap: 8px;
-}
-.diff-episodes {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.diff-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.diff-item {
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: var(--bg-elevated);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.diff-item.add {
-  color: var(--state-success, #22c55e);
-}
-.diff-item.change {
-  color: var(--state-warning, #f59e0b);
-}
-.diff-item.del {
-  color: var(--danger);
-}
-.candidate-preview {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.rule-note {
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  border-radius: 8px;
-  padding: 8px;
-  line-height: 1.6;
-}
-.candidate-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.estimate-panel {
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.estimate-grid {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-  font-size: 13px;
-  color: var(--text-primary);
-}
-.section {
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.section-spin {
-  align-self: center;
-  padding: 8px 0;
-}
-.merge-banner {
-  font-size: 12px;
-  color: var(--state-warning, #f59e0b);
-  background: rgba(245, 158, 11, 0.1);
-  border-radius: 8px;
-  padding: 8px;
-  line-height: 1.6;
-}
-.char-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.char-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--bg-elevated);
-  border-radius: 8px;
-  padding: 10px;
-}
-.char-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(99, 102, 241, 0.18);
-  color: var(--brand-primary);
-  font-size: 16px;
-  font-weight: 600;
-}
-.char-info {
-  flex: 1;
   min-width: 0;
 }
-.char-name {
-  font-size: 14px;
-  color: var(--text-primary);
-}
-.char-desc {
-  font-size: 12px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: 2px;
-}
-.scene-collapse {
-  background: transparent;
-}
-.scene-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  cursor: pointer;
-}
-.scene-seq {
-  font-size: 12px;
-  color: var(--brand-primary);
-  font-variant-numeric: tabular-nums;
-}
-.scene-name {
-  font-size: 14px;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.scene-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.scene-summary {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.6;
-  margin: 0;
-}
-.scene-episodes {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.shot-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.shot-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  padding: 4px 8px;
-  background: var(--bg-elevated);
-  border-radius: 6px;
-}
-.shot-seq {
-  color: var(--brand-primary);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-.shot-kind {
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-.shot-text {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.shot-duration {
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-
-/* ===== 窄屏适配 ===== */
+.pane-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, #e5e7eb); flex-shrink: 0; }
+.pane-label { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
+.char-count { font-size: 12px; color: var(--text-secondary, #999); font-variant-numeric: tabular-nums; }
+.char-count.over { color: var(--brand-error, #d03050); }
+.editor-wrap { position: relative; flex: 1; overflow: hidden; }
+.editor-mirror { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; overflow-y: auto; color: transparent; pointer-events: none; z-index: 0; }
+.editor-mirror .hl-mark { background: rgba(99, 102, 241, 0.18); border-radius: 3px; }
+.editor-input { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; border: none; outline: none; resize: none; background: transparent; color: var(--text-primary, #333); caret-color: var(--brand-primary, #6366f1); z-index: 1; }
+.editor-input::placeholder { color: var(--text-secondary, #999); }
 @media (max-width: 768px) {
-  .script-page {
-    height: auto;
-    min-height: calc(100vh - var(--app-header-height, 56px));
-  }
-  .script-header {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .header-actions {
-    flex-wrap: wrap;
-  }
-  .script-body {
-    flex-direction: column;
-    gap: 12px;
-  }
-  .editor-pane {
-    width: 100%;
-    flex: none;
-    height: 45vh;
-    min-height: 240px;
-  }
-  .result-pane {
-    width: 100%;
-    flex: none;
-    overflow-y: visible;
-  }
+  .script-page { height: auto; min-height: calc(100vh - var(--app-header-height, 56px)); }
+  .script-header { flex-wrap: wrap; gap: 8px; }
+  .header-actions { flex-wrap: wrap; }
 }
 </style>

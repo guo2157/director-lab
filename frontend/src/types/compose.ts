@@ -76,7 +76,6 @@ export interface AppSettings {
   llm_model?: string
   llm_api_key?: string
   llm_api_key_set?: boolean
-  video_poll_timeout_seconds?: number
   job_max_attempts?: number
   default_concurrency?: number
   [key: string]: unknown

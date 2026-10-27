@@ -4,6 +4,12 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
+      path: '/director',
+      name: 'director',
+      component: () => import('../views/DirectorConsoleView.vue'),
+      meta: { title: '导演台' },
+    },
+    {
       path: '/',
       name: 'projects',
       component: () => import('../views/ProjectListView.vue'),
@@ -14,6 +20,18 @@ const router = createRouter({
       name: 'script',
       component: () => import('../views/project/ScriptView.vue'),
       meta: { title: '剧本' },
+    },
+    {
+      path: '/project/:id/estimate',
+      name: 'estimate',
+      component: () => import('../views/project/EstimateView.vue'),
+      meta: { title: '评估' },
+    },
+    {
+      path: '/project/:id/parse',
+      name: 'parse',
+      component: () => import('../views/project/ParseView.vue'),
+      meta: { title: '解析' },
     },
     {
       path: '/project/:id/storyboard',

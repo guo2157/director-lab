@@ -18,6 +18,14 @@ export interface Project {
   settings?: ProjectSettings
   created_at: string
   updated_at: string
+  /** 派生字段：镜头总数 */
+  shot_total?: number
+  /** 派生字段：已完成镜头数 */
+  shot_done?: number
+  /** 派生字段：当前生产阶段（estimate/parse/characters/scenes/keyframes/clips/compose/export/done 等） */
+  current_stage?: string
+  /** 当前解析版本 ID（乐观锁） */
+  current_parse_version_id?: string | null
 }
 
 /** 集数规划条目（job.finished result.episodes 写入 project.episode_plan） */

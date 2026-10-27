@@ -308,3 +308,31 @@
 | 输出 | 是 | 时长按 `duration`，画幅按 `project.aspect_ratio` 对应的基准分辨率 |
 
 本模板为推荐写法，不是强制格式：用户可直接写自由文本，系统不做格式校验，仅在生成前对缺失起始状态或衔接信息的镜头给出 warning 级提示（检查项见 WORKFLOW.md 第 10.3 节骨架完整性检查）。
+
+## 6. 资产图提示词模板规范（P4 整改）
+
+资产图（角色定妆图/场景基准图/道具锚定图）与分镜图是两类不同任务：资产图定义固定视觉身份，单一主体、干净背景、不讲述剧情；分镜图允许按剧情组合多个角色、场景与道具。资产图的单主体约束不得应用到分镜图。
+
+### 6.1 模板实现与版本
+
+- 实现位置：`backend/app/services/asset_prompts.py`，模板版本常量 `ASSET_PROMPTS_VERSION`（当前 2.0）。
+- 版本追溯：生成任务创建时版本写入 `job.params.__asset_prompt_version__`；executor 执行时剥离该标记并持久化到 `job.input_snapshot.asset_prompt_version`，不作为参数提交给工作流。
+- 必填校验：名称/外观/描述全部为空时构建函数抛 `ValueError`（`*_prompt_missing_identity`），API 层返回 422，不静默生成占位提示词；仅有名称时名称作为身份兜底，不虚构外观。
+
+### 6.2 负面约束注入规则
+
+- 负面约束按资产类型区分（`negative_for_asset_type`：character/scene/prop 三套独立文本）。
+- 注入条件：工作流定义中实际绑定了 `$negative.*` 参数标记（由 `parse_workflow` 解析）时才注入 `params.negative`；未绑定时不注入，避免写入无人消费的参数。
+- 历史问题：此前依赖 `capabilities.negative_prompt` 声明，但现有工作流均未声明该字段，导致负面约束从未实际生效（P4 已修复）。
+
+### 6.3 未注入参考图槽位剔除
+
+- 工作流定义中的 LoadImage 参考图节点带有占位图（`placeholder_*.png`）。未注入槽位时占位图连线原样提交会污染生成结果（资产图混入陌生主体的根因之一）。
+- executor 在注入参数前调用 `prune_unbound_media_inputs`：剔除未提供媒体的参考图节点及所有消费连线，并写 `job.media_pruned` 事件记录被剔除槽位。
+- 必填媒体参数（标记带 `!`）缺失时不剔除，仍由 `inject_params` 报必填参数缺失错误，不静默丢失必需参考图。
+
+### 6.4 数据隔离规则
+
+- 角色模板只读取当前角色的名称/外观/简介；场景模板只读取当前场景的标题/描述；道具模板只读取当前道具的名称/外观/简介。
+- 分镜提示词（`shot.image_prompt`）由剧本解析按 §5.1 模板生成，出场角色/场景未显式 @引用 时由 `inject_asset_refs` 自动补入（仅注入有正式资产图的实体）。
+- 视频提示词（`shot.video_prompt`）按 §5.2 状态衔接模板生成，executor 自动注入当前分镜图（ref_image）、上一镜尾帧（ref_prev_frame）与跨集首帧（first_frame）。

@@ -53,6 +53,9 @@ class EstimateConfirmOut(BaseModel):
     user_confirmed: bool
     episode_start: int
     episode_count: int
+    # 确认后锁定的总集数：此后解析范围不可超出
+    total_episodes: int | None = None
+    locked: bool = False
 
 
 # --- 解析 ---
@@ -60,12 +63,36 @@ class ParseCreate(BaseModel):
     script_version_id: str
     text: str = Field(min_length=1, max_length=50000)
     episode_start: int = Field(ge=1)
-    episode_count: int = Field(ge=1)
+    # 两种输入模式二选一：episode_count（起始+数量）或 episode_end（起止集数），后端统一归一化为区间
+    episode_count: int | None = Field(default=None, ge=1)
+    episode_end: int | None = Field(default=None, ge=1)
 
 
 class ParseJobOut(BaseModel):
     job_id: str
     status: str
+
+
+# --- 集级解析状态（集数网格视图） ---
+class EpisodeParseStatusItem(BaseModel):
+    episode_no: int
+    asset_type: str
+    status: str
+    attempt_count: int
+    error_msg: str | None
+    asset_count: int | None
+    parse_version_id: str | None
+    updated_at: datetime | None
+
+
+class ParseStatusOut(BaseModel):
+    total_episodes: int | None
+    records: list[EpisodeParseStatusItem]
+
+
+class ParseRetryOut(BaseModel):
+    job_id: str
+    retried_episodes: list[int]
 
 
 class ParseVersionConfirm(BaseModel):
@@ -147,11 +174,17 @@ class JobOut(BaseModel):
     project_id: str
     job_type: str
     status: str
+    # 展示用关联信息（列表/详情接口补充，便于用户识别任务归属）
+    project_name: str | None = None
+    episode: int | None = None
+    scene_title: str | None = None
+    shot_seq: int | None = None
     error_code: str | None
     error_msg: str | None
     retryable: bool
     result: dict | None
     attempts: int
+    seq: int | None = None
     created_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None

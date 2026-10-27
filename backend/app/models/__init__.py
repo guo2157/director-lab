@@ -2,6 +2,7 @@
 from app.models.base import Base, TimestampMixin
 from app.models.narrative import (
     Character,
+    EpisodeParseRecord,
     Project,
     Prop,
     Scene,
@@ -22,11 +23,20 @@ from app.models.production import (
     UploadRecord,
     Workflow,
 )
+from app.models.continuity import EpisodeContinuity
+from app.models.agent import (
+    AgentConfirmation,
+    AgentMessage,
+    AgentPlanStep,
+    AgentSession,
+    AgentTask,
+)
 
 __all__ = [
     "Base",
     "TimestampMixin",
     "Character",
+    "EpisodeParseRecord",
     "Project",
     "Prop",
     "Scene",
@@ -44,4 +54,10 @@ __all__ = [
     "ParseVersion",
     "UploadRecord",
     "Workflow",
+    "EpisodeContinuity",
+    "AgentSession",
+    "AgentMessage",
+    "AgentTask",
+    "AgentPlanStep",
+    "AgentConfirmation",
 ]

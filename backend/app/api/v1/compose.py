@@ -159,6 +159,48 @@ def list_exports(project_id: str, db: Session = Depends(get_db)) -> dict:
     } for e in items]}
 
 
+@router.get("/projects/{project_id}/exports/{export_id}/acceptance-check")
+def check_export_acceptance(project_id: str, export_id: str,
+                            db: Session = Depends(get_db)) -> dict:
+    """成片验收检查（阶段11）：对导出文件执行质量合规与完整性校验。
+
+    - 使用 ffprobe 提取元数据，执行验收清单检查
+    - 检查项：文件存在性、文件非空、视频流、音频轨、字幕轨、分辨率、时长、格式有效性
+    - 返回结构化验收报告，不修改导出记录状态
+    """
+    from app.services.acceptance_check import run_acceptance_check
+    from app.services.compose import resolution_for
+
+    p = _get_project(db, project_id)
+    e = db.get(Export, export_id)
+    if e is None or e.project_id != project_id:
+        raise errors.invalid_request("导出记录不存在")
+    if not e.file_name:
+        raise errors.invalid_request("导出文件名为空")
+    file_path = Path(get_settings().media_dir) / e.file_name
+    # 从合成版本获取期望时长
+    comp = db.get(Composition, e.composition_id) if e.composition_id else None
+    expected_duration = comp.duration if comp else None
+    # 从项目宽高比推导期望分辨率
+    expected_resolution = None
+    if p.aspect_ratio:
+        try:
+            expected_resolution = resolution_for(p.aspect_ratio)
+        except Exception:
+            pass
+    report = run_acceptance_check(
+        export_id=export_id,
+        file_path=str(file_path),
+        file_name=e.file_name,
+        expected_duration=expected_duration,
+        expected_resolution=expected_resolution,
+        aspect_ratio=p.aspect_ratio,
+        require_audio=True,
+        require_subtitle=False,
+    )
+    return report.to_dict()
+
+
 @router.get("/exports/{export_id}/download")
 def download_export(export_id: str, db: Session = Depends(get_db)) -> FileResponse:
     e = db.get(Export, export_id)

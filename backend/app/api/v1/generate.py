@@ -71,6 +71,18 @@ def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workfl
     return wf
 
 
+def _workflow_binds_param(wf: Workflow, param_name: str) -> bool:
+    """检查工作流定义是否绑定了指定参数标记（$param.*）。
+    用于判断负面约束等参数能否实际注入，避免写入无人消费的参数。
+    """
+    from app.services.workflow_inject import parse_workflow
+    try:
+        parsed = parse_workflow(wf.definition)
+    except Exception:  # noqa: BLE001
+        return False
+    return param_name in parsed.params and not parsed.errors
+
+
 def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
                 wf: Workflow, params: dict, generation_mode: str | None = None) -> Job:
     """创建生成任务并持久化 effective_inputs 快照。"""
@@ -116,6 +128,74 @@ def _get_shot(db: Session, shot_id: str) -> Shot:
     return s
 
 
+def _find_first_frame_workflow(db: Session) -> Workflow | None:
+    """查找支持 first_frame 的视频工作流（flf2v）。"""
+    from app.services.workflow_inject import parse_workflow
+    for wf in db.query(Workflow).filter(Workflow.workflow_type == "video").all():
+        parsed = parse_workflow(wf.definition)
+        if not parsed.errors and "first_frame" in parsed.params:
+            return wf
+    return None
+
+
+def _is_first_shot_of_episode(db: Session, shot: Shot) -> bool:
+    """判断镜头是否为某集的第一个镜头（按 episode, scene.seq, shot.seq 排序）。"""
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return False
+    first = (
+        db.query(Shot)
+        .join(Scene, Shot.scene_id == Scene.id)
+        .filter(Scene.project_id == scene.project_id, Shot.episode == shot.episode)
+        .order_by(Scene.seq, Shot.seq)
+        .first()
+    )
+    return first is not None and first.id == shot.id
+
+
+def _inject_continuity_first_frame(db: Session, shot: Shot, target: str, wf: Workflow, params: dict) -> Workflow:
+    """跨集连续性首帧注入（对应改造第五节）。
+
+    当 target == clip 且镜头为某集首镜时：
+    1. 检查上一集末帧是否存在且有效
+    2. 若有效，切换到 flf2v 工作流（严格首帧锁定）
+    3. 将末帧路径注入 __media__.first_frame
+    4. 若连续性应满足但失败，抛出错误阻止生成
+    """
+    if target != "clip":
+        return wf
+    if not _is_first_shot_of_episode(db, shot):
+        return wf
+    if shot.episode <= 1:
+        return wf
+
+    from app.services.continuity import check_continuity_for_episode
+    ok, err, rec = check_continuity_for_episode(db, _project_id_from_shot(db, shot), shot.episode)
+    if not ok:
+        raise errors.AppError("continuity_check_failed", err or "连续性校验失败", 422)
+    if rec is None or not rec.source_frame_path:
+        return wf
+
+    flf2v_wf = _find_first_frame_workflow(db)
+    if flf2v_wf is None:
+        # flf2v 工作流不可用时，降级为 ref_prev_frame 参考图约束
+        media = params.get("__media__", {})
+        media["ref_prev_frame"] = rec.source_frame_path
+        params["__media__"] = media
+        return wf
+
+    media = params.get("__media__", {})
+    media["first_frame"] = rec.source_frame_path
+    params["__media__"] = media
+    return flf2v_wf
+
+
+def _project_id_from_shot(db: Session, shot: Shot) -> str:
+    """从镜头获取项目 ID。"""
+    scene = db.get(Scene, shot.scene_id)
+    return scene.project_id if scene else ""
+
+
 def _check_keyframe_gate(db: Session, shot_ids: list[str]) -> None:
     """静图先行闸口（D-13）：生成 clip 前校验分镜图已人工确认，未确认返回 409。"""
     unconfirmed = (
@@ -132,6 +212,54 @@ def _check_keyframe_gate(db: Session, shot_ids: list[str]) -> None:
         )
 
 
+def _check_inflight_duplicate(db: Session, shot_id: str, target: str) -> None:
+    """在途任务去重：同镜头同目标已有 queued/running 任务时返回 409，
+    防止重复提交/重试产生重复任务（幂等性保障）。"""
+    job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
+    dup = (
+        db.query(Job)
+        .filter(
+            Job.shot_id == shot_id,
+            Job.job_type == job_type,
+            Job.status.in_(("queued", "running")),
+        )
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+    if dup is not None:
+        raise errors.AppError(
+            "job_in_flight",
+            f"该镜头已有同目标在途任务（{dup.id}，状态 {dup.status}），请等待完成或先取消",
+            409,
+        )
+
+
+def _filter_inflight(db: Session, shots: list, target: str) -> tuple[list, list]:
+    """批量生成时过滤在途任务：跳过已有同目标 queued/running 任务的镜头，
+    返回（可生成镜头, 跳过明细），避免批量提交产生重复任务。"""
+    job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
+    shot_ids = [s.id for s in shots]
+    if not shot_ids:
+        return [], []
+    inflight = {
+        j.shot_id: j.id
+        for j in db.query(Job)
+        .filter(
+            Job.shot_id.in_(shot_ids),
+            Job.job_type == job_type,
+            Job.status.in_(("queued", "running")),
+        )
+        .all()
+    }
+    ok, skipped = [], []
+    for s in shots:
+        if s.id in inflight:
+            skipped.append({"shot_id": s.id, "job_id": inflight[s.id], "reason": "job_in_flight"})
+        else:
+            ok.append(s)
+    return ok, skipped
+
+
 @router.post("/shots/{shot_id}/generate", status_code=202)
 def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     """触发单镜生成。target 必填（keyframe/clip/audio/bgm/sfx）。"""
@@ -142,8 +270,13 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
         raise errors.AppError("invalid_request", "target 必须为 keyframe/clip/audio/bgm/sfx", 400)
     if target == "clip":
         _check_keyframe_gate(db, [shot.id])
+    # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重复提交
+    _check_inflight_duplicate(db, shot.id, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
+    # 跨集连续性首帧注入（第五节）：集首镜 clip 生成时注入上一集末帧
+    if target == "clip":
+        wf = _inject_continuity_first_frame(db, shot, target, wf, params)
     # 按 target 组装默认 prompt 基础
     if target == "keyframe":
         params.setdefault("prompt", shot.image_prompt or "")
@@ -151,15 +284,22 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
         params.setdefault("prompt", shot.video_prompt or shot.image_prompt or "")
     elif target == "audio":
         params.setdefault("tts_text", shot.dialogue or "")
+    # P2：镜头资产清单注入——出场角色/所属场景未在提示词 @引用 时自动补入头部
+    if target == "keyframe" and params.get("prompt"):
+        from app.services.shot_refs import inject_asset_refs
+        params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
     # @引用注入（D-16）：keyframe/clip 生成时解析提示词中的 @角色/@场景，自动携带参考图
-    if target in ("keyframe", "clip") and "__media__" not in params:
+    # 连续性首帧注入可能已设置 __media__.first_frame，此处合并而非覆盖
+    if target in ("keyframe", "clip"):
         from app.services.ref_inject import build_media_params
         prompt_text = params.get("prompt") or ""
         if prompt_text:
             slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
             media = build_media_params(db, scene.project_id, prompt_text, slots)
             if media:
-                params["__media__"] = media
+                _existing = params.get("__media__", {})
+                _existing.update(media)
+                params["__media__"] = _existing
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
                       generation_mode=payload.get("generation_mode"))
     db.commit()
@@ -176,6 +316,8 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
         raise errors.AppError("invalid_request", "target 无效", 400)
     if target == "clip":
         _check_keyframe_gate(db, [shot.id])
+    # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重复提交
+    _check_inflight_duplicate(db, shot.id, target)
     # 旧资产转历史版本
     if target == "keyframe":
         # 重做分镜图后确认自动失效（D-13）：需重新生成并重新确认
@@ -193,21 +335,31 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
             a.validity = "superseded"
     wf = _match_workflow(db, target, payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
+    # 跨集连续性首帧注入（重做与单镜生成行为一致）
+    if target == "clip":
+        wf = _inject_continuity_first_frame(db, shot, target, wf, params)
     if target == "keyframe":
         params.setdefault("prompt", shot.image_prompt or "")
     elif target == "clip":
         params.setdefault("prompt", shot.video_prompt or shot.image_prompt or "")
     elif target == "audio":
         params.setdefault("tts_text", shot.dialogue or "")
+    # P2：镜头资产清单注入（重做与单镜生成行为一致）
+    if target == "keyframe" and params.get("prompt"):
+        from app.services.shot_refs import inject_asset_refs
+        params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
     # @引用注入（D-16）：重做与单镜生成行为一致，重做时同样携带参考图
-    if target in ("keyframe", "clip") and "__media__" not in params:
+    # 连续性首帧注入可能已设置 __media__.first_frame，此处合并而非覆盖
+    if target in ("keyframe", "clip"):
         from app.services.ref_inject import build_media_params
         prompt_text = params.get("prompt") or ""
         if prompt_text:
             slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
             media = build_media_params(db, scene.project_id, prompt_text, slots)
             if media:
-                params["__media__"] = media
+                _existing = params.get("__media__", {})
+                _existing.update(media)
+                params["__media__"] = _existing
     job = _create_job(db, scene.project_id, shot.id, target, wf, params)
     db.commit()
     return _job_out(job)
@@ -221,7 +373,21 @@ def generate_character(character_id: str, payload: dict, db: Session = Depends(g
         raise errors.AppError("not_found", "角色不存在", 404)
     wf = _match_workflow(db, "keyframe", payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
-    params.setdefault("prompt", ch.appearance or ch.description or ch.name)
+    # P1：角色定妆图使用纯净化结构化模板（单一主体/干净背景/负面约束分段）
+    # P4 整改：必填变量缺失时明确报错（422），不静默生成占位提示词
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION, build_character_prompt, negative_for_asset_type
+    try:
+        params.setdefault(
+            "prompt",
+            build_character_prompt(ch.name, ch.appearance or "", description=ch.description or ""),
+        )
+    except ValueError as e:
+        raise errors.AppError("invalid_request", str(e), 422)
+    params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
+    # P4 整改：负面约束按工作流实际参数绑定注入（标记 $negative.*），
+    # 不再依赖 capabilities.negative_prompt 声明（现有工作流均未声明该字段，导致约束从未生效）
+    if "negative" not in params and _workflow_binds_param(wf, "negative"):
+        params["negative"] = negative_for_asset_type("character")
     job = _create_job(db, ch.project_id, None, "keyframe", wf, params)
     job.params = {**job.params, "__character_id__": ch.id}
     db.commit()
@@ -236,7 +402,19 @@ def generate_prop(prop_id: str, payload: dict, db: Session = Depends(get_db)) ->
         raise errors.AppError("not_found", "道具不存在", 404)
     wf = _match_workflow(db, "keyframe", payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
-    params.setdefault("prompt", p.appearance or p.description or p.name)
+    # P1：道具锚定图使用纯净化结构化模板
+    # P4 整改：必填变量缺失时明确报错（422）
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION, build_prop_prompt, negative_for_asset_type
+    try:
+        params.setdefault(
+            "prompt",
+            build_prop_prompt(p.name, p.appearance or "", description=p.description or ""),
+        )
+    except ValueError as e:
+        raise errors.AppError("invalid_request", str(e), 422)
+    params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
+    if "negative" not in params and _workflow_binds_param(wf, "negative"):
+        params["negative"] = negative_for_asset_type("prop")
     job = _create_job(db, p.project_id, None, "keyframe", wf, params)
     job.params = {**job.params, "__prop_id__": p.id}
     db.commit()
@@ -251,8 +429,19 @@ def generate_scene_baseline(scene_id: str, payload: dict, db: Session = Depends(
         raise errors.AppError("scene_not_found", "场景不存在", 404)
     wf = _match_workflow(db, "keyframe", payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
-    base = sc.title if not sc.description else f"{sc.title}。{sc.description}"
-    params.setdefault("prompt", base)
+    # P1：场景基准图使用纯净化结构化模板（无角色/无独立道具/空间布局完整）
+    # P4 整改：必填变量缺失时明确报错（422）
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION, build_scene_prompt, negative_for_asset_type
+    try:
+        params.setdefault(
+            "prompt",
+            build_scene_prompt(sc.title or "", sc.description or ""),
+        )
+    except ValueError as e:
+        raise errors.AppError("invalid_request", str(e), 422)
+    params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
+    if "negative" not in params and _workflow_binds_param(wf, "negative"):
+        params["negative"] = negative_for_asset_type("scene")
     job = _create_job(db, sc.project_id, None, "keyframe", wf, params)
     job.params = {**job.params, "__scene_id__": sc.id}
     db.commit()
@@ -275,9 +464,21 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
     shots = q.order_by(Shot.seq).all()
     if len(shots) < 3:
         raise errors.AppError("invalid_request", "选中镜头少于 3 个，请使用单镜生成接口", 400)
+    # 在途任务过滤：跳过已有同目标在途任务的镜头，避免重复提交
+    shots, skipped = _filter_inflight(db, shots, target)
+    if not shots:
+        raise errors.AppError(
+            "job_in_flight",
+            f"所有选中镜头均已有同目标在途任务（{len(skipped)} 个），请等待完成或先取消",
+            409,
+        )
     if target == "clip":
         _check_keyframe_gate(db, [s.id for s in shots])
     wf = _match_workflow(db, target, payload.get("workflow_id"))
+    # @引用注入（D-16，P0 修复）：与单镜生成/项目批量生成行为一致，
+    # 解析每个镜头提示词中的 @角色/@场景/@道具，自动携带参考图
+    from app.services.ref_inject import build_media_params
+    slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
     jobs = []
     for shot in shots:
         params = dict(payload.get("params") or {})
@@ -285,9 +486,26 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
             params.setdefault("prompt", shot.image_prompt or "")
         elif target == "clip":
             params.setdefault("prompt", shot.video_prompt or shot.image_prompt or "")
-        jobs.append(_create_job(db, sc.project_id, shot.id, target, wf, params))
+        # 跨集连续性首帧注入（批量生成与单镜生成行为一致）
+        shot_wf = wf
+        if target == "clip":
+            shot_wf = _inject_continuity_first_frame(db, shot, target, wf, params)
+        # P2：镜头资产清单注入（场景批量与单镜生成行为一致）
+        if target == "keyframe" and params.get("prompt"):
+            from app.services.shot_refs import inject_asset_refs
+            params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+        # @引用注入：合并已有 __media__（首帧注入可能已设置 first_frame）
+        if target in ("keyframe", "clip"):
+            prompt_text = params.get("prompt") or ""
+            if prompt_text:
+                media = build_media_params(db, sc.project_id, prompt_text, slots)
+                if media:
+                    _existing = params.get("__media__", {})
+                    _existing.update(media)
+                    params["__media__"] = _existing
+        jobs.append(_create_job(db, sc.project_id, shot.id, target, shot_wf, params))
     db.commit()
-    return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs)}
+    return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs), "skipped": skipped}
 
 
 @router.post("/projects/{project_id}/generate", status_code=202)
@@ -315,6 +533,14 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
     shots = q.order_by(Shot.episode, Scene.seq, Shot.seq).all()
     if len(shots) < 3:
         raise errors.AppError("invalid_request", "选中镜头少于 3 个，请使用单镜生成接口", 400)
+    # 在途任务过滤：跳过已有同目标在途任务的镜头，避免重复提交
+    shots, skipped = _filter_inflight(db, shots, target)
+    if not shots:
+        raise errors.AppError(
+            "job_in_flight",
+            f"所有选中镜头均已有同目标在途任务（{len(skipped)} 个），请等待完成或先取消",
+            409,
+        )
     if target == "clip":
         _check_keyframe_gate(db, [s.id for s in shots])
     wf = _match_workflow(db, target, payload.get("workflow_id"))
@@ -326,17 +552,27 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
             params.setdefault("prompt", shot.image_prompt or "")
         else:
             params.setdefault("prompt", shot.video_prompt or shot.image_prompt or "")
-        # @引用注入（D-16）：批量生成与单镜生成行为一致，分镜图/视频均携带参考图
-        if "__media__" not in params:
+        # 跨集连续性首帧注入（项目批量与单镜生成行为一致）
+        shot_wf = wf
+        if target == "clip":
+            shot_wf = _inject_continuity_first_frame(db, shot, target, wf, params)
+        # P2：镜头资产清单注入（项目批量与单镜生成行为一致）
+        if target == "keyframe" and params.get("prompt"):
+            from app.services.shot_refs import inject_asset_refs
+            params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+        # @引用注入：合并已有 __media__（首帧注入可能已设置 first_frame）
+        if target in ("keyframe", "clip"):
             from app.services.ref_inject import build_media_params
             prompt_text = params.get("prompt") or ""
             if prompt_text:
                 media = build_media_params(db, project_id, prompt_text, slots)
                 if media:
-                    params["__media__"] = media
-        jobs.append(_create_job(db, project_id, shot.id, target, wf, params))
+                    _existing = params.get("__media__", {})
+                    _existing.update(media)
+                    params["__media__"] = _existing
+        jobs.append(_create_job(db, project_id, shot.id, target, shot_wf, params))
     db.commit()
-    return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs)}
+    return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs), "skipped": skipped}
 
 
 @router.post("/shots/{shot_id}/assets", status_code=201)

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import Asset, AssetRef, Job, Shot, ids
+from app.models.enums import ASSET_TYPE
 from app.services import errors
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -67,6 +68,10 @@ def list_assets(
 ) -> dict:
     q = db.query(Asset).filter(Asset.project_id == project_id)
     if asset_type:
+        # 非法分类值直接 422，禁止静默返回错误类别的数据（分类正确性要求）
+        if asset_type not in ASSET_TYPE:
+            allowed = "、".join(ASSET_TYPE)
+            raise errors.AppError("invalid_asset_type", f"asset_type 取值无效，允许值：{allowed}", 422)
         q = q.filter(Asset.asset_type == asset_type)
     if status:
         q = q.filter(Asset.validity == status)

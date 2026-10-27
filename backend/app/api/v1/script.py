@@ -14,11 +14,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import Job, ParseVersion, Project, ScriptEstimate, ScriptVersion
+from app.models import EpisodeParseRecord, Job, ParseVersion, Project, ScriptEstimate, ScriptVersion
 from app.models import ids
 from app.schemas.script import (
-    EstimateConfirm, EstimateConfirmOut, EstimateCreate, EstimateOut,
-    ParseCreate, ParseJobOut, ParseVersionConfirm, ParseVersionOut,
+    EpisodeParseStatusItem, EstimateConfirm, EstimateConfirmOut, EstimateCreate, EstimateOut,
+    ParseCreate, ParseJobOut, ParseRetryOut, ParseStatusOut, ParseVersionConfirm, ParseVersionOut,
     ScriptVersionCreate, ScriptVersionOut,
 )
 from app.services import errors
@@ -108,6 +108,109 @@ def get_current_script_version(project_id: str,
     }
 
 
+@router.post("/{project_id}/script-write", status_code=201)
+def write_project_script(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """AI 创作/扩写剧本（阶段1）：create（创意→剧本）/ expand（梗概→扩写）。
+
+    - 创作配置取 Project.settings（genre/audience/visual_style/episode_count 等），
+      修改配置后由 estimated_text_hash 机制驱动下游失效，不无条件清空资产
+    - LLM 失败按 llm_* 错误码返回（不落库半成品）；成功后保存为新剧本版本
+    - 已有完整剧本的用户直接走 script-versions 保存，不经本端点
+    """
+    from app.integrations.llm import LLMError
+    from app.services.script_writing import write_script
+
+    p = _get_project(db, project_id)
+    if p.status == "archived":
+        raise errors.invalid_state_transition("已归档项目不可创作剧本")
+    mode = payload.get("mode")
+    if mode not in ("create", "expand"):
+        raise errors.invalid_request("mode 须为 create 或 expand")
+    source_text = (payload.get("source_text") or "").strip()
+    if not source_text:
+        raise errors.invalid_request("source_text 必填（创意或故事梗概）")
+    if len(source_text) > 50000:
+        raise errors.invalid_request("source_text 超过 50000 字符上限")
+    # LLM 调用（短事务外，与 estimate 同模式）
+    try:
+        text = write_script(mode, source_text, p.settings or {})
+    except LLMError as e:
+        raise errors.AppError(e.code, e.message, 502)
+    if not text or len(text) < 50:
+        raise errors.AppError("llm_invalid_output", "生成剧本内容为空或过短", 502)
+    # 保存为新剧本版本（复用 script-versions 覆盖式版本管理）
+    sv = (
+        db.query(ScriptVersion)
+        .filter(ScriptVersion.project_id == project_id)
+        .order_by(ScriptVersion.version.desc())
+        .first()
+    )
+    if sv is None:
+        sv = ScriptVersion(
+            id=ids.script_version_id(), project_id=project_id, version=1,
+            content_snapshot=text, content_hash=_hash(text), created_at=_now(),
+        )
+        db.add(sv)
+    else:
+        sv.content_snapshot = text
+        sv.content_hash = _hash(text)
+        sv.version += 1
+        sv.created_at = _now()
+    p.current_script_version_id = sv.id
+    db.commit()
+    return {
+        "script_version_id": sv.id,
+        "version": sv.version,
+        "content_hash": sv.content_hash,
+        "mode": mode,
+        "text": text,
+    }
+
+
+@router.post("/{project_id}/script-evaluate", status_code=200)
+def evaluate_project_script(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """剧本质量评估（阶段2）：调用 LLM 生成结构化评估报告。
+
+    - 评估维度：优点、问题、修改建议、制作风险、剧情漏洞检测、总体评分、总结
+    - 在 estimate_script 算法估算基础上注入基础数据，LLM 进行深度质量评估
+    - LLM 失败按 llm_* 错误码返回 502，不落库半成品
+    - 评估为只读操作，不修改剧本版本或项目状态
+    """
+    from app.integrations.llm import LLMError
+    from app.services.script_evaluation import evaluate_script
+
+    p = _get_project(db, project_id)
+    if p.status == "archived":
+        raise errors.invalid_state_transition("已归档项目不可评估剧本")
+    script_version_id = payload.get("script_version_id")
+    text = payload.get("text") or ""
+    if not script_version_id:
+        raise errors.invalid_request("script_version_id 必填")
+    if not text.strip():
+        raise errors.invalid_request("text 必填")
+    sv = _get_script_version(db, script_version_id)
+    if sv.project_id != project_id:
+        raise errors.script_version_conflict("剧本版本不属于本项目")
+    _check_text_hash(sv, text)
+    # 算法估算作为基础数据注入
+    settings_map = p.settings or {}
+    estimate_data = estimate_script(
+        text,
+        episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
+        max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
+    )
+    # LLM 深度评估（短事务外）
+    try:
+        report = evaluate_script(text, estimate_data, p.settings or {})
+    except LLMError as e:
+        raise errors.AppError(e.code, e.message, 502)
+    return {
+        "script_version_id": sv.id,
+        "estimate_data": estimate_data,
+        "report": report,
+    }
+
+
 @router.post("/{project_id}/estimate", status_code=201)
 def create_estimate(project_id: str, payload: EstimateCreate,
                     db: Session = Depends(get_db)) -> EstimateOut:
@@ -152,12 +255,110 @@ def confirm_estimate(project_id: str, estimate_id: str, payload: EstimateConfirm
         raise errors.estimate_not_found()
     if est.script_version_id != payload.script_version_id:
         raise errors.script_version_conflict("评估版本与确认的剧本版本不一致")
+    # 已锁定的评估不可重复确认改集数（口径锁定）
+    if est.locked_at is not None and est.total_episodes is not None:
+        if payload.episode_count > est.total_episodes:
+            raise errors.invalid_request(
+                f"评估已锁定总集数 {est.total_episodes}，解析范围不可超出"
+            )
     est.user_confirmed = True
+    # 首次确认时锁定总集数快照：此后解析范围不可超出，保证多轮解析口径一致
+    if est.total_episodes is None:
+        est.total_episodes = payload.episode_count
+        est.locked_at = _now()
     db.commit()
     return EstimateConfirmOut(
         estimate_id=est.id, user_confirmed=True,
         episode_start=payload.episode_start, episode_count=payload.episode_count,
+        total_episodes=est.total_episodes, locked=True,
     )
+
+
+@router.post("/{project_id}/script-agent", status_code=202)
+def create_script_agent(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """剧本一体化分析（Agent）：评估+解析合并，集数由 Agent 决定，无需用户确认集数。
+
+    - 入参与 parse 一致：script_version_id + text（hash 校验）
+    - episode_start 可选（默认 1；后续批次继续分析时传入）
+    - 首批自动解析，后续批次由前端『继续分析』推进
+    """
+    p = _get_project(db, project_id)
+    if p.status == "archived":
+        raise errors.invalid_state_transition("已归档项目不可分析剧本")
+    script_version_id = payload.get("script_version_id")
+    text = payload.get("text") or ""
+    if not script_version_id:
+        raise errors.invalid_request("script_version_id 必填")
+    if not text.strip():
+        raise errors.invalid_request("text 必填")
+    sv = _get_script_version(db, script_version_id)
+    if sv.project_id != project_id:
+        raise errors.script_version_conflict("剧本版本不属于本项目")
+    _check_text_hash(sv, text)
+    episode_start = int(payload.get("episode_start") or 1)
+    if episode_start < 1:
+        raise errors.invalid_request("episode_start 不得小于 1")
+    job = Job(
+        id=ids.job_id(), project_id=project_id, job_type="script_agent",
+        params={
+            "script_version_id": sv.id,
+            "episode_start": episode_start,
+        },
+        status="queued", created_at=_now(),
+    )
+    db.add(job)
+    _activate_if_draft(db, p)
+    db.commit()
+    return {"job_id": job.id, "status": job.status}
+
+
+@router.get("/{project_id}/script-agent/status")
+def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """Agent 分析状态：最近一个 script_agent 任务 + 集级记录 + 口径信息。"""
+    _get_project(db, project_id)
+    job = (
+        db.query(Job)
+        .filter(Job.project_id == project_id, Job.job_type == "script_agent")
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+    records = (
+        db.query(EpisodeParseRecord)
+        .filter(EpisodeParseRecord.project_id == project_id,
+                EpisodeParseRecord.asset_type == "all")
+        .order_by(EpisodeParseRecord.episode_no)
+        .all()
+    )
+    # 口径：最新 candidate/succeeded 解析版本
+    pv = (
+        db.query(ParseVersion)
+        .filter(ParseVersion.project_id == project_id)
+        .order_by(ParseVersion.version.desc())
+        .first()
+    )
+    out = {
+        "job": {
+            "id": job.id, "status": job.status,
+            "error_code": job.error_code, "error_msg": job.error_msg,
+            "result": job.result,
+        } if job else None,
+        "scope": {
+            "total_episodes": pv.total_episodes if pv else None,
+            "script_hash": pv.script_hash if pv else None,
+            "parse_version_id": pv.id if pv else None,
+            "parse_version_status": pv.status if pv else None,
+        },
+        "records": [
+            {
+                "episode_no": r.episode_no,
+                "status": r.status,
+                "asset_count": r.asset_count,
+                "error_msg": r.error_msg,
+            }
+            for r in records
+        ],
+    }
+    return out
 
 
 @router.post("/{project_id}/parse", status_code=202)
@@ -178,12 +379,29 @@ def create_parse(project_id: str, payload: ParseCreate,
     )
     if confirmed is None:
         raise errors.invalid_request("解析前须先评估并确认与剧本版本匹配的制作范围")
+    # 解析区间归一化：episode_count（起始+数量）或 episode_end（起止集数）二选一
+    if payload.episode_count is None and payload.episode_end is None:
+        raise errors.invalid_request("须提供 episode_count 或 episode_end 之一")
+    if payload.episode_count is not None and payload.episode_end is not None:
+        raise errors.invalid_request("episode_count 与 episode_end 只能提供其一")
+    if payload.episode_end is not None:
+        if payload.episode_end < payload.episode_start:
+            raise errors.invalid_request("episode_end 不得小于 episode_start")
+        episode_count = payload.episode_end - payload.episode_start + 1
+    else:
+        episode_count = payload.episode_count
+    # 口径锁定：解析范围不可超出评估确认时锁定的总集数
+    if confirmed.total_episodes is not None:
+        if payload.episode_start + episode_count - 1 > confirmed.total_episodes:
+            raise errors.invalid_request(
+                f"解析范围超出评估锁定的总集数 {confirmed.total_episodes}"
+            )
     job = Job(
         id=ids.job_id(), project_id=project_id, job_type="parse",
         params={
             "script_version_id": sv.id,
             "episode_start": payload.episode_start,
-            "episode_count": payload.episode_count,
+            "episode_count": episode_count,
         },
         status="queued", created_at=_now(),
     )
@@ -193,6 +411,86 @@ def create_parse(project_id: str, payload: ParseCreate,
     return ParseJobOut(job_id=job.id, status=job.status)
 
 
+@router.get("/{project_id}/parse/status")
+def get_parse_status(project_id: str, db: Session = Depends(get_db)) -> ParseStatusOut:
+    """集级解析状态查询：返回各集解析记录，供前端集数网格视图渲染。"""
+    _get_project(db, project_id)
+    # 锁定的总集数：优先取 ParseVersion 口径（script-agent 流程），回退已确认评估快照（旧流程）
+    pv_scope = (
+        db.query(ParseVersion)
+        .filter(ParseVersion.project_id == project_id, ParseVersion.total_episodes.isnot(None))
+        .order_by(ParseVersion.version.desc())
+        .first()
+    )
+    total_episodes = pv_scope.total_episodes if pv_scope is not None else None
+    if total_episodes is None:
+        est = (
+            db.query(ScriptEstimate)
+            .join(ScriptVersion, ScriptEstimate.script_version_id == ScriptVersion.id)
+            .filter(ScriptVersion.project_id == project_id, ScriptEstimate.user_confirmed.is_(True))
+            .order_by(ScriptEstimate.created_at.desc())
+            .first()
+        )
+        total_episodes = est.total_episodes if est is not None else None
+    records = (
+        db.query(EpisodeParseRecord)
+        .filter(EpisodeParseRecord.project_id == project_id)
+        .order_by(EpisodeParseRecord.episode_no, EpisodeParseRecord.asset_type)
+        .all()
+    )
+    return ParseStatusOut(
+        total_episodes=total_episodes,
+        records=[
+            EpisodeParseStatusItem(
+                episode_no=r.episode_no, asset_type=r.asset_type, status=r.status,
+                attempt_count=r.attempt_count or 0, error_msg=r.error_msg,
+                asset_count=r.asset_count, parse_version_id=r.parse_version_id,
+                updated_at=r.updated_at,
+            )
+            for r in records
+        ],
+    )
+
+
+@router.post("/{project_id}/parse/retry", status_code=202)
+def retry_parse(project_id: str, db: Session = Depends(get_db)) -> ParseRetryOut:
+    """重试失败的集级解析记录：仅 failed 状态的集重新入队，成功/进行中的不动。"""
+    p = _get_project(db, project_id)
+    if p.status == "archived":
+        raise errors.invalid_state_transition("已归档项目不可解析")
+    failed = (
+        db.query(EpisodeParseRecord)
+        .filter(
+            EpisodeParseRecord.project_id == project_id,
+            EpisodeParseRecord.status == "failed",
+        )
+        .order_by(EpisodeParseRecord.episode_no)
+        .all()
+    )
+    if not failed:
+        raise errors.invalid_request("没有失败的解析记录可重试")
+    # 失败集去重并归并为连续区间（当前按集粒度重试，取最小/最大集数）
+    episodes = sorted({r.episode_no for r in failed})
+    episode_start, episode_end = episodes[0], episodes[-1]
+    # 需要剧本版本：取项目当前剧本版本
+    sv = db.get(ScriptVersion, p.current_script_version_id) if p.current_script_version_id else None
+    if sv is None:
+        raise errors.script_version_not_found()
+    job = Job(
+        id=ids.job_id(), project_id=project_id, job_type="parse",
+        params={
+            "script_version_id": sv.id,
+            "episode_start": episode_start,
+            "episode_count": episode_end - episode_start + 1,
+            "retry": True,
+        },
+        status="queued", created_at=_now(),
+    )
+    db.add(job)
+    db.commit()
+    return ParseRetryOut(job_id=job.id, retried_episodes=episodes)
+
+
 @router.post("/{project_id}/parse-versions/{parse_version_id}/confirm")
 def confirm_parse_version(project_id: str, parse_version_id: str, payload: ParseVersionConfirm,
                           db: Session = Depends(get_db)) -> ParseVersionOut:
@@ -200,35 +498,56 @@ def confirm_parse_version(project_id: str, parse_version_id: str, payload: Parse
     pv = db.get(ParseVersion, parse_version_id)
     if pv is None or pv.project_id != project_id:
         raise errors.parse_version_not_found()
-    if pv.status != "candidate":
+    if pv.status == "candidate":
+        pass
+    elif pv.status == "current":
+        # script-agent 多批次：首批确认后版本为 current，后续批次复用同一版本做增量确认；
+        # 仅当存在该版本的 script_agent 成功任务时允许，普通 parse 流程的重复确认仍拒绝
+        _agent_jobs = (
+            db.query(Job)
+            .filter(Job.project_id == project_id,
+                    Job.job_type == "script_agent",
+                    Job.status == "succeeded")
+            .all()
+        )
+        if not any((j.result or {}).get("parse_version_id") == pv.id for j in _agent_jobs):
+            raise errors.parse_version_conflict("仅候选状态的解析版本可确认")
+    else:
         raise errors.parse_version_conflict("仅候选状态的解析版本可确认")
     # 乐观锁：请求携带的当前版本须与实际一致
     if (payload.current_parse_version_id or None) != (p.current_parse_version_id or None):
         raise errors.parse_version_conflict()
-    # 找到产生该候选版本的解析任务，取其 result 做级联落库
-    parse_job = (
+    # 找到产生该候选版本的解析任务（parse 或 script_agent），取其 result 做级联落库；
+    # script-agent 多批次共用同一 ParseVersion，须按 episode_start 升序逐批应用
+    parse_jobs = (
         db.query(Job)
-        .filter(Job.project_id == project_id, Job.job_type == "parse", Job.status == "succeeded")
+        .filter(Job.project_id == project_id,
+                Job.job_type.in_(["parse", "script_agent"]),
+                Job.status == "succeeded")
         .order_by(Job.finished_at.desc())
         .all()
     )
-    target_result = None
-    for j in parse_job:
-        if (j.result or {}).get("parse_version_id") == pv.id:
-            target_result = j.result
-            break
-    if target_result is not None:
+    # 应用顺序：(episode_start, finished_at) 升序——同集数范围时旧任务先应用、
+    # 新批次后应用覆盖；否则旧全量解析会覆盖新批次的增量结果
+    target_results = [
+        (j.result, j.finished_at.isoformat() if j.finished_at else "")
+        for j in parse_jobs if (j.result or {}).get("parse_version_id") == pv.id
+    ]
+    target_results.sort(key=lambda t: (int(t[0].get("episode_start") or 1), t[1]))
+    target_results = [t[0] for t in target_results]
+    if target_results:
         from app.models import Scene as SceneModel
         from app.services.script_parse import apply_parse_result
         current_scene_ids = [
             row[0] for row in db.query(SceneModel.id).filter(SceneModel.project_id == project_id).all()
         ]
-        apply_parse_result(
-            db, p, target_result,
-            episode_start=int(target_result.get("episode_start") or 1),
-            episode_count=int(target_result.get("episode_count") or 1),
-            current_scene_ids=current_scene_ids,
-        )
+        for target_result in target_results:
+            apply_parse_result(
+                db, p, target_result,
+                episode_start=int(target_result.get("episode_start") or 1),
+                episode_count=int(target_result.get("episode_count") or 1),
+                current_scene_ids=current_scene_ids,
+            )
     # 旧版本标记 superseded
     old_id = p.current_parse_version_id
     if old_id:

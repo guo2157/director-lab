@@ -10,23 +10,27 @@ export type JobType =
   | 'export'
 
 /** 任务状态 */
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'lost' | 'cancelled'
+export type JobStatus = 'queued' | 'running' | 'submission_unknown' | 'succeeded' | 'failed' | 'lost' | 'cancelled'
 
 /** 任务（ID 前缀 job_，retry 仅 failed/lost 且 retryable=true） */
 export interface Job {
   id: string
   project_id?: string | null
+  /** 展示用关联信息（后端列表/详情接口补充） */
+  project_name?: string | null
+  episode?: number | null
+  scene_title?: string | null
+  shot_seq?: number | null
   job_type: JobType
   status: JobStatus
   target_id?: string | null
   workflow_id?: string | null
   input_snapshot?: Record<string, unknown>
   result?: Record<string, unknown> | null
-  error?: {
-    code: string
-    message: string
-    detail?: Record<string, unknown> | string | null
-  } | null
+  /** 错误码（后端平铺字段，如 llm_error/comfy_timeout） */
+  error_code?: string | null
+  /** 错误信息（后端平铺字段，展示给用户的具体原因） */
+  error_msg?: string | null
   retryable?: boolean
   attempts?: number
   seq?: number

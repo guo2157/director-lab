@@ -1,5 +1,5 @@
 /** 资产类型（event_type 与 asset_type 枚举互不通用） */
-export type AssetType = 'keyframe' | 'clip' | 'audio' | 'portrait' | 'anchor' | 'baseline' | 'reference' | 'first_frame' | 'end_frame'
+export type AssetType = 'character' | 'scene' | 'prop' | 'keyframe' | 'clip' | 'audio' | 'last_frame' | 'reference' | 'first_frame' | 'end_frame'
 
 /** 资产状态 */
 export type AssetStatus = 'pending' | 'current' | 'stale' | 'archived'

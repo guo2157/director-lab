@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.integrations.llm import LLMClient, LLMError
-from app.models import Job, JobEvent, ParseVersion, ScriptVersion
+from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion
 from app.models import ids
 from app.services.script_parse import normalize_parse_output
 from app.services.prompt_store import get_prompt
@@ -38,6 +38,52 @@ def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
     job.finished_at = _now()
     _write_event(db, job, "job.failed", {"error_code": code, "error_msg": job.error_msg})
     db.commit()
+
+
+def _upsert_records(db: Session, project_id: str, episode_start: int, episode_count: int,
+                    status: str, *, error_msg: str | None = None,
+                    asset_counts: dict[int, int] | None = None,
+                    parse_version_id: str | None = None) -> list[EpisodeParseRecord]:
+    """按集 upsert 集级解析记录（asset_type=all：当前单次 LLM 调用产出全部实体分组）。
+
+    状态机：pending → running → succeeded/failed；failed 重试回 running。
+    """
+    now = _now().replace(tzinfo=None)
+    records = []
+    for ep in range(episode_start, episode_start + episode_count):
+        rec = (
+            db.query(EpisodeParseRecord)
+            .filter(
+                EpisodeParseRecord.project_id == project_id,
+                EpisodeParseRecord.episode_no == ep,
+                EpisodeParseRecord.asset_type == "all",
+            )
+            .first()
+        )
+        if rec is None:
+            rec = EpisodeParseRecord(
+                id=ids.episode_parse_record_id(), project_id=project_id,
+                episode_no=ep, asset_type="all", status="pending",
+                attempt_count=0, version=0, created_at=now,
+            )
+            db.add(rec)
+        if status == "running":
+            # 仅 pending/failed 可进入 running（防重入）
+            if rec.status in ("running", "succeeded"):
+                records.append(rec)
+                continue
+            rec.attempt_count = (rec.attempt_count or 0) + 1
+        rec.status = status
+        rec.error_msg = error_msg
+        rec.updated_at = now
+        rec.version = (rec.version or 0) + 1
+        if asset_counts is not None and status == "succeeded":
+            rec.asset_count = asset_counts.get(ep, 0)
+        if parse_version_id:
+            rec.parse_version_id = parse_version_id
+        records.append(rec)
+    db.flush()
+    return records
 
 
 def execute_parse_job(job_id: str) -> dict:
@@ -66,6 +112,10 @@ def execute_parse_job(job_id: str) -> dict:
             return {"ok": False, "reason": "script_version_not_found"}
         text = sv.content_snapshot
 
+        # 集级解析记录置 running（pending/failed 可进入，succeeded/running 跳过）
+        _upsert_records(db, job.project_id, episode_start, episode_count, "running")
+        db.commit()
+
         # 项目内已有角色名→ID 映射（供 speaker_id 归一化）
         from app.models import Character
         char_map = {
@@ -82,6 +132,8 @@ def execute_parse_job(job_id: str) -> dict:
         try:
             raw = client.chat_json(get_prompt("parse_system"), user_prompt)
         except LLMError as e:
+            # 集级记录回写 failed（含本次范围内的全部集）
+            _upsert_records(db, job.project_id, episode_start, episode_count, "failed", error_msg=e.message[:2000])
             _fail_job(db, job, e.code, e.message)
             return {"ok": False, "reason": e.code}
 
@@ -127,6 +179,17 @@ def execute_parse_job(job_id: str) -> dict:
             created_at=_now().replace(tzinfo=None),
         )
         db.add(pv)
+
+        # 按集统计镜头数并回写集级记录 succeeded
+        per_episode_shots: dict[int, int] = {}
+        for sc in norm.data.get("scenes") or []:
+            for sh in sc.get("shots") or []:
+                ep = int(sh.get("episode") or episode_start)
+                per_episode_shots[ep] = per_episode_shots.get(ep, 0) + 1
+        _upsert_records(
+            db, job.project_id, episode_start, episode_count, "succeeded",
+            asset_counts=per_episode_shots, parse_version_id=pv.id,
+        )
 
         job.status = "succeeded"
         job.result = {**parse_result, "parse_version_id": pv.id}

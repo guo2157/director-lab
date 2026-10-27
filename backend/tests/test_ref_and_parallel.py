@@ -40,7 +40,7 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
     db = SessionLocal()
     char_names = []
     for i in range(n_chars):
-        a = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe",
+        a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
                   name=f"p{i}", version=1, file_path=f"/tmp/p{i}.png", validity="current")
         db.add(a)
         db.flush()
@@ -50,7 +50,7 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
         char_names.append(name)
     scene_name = None
     if with_scene:
-        a2 = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe",
+        a2 = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene",
                    name="s0", version=1, file_path="/tmp/s0.png", validity="current")
         db.add(a2)
         db.flush()
@@ -101,7 +101,7 @@ def test_same_name_character_scene_422(client: TestClient):
     from app.services import ref_inject
     pid = client.post("/api/projects", json={"name": "同名项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
-    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="keyframe",
+    a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
               name="x", version=1, file_path="/tmp/x.png", validity="current")
     db.add(a)
     db.flush()

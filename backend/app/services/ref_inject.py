@@ -122,14 +122,20 @@ def build_media_params(db: Session, project_id: str, prompt: str,
     scene_names = [n for n, i in refs.items() if i["type"] == "scene"]
     prop_names = [n for n, i in refs.items() if i["type"] == "prop"]
     # 工作流声明的可用槽位（None 表示不限制，全部可用）
+    # 兼容两种声明格式：字符串数组 ['ref_identity', ...] 或对象数组
+    # [{param: 'ref_identity', input_key: 'ref_images.ref_image_2', optional: true}, ...]（seed meta 格式）
     if reference_slots is None:
         avail_char = list(_CHARACTER_SLOTS)
         avail_scene = list(_SCENE_SLOTS)
         avail_prop = list(_PROP_SLOTS)
     else:
-        avail_char = [s for s in _CHARACTER_SLOTS if s in reference_slots]
-        avail_scene = [s for s in _SCENE_SLOTS if s in reference_slots]
-        avail_prop = [s for s in _PROP_SLOTS if s in reference_slots]
+        slot_names = [
+            item.get("param") if isinstance(item, dict) else item
+            for item in reference_slots
+        ]
+        avail_char = [s for s in _CHARACTER_SLOTS if s in slot_names]
+        avail_scene = [s for s in _SCENE_SLOTS if s in slot_names]
+        avail_prop = [s for s in _PROP_SLOTS if s in slot_names]
     media: dict[str, str] = {}
     # 角色引用：按顺序填入可用角色槽位
     if len(char_names) > len(avail_char):

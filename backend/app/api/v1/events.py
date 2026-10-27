@@ -57,7 +57,9 @@ async def event_stream(last_seq: int = Query(0, ge=0)) -> StreamingResponse:
                     job = db.get(Job, ev.job_id)
                     data = _event_payload(ev, job)
                     seq = max(seq, ev.event_seq)
-                    yield f"id: {ev.event_seq}\nevent: {ev.event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+                    # 不发送 event: 名称行：带名称的事件不会触发前端 onmessage，
+                    # 事件类型已包含在 data.event_type 中，前端统一用 onmessage 处理
+                    yield f"id: {ev.event_seq}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
             finally:
                 db.close()
             # 心跳注释，防代理断连

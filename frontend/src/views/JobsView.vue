@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, h } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
-  NCard, NButton, NSpin, NEmpty, NTag, NDataTable, NSelect,
+  NCard, NButton, NSpin, NEmpty, NTag, NDataTable,
   NTooltip, NStatistic, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -18,8 +18,8 @@ const statusFilter = ref('')
 const page = ref(1)
 const pageSize = 20
 
-const typeOptions = [
-  { label: '全部类型', value: '' },
+const typeTabs = [
+  { label: '全部', value: '' },
   { label: '图像', value: 'generate_keyframe' },
   { label: '视频', value: 'generate_clip' },
   { label: '语音', value: 'generate_audio' },
@@ -29,15 +29,24 @@ const typeOptions = [
   { label: '合成', value: 'compose' },
   { label: '导出', value: 'export' },
 ]
-const statusOptions = [
-  { label: '全部状态', value: '' },
-  { label: '排队中', value: 'queued' },
-  { label: '执行中', value: 'running' },
-  { label: '成功', value: 'succeeded' },
-  { label: '失败', value: 'failed' },
-  { label: '丢失', value: 'lost' },
-  { label: '已取消', value: 'cancelled' },
-]
+
+function setStatus(value: string) {
+  statusFilter.value = value
+  page.value = 1
+}
+function setType(value: string) {
+  typeFilter.value = value
+  page.value = 1
+}
+// 任务归属描述：项目 · 第N集 · 场景 · 分镜#N（替代裸 jobId 展示）
+function jobContext(job: Job): string {
+  const parts: string[] = []
+  if (job.project_name) parts.push(job.project_name)
+  if (job.episode != null) parts.push(`第${job.episode}集`)
+  if (job.scene_title) parts.push(job.scene_title)
+  if (job.shot_seq != null) parts.push(`分镜#${job.shot_seq}`)
+  return parts.length ? parts.join(' · ') : job.id
+}
 
 // --- Data ---
 const jobsQuery = useQuery({
@@ -58,20 +67,31 @@ const statsQuery = useQuery({
 })
 
 // --- SSE ---
+const sseConnected = ref(false)
 let eventSource: EventSource | null = null
 
 onMounted(() => {
   try {
     eventSource = new EventSource('/api/events')
-    eventSource.onmessage = () => {
+    eventSource.onopen = () => {
+      sseConnected.value = true
+    }
+    eventSource.onmessage = (ev) => {
+      sseConnected.value = true
+      // 过滤高频流式事件：仅任务状态类事件触发列表刷新，忽略 agent.llm_delta
+      try {
+        const data = JSON.parse(ev.data)
+        if (data.event_type === 'agent.llm_delta') return
+      } catch { /* 非 JSON 消息按原逻辑刷新 */ }
       queryClient.invalidateQueries({ queryKey: ['jobs'] })
       queryClient.invalidateQueries({ queryKey: ['jobStats'] })
     }
     eventSource.onerror = () => {
       // SSE 断线降级轮询（refetchInterval 已配置）
+      sseConnected.value = false
     }
   } catch {
-    // EventSource 不可用时依赖轮询
+    sseConnected.value = false
   }
 })
 
@@ -98,13 +118,20 @@ const cancelMutation = useMutation({
   onError: (e: any) => message.error(`取消失败: ${e?.message ?? e}`),
 })
 
-// --- Table ---
+
+const runningJobs = computed<Job[]>(() =>
+  (jobsQuery.data.value?.items || []).filter(
+    (j) => j.status === 'queued' || j.status === 'running'
+  )
+)
+
+// --- Labels & colors ---
 const statusColors: Record<string, string> = {
-  queued: '#3B82F6', running: '#3B82F6', succeeded: '#22C55E',
+  queued: '#3B82F6', running: '#3B82F6', submission_unknown: '#F59E0B', succeeded: '#22C55E',
   failed: '#EF4444', lost: '#EF4444', cancelled: '#9CA3AF',
 }
 const statusLabels: Record<string, string> = {
-  queued: '排队中', running: '执行中', succeeded: '成功',
+  queued: '排队中', running: '执行中', submission_unknown: '提交未知', succeeded: '成功',
   failed: '失败', lost: '丢失', cancelled: '已取消',
 }
 const typeLabels: Record<string, string> = {
@@ -118,19 +145,21 @@ function isEnvError(job: Job): boolean {
   return job.retryable === true
 }
 
+// --- Table ---
 const columns = computed<DataTableColumns<Job>>(() => [
-  { title: 'ID', key: 'id', width: 120, ellipsis: { tooltip: true } },
+  { title: '归属', key: 'project_name', width: 220, ellipsis: { tooltip: true },
+    render: (row) => jobContext(row) },
   { title: '类型', key: 'job_type', width: 80,
     render: (row) => typeLabels[row.job_type] || row.job_type },
-  { title: '状态', key: 'status', width: 90,
+  { title: '状态', key: 'status', width: 100,
     render: (row) =>
       h(NTag, { size: 'small', round: true, color: { color: statusColors[row.status], textColor: '#fff' } },
         { default: () => statusLabels[row.status] || row.status }) },
-  { title: '目标', key: 'target_id', width: 120, ellipsis: { tooltip: true } },
+  { title: '目标', key: 'target_id', width: 130, ellipsis: { tooltip: true } },
   { title: '尝试', key: 'attempts', width: 60 },
   { title: '创建时间', key: 'created_at', width: 160,
     render: (row) => new Date(row.created_at).toLocaleString() },
-  { title: '操作', key: 'actions', width: 120,
+  { title: '操作', key: 'actions', width: 110,
     render: (row) => {
       if (row.status === 'failed' || row.status === 'lost') {
         if (isEnvError(row)) {
@@ -139,7 +168,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
         }
         return h(NTooltip, null, {
           trigger: () => h(NButton, { size: 'tiny', quaternary: true }, { default: () => '查看指引' }),
-          default: () => row.error?.message || '配置类错误，请检查参数',
+          default: () => row.error_msg || '未知原因',
         })
       }
       if (row.status === 'queued' || row.status === 'running') {
@@ -151,27 +180,30 @@ const columns = computed<DataTableColumns<Job>>(() => [
   },
 ])
 
-import { h } from 'vue'
 </script>
 
 <template>
   <div class="jobs-page">
     <div class="page-header">
       <div>
-        <h2 class="page-title">任务队列</h2>
+        <h2 class="page-title">任务中心</h2>
         <p class="page-subtitle">生成任务实时状态，5 秒自动刷新</p>
+      </div>
+      <div class="sse-indicator" :class="sseConnected ? 'on' : 'off'">
+        <span class="sse-dot"></span>
+        {{ sseConnected ? '实时连接' : '轮询模式' }}
       </div>
     </div>
 
-    <!-- Stats cards -->
+    <!-- Stats cards（点击联动过滤） -->
     <div class="stats-row">
-      <n-card class="stat-card" :bordered="false">
+      <n-card class="stat-card clickable" :bordered="false" @click="setStatus('succeeded')">
         <n-statistic label="今日成功" :value="statsQuery.data.value?.today_succeeded ?? 0" />
       </n-card>
-      <n-card class="stat-card" :bordered="false">
+      <n-card class="stat-card clickable" :bordered="false" @click="setStatus('failed')">
         <n-statistic label="今日失败" :value="statsQuery.data.value?.today_failed ?? 0" />
       </n-card>
-      <n-card class="stat-card" :bordered="false">
+      <n-card class="stat-card clickable" :bordered="false" @click="setStatus('running')">
         <n-statistic label="进行中" :value="statsQuery.data.value?.in_progress ?? 0" />
       </n-card>
       <n-card class="stat-card" :bordered="false">
@@ -179,50 +211,94 @@ import { h } from 'vue'
       </n-card>
     </div>
 
-    <!-- Table -->
-    <n-card class="settings-card" :bordered="false">
-      <div class="wf-toolbar">
-        <div class="filter-row">
-          <n-select v-model:value="typeFilter" :options="typeOptions" size="small" style="width: 150px" clearable />
-          <n-select v-model:value="statusFilter" :options="statusOptions" size="small" style="width: 150px" clearable />
-        </div>
-        <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
+    <!-- 主从布局：左侧任务列表 + 右侧详情面板 -->
+    <div class="jobs-layout">
+      <div class="jobs-main">
+        <n-card class="panel-card" :bordered="false">
+          <div class="wf-toolbar">
+            <div class="filter-row">
+              <div class="type-tabs">
+                <button
+                  v-for="t in typeTabs"
+                  :key="t.value"
+                  type="button"
+                  class="status-tab"
+                  :class="{ active: typeFilter === t.value }"
+                  @click="setType(t.value)"
+                >{{ t.label }}</button>
+              </div>
+              <n-tag
+                v-if="statusFilter"
+                size="small"
+                round
+                closable
+                :color="{ color: statusColors[statusFilter], textColor: '#fff' }"
+                @close="setStatus('')"
+              >状态：{{ statusLabels[statusFilter] || statusFilter }}</n-tag>
+              <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
+            </div>
+          </div>
+
+          <!-- 进行中任务置顶卡片 -->
+          <div v-if="runningJobs.length" class="running-cards">
+            <div
+              v-for="job in runningJobs"
+              :key="job.id"
+              class="running-card"
+            >
+              <span class="running-pulse"></span>
+              <span class="running-type">{{ typeLabels[job.job_type] || job.job_type }}</span>
+              <span class="running-id">{{ jobContext(job) }}</span>
+              <n-button size="tiny" type="error" quaternary @click.stop="cancelMutation.mutate(job.id)">取消</n-button>
+            </div>
+          </div>
+
+          <n-spin v-if="jobsQuery.isLoading.value" class="page-loading" />
+          <div v-else-if="jobsQuery.isError.value" class="state-block">
+            <p class="state-text">任务加载失败：{{ jobsQuery.error.value instanceof Error ? jobsQuery.error.value.message : '请稍后重试' }}</p>
+            <n-button secondary @click="() => jobsQuery.refetch()">重试</n-button>
+          </div>
+          <n-empty v-else-if="jobsQuery.data.value?.items?.length === 0" description="暂无任务" style="padding: 24px 0" />
+          <n-data-table
+            v-else
+            :columns="columns"
+            :data="jobsQuery.data.value?.items || []"
+            :bordered="false"
+            :single-line="false"
+            size="small"
+            :pagination="{
+              page: page,
+              pageSize: pageSize,
+              itemCount: jobsQuery.data.value?.total ?? 0,
+              onUpdatePage: (p: number) => { page = p },
+              showSizePicker: false,
+            }"
+          />
+        </n-card>
       </div>
-      <n-spin v-if="jobsQuery.isLoading.value" class="page-loading" />
-      <n-empty v-else-if="jobsQuery.data.value?.items?.length === 0" description="暂无任务" style="padding: 24px 0" />
-      <n-data-table
-        v-else
-        :columns="columns"
-        :data="jobsQuery.data.value?.items || []"
-        :bordered="false"
-        :single-line="false"
-        size="small"
-        :pagination="{
-          page: page,
-          pageSize: pageSize,
-          itemCount: jobsQuery.data.value?.total ?? 0,
-          onUpdatePage: (p: number) => { page = p },
-          showSizePicker: false,
-        }"
-      />
-    </n-card>
+
+    </div>
   </div>
 </template>
 
 <style scoped>
 .jobs-page {
-  padding: 24px;
-  max-width: 1280px;
+  padding: var(--sp-6);
+  max-width: 1440px;
   margin: 0 auto;
   min-height: calc(100vh - var(--app-header-height, 56px));
 }
 .page-header {
-  margin: 4px 0 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin: var(--sp-1) 0 var(--sp-4);
 }
 .page-title {
   font-size: 20px;
   font-weight: 700;
-  margin: 0 0 4px;
+  margin: 0 0 var(--sp-1);
   color: var(--text-primary);
 }
 .page-subtitle {
@@ -230,35 +306,174 @@ import { h } from 'vue'
   color: var(--text-secondary);
   margin: 0;
 }
+.sse-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.sse-indicator.on .sse-dot {
+  background: var(--state-success);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+.sse-indicator.off .sse-dot {
+  background: var(--state-warning);
+}
 .stats-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
 }
 .stat-card {
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  transition: transform var(--transition-base), box-shadow var(--transition-base);
 }
-.settings-card {
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+.stat-card.clickable {
+  cursor: pointer;
+}
+.stat-card.clickable:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lift);
+}
+.jobs-layout {
+  display: block;
+}
+.jobs-main {
+  min-width: 0;
+}
+.panel-card {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
 }
 .wf-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  flex-wrap: wrap;
+}
+.status-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.status-tab:hover {
+  color: var(--text-primary);
+}
+.status-tab.active {
+  background: var(--brand-primary);
+  color: #fff;
 }
 .filter-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
 }
-.page-loading { display: flex; justify-content: center; padding: 80px 0; }
+.type-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  padding: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  flex-wrap: wrap;
+}
+.running-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.running-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.running-card:hover {
+  border-color: var(--border-strong);
+}
+.running-card.selected {
+  border-color: var(--brand-primary);
+  background: rgba(99, 102, 241, 0.08);
+}
+.running-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3B82F6;
+  animation: running-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes running-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); }
+}
+.running-type {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+.running-id {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-12) var(--sp-6);
+}
+.state-text {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+.page-loading {
+  display: flex;
+  justify-content: center;
+  padding: 80px 0;
+}
 @media (max-width: 768px) {
-  .stats-row { grid-template-columns: repeat(2, 1fr); }
-  .wf-toolbar { flex-direction: column; align-items: stretch; }
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .wf-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>

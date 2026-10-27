@@ -7,6 +7,7 @@
 - 失败按 §5.5 分类记录 error_code
 - 产物路径来自资产表 file_path；工作目录用系统临时目录，产物写 media_dir
 """
+import logging
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import Asset, AssetRef, Composition, Job, JobEvent, Project, Scene, Shot
 from app.models import ids
+
+logger = logging.getLogger(__name__)
 from app.services import compose as cs
 
 
@@ -243,6 +246,21 @@ def execute_compose_job(job_id: str) -> dict:
         _write_event(db, job, "job.finished", {"status": "succeeded",
                                                "result": {"composition_id": comp_id, "duration": duration}})
         db.commit()
+
+        # 跨集连续性：合成成功后自动提取末帧（对应改造第四节）
+        try:
+            from app.services.continuity import extract_episode_last_frame, invalidate_downstream_continuity
+            if episode is not None:
+                media_dir = Path(settings.media_dir)
+                # 先使下游连续性资产失效（版本递增），再提取当前集末帧
+                invalidated = invalidate_downstream_continuity(db, job.project_id, episode)
+                if invalidated:
+                    logger.info("第 %d 集重合成，已使 %d 个下游剧集连续性资产失效", episode, len(invalidated))
+                extract_episode_last_frame(db, job.project_id, episode, comp, media_dir)
+                logger.info("第 %d 集末帧提取完成", episode)
+        except Exception as e:
+            logger.warning("末帧提取失败（不影响合成结果）: %s", e)
+
         return {"ok": True, "composition_id": comp_id, "duration": duration}
     except Exception as e:
         db.rollback()

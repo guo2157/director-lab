@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
 
-from app.api.v1 import assets, characters, compose, events, generate, jobs, projects, props, scenes, script, settings, shots, workflows
+from app.api.v1 import agent, assets, characters, compose, events, generate, jobs, projects, props, scenes, script, settings, shots, workflows
 
 
 def _startup_selfcheck() -> dict:
@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title=cfg.app_name, debug=cfg.debug, lifespan=lifespan)
 
     app.include_router(projects.router)
+    app.include_router(agent.router)
     app.include_router(assets.router)
     app.include_router(generate.router)
     app.include_router(characters.router)
@@ -92,20 +93,27 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # exc.errors() 的 ctx 可能携带 field_validator 抛出的原始 ValueError 对象（不可 JSON 序列化），
+        # 统一转为字符串，避免 422 响应本身因序列化失败退化为 500
+        def _safe_err(err: dict) -> dict:
+            out = dict(err)
+            ctx = out.get("ctx")
+            if isinstance(ctx, dict):
+                out["ctx"] = {k: str(v) if isinstance(v, BaseException) else v for k, v in ctx.items()}
+            return out
+
         return JSONResponse(
             status_code=422,
             content={
                 "detail": {
                     "code": "invalid_request",
                     "message": "请求参数校验失败",
-                    "errors": exc.errors(),
+                    "errors": [_safe_err(e) for e in exc.errors()],
                 }
             },
         )
 
-    @app.get("/api/health")
-    async def health() -> dict:
-        return {"status": "ok", "app": cfg.app_name, "version": "0.1.0"}
+    # /api/health 由 settings.health_router 统一提供（含 database/comfyui/worker/disk 分项状态）
 
     return app
 
