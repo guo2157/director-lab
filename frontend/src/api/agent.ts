@@ -97,3 +97,40 @@ export function listMessages(
 ) {
   return get<MessageListResult>(`/agent/sessions/${sessionId}/messages`, params)
 }
+
+/** 待审批的生成申请 */
+export interface AgentApproval {
+  confirmation_id: string
+  task_id: string
+  tool_name: string
+  args: Record<string, unknown> | null
+  status: string
+  comment: string | null
+  created_at: string | null
+}
+
+/** 会话内待审批列表 */
+export function listApprovals(sessionId: string) {
+  return get<{ items: AgentApproval[]; count: number }>(
+    `/agent/sessions/${sessionId}/approvals`,
+  )
+}
+
+/** 裁决审批：approve=true 批准，false 拒绝（批准不触发生成） */
+export function resolveApproval(
+  sessionId: string,
+  confirmationId: string,
+  payload: { approve: boolean; comment?: string | null },
+) {
+  return post<AgentApproval>(
+    `/agent/sessions/${sessionId}/approvals/${confirmationId}/resolve`,
+    payload,
+  )
+}
+
+/** 执行已批准的生成申请（幂等，重复调用复用同一任务） */
+export function executeApproval(sessionId: string, confirmationId: string) {
+  return post<{ confirmation_id: string; job_id: string; status: string; reused: boolean }>(
+    `/agent/sessions/${sessionId}/approvals/${confirmationId}/execute`,
+  )
+}

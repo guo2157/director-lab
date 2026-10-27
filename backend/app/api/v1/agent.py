@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models import AgentMessage, AgentSession, Project
+from app.models import AgentConfirmation, AgentMessage, AgentSession, AgentTask, Project
 from app.models.ids import agent_message_id, agent_session_id
 from app.schemas.agent import (
     AgentMessageCreate,
@@ -208,6 +208,96 @@ def list_messages(
         "page": page,
         "page_size": page_size,
     }
+
+
+class ApprovalResolveRequest(BaseModel):
+    """审批裁决请求。"""
+
+    approve: bool = Field(description="true 批准 / false 拒绝")
+    comment: str | None = Field(default=None, max_length=500, description="可选：审批意见")
+
+
+def _confirmation_out(c: AgentConfirmation) -> dict:
+    """审批记录对外结构（不含内部任务详情）。"""
+    return {
+        "confirmation_id": c.id,
+        "task_id": c.task_id,
+        "tool_name": c.tool_name,
+        "args": c.args,
+        "status": c.status,
+        "comment": c.comment,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+def _confirmation_in_session(
+    db: Session, session_id: str, confirmation_id: str
+) -> AgentConfirmation:
+    """校验审批记录存在且属于该会话，防止跨会话操作他人审批。"""
+    confirmation = db.get(AgentConfirmation, confirmation_id)
+    if confirmation is None:
+        raise biz_error(code="confirmation_not_found", http=404, message="审批记录不存在")
+    task = db.get(AgentTask, confirmation.task_id)
+    if task is None or task.session_id != session_id:
+        raise biz_error(code="confirmation_not_found", http=404, message="审批记录不属于该会话")
+    return confirmation
+
+
+@router.get("/{session_id}/approvals")
+def list_approvals(session_id: str, db: Session = Depends(get_db)) -> dict:
+    """会话内待审批的生成申请（供审批面板展示）。"""
+    _get_session(db, session_id)
+    from app.services.approvals import list_pending
+
+    items = [_confirmation_out(c) for c in list_pending(db, session_id)]
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/{session_id}/approvals/{confirmation_id}/resolve")
+def resolve_approval(
+    session_id: str,
+    confirmation_id: str,
+    payload: ApprovalResolveRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """裁决审批：批准或拒绝。仅处理待审记录，重复裁决返回 409。
+
+    批准本身不触发生成：执行需再调 execute 接口，审批与执行严格分离。
+    """
+    s = _get_session(db, session_id)
+    if s.status == "archived":
+        raise biz_error(code="session_archived", http=409, message="会话已归档，不能审批")
+    from app.services.approvals import resolve_confirmation
+
+    _confirmation_in_session(db, session_id, confirmation_id)
+    resolved = resolve_confirmation(
+        db, confirmation_id=confirmation_id, approve=payload.approve, comment=payload.comment
+    )
+    return _confirmation_out(resolved)
+
+
+@router.post("/{session_id}/approvals/{confirmation_id}/execute")
+def execute_approval(
+    session_id: str,
+    confirmation_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    """执行已批准的生成申请：创建任务并入队（幂等，重复调用复用同一任务）。"""
+    s = _get_session(db, session_id)
+    if s.status == "archived":
+        raise biz_error(code="session_archived", http=409, message="会话已归档，不能执行")
+    from app.services.agent_tools import execute_tool
+
+    _confirmation_in_session(db, session_id, confirmation_id)
+    result = execute_tool(db, "run_generate", approved=True, confirmation_id=confirmation_id)
+    if not result.ok:
+        http = 409 if result.error_code == "approval_required" else 400
+        raise biz_error(
+            code=result.error_code or "tool_internal_error",
+            http=http,
+            message=result.error_message or "执行生成失败",
+        )
+    return {"confirmation_id": confirmation_id, **(result.data or {})}
 
 
 class ChatRequest(BaseModel):

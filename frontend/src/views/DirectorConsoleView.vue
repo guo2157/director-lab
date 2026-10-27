@@ -7,11 +7,14 @@ import { ApiError, get, post } from '@/api/client'
 import {
   archiveSession,
   createSession,
+  executeApproval,
+  listApprovals,
   listMessages,
   listSessions,
+  resolveApproval,
   updateSession,
 } from '@/api/agent'
-import type { AgentMessage, AgentSession } from '@/api/agent'
+import type { AgentApproval, AgentMessage, AgentSession } from '@/api/agent'
 import { listJobs } from '@/api/jobs'
 
 const message = useMessage()
@@ -267,6 +270,10 @@ interface JobBrief {
 const projects = ref<ProjectBrief[]>([])
 const contextJobs = ref<JobBrief[]>([])
 const contextLoading = ref(false)
+// 生成类操作的待审批申请（批准与执行分离：批准只放行，执行才建任务）
+const approvals = ref<AgentApproval[]>([])
+const approvalLoading = ref(false)
+const approvingId = ref<string | null>(null)
 const linkingMode = ref(false)
 const linkTarget = ref<string | null>(null)
 
@@ -319,10 +326,64 @@ async function loadContext() {
   }
 }
 
+async function loadApprovals() {
+  const sid = activeSessionId.value
+  approvals.value = []
+  if (!sid) return
+  approvalLoading.value = true
+  try {
+    const res = await listApprovals(sid)
+    approvals.value = res.items ?? []
+  } catch {
+    approvals.value = []
+  } finally {
+    approvalLoading.value = false
+  }
+}
+
+// 面板只展示关键参数（目标类型 + 镜头），避免把整段入参铺满侧栏
+function approvalSummary(a: AgentApproval): string {
+  const args = (a.args ?? {}) as Record<string, unknown>
+  const target = String(args.target ?? '')
+  const shot = String(args.shot_id ?? '')
+  return [target || '生成', shot].filter(Boolean).join(' · ')
+}
+
+async function decideApproval(a: AgentApproval, approve: boolean) {
+  const sid = activeSessionId.value
+  if (!sid) return
+  approvingId.value = a.confirmation_id
+  try {
+    await resolveApproval(sid, a.confirmation_id, { approve })
+    message.success(approve ? '已批准，可点击执行' : '已拒绝')
+    await loadApprovals()
+  } catch (e) {
+    message.error(`审批失败: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    approvingId.value = null
+  }
+}
+
+async function runApproved(a: AgentApproval) {
+  const sid = activeSessionId.value
+  if (!sid) return
+  approvingId.value = a.confirmation_id
+  try {
+    const res = await executeApproval(sid, a.confirmation_id)
+    message.success(res.reused ? `任务已存在：${res.job_id}` : `已创建任务：${res.job_id}`)
+    await Promise.all([loadApprovals(), loadContext()])
+  } catch (e) {
+    message.error(`执行失败: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    approvingId.value = null
+  }
+}
+
 watch(
   () => activeSession.value?.project_id,
   () => void loadContext(),
 )
+watch(activeSessionId, () => void loadApprovals())
 
 async function linkProject(pid: string | null) {
   // 未选中会话时无法关联：给出明确提示，避免点击后毫无反馈被误认为报错
@@ -568,6 +629,41 @@ onMounted(() => {
             </div>
           </div>
 
+          <div class="ctx-label">待审批生成</div>
+          <NSpin :show="approvalLoading" size="small">
+            <div v-if="!approvals.length" class="ctx-empty">暂无待审批申请</div>
+            <div v-else class="approval-list">
+              <div v-for="a in approvals" :key="a.confirmation_id" class="approval-item">
+                <div class="approval-main">
+                  <div class="approval-title" :title="a.tool_name">{{ approvalSummary(a) }}</div>
+                  <div class="approval-actions">
+                    <template v-if="a.status === 'pending'">
+                      <NButton
+                        size="tiny"
+                        type="primary"
+                        :loading="approvingId === a.confirmation_id"
+                        @click="decideApproval(a, true)"
+                      >批准</NButton>
+                      <NButton
+                        size="tiny"
+                        :loading="approvingId === a.confirmation_id"
+                        @click="decideApproval(a, false)"
+                      >拒绝</NButton>
+                    </template>
+                    <template v-else-if="a.status === 'approved'">
+                      <NTag size="tiny" type="success">已批准</NTag>
+                      <NButton
+                        size="tiny"
+                        type="primary"
+                        :loading="approvingId === a.confirmation_id"
+                        @click="runApproved(a)"
+                      >执行</NButton>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </NSpin>
           <div class="ctx-label">最近任务</div>
           <NSpin :show="contextLoading" size="small">
             <div v-if="!contextJobs.length" class="ctx-empty">暂无任务记录</div>
@@ -821,6 +917,38 @@ onMounted(() => {
   color: var(--text-secondary, #666);
   text-decoration: none;
 }
+.approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.approval-item {
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.approval-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.approval-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .chat-input {
   display: flex;
   gap: 10px;

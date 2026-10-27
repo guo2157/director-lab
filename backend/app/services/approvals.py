@@ -130,14 +130,21 @@ def get_confirmation(db: Session, confirmation_id: str) -> AgentConfirmation:
 
 
 def list_pending(db: Session, session_id: str) -> list[AgentConfirmation]:
-    """列出会话内全部待审批记录（审批面板用）。"""
+    """列出会话内待处理的审批记录（审批面板用）。
+
+    包含 pending（待裁决）与 approved（已批准待执行）两类：
+    批准后记录必须继续可见，否则界面无从触发执行，审批链路会断在半路；
+    任务执行完成后（task.status=completed）才从列表移除。
+    已拒绝的记录直接消失，避免占位干扰。
+    """
     return list(
         db.scalars(
             select(AgentConfirmation)
             .join(AgentTask, AgentConfirmation.task_id == AgentTask.id)
             .where(
                 AgentTask.session_id == session_id,
-                AgentConfirmation.status == "pending",
+                AgentConfirmation.status.in_(("pending", "approved")),
+                AgentTask.status != "completed",
             )
             .order_by(AgentConfirmation.created_at.asc())
         ).all()
