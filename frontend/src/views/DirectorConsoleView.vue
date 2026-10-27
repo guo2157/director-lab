@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import { NButton, NEmpty, NInput, NPopconfirm, NSelect, NSpin, NTag } from 'naive-ui'
+import { NButton, NEmpty, NImage, NInput, NPopconfirm, NSelect, NSpin, NTag } from 'naive-ui'
 import { ApiError, get, post } from '@/api/client'
 import {
   archiveSession,
@@ -457,22 +457,24 @@ onMounted(() => {
                 class="asset-thumbs"
               >
                 <template v-for="a in visibleAssetRefs(m)" :key="a.asset_id">
-                  <a
+                  <!-- 图片类：气泡内用低成本缩略图直出，点击进入预览层查看原图
+                       （可缩放/旋转/下载），避免新开标签页直接加载数 MB PNG -->
+                  <div
                     v-if="isImageAsset(a.asset_type)"
                     class="asset-thumb"
-                    :href="`/api/assets/${a.asset_id}/file`"
-                    target="_blank"
-                    rel="noopener"
                     :title="`${a.name}（${a.asset_type}）`"
                   >
-                    <img
+                    <NImage
                       :src="`/api/assets/${a.asset_id}/file?thumb=true`"
-                      :alt="a.name"
-                      loading="lazy"
+                      :preview-src="`/api/assets/${a.asset_id}/file`"
+                      :img-props="{ alt: a.name, loading: 'lazy' }"
+                      width="100%"
+                      height="100%"
+                      object-fit="cover"
                       @error="onThumbError(a.asset_id)"
                     />
                     <span class="asset-thumb-label">{{ a.asset_type }}</span>
-                  </a>
+                  </div>
                   <a
                     v-else
                     class="asset-thumb-link"
@@ -788,6 +790,7 @@ onMounted(() => {
   overflow: hidden;
   border: 1px solid var(--border-subtle, #e5e7eb);
   background: #000;
+  cursor: zoom-in;
 }
 .asset-thumb img {
   width: 100%;
