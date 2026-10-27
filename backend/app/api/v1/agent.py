@@ -257,7 +257,25 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         route_action,
     )
 
-    intent = classify_intent(payload.content)
+    # 加载近期对话（当前消息之前，旧→新），供意图识别消解『它』『上一个』等指代
+    recent = (
+        db.scalars(
+            select(AgentMessage)
+            .where(
+                AgentMessage.session_id == session_id,
+                AgentMessage.role.in_(["user", "assistant"]),
+                AgentMessage.seq <= max_seq,
+            )
+            .order_by(AgentMessage.seq.desc())
+            .limit(10)
+        )
+        .unique()
+        .all()
+    )[::-1]
+    intent = classify_intent(
+        payload.content,
+        recent_messages=[{"role": m.role, "content": m.content} for m in recent],
+    )
     action = route_action(intent.intent)
     # 结构化意图（B 档）：ambiguous 且带缺失信息时向用户澄清，不进入主对话（不虚构目标）
     if intent.intent == "ambiguous" and intent.missing_information:
