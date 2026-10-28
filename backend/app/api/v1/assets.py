@@ -537,11 +537,16 @@ def get_asset_regenerate_config(asset_id: str, db: Session = Depends(get_db)) ->
     }
 
 
-@router.post("/{asset_id}/replace", status_code=201)
+@router.post("/{asset_id}/replace", status_code=200)
 async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(get_db)) -> dict:
-    """上传新文件替换资产：生成 vN+1 并置为生效版本，旧版本转 superseded 保留可回滚。"""
-    old = _get_asset(db, asset_id)
-    if old.locked:
+    """上传新文件原地替换资产（2026-10-28 改版）：直接覆盖原文件内容。
+
+    固定约束：资产名称与文件路径（图片名称和图片位置）不可变——
+    上传的图片直接替换现有文件，不生成新版本记录、不改变 file_path/name。
+    版本时间线与回滚不适用于替换（无新版本产生）。
+    """
+    asset = _get_asset(db, asset_id)
+    if asset.locked:
         raise errors.AppError("asset_locked", "资产已锁定，请先解锁再替换", 409)
     data = await file.read()
     if not data:
@@ -549,58 +554,39 @@ async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(g
     if len(data) > _MAX_UPLOAD_BYTES:
         raise errors.AppError("invalid_request", "单文件上限 500MB", 400)
     suffix = Path(file.filename or "").suffix or ".bin"
-    _check_file_type(old.asset_type, suffix)
-    settings = get_settings()
-    media_dir = Path(settings.media_dir)
-    media_dir.mkdir(parents=True, exist_ok=True)
-    new_id = ids.asset_id()
-    version = _next_version_by_name(db, old.project_id, old.asset_type, old.name)
-    dest = media_dir / f"{new_id}_v{version}{suffix}"
+    _check_file_type(asset.asset_type, suffix)
+    # 原地覆盖：文件路径固定不变，直接写原 file_path
+    dest = Path(asset.file_path)
+    if not dest.is_absolute():
+        # file_path 为相对后端工作目录的存储口径（data/media/xxx），按原样解析
+        if not dest.exists():
+            dest = Path(get_settings().media_dir) / dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
-    # 分镜图/视频等镜头产物与镜头的关联依赖 source_job_id（_current_asset_info 按此反查），
-    # 替换后必须继承原产物的来源任务，否则新图无法被镜头识别为当前分镜图
-    _inherit_job_id = old.source_job_id if old.asset_type in _SHOT_BOUND_TYPES else None
-    new_asset = Asset(
-        id=new_id,
-        project_id=old.project_id,
-        asset_type=old.asset_type,
-        name=old.name,
-        version=version,
-        parent_id=old.id,
-        source_job_id=_inherit_job_id,
-        file_path=str(dest),
-        thumb_path=_make_thumb_safe(str(dest), f"{new_id}_v{version}"),
-        validity="current",
-        input_snapshot={
-            "created_at": _now().isoformat(),
-            "replace_of": old.id,
-            "replaced_version": old.version,
-            "original_filename": file.filename,
-        },
-    )
-    old.validity = "superseded"
-    db.add(new_asset)
-    changed_entities = _sync_entity_pointer(db, old.id, new_asset.id, old.asset_type)
-    affected_shots = _mark_referencing_shots(db, old.id)
-    # 人工审核闸口（D-23）：公共资产换版后原审核结论失效，需重新提交审核
-    if old.asset_type in ("character", "scene", "prop"):
+    # 缩略图按原路径覆盖重生成
+    asset.thumb_path = _make_thumb_safe(str(dest), dest.stem)
+    asset.input_snapshot = {
+        **(asset.input_snapshot or {}),
+        "replaced_at": _now().isoformat(),
+        "original_filename": file.filename,
+    }
+    affected_shots = _mark_referencing_shots(db, asset.id)
+    # 人工审核闸口（D-23）：公共资产替换后原审核结论失效，需重新提交审核
+    if asset.asset_type in ("character", "scene", "prop"):
         from app.services.assets_review import reset_assets_review
-        reset_assets_review(db, old.project_id)
+        reset_assets_review(db, asset.project_id)
     # 分镜图换图后该镜分镜图需重新人工确认（D-13 静图先行闸口）
-    if old.asset_type == "keyframe":
+    if asset.asset_type == "keyframe":
         from app.models import Shot as _Shot
-        _src = db.get(Job, old.source_job_id) if old.source_job_id else None
+        _src = db.get(Job, asset.source_job_id) if asset.source_job_id else None
         if _src is not None and _src.shot_id:
             _shot = db.get(_Shot, _src.shot_id)
             if _shot is not None:
                 _shot.keyframe_confirmed = False
                 affected_shots = list({*affected_shots, _shot.id})
     db.commit()
-    out = _to_out(new_asset)
+    out = _to_out(asset)
     out.update({
-        "previous_asset_id": old.id,
-        "previous_version": old.version,
-        "synced_entities": changed_entities,
         "affected_shots": affected_shots,
     })
     return out

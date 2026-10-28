@@ -218,10 +218,7 @@ async function confirmReplace() {
   replaceBusy.value = true
   try {
     const res = await replaceAsset(replaceTarget.value.id, replaceFileObj.value)
-    message.success(
-      `已替换为 v${res.version}` +
-        (res.previous_version ? `，原 v${res.previous_version} 可在版本时间线回滚` : ''),
-    )
+    message.success('替换成功，图片内容已更新（名称与位置保持不变）')
     if (res.affected_shots?.length) {
       message.info(`${res.affected_shots.length} 个引用镜头已标记待重做`)
     }
@@ -867,34 +864,22 @@ async function handleBatchCraft() {
     <!-- 上传替换确认弹窗 -->
     <n-modal v-model:show="replaceVisible" preset="card" style="width: 640px" title="上传替换资产">
       <template v-if="replaceTarget">
-        <div class="replace-row">
-          <div class="replace-card">
-            <div class="replace-card-label">当前版本 v{{ replaceTarget.version }}</div>
-            <div class="replace-card-preview">
-              <img v-if="replaceTarget.thumb_url || replaceTarget.url" :src="replaceTarget.thumb_url || replaceTarget.url" alt="" />
-              <div v-else class="thumb-placeholder">
-                {{ assetTypeLabels[replaceTarget.asset_type] || replaceTarget.asset_type }}
-              </div>
+        <div class="replace-card">
+          <div class="replace-card-label">{{ replaceTarget.name }}</div>
+          <div class="replace-card-preview">
+            <input ref="replaceFileInputRef" type="file" accept="image/*,video/*" style="display:none" @change="onReplaceFileChange" />
+            <div v-if="replacePreview" class="replace-preview-wrap">
+              <img :src="replacePreview" alt="" />
+              <n-button size="tiny" secondary class="replace-repick" @click="triggerReplaceFileSelect">重新选择</n-button>
             </div>
-          </div>
-          <div class="replace-arrow">→</div>
-          <div class="replace-card">
-            <div class="replace-card-label">新版本 v{{ replaceTarget.version + 1 }}</div>
-            <div class="replace-card-preview">
-              <input ref="replaceFileInputRef" type="file" accept="image/*,video/*" style="display:none" @change="onReplaceFileChange" />
-              <div v-if="replacePreview" class="replace-preview-wrap">
-                <img :src="replacePreview" alt="" />
-                <n-button size="tiny" secondary class="replace-repick" @click="triggerReplaceFileSelect">重新选择</n-button>
-              </div>
-              <div v-else class="replace-pick">
-                <n-button size="small" secondary @click="triggerReplaceFileSelect">选择文件</n-button>
-              </div>
+            <div v-else class="replace-pick">
+              <n-button size="small" secondary @click="triggerReplaceFileSelect">选择文件</n-button>
             </div>
           </div>
         </div>
         <div v-if="replaceFileObj" class="replace-file-name">已选择：{{ replaceFileObj.name }}</div>
         <n-alert type="info" :bordered="false" style="margin-top: 12px">
-          替换不会覆盖原文件：旧版本转为历史版本并保留在版本时间线中，可随时回滚。引用该资产的镜头会被标记为待重做，但不会自动触发任务。
+          上传的图片将直接替换当前图片内容，资产名称与文件位置保持不变。引用该资产的镜头会被标记为待重做，但不会自动触发任务。
         </n-alert>
       </template>
       <template #footer>
