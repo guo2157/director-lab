@@ -511,6 +511,9 @@
 | POST | /api/agent/sessions/{session_id}/messages | 追加消息 |
 | GET | /api/agent/sessions/{session_id}/messages | 消息列表（支持 after_seq 增量） |
 | POST | /api/agent/sessions/{session_id}/chat | 聊天（意图识别 → 工具审计 → LLM 回复） |
+| GET | /api/agent/sessions/{session_id}/approvals | 会话内待审批生成申请列表 |
+| POST | /api/agent/sessions/{session_id}/approvals/{confirmation_id}/resolve | 裁决审批（批准/拒绝，重复裁决 409） |
+| POST | /api/agent/sessions/{session_id}/approvals/{confirmation_id}/execute | 执行已批准的生成申请（幂等，重复执行复用同一任务） |
 
 ### 会话与消息
 - 会话 `project_id` 可空：未关联项目时为通用问答，不执行项目工具。
@@ -522,8 +525,9 @@
 ### 聊天流程（POST /chat）
 1. 持久化 user 消息。
 2. **意图识别**（B 档）：先走确定性**规则快路径**（`apply_fast_path_rules`，结果 `source=rules`），未命中再调用 LLM 结构化识别（`source=llm`）。规则优先级 unsafe > generate_request > query，命中即返回（confidence=1.0，省一次 LLM 往返）：unsafe 拦索要密钥/凭据、删除或清空全部数据、绕过规则或审批；generate_request 要求生成动作 + 产物词（生成/出图/渲染 + 关键帧/分镜/视频/角色图等），并带负向断言排除描述性表述（『最近生成的角色图长什么样』是在查看已有产物，判为 query 而不是生成请求）；query 覆盖进展/进度/状态/概览、失败原因、任务列表、资产统计，以及查看类表述（看看/看一下/给我看看/长什么样 + 图/视频/片段/素材/角色/场景/道具/关键帧/分镜/资产）。未命中规则的模糊消息交由 LLM 输出经 Pydantic Schema 校验，提取 intent/goal/entities/missing_information/risk_level/confidence；规则兜底高风险关键词；置信度 < 0.7 或信息缺失时返回澄清问题（route_action=clarify），不进入主对话。
-3. **确定性路由**：unsafe → 拒绝（reject）；generate_request → 引导到对应页面（guide）；识别失败降级 query 继续主对话。
-4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（query/analysis → project_overview、asset_stats、list_jobs；其余意图不授予任何工具），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
+3. **确定性路由**：unsafe → 拒绝（reject）；generate_request → 落地为审批申请（guide 分支内 `_try_create_generate_approval`，只建申请绝不执行生成）；识别失败降级 query 继续主对话。
+   生成申请的目标定位（不猜用户意图对象）：镜头目标须消息明确给出镜头标识（`sht_` ID 或『第 N 镜』且项目内唯一命中）；实体目标（角色/场景/道具公共资产）须明确给出实体 ID（`chr_`/`scn_`/`prp_` 前缀），不按名称猜测；定位不到时返回澄清提示。生成目标由关键词判定：音频（配音/语音/台词/朗读/TTS/旁白）→ audio，视频（视频/片段/动态）→ clip，图片类 → keyframe，判定不出默认 keyframe（成本最低）。
+4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（query/analysis → project_overview、asset_stats、list_jobs、list_asset_plans；其余意图不授予任何工具），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
 
    `list_assets` 为**条件注入**：仅当用户消息命中资产类关键词（图/视频/片段/素材/缩略/画面/看看/长什么样）时，才以 `validity=current, limit=6` 追加查询。既避免每条回复都附带缩略图（UI 噪音与无谓带宽），也只展示仍然有效的资产。
 5. **LLM 回复**：历史窗口最近 40 条 user/assistant 消息；瞬态错误指数退避重试最多 3 次；`llm_unconfigured` → 409，其余失败 → 502（用户消息已持久化，可重试）。
@@ -536,6 +540,19 @@
 | list_jobs | read | low | 无 | 否 |
 | asset_stats | read | low | 无 | 否 |
 | list_assets | read | low | 无 | 否 |
+| list_asset_plans | read | low | 无 | 否 |
+| request_generate | generate | medium | 有 | 否（只建审批记录，不建任务） |
+| run_generate | generate | high | 有 | 是（须先人工批准） |
+
+`list_asset_plans` 返回项目资产定义清单（plan_id / plan_type / asset_key / status / confirmed / owner_type / owner_id / episode / seq / asset_id / version / dependencies[{slot, ref_key}]），支持 plan_type（character/scene/prop/keyframe/clip）与 status（pending/generated/reviewed/rejected）过滤及分页（limit 默认 20、最大 50），**不返回文件系统路径**（media_path/thumb_path）。
+
+### 生成申请与审批（申请-审批-执行三段分离）
+- **request_generate**：提交生成申请，只创建审批记录（agent_confirmation），不建任务、不消耗算力。镜头目标（keyframe/clip/audio/bgm/sfx）须给 `shot_id`；实体目标（character/scene/prop 公共资产）须给 `entity_id`。同会话同入参重复申请复用同一条待审记录（幂等）；同镜头/同实体已有在途任务时拒绝（`job_in_flight`）。
+- **run_generate**：执行已批准的申请，创建生成任务入队。幂等键 `agc:{confirmation_id}`，重复执行复用同一任务。门禁与 API 通道同等校验，不可绕过：
+  - keyframe：D-23 统一资产就绪门禁（必需资产齐全/有效/审核通过）；
+  - clip：D-13 静图先行闸口（分镜图须人工确认，`keyframe_not_confirmed`）；
+  - 实体目标：走 keyframe 图像工作流，任务参数注入归属键（`__character_id__`/`__scene_id__`/`__prop_id__`），生成后回退项目审核状态为 pending（D-23）。
+- **参数组装与 API 通道对齐**：镜头目标 prompt 兜底 `shot.image_prompt`/`shot.video_prompt`，audio 走 `tts_text`（台词）；clip 含跨集连续性首帧注入、镜间尾帧依赖注入（声明必需而缺失时 `prev_frame_missing` 拦截）、@引用参考图注入；实体目标空 prompt 时按实体属性用纯净化模板构造，工作流绑定 negative 参数时注入负面约束。注入明细写入任务 `input_snapshot` 供追溯。
 
 `list_assets` 返回项目资产清单（asset_id / asset_type / name / version / validity / quality_status / has_file / has_thumb / source_job_id / locked / ref_count / generated_at），以及 `count`（本次返回条数）与 `offset`（本次起始偏移），**不返回文件系统路径**；前端据 `asset_id` 通过 `GET /api/assets/{asset_id}/file?thumb=true` 取缩略图。
 
@@ -551,7 +568,7 @@ assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用�
 - 缩略图加载失败（资产已失效或被清理）时前端记录失败 asset_id 并隐藏该项，避免历史消息出现破图。
 
 - 入参经 Pydantic Schema 校验（model_validate），校验失败返回 `tool_invalid_args`。
-- `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前四个工具均无需审批）。
+- `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前仅 run_generate 需审批，经审批面板批准后由 execute 接口以 approved=True 调用）。
 
 ### Agent 任务/计划/审批表（B 档）
 - `agent_task`：结构化意图识别结果落库（intent/intent_goal/risk_level/confidence/success_criteria/status）。
