@@ -298,6 +298,29 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
     episode_start = int(payload.get("episode_start") or 1)
     if episode_start < 1:
         raise errors.invalid_request("episode_start 不得小于 1")
+    # 幂等拦截（2026-10-28）：剧本未变化（同 script_version_id）且同 episode_start 已有成功的
+    # script_agent 任务时，直接复用已有结果，不创建新任务、不重复调用 LLM。
+    # 剧本 hash 变化会生成新 script_version_id，自然走重新分析；force=true 可强制重析。
+    if not payload.get("force"):
+        existing = (
+            db.query(Job)
+            .filter(
+                Job.project_id == project_id,
+                Job.job_type == "script_agent",
+                Job.status == "succeeded",
+            )
+            .order_by(Job.created_at.desc())
+            .all()
+        )
+        for j in existing:
+            jp = j.params or {}
+            if jp.get("script_version_id") == sv.id and int(jp.get("episode_start") or 1) == episode_start:
+                return {
+                    "job_id": j.id,
+                    "status": j.status,
+                    "idempotent_reuse": True,
+                    "message": "剧本未变化且该批次已成功分析，已复用已有结果（如需重新分析请传 force=true）",
+                }
     job = Job(
         id=ids.job_id(), project_id=project_id, job_type="script_agent",
         params={
@@ -371,17 +394,8 @@ def create_parse(project_id: str, payload: ParseCreate,
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, payload.text)
-    # 前置：必须已确认与 script_version_id 匹配的评估
-    confirmed = (
-        db.query(ScriptEstimate)
-        .filter(ScriptEstimate.script_version_id == sv.id, ScriptEstimate.user_confirmed.is_(True))
-        .first()
-    )
-    if confirmed is None:
-        raise errors.invalid_request("解析前须先评估并确认与剧本版本匹配的制作范围")
-    # 解析区间归一化：episode_count（起始+数量）或 episode_end（起止集数）二选一
-    if payload.episode_count is None and payload.episode_end is None:
-        raise errors.invalid_request("须提供 episode_count 或 episode_end 之一")
+    # 解析区间归一化：episode_count/episode_end 可选（LLM parser 自主分析集数）
+    # 未提供时默认从第1集开始，episode_count 传 None 由 parser 自行确定
     if payload.episode_count is not None and payload.episode_end is not None:
         raise errors.invalid_request("episode_count 与 episode_end 只能提供其一")
     if payload.episode_end is not None:
@@ -390,12 +404,6 @@ def create_parse(project_id: str, payload: ParseCreate,
         episode_count = payload.episode_end - payload.episode_start + 1
     else:
         episode_count = payload.episode_count
-    # 口径锁定：解析范围不可超出评估确认时锁定的总集数
-    if confirmed.total_episodes is not None:
-        if payload.episode_start + episode_count - 1 > confirmed.total_episodes:
-            raise errors.invalid_request(
-                f"解析范围超出评估锁定的总集数 {confirmed.total_episodes}"
-            )
     job = Job(
         id=ids.job_id(), project_id=project_id, job_type="parse",
         params={
@@ -415,7 +423,7 @@ def create_parse(project_id: str, payload: ParseCreate,
 def get_parse_status(project_id: str, db: Session = Depends(get_db)) -> ParseStatusOut:
     """集级解析状态查询：返回各集解析记录，供前端集数网格视图渲染。"""
     _get_project(db, project_id)
-    # 锁定的总集数：优先取 ParseVersion 口径（script-agent 流程），回退已确认评估快照（旧流程）
+    # 锁定的总集数：仅从 ParseVersion 获取（LLM parser 自主分析集数后回写）
     pv_scope = (
         db.query(ParseVersion)
         .filter(ParseVersion.project_id == project_id, ParseVersion.total_episodes.isnot(None))
@@ -423,15 +431,6 @@ def get_parse_status(project_id: str, db: Session = Depends(get_db)) -> ParseSta
         .first()
     )
     total_episodes = pv_scope.total_episodes if pv_scope is not None else None
-    if total_episodes is None:
-        est = (
-            db.query(ScriptEstimate)
-            .join(ScriptVersion, ScriptEstimate.script_version_id == ScriptVersion.id)
-            .filter(ScriptVersion.project_id == project_id, ScriptEstimate.user_confirmed.is_(True))
-            .order_by(ScriptEstimate.created_at.desc())
-            .first()
-        )
-        total_episodes = est.total_episodes if est is not None else None
     records = (
         db.query(EpisodeParseRecord)
         .filter(EpisodeParseRecord.project_id == project_id)

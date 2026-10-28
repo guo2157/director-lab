@@ -126,6 +126,35 @@ def execute_script_agent_job(job_id: str) -> dict:
         text = sv.content_snapshot
         script_hash = sv.content_hash or ""
 
+        # ---- 0. 幂等防御（2026-10-28）：同剧本版本且同 episode_start 已有成功任务时，
+        # 复用其结果直接标记 succeeded，跳过 LLM 评估与解析（接口层已拦截，此处防御
+        # 并发提交/绕过接口直建任务等场景，避免重复消耗 LLM 调用）----
+        _done = (
+            db.query(Job)
+            .filter(
+                Job.project_id == job.project_id,
+                Job.job_type == "script_agent",
+                Job.status == "succeeded",
+                Job.id != job.id,
+            )
+            .order_by(Job.created_at.desc())
+            .all()
+        )
+        for _prev in _done:
+            _pp = _prev.params or {}
+            if _pp.get("script_version_id") == sv.id and int(_pp.get("episode_start") or 1) == episode_start:
+                job.status = "succeeded"
+                job.result = dict(_prev.result or {})
+                job.result["idempotent_reuse"] = True
+                job.result["reused_from_job_id"] = _prev.id
+                job.finished_at = _now()
+                _write_event(db, job, "agent.succeeded", {
+                    "idempotent_reuse": True,
+                    "reused_from_job_id": _prev.id,
+                })
+                db.commit()
+                return {"ok": True, "idempotent_reuse": True, "reused_from_job_id": _prev.id}
+
         # ---- 1. 算法预检（不落库）----
         from app.models import Project
         project = db.get(Project, job.project_id)
