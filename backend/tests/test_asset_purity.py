@@ -179,6 +179,9 @@ def test_scene_batch_generate_injects_media(client: TestClient):
     pid = client.post("/api/projects", json={"name": "p0test", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
     try:
+        # D-23 资产门禁：定妆图文件必须真实存在
+        from pathlib import Path
+        Path("/tmp/x.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
                   name="小马", version=1, file_path="/tmp/x.png", validity="current")
         db.add(a)
@@ -188,18 +191,20 @@ def test_scene_batch_generate_injects_media(client: TestClient):
         scene = Scene(id=ids.scene_id(), project_id=pid, episode=1, seq=1, title="马棚")
         db.add_all([pony, scene])
         db.flush()
+        # D-23 资产门禁：为场景构造真实基准图资产
+        from tests.conftest import seed_scene_baseline_asset
+        seed_scene_baseline_asset(db, scene, "/tmp/dlab_test_media")
         for i in range(3):
             db.add(Shot(id=ids.shot_id(), scene_id=scene.id, episode=1, seq=i + 1,
                         shot_kind="visual", duration=5, image_prompt=f"@小马 在马棚，镜头{i+1}"))
         wf = Workflow(id=ids.workflow_id(), name="img", workflow_type="image",
-                      capabilities={"reference_slots": ["ref_identity"]},
+                      capabilities={"reference_slots": ["ref_identity", "ref_scene"]},
                       definition={"nodes": []}, is_default=True)
         db.add(wf)
         # D-23 资产审核闸口：本用例聚焦 @引用参考图注入，
         # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
-        from app.models import Project
-        _proj = db.get(Project, pid)
-        _proj.assets_review_status = "approved"
+        from tests.conftest import approve_project_assets
+        approve_project_assets(db, pid)
         db.commit()
         scene_id = scene.id
     finally:

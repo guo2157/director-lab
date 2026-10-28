@@ -287,9 +287,19 @@ def execute_approval(
     if s.status == "archived":
         raise biz_error(code="session_archived", http=409, message="会话已归档，不能执行")
     from app.services.agent_tools import execute_tool
+    from app.services.pipeline_tools import PIPELINE_TOOL_REGISTRY, execute_pipeline_tool
+    from app.services.regen_tools import REGEN_TOOL_REGISTRY, execute_regen_tool
 
     _confirmation_in_session(db, session_id, confirmation_id)
-    result = execute_tool(db, "run_generate", approved=True, confirmation_id=confirmation_id)
+    confirmation = db.get(AgentConfirmation, confirmation_id)
+    # 流程工具（合成/导出等）：批准后经流程工具执行通道执行（含状态机门禁）
+    if confirmation is not None and confirmation.tool_name in PIPELINE_TOOL_REGISTRY:
+        result = execute_pipeline_tool(db, confirmation.tool_name, approved=True, **(confirmation.args or {}))
+    # 返工工具（重新生成等）：批准后经返工工具执行通道执行（含状态机门禁）
+    elif confirmation is not None and confirmation.tool_name in REGEN_TOOL_REGISTRY:
+        result = execute_regen_tool(db, confirmation.tool_name, approved=True, **(confirmation.args or {}))
+    else:
+        result = execute_tool(db, "run_generate", approved=True, confirmation_id=confirmation_id)
     if not result.ok:
         http = 409 if result.error_code == "approval_required" else 400
         raise biz_error(
@@ -416,6 +426,170 @@ def _try_create_generate_approval(
     return reply, {"ok": True, **data}
 
 
+def _resolve_regen_target(db: Session, project_id: str, text: str) -> tuple[dict, str | None]:
+    """从消息中解析返工操作的目标（资产 ast_ / 镜头 sht_ 或『第 N 镜』）。
+
+    返回 (目标参数, 错误消息)：解析成功时错误消息为 None。
+    不猜测目标：定位不到时返回澄清提示（猜错会返工错对象，浪费算力与成本）。
+    """
+    import re as _re
+    from app.models import Asset, Shot, Scene
+    from app.services.generate_intent import resolve_shot
+    # 资产 ID：ast_ 前缀
+    m = _re.search(r"\bast_[a-z0-9]+\b", text)
+    if m:
+        asset = db.get(Asset, m.group(0))
+        if asset is None:
+            return {}, f"资产 {m.group(0)} 不存在，请确认资产 ID。"
+        if asset.project_id != project_id:
+            return {}, "该资产不属于当前项目，请确认后重试。"
+        return {"asset_id": asset.id}, None
+    # 镜头 ID 或『第 N 镜』
+    m = _re.search(r"\bsht_[a-z0-9]+\b", text)
+    if m:
+        shot = db.get(Shot, m.group(0))
+        if shot is None:
+            return {}, f"镜头 {m.group(0)} 不存在，请确认镜头 ID。"
+        scene = db.get(Scene, shot.scene_id)
+        if scene is None or scene.project_id != project_id:
+            return {}, "该镜头不属于当前项目，请确认后重试。"
+        return {"shot_id": shot.id}, None
+    shot, reason = resolve_shot(db, project_id, text)
+    if shot is not None:
+        return {"shot_id": shot.id}, None
+    hints = {
+        "shot_not_found": "没有找到你提到的镜头，请确认镜头编号是否存在。",
+        "shot_not_in_project": "该镜头不属于当前项目，请确认后重试。",
+        "shot_ambiguous": "『第 N 镜』在本项目内命中多个镜头，请补充场景或直接给出镜头 ID。",
+    }
+    if reason in hints:
+        return {}, hints[reason]
+    return {}, (
+        "请明确要返工的目标：给出资产 ID（ast_ 开头）或镜头（『第 N 镜』或镜头 ID，sht_ 开头）。"
+    )
+
+
+def _handle_pipeline_action(
+    db: Session, session: AgentSession, session_id: str, intent, text: str
+) -> tuple[str, dict | None]:
+    """流程操作处理：意图识别流程节点 → 状态机门禁 → 执行流程工具。
+
+    - 动作键来自意图识别（规则快路径或 LLM entities.pipeline_action）
+    - review_current：泛化审核确认，按当前流程节点解析为具体审核动作
+    - 高风险工具（合成/导出）不直接执行：只创建审批申请，批准后经 execute 接口执行
+    - 状态机门禁阻断时返回当前节点与下一步指引（不猜测、不降级、不跳过审核闸口）
+    """
+    from app.services.pipeline_tools import PIPELINE_TOOL_REGISTRY, execute_pipeline_tool
+    from app.services.pipeline_state import get_pipeline_status
+
+    action = (intent.entities or {}).get("pipeline_action") if intent else None
+    if not action:
+        return (
+            "未能识别出要执行的流程操作。可以对我说：新建项目、保存剧本、分析剧本、"
+            "审核资产库、确认分镜图、合成成片、导出成片，或直接描述你的需求。",
+            None,
+        )
+    # 泛化审核确认：按当前流程节点解析为具体审核动作
+    if action == "review_current":
+        if not session.project_id:
+            return ("当前会话未关联项目，无法执行审核操作。请先在右侧关联项目。", None)
+        try:
+            st = get_pipeline_status(db, session.project_id)
+        except Exception:
+            return ("项目状态查询失败，请确认项目是否存在。", None)
+        node_review_map = {
+            "review_assets": "review_assets",
+            "review_keyframes": "confirm_keyframes",
+        }
+        action = node_review_map.get(st.node_key)
+        if action is None:
+            return (
+                f"当前流程节点为『{st.node_name}』，不是审核闸口，无需审核。下一步：{st.next_hint}",
+                None,
+            )
+    # 新建项目：无需关联项目；其余操作须会话已关联项目
+    if action != "create_project" and not session.project_id:
+        return (
+            "当前会话未关联项目，无法执行该流程操作。请先在右侧关联项目"
+            "（或先对我说『新建项目』创建一个新项目）。",
+            None,
+        )
+    spec = PIPELINE_TOOL_REGISTRY.get(action)
+    if spec is None:
+        # 返工工具（重新生成/替换/采纳）：目标从消息中解析（资产 ast_/镜头 sht_ 或『第 N 镜』）
+        from app.services.regen_tools import REGEN_TOOL_REGISTRY, execute_regen_tool
+        spec = REGEN_TOOL_REGISTRY.get(action)
+        if spec is None:
+            return (f"未注册的流程操作：{action}，请确认操作名称。", None)
+        if not session.project_id:
+            return ("当前会话未关联项目，无法执行返工操作。请先在右侧关联项目。", None)
+        target_args, target_err = _resolve_regen_target(db, session.project_id, text)
+        if target_err:
+            return (target_err, None)
+        # 生成类返工（重新生成）：只创建审批申请，不直接执行
+        if spec.get("requires_approval"):
+            from app.services.approvals import create_confirmation
+            confirmation = create_confirmation(
+                db,
+                session_id=session_id,
+                tool_name=action,
+                args={"project_id": session.project_id, **target_args},
+                goal=intent.goal or f"执行返工操作 {action}",
+                risk_level=spec.get("risk_level", "high"),
+            )
+            return (
+                f"已提交『{spec['description'].split('（')[0]}』审批申请（审批编号 {confirmation.id}）。"
+                "请在右侧『待审批生成』中批准后点执行，任务才会真正创建；我不会在对话中直接执行生成类操作。",
+                {"ok": True, "confirmation_id": confirmation.id, "tool": action, **target_args},
+            )
+        # 替换/采纳/查询类返工：直接执行
+        result = execute_regen_tool(db, action, project_id=session.project_id, **target_args)
+        if not result.ok:
+            return f"返工操作执行失败：{result.error_message}", {
+                "ok": False,
+                "error_code": result.error_code,
+                "tool": action,
+            }
+        data = result.data or {}
+        note = data.get("note", "")
+        reply = f"返工操作已执行：{spec['description'].split('（')[0]}。"
+        if note:
+            reply += f"\n{note}"
+        return reply, {"ok": True, "tool": action, **{k: v for k, v in data.items() if k != "note"}}
+    # 高风险工具（需审批）：只创建审批申请，不直接执行
+    if spec.get("requires_approval"):
+        from app.services.approvals import create_confirmation
+        confirmation = create_confirmation(
+            db,
+            session_id=session_id,
+            tool_name=action,
+            args={"project_id": session.project_id},
+            goal=intent.goal or f"执行流程操作 {action}",
+            risk_level=spec.get("risk_level", "high"),
+        )
+        return (
+            f"已提交『{spec['description'].split('（')[0]}』审批申请（审批编号 {confirmation.id}）。"
+            "请在右侧『待审批生成』中批准后点执行，任务才会真正创建；我不会在对话中直接执行高风险操作。",
+            {"ok": True, "confirmation_id": confirmation.id, "tool": action},
+        )
+    # 普通流程操作：经状态机门禁直接执行
+    kwargs: dict = {"project_id": session.project_id} if action != "create_project" else {}
+    result = execute_pipeline_tool(db, action, **kwargs)
+    if not result.ok:
+        return f"流程操作执行失败：{result.error_message}", {
+            "ok": False,
+            "error_code": result.error_code,
+            "tool": action,
+        }
+    data = result.data or {}
+    node_name = data.get("pipeline_node_name", "")
+    next_hint = data.get("next_hint", "")
+    reply = f"流程操作已执行：{node_name}。"
+    if next_hint:
+        reply += f"\n下一步：{next_hint}"
+    return reply, {"ok": True, "tool": action, **{k: v for k, v in data.items() if k != "pipeline_node"}}
+
+
 class ChatRequest(BaseModel):
     """聊天请求：用户输入文本。"""
 
@@ -499,8 +673,9 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # 结构化意图（B 档）：ambiguous 且带缺失信息时向用户澄清，不进入主对话（不虚构目标）
     if intent.intent == "ambiguous" and intent.missing_information:
         action = "clarify"
-    if action in ("reject", "guide", "clarify"):
+    if action in ("reject", "guide", "clarify", "pipeline"):
         # unsafe：直接拒绝；generate_request：不执行生成，引导到对应页面（P0：生成不在 Agent 直接执行范围）；
+        # pipeline：流程节点操作，经状态机门禁执行流程工具（高风险操作只建审批申请）；
         # clarify：信息不足，向用户澄清缺失信息（确定性拼接，不调用模型）
         approval_info: dict | None = None
         if action == "reject":
@@ -508,6 +683,9 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         elif action == "guide":
             # 生成请求：能唯一定位到镜头则落地为审批申请，否则澄清洗明（不猜测目标）
             reply, approval_info = _try_create_generate_approval(db, s, session_id, payload.content)
+        elif action == "pipeline":
+            # 流程操作：意图识别流程节点，经状态机门禁执行（审核闸口/审批纪律不跳过）
+            reply, approval_info = _handle_pipeline_action(db, s, session_id, intent, payload.content)
         else:
             reply = build_clarification_question(intent.missing_information)
         assistant_msg = AgentMessage(

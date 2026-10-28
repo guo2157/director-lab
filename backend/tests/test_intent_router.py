@@ -44,7 +44,6 @@ def test_fast_path_query(text: str):
 @pytest.mark.parametrize(
     "text",
     [
-        "重新生成关键帧",
         "把所有分镜的关键帧全部重新生成一遍",
         "批量出图",
         "重新渲染一下",
@@ -52,7 +51,10 @@ def test_fast_path_query(text: str):
     ],
 )
 def test_fast_path_generate(text: str):
-    """真实生成请求仍判定为 generate_request（引导到对应页面，不在对话内执行）。"""
+    """真实生成请求仍判定为 generate_request（引导到对应页面，不在对话内执行）。
+    注：『重新生成关键帧』类表述现识别为返工操作（regenerate_shot），
+    由 test_regen_intent_routing 覆盖。
+    """
     r = apply_fast_path_rules(text)
     assert r is not None
     assert r.intent == "generate_request"
@@ -112,7 +114,7 @@ def test_intent_tool_mapping_readonly_whitelist():
 def test_route_action_covers_all_categories():
     """所有意图类别都能映射到确定的动作，不出现未定义分支。"""
     for intent in INTENT_CATEGORIES:
-        assert route_action(intent) in {"chat", "reject", "guide"}
+        assert route_action(intent) in {"chat", "reject", "guide", "pipeline"}
 
 
 def test_clarification_question_lists_missing_information():
@@ -127,7 +129,7 @@ def test_clarification_question_lists_missing_information():
     [
         ("项目进展如何", "query"),
         ("资产统计", "query"),
-        ("重新生成关键帧", "generate_request"),
+        ("重新生成关键帧", "pipeline_action"),
         ("删除所有项目数据", "unsafe"),
     ],
 )

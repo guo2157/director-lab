@@ -570,6 +570,8 @@ async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(g
         "replaced_at": _now().isoformat(),
         "original_filename": file.filename,
     }
+    # 更新 updated_at：文件内容已变化，前端以 v=updated_at 破图片缓存，必须变化才能拉到新图
+    asset.updated_at = _now()
     affected_shots = _mark_referencing_shots(db, asset.id)
     # 人工审核闸口（D-23）：公共资产替换后原审核结论失效，需重新提交审核
     if asset.asset_type in ("character", "scene", "prop"):

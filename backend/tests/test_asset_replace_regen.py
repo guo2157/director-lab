@@ -103,22 +103,25 @@ def test_upload_rejects_wrong_file_kind(client):
     assert r.json()["detail"]["code"] == "invalid_file_type"
 
 
-def test_replace_creates_new_version(client):
+def test_replace_overwrites_in_place(client):
+    """replace 为原地覆盖语义（2026-10-28 改版）：不产生新版本，
+    资产 id/name/file_path/version 不变，文件内容与 updated_at 更新。"""
     pid = _project(client)
     first = _upload(client, pid, "character").json()
     r = client.post(
         f"/api/assets/{first['id']}/replace",
         files={"file": ("b.png", PNG, "image/png")},
     )
-    assert r.status_code == 201, r.text
+    assert r.status_code == 200, r.text
     new = r.json()
-    assert new["version"] == first["version"] + 1
+    assert new["id"] == first["id"]
+    assert new["version"] == first["version"]
     assert new["validity"] == "current"
-    assert new["previous_asset_id"] == first["id"]
-    assert new["previous_version"] == first["version"]
-    versions = client.get(f"/api/assets/{first['id']}/versions").json()
-    old = [v for v in versions if v["id"] == first["id"]][0]
-    assert old["validity"] == "superseded"
+    assert new["file_path"] == first["file_path"]
+    assert new["name"] == first["name"]
+    # 文件内容已被覆盖更新
+    from pathlib import Path
+    assert Path(new["file_path"]).read_bytes() == PNG
 
 
 def test_replace_locked_asset_conflicts(client):

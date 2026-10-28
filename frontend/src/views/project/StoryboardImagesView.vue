@@ -285,7 +285,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
         @update:checked="toggleSelectAll"
       >全选</n-checkbox>
       <n-button
-        size="small"
+        size="medium"
         type="primary"
         :disabled="!reviewApproved || !selectedList.length"
         :loading="batchMutation.isPending.value"
@@ -317,7 +317,9 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
             <div v-for="shot in shotsMap[scene.id] || []" :key="shot.id" class="shot-card">
               <div class="shot-thumb">
                 <div class="thumb-overlay">
-                  <n-checkbox :checked="!!selectedIds[shot.id]" @update:checked="toggleSelect(shot)" />
+                  <div class="select-box" :class="{ checked: !!selectedIds[shot.id] }" @click.stop="toggleSelect(shot)">
+                    <n-checkbox :checked="!!selectedIds[shot.id]" size="large" class="select-box-cb" />
+                  </div>
                   <n-tag v-if="shot.current_assets?.keyframe?.locked" size="tiny" type="warning">已锁定</n-tag>
                 </div>
                 <n-image
@@ -444,6 +446,10 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 .bar-gap { flex: 1; }
 .shot-thumb { position: relative; }
 .thumb-overlay { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; align-items: center; justify-content: space-between; z-index: 2; }
+.select-box { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 6px; background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(2px); cursor: pointer; transition: background 0.15s; }
+.select-box:hover { background: rgba(255, 255, 255, 0.92); }
+.select-box :deep(.select-box-cb) { pointer-events: none; }
+.select-box.checked { background: rgba(255, 255, 255, 0.92); }
 @media (max-width: 768px) {
   .gate-banner { flex-wrap: wrap; }
   .scene-header { flex-wrap: wrap; }

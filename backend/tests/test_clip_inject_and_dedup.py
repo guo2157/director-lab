@@ -46,12 +46,10 @@ def _make_project(client, aspect_ratio="9:16"):
     # D-23 资产审核闸口：本文件聚焦参数注入与在途去重，
     # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
     from app.core.database import SessionLocal
-    from app.models import Project
+    from tests.conftest import approve_project_assets
     _db = SessionLocal()
     try:
-        _p = _db.get(Project, pid)
-        _p.assets_review_status = "approved"
-        _db.commit()
+        approve_project_assets(_db, pid)
     finally:
         _db.close()
     return pid
@@ -59,6 +57,16 @@ def _make_project(client, aspect_ratio="9:16"):
 
 def _make_shot(client, pid, duration=5, episode=1):
     scn = client.post("/api/scenes", json={"project_id": pid, "title": "草地", "episode": episode}).json()
+    # D-23 资产门禁：为场景构造真实基准图资产（指针 → current → 文件存在）
+    from app.core.database import SessionLocal
+    from app.models import Scene
+    from tests.conftest import seed_scene_baseline_asset
+    _db = SessionLocal()
+    try:
+        _scene = _db.get(Scene, scn["id"])
+        seed_scene_baseline_asset(_db, _scene, "/tmp/dlab_test_media")
+    finally:
+        _db.close()
     shot = client.post("/api/shots", json={
         "scene_id": scn["id"], "episode": episode, "shot_kind": "visual", "duration": duration,
     }).json()
@@ -193,6 +201,16 @@ def test_batch_generate_skips_inflight(client, monkeypatch):
     """批量生成跳过在途镜头，响应 skipped 报告原因。"""
     pid = _make_project(client)
     scn = client.post("/api/scenes", json={"project_id": pid, "title": "多镜场景", "episode": 1}).json()
+    # D-23 资产门禁：为场景构造真实基准图资产
+    from app.core.database import SessionLocal
+    from app.models import Scene
+    from tests.conftest import seed_scene_baseline_asset
+    _db = SessionLocal()
+    try:
+        _scene = _db.get(Scene, scn["id"])
+        seed_scene_baseline_asset(_db, _scene, "/tmp/dlab_test_media")
+    finally:
+        _db.close()
     shot_ids = []
     for i in range(3):
         sh = client.post("/api/shots", json={

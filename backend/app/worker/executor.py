@@ -42,6 +42,52 @@ def _next_asset_version(
     return (latest.version + 1) if latest is not None else 1
 
 
+def _asset_regenerate_target(db: Session, job: Job) -> Asset | None:
+    """资产库 regenerate 链路识别：input_snapshot.regeneration 为含 asset_id 的字典。
+
+    命中时产物原地覆盖该资产文件（名称与位置固定不变），不产生新版本；
+    分镜重新生成工作台的 regeneration 为布尔 True，不在此列，仍走候选版本流程。
+    """
+    regen = (job.input_snapshot or {}).get("regeneration")
+    if not isinstance(regen, dict):
+        return None
+    asset_id = regen.get("asset_id")
+    if not asset_id:
+        return None
+    return db.get(Asset, asset_id)
+
+
+def _overwrite_asset_file(asset: Asset, content: bytes) -> str:
+    """原地覆盖资产文件：file_path 固定不变，返回实际写入路径。"""
+    from pathlib import Path
+
+    dest = Path(asset.file_path)
+    if not dest.is_absolute() and not dest.exists():
+        dest = Path(get_settings().media_dir) / dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    return str(dest)
+
+
+def _apply_regenerate_gates(db: Session, job: Job, asset: Asset) -> None:
+    """资产库 regenerate 原地覆盖后的闸口（与 replace_asset 保持一致）：
+    引用镜头标记待重做；公共资产重置人工审核。"""
+    from app.models import AssetRef
+
+    for ref in db.query(AssetRef).filter(AssetRef.asset_id == asset.id).all():
+        shot = db.get(Shot, ref.shot_id)
+        if shot is None:
+            continue
+        if hasattr(shot, "redo_required"):
+            shot.redo_required = True
+        if hasattr(shot, "keyframe_confirmed"):
+            shot.keyframe_confirmed = False
+    if asset.asset_type in ("character", "scene", "prop"):
+        from app.services.assets_review import reset_assets_review
+
+        reset_assets_review(db, job.project_id)
+
+
 def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = None) -> None:
     """事件与状态同事务写入 outbox。event_seq 由数据库自增，并回写 job.event_seq 供增量补齐。"""
     ev = JobEvent(job_id=job.id, event_type=event_type, payload=payload or {}, created_at=_now())
@@ -419,17 +465,38 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             media_dir = settings.media_dir
                             os.makedirs(media_dir, exist_ok=True)
                             created_assets = []
+                            _regen_target = _asset_regenerate_target(db, job)
                             for d in downloaded:
                                 out_name = d["out_name"]
                                 item = d["item"]
                                 content = d["content"]
                                 ext = (item["filename"].rsplit(".", 1)[-1] or "png").lower()
-                                asset_id = id_gen.asset_id()
                                 _is_regen_rec = bool((job.input_snapshot or {}).get("regeneration"))
                                 asset_type_map = {"cover": "keyframe", "clip": "clip", "voice": "audio", "bgm": "audio", "sfx": "audio"}
                                 asset_type = asset_type_map.get(out_name, "keyframe")
                                 if asset_type == "keyframe" and _entity_asset_type:
                                     asset_type = _entity_asset_type
+                                if _regen_target is not None:
+                                    # 资产库 regenerate：原地覆盖原文件，名称与位置固定不变
+                                    filepath = _overwrite_asset_file(_regen_target, content)
+                                    try:
+                                        from app.services.thumbnail import make_thumb
+                                        _regen_target.thumb_path = make_thumb(
+                                            filepath, os.path.splitext(os.path.basename(filepath))[0]
+                                        )
+                                    except Exception:
+                                        pass
+                                    _rt_snap = dict(_regen_target.input_snapshot or {})
+                                    _rt_snap["regenerated_at"] = _now().isoformat()
+                                    _rt_snap["regenerate_job_id"] = job.id
+                                    _regen_target.input_snapshot = _rt_snap
+                                    created_assets.append({
+                                        "asset_id": _regen_target.id,
+                                        "out_name": out_name,
+                                        "file_path": filepath,
+                                    })
+                                    continue
+                                asset_id = id_gen.asset_id()
                                 # 版本号必须在产物类型与实体归属确定之后再计算，
                                 # 否则会用到尚未赋值的类型变量，且实体类资产无法按名称隔离版本
                                 version = _next_asset_version(db, job, asset_type, _entity_asset_name)
@@ -483,6 +550,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _s.baseline_asset_id = _kf[0]["asset_id"]
+                            # 资产库 regenerate 原地覆盖闸口：引用镜头待重做 + 公共资产重置审核
+                            if _regen_target is not None:
+                                _apply_regenerate_gates(db, job, _regen_target)
                             # 成功终态
                             print(f"[worker] 任务成功 {job.id} ({job.job_type}) shot={job.shot_id} assets={len(created_assets)}", flush=True)
                             job.status = "succeeded"
@@ -762,6 +832,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         media_dir.mkdir(parents=True, exist_ok=True)
         asset_type_map = {"cover": "keyframe", "clip": "clip", "voice": "audio", "bgm": "audio", "sfx": "audio"}
         created_assets = []
+        _regen_target = _asset_regenerate_target(db, job)
         for rec in downloaded:
             out_name = rec["out_name"]
             filename = rec["item"]["filename"]
@@ -773,6 +844,25 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             # 多图参考重新生成工作台 V1：重新生成任务落候选版本，
             # 版本号按同镜头同类型递增，不覆盖当前生效版本
             _is_regen = bool((job.input_snapshot or {}).get("regeneration"))
+            if _regen_target is not None:
+                # 资产库 regenerate：原地覆盖原文件，名称与位置固定不变
+                filepath = _overwrite_asset_file(_regen_target, rec["content"])
+                try:
+                    from app.services.thumbnail import make_thumb
+                    _regen_target.thumb_path = make_thumb(
+                        filepath, os.path.splitext(os.path.basename(filepath))[0]
+                    )
+                except Exception:
+                    pass
+                _rt_snap = dict(_regen_target.input_snapshot or {})
+                _rt_snap["regenerated_at"] = _now().isoformat()
+                _rt_snap["regenerate_job_id"] = job.id
+                _regen_target.input_snapshot = _rt_snap
+                created_assets.append({
+                    "asset_id": _regen_target.id, "asset_type": _regen_target.asset_type,
+                    "out_name": out_name, "file_path": filepath,
+                })
+                continue
             version = _next_asset_version(db, job, asset_type, _entity_asset_name)
             aid = id_gen.asset_id()
             stored_name = f"{aid}_v{version}.{ext}"
@@ -804,6 +894,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 "out_name": out_name, "file_path": str(stored_path),
             })
 
+        # 资产库 regenerate 原地覆盖闸口：引用镜头待重做 + 公共资产重置审核
+        if _regen_target is not None:
+            _apply_regenerate_gates(db, job, _regen_target)
         # 7.0 锚定图/定妆图/基准图回写（D-20）：generate 端点将 __prop_id__ / __character_id__ / __scene_id__
         # 写入 job.params，生成成功后将首个实体产物回写到对应记录
         _anchor_map = [
@@ -841,7 +934,13 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     _qa.quality_status = "passed" if _qr["passed"] else "failed"
                     _qa.quality_issues = _qr["issues"] or None
                 if not _qr["passed"]:
-                    _quality_failed.append({"asset_id": _a["asset_id"], "issues": _qr["issues"]})
+                    if _regen_target is not None and _a["asset_id"] == _regen_target.id:
+                        # 原地覆盖资产无候选版本可回退，不进入换 seed 重试，仅记录告警事件
+                        _write_event(db, job, "job.quality_warning", {
+                            "asset_id": _a["asset_id"], "issues": _qr["issues"],
+                        })
+                    else:
+                        _quality_failed.append({"asset_id": _a["asset_id"], "issues": _qr["issues"]})
             if _quality_failed:
                 _max_attempts = settings.job_max_attempts
                 if (job.attempts or 0) < _max_attempts:

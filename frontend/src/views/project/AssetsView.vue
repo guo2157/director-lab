@@ -188,6 +188,14 @@ const replaceFileObj = ref<File | null>(null)
 const replacePreview = ref<string | null>(null)
 const replaceBusy = ref(false)
 
+/** 资产图片 URL 追加版本参数：替换/更新后 updated_at 变化，URL 随之变化，避免浏览器缓存旧图 */
+function assetImgUrl(asset: Asset): string {
+  const base = asset.thumb_url || asset.url || ''
+  if (!base) return ''
+  const sep = base.includes('?') ? '&' : '?'
+  return `${base}${sep}v=${encodeURIComponent(asset.updated_at)}`
+}
+
 function openReplace(asset: Asset) {
   replaceTarget.value = asset
   replaceFileObj.value = null
@@ -223,6 +231,20 @@ async function confirmReplace() {
       message.info(`${res.affected_shots.length} 个引用镜头已标记待重做`)
     }
     replaceVisible.value = false
+    // 立即用替换结果更新本地缓存：updated_at 变化使图片 URL 的 v 参数变化，无需等待重新拉取即显示新图
+    const cacheKey = ['assets', projectId]
+    const cached = queryClient.getQueryData<{ items: Asset[] }>(cacheKey)
+    if (cached?.items) {
+      const idx = cached.items.findIndex((a) => a.id === res.id)
+      if (idx >= 0) {
+        const nextItems = [...cached.items]
+        nextItems[idx] = { ...nextItems[idx], ...res }
+        queryClient.setQueryData(cacheKey, { ...cached, items: nextItems })
+      }
+    }
+    if (activeAsset.value?.id === res.id) {
+      activeAsset.value = { ...activeAsset.value, ...res }
+    }
     await refreshAll()
   } catch (e: any) {
     message.error(`替换失败: ${e?.message ?? e}`)
@@ -746,7 +768,7 @@ async function handleBatchCraft() {
               @click="openDrawer(asset)"
             >
               <div class="asset-thumb">
-                <img v-if="asset.thumb_url || asset.url" :src="asset.thumb_url || asset.url" alt="" />
+                <img v-if="asset.thumb_url || asset.url" :src="assetImgUrl(asset)" alt="" />
                 <div v-else class="thumb-placeholder">
                   <span>{{ assetTypeLabels[asset.asset_type] || asset.asset_type }}</span>
                 </div>
@@ -808,7 +830,7 @@ async function handleBatchCraft() {
           <div class="drawer-preview">
             <n-image
               v-if="activeAsset.url"
-              :src="activeAsset.url"
+              :src="assetImgUrl(activeAsset)"
               object-fit="contain"
               class="drawer-preview-img"
             />

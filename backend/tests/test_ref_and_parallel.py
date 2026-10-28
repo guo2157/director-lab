@@ -34,12 +34,15 @@ def client(tmp_path, monkeypatch):
 
 def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
     """构造项目 + n 个角色（有定妆图）+ 1 个场景（有基准图），返回 (pid, char_names, scene_name)。"""
+    from pathlib import Path
     from app.core.database import SessionLocal
     from app.models import Asset, Character, Scene, ids
     pid = client.post("/api/projects", json={"name": "多角色项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
     char_names = []
     for i in range(n_chars):
+        # D-23 资产门禁：定妆图文件必须真实存在
+        Path(f"/tmp/p{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
                   name=f"p{i}", version=1, file_path=f"/tmp/p{i}.png", validity="current")
         db.add(a)
@@ -50,6 +53,8 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
         char_names.append(name)
     scene_name = None
     if with_scene:
+        # D-23 资产门禁：基准图文件必须真实存在
+        Path("/tmp/s0.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         a2 = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene",
                    name="s0", version=1, file_path="/tmp/s0.png", validity="current")
         db.add(a2)
@@ -220,6 +225,9 @@ def _mk_shots_with_prompt(client, n=3):
     # 因此断言需同时包含角色定妆图与场景基准图。
     _db = SessionLocal()
     try:
+        # D-23 资产门禁：基准图文件必须真实存在
+        from pathlib import Path
+        Path("/tmp/playground.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         _a = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene",
                    name="外景地基准", version=1, file_path="/tmp/playground.png", validity="current")
         _db.add(_a)

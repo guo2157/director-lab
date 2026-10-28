@@ -294,16 +294,6 @@ async function handleCreate() {
       </div>
       <template v-else>
         <div class="toolbar">
-          <n-input
-            v-model:value="searchKeyword"
-            class="search-input"
-            placeholder="搜索项目名称…"
-            clearable
-          >
-            <template #prefix>
-              <span class="search-icon">⌕</span>
-            </template>
-          </n-input>
           <div class="filter-chips">
             <button
               v-for="c in FILTER_CHIPS"

@@ -52,16 +52,19 @@ def _make_project(client, shots=3, approved=True):
             "scene_id": scn["id"], "episode": 1, "shot_kind": "visual", "duration": 5,
         }).json()
         ids.append(s["id"])
-    if approved:
-        from app.core.database import SessionLocal
-        from app.models import Project
-        _db = SessionLocal()
-        try:
-            p = _db.get(Project, pid)
-            p.assets_review_status = "approved"
-            _db.commit()
-        finally:
-            _db.close()
+    # D-23 资产就绪门禁：始终构造真实场景基准图资产（门禁先查资产完整性再查审核状态），
+    # 审核状态按 approved 参数区分：False 时资产齐全但审核待定，命中 assets_review_pending
+    from app.core.database import SessionLocal
+    from app.models import Project, Scene
+    from tests.conftest import approve_project_assets, seed_scene_baseline_asset
+    _db = SessionLocal()
+    try:
+        _scene = _db.get(Scene, scn["id"])
+        seed_scene_baseline_asset(_db, _scene, "/tmp/dlab_test_media")
+        if approved:
+            approve_project_assets(_db, pid)
+    finally:
+        _db.close()
     return {"pid": pid, "scene": scn, "shots": ids}
 
 

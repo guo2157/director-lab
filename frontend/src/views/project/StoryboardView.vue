@@ -353,8 +353,8 @@ async function submitClipsByPlans(picked: Shot[]) {
         @update:checked="toggleSelectAllShots"
       >全选</n-checkbox>
       <n-button
-        size="small"
-        secondary
+        size="medium"
+        type="primary"
         :disabled="!readiness.all || !selectedShotIds.length"
         :loading="batchClipMutation.isPending.value"
         @click="handleBatchClip"

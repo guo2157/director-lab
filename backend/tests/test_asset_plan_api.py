@@ -99,6 +99,33 @@ def _approve(pid):
         db.close()
 
 
+def _seed_assets(pid):
+    """D-23 资产门禁：为项目下所有角色构造真实定妆图、所有场景构造真实基准图。
+
+    门禁校验资产真实状态（指针 → current → 文件存在），仅设审核标志不再足够。
+    """
+    from pathlib import Path
+    from app.core.database import SessionLocal
+    from app.models import Asset, Character, Scene, ids
+    from tests.conftest import seed_scene_baseline_asset
+    db = SessionLocal()
+    try:
+        for ch in db.query(Character).filter(Character.project_id == pid).all():
+            fpath = Path(f"/tmp/dlab_test_media/portrait_{ch.id}.png")
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+            a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
+                      name=f"{ch.name}-定妆图", version=1, file_path=str(fpath), validity="current")
+            db.add(a)
+            db.flush()
+            ch.portrait_asset_id = a.id
+        for sc in db.query(Scene).filter(Scene.project_id == pid).all():
+            seed_scene_baseline_asset(db, sc, "/tmp/dlab_test_media")
+        db.commit()
+    finally:
+        db.close()
+
+
 def test_list_plans_after_parse(client, monkeypatch):
     """解析确认后可查询到五类定义，计数与内容正确。"""
     pid, _ = _prepare(client, monkeypatch)
@@ -121,6 +148,8 @@ def test_list_plans_after_parse(client, monkeypatch):
 def test_keyframe_blocked_without_review(client, monkeypatch):
     """公共资产未审核通过时，分镜图按定义生成被拦截。"""
     pid, wf = _prepare(client, monkeypatch)
+    # D-23：先补齐真实资产（资产完整但未审核 → assets_review_pending）
+    _seed_assets(pid)
     r = client.post(f"/api/projects/{pid}/asset-plans/generate",
                     json={"plan_type": "keyframe", "workflow_id": wf})
     assert r.status_code == 409, r.text
@@ -139,6 +168,7 @@ def test_character_generate_allowed(client, monkeypatch):
 def test_keyframe_generate_after_review(client, monkeypatch):
     """审核通过后分镜图可批量生成。"""
     pid, wf = _prepare(client, monkeypatch)
+    _seed_assets(pid)
     _approve(pid)
     r = client.post(f"/api/projects/{pid}/asset-plans/generate",
                     json={"plan_type": "keyframe", "workflow_id": wf})
