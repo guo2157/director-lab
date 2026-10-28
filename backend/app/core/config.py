@@ -9,7 +9,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DLAB_", extra="ignore")
+    # env_file：支持从 backend/.env 加载配置（优先级：环境变量 > .env > 默认值）
+    # 2026-10-28 修复：此前未配置 env_file，写入 .env 的配置静默失效
+    model_config = SettingsConfigDict(env_prefix="DLAB_", env_file=".env", extra="ignore")
 
     # --- 基础 ---
     app_name: str = "director-lab"

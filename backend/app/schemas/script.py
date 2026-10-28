@@ -151,7 +151,8 @@ class CompositionDetailOut(CompositionOut):
 
 # --- 导出 ---
 class ExportCreate(BaseModel):
-    composition_id: str
+    # 2026-10-28：补充字段描述，缺失时 422 校验错误可提示来源（合成版本列表 GET /api/projects/{id}/compositions）
+    composition_id: str = Field(description="要导出的合成版本 ID，来自 GET /api/projects/{id}/compositions")
     format: str = Field(default="mp4", pattern="^mp4$")
     include_subtitle: bool | None = None
     subtitle_mode: str | None = None
