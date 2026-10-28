@@ -129,6 +129,12 @@ function handleFileDrop(e: DragEvent) {
   }
 }
 
+/** 隐藏文件选择框引用：按钮点击时程序化触发（label 包裹 button 不会转发点击，导致上传不可用） */
+const fileInputRef = ref<HTMLInputElement | null>(null)
+function triggerFileSelect() {
+  fileInputRef.value?.click()
+}
+
 function handleFileSelect(e: Event) {
   const input = e.target as HTMLInputElement
   if (!input.files) return
@@ -246,6 +252,11 @@ function onReplaceFileChange(e: Event) {
   if (replacePreview.value) URL.revokeObjectURL(replacePreview.value)
   replacePreview.value = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
   input.value = ''
+}
+/** 替换弹窗文件选择框引用：程序化触发（label 包裹 n-button 不会转发点击，与页面上方上传按钮同款修复） */
+const replaceFileInputRef = ref<HTMLInputElement | null>(null)
+function triggerReplaceFileSelect() {
+  replaceFileInputRef.value?.click()
 }
 
 async function confirmReplace() {
@@ -663,7 +674,6 @@ async function handleBatchCraft() {
     <header class="page-header">
       <div class="header-left">
         <h1 class="page-title">资产库</h1>
-        <span class="page-hint">管理公共资产与制作资产，人工审核通过后进入分镜图</span>
       </div>
     </header>
     <div class="assets-layout">
@@ -721,7 +731,7 @@ async function handleBatchCraft() {
           <div class="craft-head">
             <span class="craft-title">制作资产区</span>
             <span class="craft-sub">角色定妆图 / 场景基准图 / 道具锚定图（项目级公共资产，按名称绑定供分镜引用）</span>
-            <n-button size="tiny" :loading="batchCrafting" :disabled="!selectedCraftIds.length" @click="handleBatchCraft">批量生成（{{ selectedCraftIds.length }}）</n-button>
+            <n-button size="medium" type="primary" :loading="batchCrafting" :disabled="!selectedCraftIds.length" @click="handleBatchCraft">批量生成（{{ selectedCraftIds.length }}）</n-button>
           </div>
           <div class="craft-body">
           <div v-for="grp in visibleCraftGroups" :key="grp.type" class="craft-group">
@@ -757,7 +767,6 @@ async function handleBatchCraft() {
         </div>
         <!-- Toolbar -->
         <div class="toolbar">
-          <n-input v-model:value="keyword" placeholder="搜索资产..." size="small" style="width: 200px" clearable />
           <n-space align="center" :size="8">
             <n-select
               v-model:value="uploadType"
@@ -766,10 +775,8 @@ async function handleBatchCraft() {
               :options="uploadTypeOptions"
               :consistent-menu-width="false"
             />
-            <label class="upload-btn">
-              <input type="file" multiple @change="handleFileSelect" style="display:none" />
-              <n-button size="small" type="primary" :loading="uploadMutation.isPending.value">上传资产</n-button>
-            </label>
+            <input ref="fileInputRef" type="file" multiple @change="handleFileSelect" style="display:none" />
+            <n-button size="small" type="primary" :loading="uploadMutation.isPending.value" @click="triggerFileSelect">上传资产</n-button>
           </n-space>
         </div>
 
@@ -932,12 +939,13 @@ async function handleBatchCraft() {
           <div class="replace-card">
             <div class="replace-card-label">新版本 v{{ replaceTarget.version + 1 }}</div>
             <div class="replace-card-preview">
-              <img v-if="replacePreview" :src="replacePreview" alt="" />
+              <input ref="replaceFileInputRef" type="file" accept="image/*,video/*" style="display:none" @change="onReplaceFileChange" />
+              <div v-if="replacePreview" class="replace-preview-wrap">
+                <img :src="replacePreview" alt="" />
+                <n-button size="tiny" secondary class="replace-repick" @click="triggerReplaceFileSelect">重新选择</n-button>
+              </div>
               <div v-else class="replace-pick">
-                <label class="upload-btn">
-                  <input type="file" accept="image/*,video/*" style="display:none" @change="onReplaceFileChange" />
-                  <n-button size="small" secondary>选择文件</n-button>
-                </label>
+                <n-button size="small" secondary @click="triggerReplaceFileSelect">选择文件</n-button>
               </div>
             </div>
           </div>
@@ -1051,6 +1059,8 @@ async function handleBatchCraft() {
 .replace-card-preview { height: 190px; display: flex; align-items: center; justify-content: center; background: var(--bg-elevated, #f8fafc); border-radius: 8px; overflow: hidden; }
 .replace-card-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .replace-pick { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
+.replace-preview-wrap { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
+.replace-repick { position: absolute; bottom: 8px; right: 8px; }
 .replace-arrow { font-size: 18px; color: var(--text-secondary, #64748b); }
 .replace-file-name { font-size: 12px; color: var(--text-secondary, #64748b); margin-top: 10px; }
 /* 重新生成抽屉 */
