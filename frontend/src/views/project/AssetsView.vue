@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NButton, NSpace, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
-  NInput, NTooltip, NSelect, NModal, NAlert, NCheckbox, useMessage, useDialog,
+  NInput, NTooltip, NModal, NAlert, NCheckbox, useMessage, useDialog,
   NImage, NDropdown, NTimeline, NTimelineItem,
 } from 'naive-ui'
 import {
-  listAssets, deleteAsset, lockAsset, unlockAsset, uploadAsset, listAssetVersions,
+  listAssets, deleteAsset, lockAsset, unlockAsset, listAssetVersions,
   replaceAsset, regenerateAsset, getAssetRegenerateConfig,
 } from '@/api/assets'
 import type { AssetRegenerateConfig } from '@/api/assets'
@@ -95,54 +95,8 @@ const assetsQuery = useQuery({
   queryFn: () => listAllAssets(),
 })
 
-// --- Upload ---
-// 上传必须显式指定资产类型，否则后端无法归类，资产会掉出角色/场景/道具分组
-const uploadTypeOptions = [
-  { label: '角色图', value: 'character' },
-  { label: '场景图', value: 'scene' },
-  { label: '道具图', value: 'prop' },
-]
-const uploadType = ref<string>('character')
-watch(activeCategory, (v) => {
-  if (v) uploadType.value = v
-})
-
-const uploadMutation = useMutation({
-  mutationFn: (file: File) =>
-    uploadAsset(file, {
-      project_id: projectId.value,
-      asset_type: uploadType.value,
-      name: file.name.replace(/\.[^.]+$/, ''),
-    }),
-  onSuccess: () => {
-    message.success('上传成功')
-    queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
-  },
-  onError: (e: any) => message.error(`上传失败: ${e?.message ?? e}`),
-})
-
-function handleFileDrop(e: DragEvent) {
-  const files = e.dataTransfer?.files
-  if (!files) return
-  for (const file of Array.from(files)) {
-    uploadMutation.mutate(file)
-  }
-}
-
-/** 隐藏文件选择框引用：按钮点击时程序化触发（label 包裹 button 不会转发点击，导致上传不可用） */
-const fileInputRef = ref<HTMLInputElement | null>(null)
-function triggerFileSelect() {
-  fileInputRef.value?.click()
-}
-
-function handleFileSelect(e: Event) {
-  const input = e.target as HTMLInputElement
-  if (!input.files) return
-  for (const file of Array.from(input.files)) {
-    uploadMutation.mutate(file)
-  }
-  input.value = ''
-}
+// --- Upload（独立上传入口已移除）：单独上传的角色/场景/道具资产无法绑定实体参考关系，
+// 资产图统一走角色/场景/道具卡片的生成入口，替换走资产卡片的『上传替换』 ---
 
 // --- Lock/Unlock ---
 const lockMutation = useMutation({
@@ -765,23 +719,11 @@ async function handleBatchCraft() {
           </div>
           <n-empty v-if="!readiness.total" size="small" description="解析完成后此处展示角色/场景/道具实体" />
         </div>
-        <!-- Toolbar -->
-        <div class="toolbar">
-          <n-space align="center" :size="8">
-            <n-select
-              v-model:value="uploadType"
-              size="small"
-              style="width: 130px"
-              :options="uploadTypeOptions"
-              :consistent-menu-width="false"
-            />
-            <input ref="fileInputRef" type="file" multiple @change="handleFileSelect" style="display:none" />
-            <n-button size="small" type="primary" :loading="uploadMutation.isPending.value" @click="triggerFileSelect">上传资产</n-button>
-          </n-space>
-        </div>
+        <!-- Toolbar：独立上传入口已移除（单独上传的角色/场景/道具资产无法绑定实体参考关系，
+             资产图统一走角色/场景/道具卡片的生成入口，替换走资产卡片的『上传替换』） -->
 
         <!-- Upload drop zone -->
-        <div class="drop-zone" @dragover.prevent @drop.prevent="handleFileDrop">
+        <div class="drop-zone">
           <n-spin v-if="assetsQuery.isLoading.value" class="page-loading" />
           <div v-else-if="assetsQuery.isError.value" class="state-block">
             <p class="state-text">资产加载失败：{{ errMsg(assetsQuery.error.value) }}</p>
