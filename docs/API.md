@@ -548,6 +548,7 @@
 
 ### 生成申请与审批（申请-审批-执行三段分离）
 - **request_generate**：提交生成申请，只创建审批记录（agent_confirmation），不建任务、不消耗算力。镜头目标（keyframe/clip/audio/bgm/sfx）须给 `shot_id`；实体目标（character/scene/prop 公共资产）须给 `entity_id`。同会话同入参重复申请复用同一条待审记录（幂等）；同镜头/同实体已有在途任务时拒绝（`job_in_flight`）。
+- **制作阶段状态机门禁**：生成目标不得早于其所属制作阶段，阶段判定以 `derive_progress`（ARCHITECTURE.md §4.1 的 12 阶段）为唯一权威。申请侧（request_generate）阶段不足时快速失败（`stage_gate_blocked`），不建审批记录；执行侧（run_generate）纵深防御再次校验，防止审批通过后项目阶段回退（如剧本变更回到 estimate）仍执行生成。阈值与 API 通道同等强度：keyframe 须公共资产齐全（assets_review 阶段起，审核未通过/资产缺失/版本无效等细粒度阻断由 D-23 统一资产就绪门禁给出精确错误码）；clip/audio 须公共资产审核通过（keyframes 阶段起，单镜细粒度由 D-13 逐镜校验）；character/prop 须 characters 阶段起，scene 须 scenes 阶段起。bgm/sfx 不在 12 阶段状态机内，不做阶段门禁。D-13/D-23 人工审核闸口保持不变，不可跳过。
 - **run_generate**：执行已批准的申请，创建生成任务入队。幂等键 `agc:{confirmation_id}`，重复执行复用同一任务。门禁与 API 通道同等校验，不可绕过：
   - keyframe：D-23 统一资产就绪门禁（必需资产齐全/有效/审核通过）；
   - clip：D-13 静图先行闸口（分镜图须人工确认，`keyframe_not_confirmed`）；
