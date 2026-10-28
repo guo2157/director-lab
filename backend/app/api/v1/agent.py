@@ -300,6 +300,36 @@ def execute_approval(
     return {"confirmation_id": confirmation_id, **(result.data or {})}
 
 
+# 制作阶段 → 下一步指引（derive_progress 的 current_stage 映射；
+# 生成请求定位不到目标时按项目实际阶段引导，让 Agent 成为流程向导）
+_STAGE_GUIDANCE = {
+    "estimate": "当前项目还没有可用的剧本：请先在剧本页创作或保存剧本（也可用剧本创作辅助生成），再发起剧本一体化分析，解析出场景、镜头与资产定义。",
+    "select_range": "剧本已保存但尚未分析：请先发起剧本一体化分析，解析出镜头后再生成。",
+    "parse": "剧本分析尚未产出镜头：请先完成剧本分析（或等待进行中的分析任务完成）。",
+    "characters": "项目还有角色缺少定妆图：请先在资产库生成角色定妆图（对话中给出角色 ID，chr_ 开头，即可提交生成申请）。",
+    "scenes": "项目还有场景缺少基准图：请先在资产库生成场景基准图（对话中给出场景 ID，scn_ 开头，即可提交生成申请）。",
+    "assets_review": "公共资产尚未通过人工审核：请先在资产库确认资产无误并通过审核，之后才能生成分镜图。",
+    "keyframes": "项目还有分镜图未生成或未人工确认：可以先对我说『为第 N 镜生成关键帧』（或给出镜头 ID，sht_ 开头）生成分镜图，人工确认后再生成视频。",
+    "clips": "分镜图已就绪：可以直接对我说『为第 N 镜生成视频』，或给出镜头 ID（sht_ 开头）。",
+    "audio": "视频已生成，还有对白/旁白镜头缺少音频：可对我说『为第 N 镜生成配音』。",
+    "compose": "镜头产物已就绪：可到合成页进行成片合成。",
+    "export": "合成已完成：可到导出页导出成片。",
+    "done": "项目制作流程已完成。",
+}
+
+
+def _stage_guidance(db: Session, project_id: str) -> str:
+    """按项目当前制作阶段返回下一步指引（阶段取 derive_progress，不另行判定）。"""
+    from app.models import Project
+    from app.services.progress import derive_progress
+
+    project = db.get(Project, project_id)
+    if project is None:
+        return ""
+    _total, _done, stage = derive_progress(db, project)
+    return _STAGE_GUIDANCE.get(stage, "")
+
+
 def _try_create_generate_approval(
     db: Session, session: AgentSession, session_id: str, text: str
 ) -> tuple[str, dict | None]:
@@ -354,7 +384,14 @@ def _try_create_generate_approval(
             "shot_not_in_project": "该镜头不属于当前项目，请确认后重试。",
             "shot_ambiguous": "『第 N 镜』在本项目内命中多个镜头，请补充场景或直接给出镜头 ID。",
         }
-        return hints.get(reason or "shot_unspecified", "无法确定要生成的目标，请补充镜头或实体信息。"), None
+        reply = hints.get(reason or "shot_unspecified", "无法确定要生成的目标，请补充镜头或实体信息。")
+        # 消息未给出任何目标标识时，按项目当前制作阶段给出下一步指引
+        # （从零创作的用户不知道镜头/实体 ID，只按 ID 引导对其无帮助）
+        if reason in (None, "shot_unspecified"):
+            guidance = _stage_guidance(db, session.project_id)
+            if guidance:
+                reply = f"{reply}\n\n{guidance}"
+        return reply, None
 
     target = resolve_target(text)
     result = execute_tool(
