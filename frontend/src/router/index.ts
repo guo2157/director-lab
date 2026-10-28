@@ -34,6 +34,12 @@ const router = createRouter({
       meta: { title: '解析' },
     },
     {
+      path: '/project/:id/storyboard-images',
+      name: 'storyboard-images',
+      component: () => import('../views/project/StoryboardImagesView.vue'),
+      meta: { title: '分镜图' },
+    },
+    {
       path: '/project/:id/storyboard',
       name: 'storyboard',
       component: () => import('../views/project/StoryboardView.vue'),

@@ -506,7 +506,7 @@ async function handleCreate() {
 }
 .page-subtitle {
   margin: 4px 0 0;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 20px;
   color: var(--text-secondary);
 }
@@ -728,9 +728,9 @@ async function handleCreate() {
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 500;
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -744,7 +744,7 @@ async function handleCreate() {
   justify-content: space-between;
   gap: 8px;
   margin-top: 4px;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 20px;
   color: var(--text-secondary);
 }
@@ -758,7 +758,7 @@ async function handleCreate() {
   flex: 1;
 }
 .progress-text {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 18px;
   color: var(--text-secondary);
   min-width: 34px;

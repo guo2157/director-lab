@@ -523,4 +523,11 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                 db.query(AssetRef).filter(AssetRef.shot_id == s.id).delete()
                 db.delete(s)
                 stats["shots_deleted"] += 1
+
+    # 6. 资产定义定稿落库：名称、占位路径、提示词与参考依赖一次性写入
+    #    名称与路径一经生成不再改动，后续生成/替换只更新内容与状态
+    from app.services.asset_plan import build_asset_plans
+    plan_stats = build_asset_plans(db, project, episode_start=episode_start,
+                                   episode_count=episode_count)
+    stats["asset_plans"] = plan_stats
     return stats

@@ -57,6 +57,9 @@ class ProjectOut(BaseModel):
     estimated_text_hash: str | None
     current_script_version_id: str | None
     current_parse_version_id: str | None
+    # 公共资产人工审核状态（D-23）：pending / approved / rejected
+    assets_review_status: str = "pending"
+    assets_reviewed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     shot_total: int = 0

@@ -102,6 +102,7 @@ def test_intent_tool_mapping_readonly_whitelist():
         "list_jobs",
         "asset_stats",
         "list_assets",
+        "list_asset_plans",
     ]
     assert set(get_allowed_tools("analysis")) == set(get_allowed_tools("query"))
     for intent in ("generate_request", "ambiguous", "unsafe", "unknown"):

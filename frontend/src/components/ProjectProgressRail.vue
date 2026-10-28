@@ -11,8 +11,11 @@ const router = useRouter()
 // 流程阶段定义：key 对应路由名，stage 对应后端 current_stage 枚举
 const stages = [
   { key: 'script', label: '剧本', icon: '📝', stages: ['estimate', 'select_range', 'parse'] },
-  { key: 'assets', label: '资产库', icon: '🖼️', stages: ['characters', 'scenes', 'clips', 'audio'] },
-  { key: 'storyboard', label: '分镜看板', icon: '🎬', stages: ['keyframes'] },
+  // 资产库：公共资产（角色定妆图/场景基准图/道具锚定图）生成
+  { key: 'assets', label: '资产库', icon: '🖼️', stages: ['characters', 'scenes'] },
+  // 分镜图：公共资产人工审核 + 逐镜分镜图生成与确认
+  { key: 'storyboard-images', label: '分镜图', icon: '✅', stages: ['assets_review', 'keyframes'] },
+  { key: 'storyboard', label: '分镜看板', icon: '🎬', stages: ['clips', 'audio'] },
   { key: 'compose', label: '合成与导出', icon: '📦', stages: ['compose', 'export', 'done'] },
 ]
 
@@ -24,7 +27,7 @@ const { data: project } = useQuery({
 // 后端阶段 → 前端流程步骤索引（按顺序取第一个匹配）
 const stageOrder = [
   'estimate', 'select_range', 'parse',
-  'characters', 'scenes', 'keyframes', 'clips', 'audio',
+  'characters', 'scenes', 'assets_review', 'keyframes', 'clips', 'audio',
   'compose', 'export', 'done',
 ]
 const currentStage = computed(() => project.value?.current_stage ?? '')
@@ -159,7 +162,27 @@ function goStep(key: string) {
 }
 @media (max-width: 768px) {
   .progress-rail {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+    overflow-x: auto;
+  }
+  .rail-title,
+  .rail-stage,
+  .step-line {
     display: none;
+  }
+  .rail-steps {
+    flex-direction: row;
+    gap: 4px;
+  }
+  .rail-step {
+    flex-shrink: 0;
+    padding: 6px 10px;
   }
 }
 </style>

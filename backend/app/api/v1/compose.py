@@ -201,6 +201,16 @@ def check_export_acceptance(project_id: str, export_id: str,
     return report.to_dict()
 
 
+@router.get("/media/{file_path:path}")
+def serve_media(file_path: str) -> FileResponse:
+    """提供合成预览视频文件（路径须在 media_dir 内）。"""
+    media_dir = Path(get_settings().media_dir).resolve()
+    target = (media_dir / file_path).resolve()
+    if not str(target).startswith(str(media_dir)) or not target.exists():
+        raise errors.invalid_request("文件不存在")
+    return FileResponse(path=str(target), media_type="video/mp4")
+
+
 @router.get("/exports/{export_id}/download")
 def download_export(export_id: str, db: Session = Depends(get_db)) -> FileResponse:
     e = db.get(Export, export_id)

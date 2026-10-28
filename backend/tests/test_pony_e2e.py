@@ -135,6 +135,18 @@ def test_pony_crossing_river_e2e(client: TestClient):
     result = execute_generate_job(r.json()["id"])
     assert result["ok"], result
     anchor_id = result["assets"][0]["asset_id"]
+    # 人工审核闸口（D-23）：三类公共资产（定妆图/基准图/锚定图）全部生成完毕后，
+    # 真实流程需人工审核通过才放行分镜图；此处模拟该审核动作。
+    # 注意：公共资产生成会主动把审核状态回退为待审核，故放行必须在全部生成之后。
+    from app.core.database import SessionLocal as _SLR
+    from app.models import Project as _ProjectR
+    _dbr = _SLR()
+    try:
+        _pr = _dbr.get(_ProjectR, pid)
+        _pr.assets_review_status = "approved"
+        _dbr.commit()
+    finally:
+        _dbr.close()
 
     # --- 6. 分镜图生成（镜头资产清单注入 + @引用参考图） ---
     # 镜头1：小马在马棚听老马说话（提示词未写 @引用，应自动注入）

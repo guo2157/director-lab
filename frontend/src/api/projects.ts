@@ -28,6 +28,11 @@ export async function deleteProject(id: string) {
   await del<void>(`/projects/${id}`)
 }
 
+/** 公共资产人工审核（action=approve 审核通过并放行分镜图 / reject 驳回返工） */
+export function reviewProjectAssets(id: string, action: 'approve' | 'reject') {
+  return post<Project>(`/projects/${id}/assets-review`, { action })
+}
+
 /** 归档项目 */
 export function archiveProject(id: string) {
   return post<Project>(`/projects/${id}/archive`)

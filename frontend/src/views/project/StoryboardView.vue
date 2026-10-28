@@ -4,10 +4,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NButton, NSpace, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
-  NInput, NTooltip, useMessage,
+  NInput, NTooltip, NCheckbox, NImage, useMessage,
 } from 'naive-ui'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots } from '@/api/script'
-import { generateShot } from '@/api/storyboard'
+import { generateShot, generateProjectShots } from '@/api/storyboard'
+import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
+import RegenerateConfigPanel from '@/components/RegenerateConfigPanel.vue'
 import type { Scene, Shot, ShotKind } from '@/types/script'
 import type { GenerateShotPayload } from '@/types/job'
 
@@ -148,6 +150,16 @@ function openDrawer(shot: Shot) {
   drawerVisible.value = true
 }
 
+/** 重新生成目标：已生成分镜视频时配置面板展示视频配置，否则展示分镜图配置。
+ * 重新生成必须基于已存在的产物版本，无产物时面板不展示，引导先完成首次生成。 */
+const regenerateTarget = computed<'keyframe' | 'clip' | null>(() => {
+  const assets = activeShot.value?.current_assets
+  if (!assets) return null
+  if (assets.clip) return 'clip'
+  if (assets.keyframe) return 'keyframe'
+  return null
+})
+
 // --- Status badge ---
 interface StatusInfo { label: string; color: string; icon?: string }
 function getShotStatus(shot: Shot): StatusInfo {
@@ -232,10 +244,88 @@ const clipsDone = computed(() => {
   const shots = allShots.value
   return shots.length > 0 && shots.every((s) => !!s.current_assets?.clip)
 })
+
+// --- 批量出视频：仅提交已确认分镜图的镜头（D-13 闸口），未确认的跳过并提示 ---
+// --- 勾选批量：勾选多个/全选镜头后仅对勾选项提交 ---
+const selectedShotIds = ref<string[]>([])
+function toggleShot(id: string, checked: boolean) {
+  const set = new Set(selectedShotIds.value)
+  if (checked) set.add(id)
+  else set.delete(id)
+  selectedShotIds.value = [...set]
+}
+const allShotsSelected = computed(() =>
+  allShots.value.length > 0 && allShots.value.every((s) => selectedShotIds.value.includes(s.id)),
+)
+function toggleSelectAllShots(checked: boolean) {
+  selectedShotIds.value = checked ? allShots.value.map((s) => s.id) : []
+}
+const batchClipMutation = useMutation({
+  mutationFn: (ids: string[]) => generateProjectShots(projectId.value, { shot_ids: ids, target: 'clip' }),
+  onSuccess: (res: any) => {
+    message.success(`已提交 ${res?.count ?? 0} 个分镜视频任务，完成后请刷新查看`)
+    queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+  },
+  onError: (e: any) => message.error(`批量出视频失败: ${e?.message ?? e}`),
+})
+
+function handleBatchClip() {
+  const shots = allShots.value
+  if (!shots.length) {
+    message.warning('当前集暂无镜头')
+    return
+  }
+  const picked = shots.filter((s) => selectedShotIds.value.includes(s.id))
+  if (!picked.length) {
+    message.warning('请先勾选要出视频的镜头')
+    return
+  }
+  const confirmed = picked.filter((s) => s.keyframe_confirmed && !!s.current_assets?.keyframe)
+  const pending = picked.length - confirmed.length
+  if (!confirmed.length) {
+    message.warning(`勾选的 ${picked.length} 个镜头的分镜图均未确认，请先到分镜图环节逐镜确认`)
+    return
+  }
+  if (pending > 0) {
+    message.info(`本次提交 ${confirmed.length} 个已确认镜头，${pending} 个未确认分镜图的镜头已跳过`)
+  }
+  void submitClipsByPlans(confirmed)
+}
+
+/** 按已定稿的视频定义批量提交：名称与关联以库中定义为准；定义缺失时回退镜头级批量 */
+async function submitClipsByPlans(picked: Shot[]) {
+  try {
+    const res = await listAssetPlans(projectId.value, { plan_type: 'clip' })
+    const pickedIds = new Set(picked.map((s) => s.id))
+    const planIds = (res.items || [])
+      .filter((p) => p.owner_id && pickedIds.has(p.owner_id))
+      .map((p) => p.id)
+    if (!planIds.length) {
+      batchClipMutation.mutate(picked.map((s) => s.id))
+      return
+    }
+    const gen = await generateFromPlans(projectId.value, { plan_type: 'clip', plan_ids: planIds })
+    message.success(`已按定义提交 ${gen.count} 个分镜视频任务，完成后请刷新查看`)
+    const skipped = (gen.skipped || []).filter((s) => s.reason !== 'no_pending_plans')
+    if (skipped.length) {
+      const reasons = [...new Set(skipped.map((s) => s.reason))].join('、')
+      message.info(`另有 ${skipped.length} 条定义被跳过：${reasons}`)
+    }
+    queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+  } catch (e: any) {
+    message.error(`批量出视频失败: ${e?.message ?? e}`)
+  }
+}
 </script>
 
 <template>
   <div class="storyboard-page">
+    <header class="page-header">
+      <div class="header-left">
+        <h1 class="page-title">分镜看板</h1>
+        <span class="page-hint">逐镜确认分镜图并生成镜头视频，全部完成后进入合成</span>
+      </div>
+    </header>
     <!-- 集选择器 -->
     <div v-if="allEpisodes.length" class="episode-bar">
       <span class="episode-label">集数</span>
@@ -250,11 +340,26 @@ const clipsDone = computed(() => {
     <!-- 公共资产齐全度门禁横幅 -->
     <div class="gate-banner" :class="{ ok: readiness.all }">
       <span class="gate-badge">{{ readiness.all ? '✓' : '⏳' }}</span>
+      <span class="status-tag" :class="readiness.all ? 'is-succeeded' : 'is-pending'">
+        {{ readiness.all ? '资产已齐全' : '资产未齐全' }}
+      </span>
       <span class="gate-text">
         {{ readiness.all ? '公共资产已齐全，可生成分镜图与分镜视频' : `公共资产未齐全：${readiness.done}/${readiness.total}，生成分镜图前请先在资产库完成生成` }}
       </span>
-      <n-button size="tiny" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
-      <n-button size="tiny" type="primary" :disabled="!clipsDone" @click="router.push(`/project/${projectId}/compose`)">去合成导出 →</n-button>
+      <n-button size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
+      <n-checkbox
+        :checked="allShotsSelected"
+        :disabled="!allShots.length"
+        @update:checked="toggleSelectAllShots"
+      >全选</n-checkbox>
+      <n-button
+        size="small"
+        secondary
+        :disabled="!readiness.all || !selectedShotIds.length"
+        :loading="batchClipMutation.isPending.value"
+        @click="handleBatchClip"
+      >批量出视频（{{ selectedShotIds.length }}）</n-button>
+      <n-button size="small" type="primary" :disabled="!clipsDone" @click="router.push(`/project/${projectId}/compose`)">去合成导出</n-button>
     </div>
     <!-- Loading -->
     <n-spin v-if="scenesQuery.isLoading.value" class="page-loading" />
@@ -300,6 +405,12 @@ const clipsDone = computed(() => {
               @dragover.prevent
             >
               <div class="shot-card" @click="openDrawer(shot)">
+                <n-checkbox
+                  class="shot-check"
+                  :checked="selectedShotIds.includes(shot.id)"
+                  @update:checked="(v: boolean) => toggleShot(shot.id, v)"
+                  @click.stop
+                />
                 <div class="shot-thumb">
                   <img
                     v-if="shot.current_assets?.keyframe?.thumb_url || shot.current_assets?.keyframe?.url"
@@ -328,17 +439,26 @@ const clipsDone = computed(() => {
     </div>
 
     <!-- Drawer -->
-    <n-drawer v-model:show="drawerVisible" :width="480">
+    <n-drawer v-model:show="drawerVisible" :width="'min(480px, 100vw)'">
       <n-drawer-content title="镜头详情" closable>
         <template v-if="activeShot">
           <div class="drawer-preview">
-            <img
+            <n-image
               v-if="activeShot.current_assets?.keyframe?.url"
               :src="activeShot.current_assets.keyframe!.url"
-              alt="preview"
+              object-fit="contain"
               class="preview-img"
             />
             <div v-else class="preview-placeholder">暂无预览图</div>
+          </div>
+          <div v-if="activeShot.current_assets?.clip?.url" class="drawer-video">
+            <div class="drawer-section-title">分镜视频</div>
+            <video
+              :src="activeShot.current_assets.clip.url"
+              controls
+              preload="metadata"
+              class="preview-video"
+            />
           </div>
 
           <n-space vertical :size="16">
@@ -356,16 +476,16 @@ const clipsDone = computed(() => {
             </div>
             <div class="drawer-actions">
               <n-button
-                type="primary"
+                quaternary
                 :disabled="!readiness.all"
-                :loading="generateMutation.isPending.value"
-                @click="handleGenerateFromDrawer('keyframe')"
+                @click="router.push(`/project/${projectId}/storyboard-images`)"
               >
-                生成关键帧
+                去分镜图生成 / 确认
               </n-button>
               <n-tooltip>
                 <template #trigger>
                   <n-button
+                    type="primary"
                     :disabled="!readiness.all || !activeShot.keyframe_confirmed"
                     :loading="generateMutation.isPending.value"
                     @click="handleGenerateFromDrawer('clip')"
@@ -377,6 +497,14 @@ const clipsDone = computed(() => {
               </n-tooltip>
             </div>
           </n-space>
+
+          <!-- 参考图与生成配置：默认沿用原配置，只允许修改提示词 -->
+          <RegenerateConfigPanel
+            v-if="regenerateTarget"
+            :key="`${activeShot.id}-${regenerateTarget}`"
+            :shot-id="activeShot.id"
+            :target="regenerateTarget"
+          />
         </template>
       </n-drawer-content>
     </n-drawer>
@@ -402,7 +530,7 @@ const clipsDone = computed(() => {
 }
 .episode-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .episode-label { font-size: 13px; color: var(--text-secondary); }
-.episode-chip { border: 1px solid var(--border-subtle, #e5e7eb); background: var(--bg-panel, #fff); border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
+.episode-chip { border: 1px solid var(--border-subtle, #e5e7eb); background: var(--bg-panel, #fff); border-radius: 999px; padding: 6px 16px; font-size: 14px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
 .episode-chip:hover { border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
 .episode-chip.active { background: rgba(99, 102, 241, 0.1); border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); font-weight: 600; }
 .gate-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); }
@@ -462,6 +590,16 @@ const clipsDone = computed(() => {
   cursor: pointer;
   border: 1px solid var(--border-subtle);
   transition: box-shadow 0.2s;
+  position: relative;
+}
+.shot-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 4px;
+  padding: 2px;
 }
 .shot-card:hover {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
@@ -520,6 +658,27 @@ const clipsDone = computed(() => {
   width: 100%;
   border-radius: 8px;
 }
+.preview-img :deep(img) {
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  display: block;
+}
+.drawer-video {
+  margin-bottom: 16px;
+}
+.drawer-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.preview-video {
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+  display: block;
+}
 .preview-placeholder {
   width: 100%;
   height: 200px;
@@ -536,6 +695,10 @@ const clipsDone = computed(() => {
   color: var(--text-secondary);
   margin-bottom: 4px;
 }
+:deep(.n-input__textarea-el) {
+  font-size: 13px;
+  line-height: 1.6;
+}
 .drawer-actions {
   display: flex;
   gap: 8px;
@@ -543,21 +706,19 @@ const clipsDone = computed(() => {
 
 /* ===== 窄屏适配 ===== */
 @media (max-width: 768px) {
-  .storyboard-page {
-    padding: 12px;
+  .storyboard-page { padding: 12px; }
+  .scenes-container { gap: 16px; }
+  .shots-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    overflow-x: visible;
   }
-  .scenes-container {
-    gap: 16px;
-  }
-  .shot-card {
-    width: 160px;
-    height: 250px;
-  }
-  .shot-thumb {
-    height: 140px;
-  }
-  .shot-info {
-    padding: 6px 8px;
-  }
+  .shot-card-wrapper { width: 100%; }
+  .shot-card { width: 100%; height: auto; }
+  .shot-thumb { height: 150px; }
+  .shot-info { padding: 6px 8px; }
+}
+@media (max-width: 480px) {
+  .shots-row { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
 }
 </style>

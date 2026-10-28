@@ -57,6 +57,11 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
         scene_name = "教室"
         db.add(Scene(id=ids.scene_id(), project_id=pid, title=scene_name, seq=1,
                      baseline_asset_id=a2.id))
+    # D-23 资产审核闸口：本文件聚焦 @引用注入与并行调度，
+    # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
+    from app.models import Project
+    _proj = db.get(Project, pid)
+    _proj.assets_review_status = "approved"
     db.commit()
     db.close()
     return pid, char_names, scene_name
@@ -202,8 +207,28 @@ def _upload_ref_workflow(client, name="ref-wf"):
 
 def _mk_shots_with_prompt(client, n=3):
     """构造项目 + 场景 + n 个镜头（image_prompt 含 @角色引用）。"""
+    from app.core.database import SessionLocal
+    from app.models import Asset, Scene, ids
+
     pid, names, _ = _mk_char_scene_assets(client, n_chars=1)
-    scn = client.post("/api/scenes", json={"project_id": pid, "title": "操场", "episode": 1}).json()
+    # 场景标题刻意不与提示词中的地点同名，避免 @引用解析注入 ref_scene，
+    # 保证本用例的断言只针对角色参考图 ref_identity
+    scn = client.post("/api/scenes", json={"project_id": pid, "title": "外景地", "episode": 1}).json()
+    # 既有 P2 前置校验：批量生成分镜图要求项目内所有场景均有基准图，
+    # 故此用例必须补齐场景基准图。按既有设计（shot_refs.inject_asset_refs），
+    # 镜头所属场景的基准图会自动补入提示词并注入 ref_scene，
+    # 因此断言需同时包含角色定妆图与场景基准图。
+    _db = SessionLocal()
+    try:
+        _a = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene",
+                   name="外景地基准", version=1, file_path="/tmp/playground.png", validity="current")
+        _db.add(_a)
+        _db.flush()
+        _s = _db.get(Scene, scn["id"])
+        _s.baseline_asset_id = _a.id
+        _db.commit()
+    finally:
+        _db.close()
     shot_ids = []
     for i in range(n):
         shot = client.post("/api/shots", json={
@@ -226,7 +251,11 @@ def test_batch_generate_carries_media(client: TestClient):
     assert len(jobs) == 3
     for j in jobs:
         params = (j.get("effective_inputs") or {}).get("params") or {}
-        assert params.get("__media__") == {"ref_identity": "/tmp/p0.png"}, j
+        # 角色定妆图（@角色）与所属场景基准图（自动补入）都会注入为参考图
+        assert params.get("__media__") == {
+            "ref_identity": "/tmp/p0.png",
+            "ref_scene": "/tmp/playground.png",
+        }, j
 
 
 def test_regenerate_carries_media(client: TestClient):
@@ -240,7 +269,11 @@ def test_regenerate_carries_media(client: TestClient):
     assert r.status_code == 202, r.text
     j = r.json()
     params = (j.get("effective_inputs") or {}).get("params") or {}
-    assert params.get("__media__") == {"ref_identity": "/tmp/p0.png"}
+    # 重做与单镜/批量行为一致：角色定妆图与所属场景基准图都会注入
+    assert params.get("__media__") == {
+        "ref_identity": "/tmp/p0.png",
+        "ref_scene": "/tmp/playground.png",
+    }
 
 
 # ---------- 并行调度（D-18） ----------

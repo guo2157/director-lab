@@ -43,6 +43,17 @@ _IMAGE_DEF = {
 
 def _make_project(client, aspect_ratio="9:16"):
     pid = client.post("/api/projects", json={"name": "注入测试", "aspect_ratio": aspect_ratio}).json()["id"]
+    # D-23 资产审核闸口：本文件聚焦参数注入与在途去重，
+    # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
+    from app.core.database import SessionLocal
+    from app.models import Project
+    _db = SessionLocal()
+    try:
+        _p = _db.get(Project, pid)
+        _p.assets_review_status = "approved"
+        _db.commit()
+    finally:
+        _db.close()
     return pid
 
 

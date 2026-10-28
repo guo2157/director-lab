@@ -101,3 +101,15 @@ def agent_confirmation_id() -> str:
 
 def agent_message_id() -> str:
     return new_id("agm")
+
+
+def job_input_ref_id() -> str:
+    return new_id("jir")
+
+
+def asset_plan_id() -> str:
+    return new_id("apn")
+
+
+def asset_plan_dep_id() -> str:
+    return new_id("apd")

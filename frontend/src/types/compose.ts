@@ -34,10 +34,9 @@ export interface ComposePayload {
 
 /** 合成结果（result 含 composition_id/file_path/duration/srt_path/warnings） */
 export interface Composition {
-  id: string
-  project_id: string
+  composition_id: string
   episode: number
-  status: 'composing' | 'completed' | 'failed'
+  status: 'composing' | 'done' | 'failed'
   stale: boolean
   file_path?: string
   duration?: number
@@ -56,11 +55,10 @@ export interface ExportPayload {
 /** 导出记录（download_url 为 /api/exports/{id}/download 完整路径） */
 export interface ExportRecord {
   id: string
-  project_id: string
   composition_id: string
-  format: string
-  delivery_profile: DeliveryProfile
-  status: 'pending' | 'completed' | 'failed'
+  file_name?: string
+  size?: number
+  status: 'exporting' | 'done' | 'failed'
   download_url: string
   created_at: string
 }

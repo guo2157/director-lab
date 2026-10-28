@@ -19,10 +19,12 @@ from app.models.production import (
     Export,
     Job,
     JobEvent,
+    JobInputRef,
     ParseVersion,
     UploadRecord,
     Workflow,
 )
+from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.models.continuity import EpisodeContinuity
 from app.models.agent import (
     AgentConfirmation,
@@ -51,10 +53,13 @@ __all__ = [
     "Export",
     "Job",
     "JobEvent",
+    "JobInputRef",
     "ParseVersion",
     "UploadRecord",
     "Workflow",
     "EpisodeContinuity",
+    "AssetPlan",
+    "AssetPlanDependency",
     "AgentSession",
     "AgentMessage",
     "AgentTask",

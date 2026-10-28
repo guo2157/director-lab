@@ -30,7 +30,7 @@
 | workflow_not_found | 404 | 工作流不存在 |
 | job_not_found | 404 | 任务不存在 |
 | character_not_found | 404 | 角色不存在 |
-| asset_locked | 409 | 资产已锁定，禁止删除或覆盖 |
+| asset_locked | 409 | 资产已锁定，禁止删除或覆盖；分镜图锁定后禁止重新生成或替换，需先解锁 |
 | asset_in_use | 409 | 资产被镜头引用，需先解绑 |
 | workflow_in_use | 409 | 工作流被默认或任务引用，禁止删除 |
 | invalid_state_transition | 409 | 状态跃迁非法 |
@@ -38,6 +38,15 @@
 | parse_version_conflict | 409 | 候选解析版本已过期或当前版本已变化 |
 | job_submission_unknown | 409 | 远端提交结果未知，需要对账后处理 |
 | prev_frame_missing | 409 | 镜头声明需要上一镜尾帧（requires_prev_frame=True）但前一镜尚无可用尾帧，需先生成前序镜头视频并完成尾帧提取 |
+| assets_review_pending | 409 | 公共资产尚未通过人工审核，禁止生成分镜图；需先在资产库提交审核并通过 |
+| assets_review_rejected | 409 | 公共资产审核被驳回，需修改或替换资产后重新提交审核 |
+| keyframe_not_confirmed | 409 | 分镜图尚未人工确认，禁止生成分镜视频；需先在分镜图环节逐镜确认 |
+| keyframe_not_ready | 409 | 分镜图尚未生成，无法生成分镜视频 |
+| job_in_flight | 409 | 同镜头同目标已有排队/运行中任务，拒绝重复提交 |
+| no_pending_plans | 409 | 没有符合条件且待生成的资产定义 |
+| no_generatable_plans | 409 | 按定义批量生成时无可生成项（全部被跳过） |
+| plan_not_found | 404 | 资产定义不存在 |
+| plan_not_generated | 409 | 定义尚未生成产物，无法确认 |
 | composition_stale | 409 | 合成版本已失效，需重新合成后再导出 |
 | composition_required | 409 | 不存在成功的合成版本，需先合成 |
 | workflow_format_invalid | 422 | 非 API 格式或结构不合规 |
@@ -79,6 +88,7 @@
 | DELETE | /api/projects/{id} | 删除项目 |
 | POST | /api/projects/{id}/archive | 归档项目 |
 | POST | /api/projects/{id}/unarchive | 取消归档 |
+| POST | /api/projects/{id}/assets-review | 公共资产人工审核（body: action=approve/reject；approve 前校验角色定妆图/场景基准图/道具锚定图齐全，缺项返回 409 assets_incomplete；通过后放行分镜图生成） |
 
 ### 剧本与分镜
 | 方法 | 路径 | 说明 |
@@ -258,11 +268,11 @@
 | script_version_id | string | 是 | 必须指向用户确认的不可变剧本版本 |
 | text | string | 是 | 1–50000 字符；必须与 script_version_id 的内容哈希一致 |
 | episode_start | int | 否 | 本次解析的起始集数，缺省为 1 |
-| episode_count | int | 否 | 本次解析的集数，缺省为已确认评估中的全部集数 |
+| episode_count | int | 否 | 本次解析的集数，缺省由解析器自主分析确定 |
 | replace_existing | bool | 否 | 默认 false。true 时仅在用户确认候选解析差异后替换选定且未锁定的集；不得直接覆盖当前版本 |
 | llm_model | string | 否 | 缺省使用设置中的模型 |
 
-调用前必须已执行并确认与 `script_version_id` 匹配的评估，未评估或未确认时返回 400，版本哈希不匹配时返回 409 `script_version_conflict`。解析仅生成 `parse_version.status=candidate` 的候选版本，范围外的集不落库。返回 `job_id`；解析任务通过 SSE `job.finished` 事件通知结果，前端也可轮询 `GET /api/jobs/{job_id}`。用户确认后由确认接口在事务中切换 `project.current_parse_version_id`，并标记旧版本为 superseded。候选解析失败或未确认时当前分镜保持不变。
+解析不再强制前置确认评估，集数由解析器自主分析确定，未评估也可直接提交解析并返回 202；版本哈希不匹配时返回 409 `script_version_conflict`。解析仅生成 `parse_version.status=candidate` 的候选版本，范围外的集不落库。返回 `job_id`；解析任务通过 SSE `job.finished` 事件通知结果，前端也可轮询 `GET /api/jobs/{job_id}`。用户确认后由确认接口在事务中切换 `project.current_parse_version_id`，并标记旧版本为 superseded。候选解析失败或未确认时当前分镜保持不变。
 
 解析版本切换时的产物处理（按 diff_summary 逐镜头）：新增镜头→无产物、状态 pending；内容变化的镜头→标记 redo、旧产物标 stale；已删除镜头的产物→标记 archived、不物理删除；未变化的镜头→产物保留、状态不变。
 
@@ -348,6 +358,18 @@
 
 **POST /api/assets/export**：请求体 `asset_ids` 数组，返回打包下载流。使用 POST 而非 GET，避免资产数量较多时 URL 过长触发网关限制。
 
+## 6.5 资产定义（AssetPlan）
+
+解析落库后由 `build_asset_plans` 一次性定稿五类定义（character/scene/prop/keyframe/clip）：名称 `{前缀}_{语义}_{短哈希}` 与占位路径一经生成永不修改，提示词随重新解析刷新。分镜图/视频提示词用 `@名称` 语法引用角色/场景（@引用解析可携带参考图）；`ref_image`/`ref_prev_frame`/`first_frame`/`end_frame` 为系统保留槽位，由执行器按镜头实际产物回填，提示词中不写 @ 引用。
+
+**GET /api/projects/{id}/asset-plans**：可选 `plan_type`、`status`、`episode`、`with_dependencies`。返回 `items`（含 `asset_key`/`media_path`/`prompt`/`status`/`owner_id`/`confirmed`/`dependencies`）+ `counts`（按类型统计 total/pending/generated/rejected）+ `total`。
+
+**POST /api/projects/{id}/asset-plans/generate**：请求体 `plan_type` 必填，`plan_ids`/`workflow_id` 可选（缺省取该类型全部 pending 定义）。闸口：keyframe 须公共资产审核通过（D-23）且跳过已锁定分镜图；clip 须分镜图已确认（D-13）。提交时按定义依赖注入参考图槽位（仅注入工作流 `capabilities.reference_slots` 声明的槽位），绑定快照（槽位/资产ID/版本/路径/状态）随任务参数持久化，重试复用快照不重新解析。返回 `jobs` + `count` + `skipped`（含跳过原因）。
+
+**POST /api/projects/{id}/asset-plans/{plan_id}/confirm**：人工确认定义；keyframe 确认同步置 `shot.keyframe_confirmed=True`。未生成返回 409 `plan_not_generated`。
+
+**POST /api/projects/{id}/asset-plans/{plan_id}/unconfirm**：取消确认；keyframe 同步回退 `shot.keyframe_confirmed=False`。
+
 ## 7. 工作流
 
 **GET /api/workflows**：可选 `workflow_type`，返回列表含 `is_default` 与 `used_by_jobs`。
@@ -380,7 +402,7 @@
 
 **POST /api/scenes/{id}/generate-baseline**：生成场景基准图，`target` 固定为 `keyframe`，以场景的 `title` 与 `description` 作为 prompt 基础。成功后新资产以 `asset_type=scene` 落库，并回写 `scene.baseline_asset_id`。
 
-**POST /api/scenes/{id}/generate**：批量生成场景内镜头，可选 `shot_ids` 限定范围；任务入队后由 worker 按并发 = 可用 ComfyUI 实例数执行（单实例串行，D-18）。此接口不生成场景基准图。选中镜头数少于 3 个时返回 400，提示改用单镜生成接口。视频任务串行约束：按 `seq` 升序处理，前一镜头视频成功并抽出末帧后才开始下一镜头；任一镜头失败时仅暂停依赖该镜头产物/末帧的后续镜头，无依赖关系的镜头继续；已完成镜头按状态跳过；显式指定 `shot_ids` 时仍按 `seq` 升序串行，不按传入顺序。@引用注入（D-16）：keyframe/clip 生成时提示词中的 @角色/@场景 自动携带参考图，与单镜生成行为一致。
+**POST /api/scenes/{id}/generate**：批量生成场景内镜头，可选 `shot_ids` 限定范围；任务入队后由 worker 按并发 = 可用 ComfyUI 实例数执行（单实例串行，D-18）。此接口不生成场景基准图。选中镜头数少于 3 个时返回 400，提示改用单镜生成接口。视频任务串行约束：按 `seq` 升序处理，前一镜头视频成功并抽出末帧后才开始下一镜头；任一镜头失败时仅暂停依赖该镜头产物/末帧的后续镜头，无依赖关系的镜头继续；已完成镜头按状态跳过；显式指定 `shot_ids` 时仍按 `seq` 升序串行，不按传入顺序。@引用注入（D-16）：keyframe/clip 生成时提示词中的 @角色/@场景 自动携带参考图，与单镜生成行为一致。keyframe 目标受人工审核闸口约束（D-23）：公共资产未审核通过返回 409 `assets_review_pending`；已锁定的分镜图不允许被批量覆盖，命中时返回 409 `asset_locked`，需先在分镜图页解锁。
 
 **POST /api/projects/{id}/generate**：跨场景批量生成。请求体含 `shot_ids`（可选）、`episode_from`/`episode_to`（可选，集数闭区间）、`scene_ids`（可选）、`target`（必填，keyframe 或 clip）、`workflow_id`（可选）。执行规则：
 

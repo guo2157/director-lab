@@ -167,6 +167,9 @@ def execute_parse_job(job_id: str) -> dict:
             script_version_id=sv.id,
             version=next_ver,
             status="candidate",
+            # 口径锁定：写入总集数，供集级状态查询与前端判断解析是否完成使用
+            # （此前遗漏该字段，导致历史版本 total_episodes 为空、前端无法判断完整进度）
+            total_episodes=episode_start + episode_count - 1,
             diff_summary={
                 "characters": len(norm.data.get("characters") or []),
                 "props": len(norm.data.get("props") or []),

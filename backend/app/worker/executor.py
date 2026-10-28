@@ -24,6 +24,24 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _next_asset_version(
+    db: Session, job: Job, asset_type: str, asset_name: str | None = None
+) -> int:
+    """计算产物版本号：同一归属范围内同类型取最大值加一，无历史则为 1。
+
+    重新生成不得覆盖当前生效版本，版本号必须递增以便区分候选与正式。
+    """
+    q = db.query(Asset).filter(Asset.asset_type == asset_type)
+    if job.shot_id:
+        q = q.join(Job, Job.id == Asset.source_job_id).filter(Job.shot_id == job.shot_id)
+    else:
+        q = q.filter(Asset.project_id == job.project_id)
+        if asset_name:
+            q = q.filter(Asset.name == asset_name)
+    latest = q.order_by(Asset.version.desc()).first()
+    return (latest.version + 1) if latest is not None else 1
+
+
 def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = None) -> None:
     """事件与状态同事务写入 outbox。event_seq 由数据库自增，并回写 job.event_seq 供增量补齐。"""
     ev = JobEvent(job_id=job.id, event_type=event_type, payload=payload or {}, created_at=_now())
@@ -219,6 +237,37 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     _shot.status = "generating"
             db.commit()
 
+        # 统一资产就绪门禁二次校验（D-23 强化）：任务创建与真正执行之间存在时间差，
+        # 执行前必须重新校验资产就绪状态，防止入队后资产被重新生成（审核回退 pending）
+        # 或失效仍提交 ComfyUI。实体资产图（定妆/基准/锚定图）自身不适用该门禁。
+        if job.job_type == "generate_keyframe":
+            _params_peek = dict(job.params or {})
+            _is_entity_asset = any(
+                k in _params_peek for k in ("__character_id__", "__scene_id__", "__prop_id__")
+            )
+            if not _is_entity_asset:
+                from app.services.assets_gate import evaluate_assets_gate
+
+                _gate = evaluate_assets_gate(db, job.project_id)
+                if not _gate.ready:
+                    _gate_detail = {
+                        "gate_status": _gate.status,
+                        "reason_code": _gate.reason_code,
+                        "blockers": [b.to_dict() for b in _gate.blockers],
+                    }
+                    _fail_job(
+                        db,
+                        job,
+                        _gate.reason_code,
+                        f"资产就绪门禁未通过：{_gate.message}",
+                    )
+                    # 门禁明细持久化到 input_snapshot 供追溯与前端展示
+                    _snap = dict(job.input_snapshot or {})
+                    _snap["assets_gate"] = _gate_detail
+                    job.input_snapshot = _snap
+                    db.commit()
+                    return {"ok": False, "reason": f"assets_gate:{_gate.reason_code}"}
+
         wf_record = db.get(Workflow, job.workflow_id) if job.workflow_id else None
         if wf_record is None:
             _fail_job(db, job, "no_matching_workflow", "任务未关联工作流")
@@ -376,15 +425,18 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                 content = d["content"]
                                 ext = (item["filename"].rsplit(".", 1)[-1] or "png").lower()
                                 asset_id = id_gen.asset_id()
-                                version = 1
-                                filename = f"{asset_id}_v{version}.{ext}"
-                                filepath = os.path.join(media_dir, filename)
-                                with open(filepath, "wb") as f_out:
-                                    f_out.write(content)
+                                _is_regen_rec = bool((job.input_snapshot or {}).get("regeneration"))
                                 asset_type_map = {"cover": "keyframe", "clip": "clip", "voice": "audio", "bgm": "audio", "sfx": "audio"}
                                 asset_type = asset_type_map.get(out_name, "keyframe")
                                 if asset_type == "keyframe" and _entity_asset_type:
                                     asset_type = _entity_asset_type
+                                # 版本号必须在产物类型与实体归属确定之后再计算，
+                                # 否则会用到尚未赋值的类型变量，且实体类资产无法按名称隔离版本
+                                version = _next_asset_version(db, job, asset_type, _entity_asset_name)
+                                filename = f"{asset_id}_v{version}.{ext}"
+                                filepath = os.path.join(media_dir, filename)
+                                with open(filepath, "wb") as f_out:
+                                    f_out.write(content)
                                 asset = Asset(
                                     id=asset_id, project_id=job.project_id,
                                     asset_type=asset_type,
@@ -396,7 +448,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                     version=version, file_path=filepath,
                                     thumb_path=None,
                                     source_job_id=job.id,
-                                    validity="current",
+                                    validity=("candidate" if _is_regen_rec else "current"),
                                     input_snapshot=job.input_snapshot,
                                 )
                                 db.add(asset)
@@ -404,7 +456,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                 # 缩略图（D-17，失败不阻断）
                                 try:
                                     from app.services.thumbnail import make_thumb
-                                    thumb_path = make_thumb(filepath, asset_id, media_dir)
+                                    thumb_path = make_thumb(filepath, asset_id)
                                     asset.thumb_path = thumb_path
                                 except Exception:
                                     asset.thumb_path = None
@@ -415,19 +467,19 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             _scene_id = (job.params or {}).get("__scene_id__")
                             if _prop_id:
                                 _p = db.get(Prop, _prop_id)
-                                if _p and not _p.anchor_asset_id:
+                                if _p and not _p.anchor_asset_id and not _is_regen_rec:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _p.anchor_asset_id = _kf[0]["asset_id"]
                             if _character_id:
                                 _c = db.get(Character, _character_id)
-                                if _c and not _c.portrait_asset_id:
+                                if _c and not _c.portrait_asset_id and not _is_regen_rec:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _c.portrait_asset_id = _kf[0]["asset_id"]
                             if _scene_id:
                                 _s = db.get(Scene, _scene_id)
-                                if _s and not _s.baseline_asset_id:
+                                if _s and not _s.baseline_asset_id and not _is_regen_rec:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _s.baseline_asset_id = _kf[0]["asset_id"]
@@ -718,7 +770,10 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             # 定妆图/基准图/锚定图按实体归属落 character/scene/prop（否则前端资产库分类永远查不到）
             if asset_type == "keyframe" and _entity_asset_type:
                 asset_type = _entity_asset_type
-            version = 1
+            # 多图参考重新生成工作台 V1：重新生成任务落候选版本，
+            # 版本号按同镜头同类型递增，不覆盖当前生效版本
+            _is_regen = bool((job.input_snapshot or {}).get("regeneration"))
+            version = _next_asset_version(db, job, asset_type, _entity_asset_name)
             aid = id_gen.asset_id()
             stored_name = f"{aid}_v{version}.{ext}"
             stored_path = media_dir / stored_name
@@ -740,7 +795,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 file_path=str(stored_path),
                 thumb_path=thumb_path,
                 source_job_id=job.id,
-                validity="current",
+                validity=("candidate" if _is_regen else "current"),
                 input_snapshot=job.input_snapshot,
             )
             db.add(asset)
@@ -760,7 +815,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             (a for a in created_assets if a["asset_type"] in ("keyframe", "character", "scene", "prop")),
             None,
         )
-        if _kf_asset is not None:
+        # 重新生成产物为候选版本，采纳前不得改动实体主图指针，否则详情页会指向未采纳的候选
+        if _kf_asset is not None and not _is_regen:
             for _key, _model, _field in _anchor_map:
                 _tid = (job.params or {}).get(_key)
                 if not _tid:
@@ -811,6 +867,12 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         job.result = {"assets": created_assets, "prompt_id": prompt_id, "seed": seed}
         job.finished_at = _now()
         _write_event(db, job, "job.finished", {"status": "succeeded", "result": job.result})
+        # 定义状态回写：绑定正式资产并置为已生成，名称与占位路径保持不变
+        try:
+            from app.services.asset_plan import sync_plan_after_generate
+            sync_plan_after_generate(db, job, created_assets)
+        except Exception as _pe:  # noqa: BLE001
+            _write_event(db, job, "asset_plan.sync_failed", {"error": str(_pe)[:200]})
         # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
         _probe_clip_and_update_shot(db, job, created_assets)
         # P0：从本次实际生成视频提取末帧并绑定 shot.last_frame_asset_id，

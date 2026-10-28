@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
 
-from app.api.v1 import agent, assets, characters, compose, events, generate, jobs, projects, props, scenes, script, settings, shots, workflows
+from app.api.v1 import agent, asset_plans, assets, characters, compose, events, generate, jobs, projects, props, regeneration, scenes, script, settings, shots, workflows
 
 
 def _startup_selfcheck() -> dict:
@@ -72,7 +72,9 @@ def create_app() -> FastAPI:
     app.include_router(projects.router)
     app.include_router(agent.router)
     app.include_router(assets.router)
+    app.include_router(asset_plans.router)
     app.include_router(generate.router)
+    app.include_router(regeneration.router)
     app.include_router(characters.router)
     app.include_router(props.router)
     app.include_router(scenes.router)

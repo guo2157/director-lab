@@ -66,6 +66,8 @@ def _current_asset_info(db: Session, shot_id: str, asset_type: str) -> dict | No
         "version": row.version,
         "url": f"/api/assets/{row.id}/file",
         "thumb_url": f"/api/assets/{row.id}/file?thumb=true" if row.thumb_path else None,
+        # 锁定状态：分镜图工作台据此显示锁定/解锁入口（锁定后禁止重新生成覆盖）
+        "locked": bool(row.locked),
     }
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from app.core.config import get_settings
 
 # 提示词目录：backend/workspace/prompts
-PROMPT_DIR = Path(__file__).resolve().parents[1] / "workspace" / "prompts"
+PROMPT_DIR = Path(__file__).resolve().parents[2] / "workspace" / "prompts"
 
 # 内置默认提示词（与 workspace 文件缺失时的回退值保持一致）
 DEFAULT_PROMPTS: dict[str, str] = {}

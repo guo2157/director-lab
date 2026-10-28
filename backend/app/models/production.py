@@ -140,6 +140,42 @@ class DependencyRef(Base):
 Index("ix_dependency_ref_target", DependencyRef.__table__.c.target_type, DependencyRef.__table__.c.target_id)
 
 
+class JobInputRef(Base):
+    """任务输入参考图（多图参考重新生成工作台 V1）。
+
+    把每次任务实际装配的参考图结构化落库，作为任务输入快照的可查询索引：
+    - slot_param：工作流槽位参数名（如 ref_identity / ref_scene / ref_prev_frame）
+    - input_key：工作流真实输入键（如 ref_images.ref_image_2），照抄能力声明
+    - asset_id / asset_version：参考图资产与其版本，用于追溯与失效判断
+    - role：实体角色（character / scene / prop / keyframe / prev_frame）
+    - required：是否必需槽位，必需槽位不可被用户移除
+    - semantic：reference 表示参考图语义，frame_constraint 表示帧约束语义
+    - enabled：本次任务是否实际注入该槽位
+    """
+
+    __tablename__ = "job_input_ref"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.job_input_ref_id)
+    job_id: Mapped[str] = mapped_column(String(32), ForeignKey("job.id"), nullable=False)
+    slot_param: Mapped[str] = mapped_column(String(48), nullable=False)
+    input_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    asset_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    asset_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    semantic: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="reference", server_default="reference"
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+Index("ix_job_input_ref_job", JobInputRef.__table__.c.job_id)
+Index("ix_job_input_ref_asset", JobInputRef.__table__.c.asset_id)
+
+
 class JobEvent(Base):
     """事件 outbox：任务状态与事件同事务写入，提交前禁止发布。"""
 

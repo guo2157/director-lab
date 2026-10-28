@@ -185,7 +185,7 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 | 剧本解析 | — | — | 由独立语言模型适配层处理，使用系统设置中的语言模型配置，不经过 ComfyUI 工作流 |
 | 生成角色定妆图 | keyframe | image | 文生图，无参考图输入 |
 | 生成场景基准图 | keyframe | image | 文生图，无参考图输入 |
-| 生成分镜图 | keyframe | image | 图生图，携带已锁定的角色定妆图和场景基准图作为参考图 |
+| 生成分镜图 | keyframe | image | 图生图，携带已锁定的角色定妆图和场景基准图作为参考图；前置约束：公共资产须通过人工审核（否则 409 `assets_review_pending`），当前分镜图已锁定时禁止重绘覆盖（否则 409 `asset_locked`，需先解锁） |
 | 生成视频 | clip | video | 多图参考生视频，携带角色/场景/道具资产图作为参考，使用 MinimaxH3 提示词技能 |
 | 检查音频/对白 | — | — | 检查 H3 VA 同次生成音轨；仅检查失败时条件触发 TTS 补救 |
 | TTS 补救配音 | audio | tts | 仅对缺失、无效或审核不通过的对白/旁白音频生成补救音轨 |
@@ -466,6 +466,18 @@ shot.duration    → $duration_hint（目标时长）
 - 密钥加密、日志脱敏
 - 云端 Partner Node 工作流已随 D-10 弃用；如重新引入须标注「云端、计费、素材外发」，默认需用户确认才可设为默认。本地权重 H3 工作流标注 `local_only`，需 ≥24GB 显存（验证目标 A10，V100 未验证）
 - 本期单用户内网可，对外须鉴权
+
+### 12.3 按定义生成的参考槽位注入与绑定快照（P0）
+
+按定义批量生成（`POST /projects/{id}/asset-plans/generate`）的参考图注入规则：
+
+1. **槽位由定义绑定决定**：`asset_plan_dependency` 按 (plan_id, slot) 记录依赖（ref_identity/ref_costume/ref_scene/ref_prop/ref_image），注入不依赖提示词文本书写顺序，从根本上避免槽位错位。
+2. **仅注入工作流声明的槽位**：以 `capabilities.reference_slots` 为准（字符串数组或 `{param, input_key, optional}` 对象数组），未声明的槽位不注入，避免无效上传与工作流不支持的输入。
+3. **版本锁定**：解析优先取定义绑定的当前有效资产（`validity == 'current'`）；绑定资产被替换时回退到归属实体/镜头的当前有效资产，不引用过期版本。
+4. **绑定快照**：每个槽位固化 `slot/ref_key/asset_id/version/file_path/status` 随任务参数 `__binding_snapshot__` 持久化；重试复用快照，不重新解析（版本漂移防护）。
+5. **系统保留槽位**：`ref_prev_frame`/`first_frame`/`end_frame` 由执行器按镜头实际产物回填（上一镜尾帧、跨集首帧），提示词中不写 @ 引用，@引用解析也不得占用。
+6. **文件缺失处理**：参考图文件不存在时跳过该槽位并记录 `file_missing`，不阻断生成。
+7. **提示词 @名称 语法**：分镜图/视频定义提示词用 `@角色名`/`@场景名` 引用（@引用解析可携带参考图）；`ref_image`（本镜分镜图）与 `ref_prev_frame`（上一镜末帧）为系统保留槽，提示词中不写 @ 引用。
 
 ## 13. 标准工作流清单（随文交付，9 份）
 

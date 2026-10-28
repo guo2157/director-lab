@@ -31,6 +31,17 @@ def _make_shot(client: TestClient) -> dict:
     shot = client.post("/api/shots", json={
         "scene_id": scn["id"], "episode": 1, "shot_kind": "visual", "duration": 5,
     }).json()
+    # D-23 资产审核闸口：本文件聚焦分镜图确认闸口（D-13），
+    # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
+    from app.core.database import SessionLocal
+    from app.models import Project
+    _db = SessionLocal()
+    try:
+        _project = _db.get(Project, pid)
+        _project.assets_review_status = "approved"
+        _db.commit()
+    finally:
+        _db.close()
     return {"project_id": pid, "scene": scn, "shot": shot}
 
 

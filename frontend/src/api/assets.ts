@@ -23,7 +23,7 @@ export function listAssetVersions(id: string) {
   return get<AssetVersion[]>(`/assets/${id}/versions`)
 }
 
-/** 上传资产（单文件 ≤500MB，multipart） */
+/** 上传资产（单文件 ≤500MB，multipart；asset_type 必填且必须命中权威枚举） */
 export function uploadAsset(file: File, payload: { project_id: string; asset_type?: string; name?: string }) {
   const form = new FormData()
   form.append('file', file)
@@ -34,6 +34,69 @@ export function uploadAsset(file: File, payload: { project_id: string; asset_typ
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 300000,
   }).then((res) => res.data)
+}
+
+/** 替换结果（后端返回新版本并附带旧版本与联动信息） */
+export interface ReplaceAssetResult extends Asset {
+  previous_asset_id?: string
+  previous_version?: number
+  synced_entities?: string[]
+  affected_shots?: string[]
+}
+
+/**
+ * 上传新文件替换资产：后端生成 vN+1 并置为生效版本，旧版本转 superseded 保留可回滚。
+ * 资产锁定或类型不匹配时后端返回 409 / 422。
+ */
+export function replaceAsset(id: string, file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  return apiClient.post<ReplaceAssetResult>(`/assets/${id}/replace`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 300000,
+  }).then((res) => res.data)
+}
+
+/** 重新生成弹窗初值（默认沿用资产模板渲染的提示词） */
+export interface AssetRegenerateConfig {
+  asset_id: string
+  asset_type: string
+  version: number
+  prompt: string
+  negative_prompt: string
+  asset_prompt_version: string
+  editable: {
+    prompt: boolean
+    negative_prompt: boolean
+    refs: boolean
+    workflow: boolean
+    params: boolean
+  }
+}
+
+/** 读取资产重新生成配置（仅角色/场景/道具支持，其余返回 422） */
+export function getAssetRegenerateConfig(id: string) {
+  return get<AssetRegenerateConfig>(`/assets/${id}/regenerate/config`)
+}
+
+/** 重新生成任务回执 */
+export interface AssetRegenerateResult {
+  job_id: string
+  status: string
+  asset_id: string
+  base_version: number
+  workflow_id?: string
+  workflow_version?: number
+  prompt_edited?: boolean
+  idempotent?: boolean
+}
+
+/** 提交资产重新生成任务（结果落候选版本，需在候选列表中采纳） */
+export function regenerateAsset(
+  id: string,
+  payload: { prompt?: string; negative_prompt?: string; workflow_id?: string; idempotency_key?: string },
+) {
+  return post<AssetRegenerateResult>(`/assets/${id}/regenerate`, payload)
 }
 
 /** 锁定资产（锁定资产删除禁用） */

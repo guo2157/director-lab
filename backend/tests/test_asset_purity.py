@@ -195,6 +195,11 @@ def test_scene_batch_generate_injects_media(client: TestClient):
                       capabilities={"reference_slots": ["ref_identity"]},
                       definition={"nodes": []}, is_default=True)
         db.add(wf)
+        # D-23 资产审核闸口：本用例聚焦 @引用参考图注入，
+        # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
+        from app.models import Project
+        _proj = db.get(Project, pid)
+        _proj.assets_review_status = "approved"
         db.commit()
         scene_id = scene.id
     finally:

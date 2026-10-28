@@ -13,12 +13,13 @@ import io
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.models import Asset, AssetRef, Job, Shot, ids
+from app.models import Asset, AssetRef, Character, Job, Prop, Scene, Shot, ids
 from app.models.enums import ASSET_TYPE
 from app.services import errors
 
@@ -111,32 +112,52 @@ def get_asset_file(asset_id: str, thumb: bool = False, db: Session = Depends(get
 @router.post("/upload", status_code=201)
 async def upload_asset(
     file: UploadFile,
-    project_id: str = None,
-    asset_type: str = "reference",
-    name: str = None,
+    project_id: str = Form(None),
+    asset_type: str = Form(None),
+    name: str = Form(None),
+    replace_asset_id: str = Form(None),
     db: Session = Depends(get_db),
 ) -> dict:
-    settings = get_settings()
+    """上传资产：asset_type 必填且必须命中权威枚举，保证资产能落到正确的分类分组。
+
+    - replace_asset_id 提供时直接走替换语义（生成 vN+1，旧版本转 superseded）
+    - 不再提供游离于枚举外的兜底类型：缺失或非法一律 422，避免产出无法分类的资产
+    """
     if not project_id:
         raise errors.AppError("invalid_request", "project_id 必填", 400)
+    if replace_asset_id:
+        return await replace_asset(replace_asset_id, file, db)
+    allowed = "、".join(ASSET_TYPE)
+    if not asset_type:
+        raise errors.AppError("invalid_asset_type", f"asset_type 必填，允许值：{allowed}", 422)
+    if asset_type not in ASSET_TYPE:
+        raise errors.AppError("invalid_asset_type", f"asset_type 取值无效，允许值：{allowed}", 422)
+    settings = get_settings()
     data = await file.read()
-    if len(data) > 500 * 1024 * 1024:
+    if not data:
+        raise errors.AppError("invalid_request", "上传文件为空", 400)
+    if len(data) > _MAX_UPLOAD_BYTES:
         raise errors.AppError("invalid_request", "单文件上限 500MB", 400)
+    suffix = Path(file.filename or "").suffix or ".bin"
+    final_type = asset_type
+    _check_file_type(final_type, suffix)
+    asset_name = name or (file.filename or "upload")
+    version = _next_version_by_name(db, project_id, final_type, asset_name)
     a = Asset(
         id=ids.asset_id(),
         project_id=project_id,
-        asset_type=asset_type,
-        name=name or (file.filename or "upload"),
-        version=1,
+        asset_type=final_type,
+        name=asset_name,
+        version=version,
         validity="current",
         input_snapshot={"created_at": _now().isoformat()},
     )
     media_dir = Path(settings.media_dir)
     media_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file.filename or "").suffix or ".bin"
-    dest = media_dir / f"{a.id}_v1{suffix}"
+    dest = media_dir / f"{a.id}_v{version}{suffix}"
     dest.write_bytes(data)
     a.file_path = str(dest)
+    a.thumb_path = _make_thumb_safe(str(dest), f"{a.id}_v{version}")
     db.add(a)
     db.commit()
     return _to_out(a)
@@ -315,6 +336,359 @@ def rollback_asset(asset_id: str, payload: dict, db: Session = Depends(get_db)) 
             shot.redo_required = True
     db.commit()
     return _to_out(new_asset)
+
+
+# ── 上传 / 替换 / 重新生成：共享校验与工具 ────────────────────────────────
+_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+_VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv"}
+_ALLOWED_EXT = _IMAGE_EXT | _VIDEO_EXT
+_IMAGE_ASSET_TYPES = {"character", "scene", "prop", "keyframe", "last_frame"}
+_VIDEO_ASSET_TYPES = {"clip"}
+_REGENERATABLE_TYPES = {"character", "scene", "prop"}
+# 镜头产物类型：与镜头关联依赖 source_job_id，替换时需继承
+_SHOT_BOUND_TYPES = {"keyframe", "clip", "last_frame"}
+_ENTITY_KEY = {"character": "__character_id__", "scene": "__scene_id__", "prop": "__prop_id__"}
+
+
+def _check_file_type(asset_type: str, suffix: str) -> None:
+    """扩展名白名单 + 与资产类型匹配校验：图片类只收图片、视频类只收视频。"""
+    ext = (suffix or "").lower()
+    if ext not in _ALLOWED_EXT:
+        allowed = "、".join(sorted(_ALLOWED_EXT))
+        raise errors.AppError(
+            "invalid_file_type",
+            f"不支持的文件类型 {ext or '(无扩展名)'}，允许：{allowed}",
+            422,
+        )
+    if asset_type in _VIDEO_ASSET_TYPES and ext not in _VIDEO_EXT:
+        raise errors.AppError("invalid_file_type", "视频类资产只接受 mp4/webm/mov/mkv 文件", 422)
+    if asset_type in _IMAGE_ASSET_TYPES and ext not in _IMAGE_EXT:
+        raise errors.AppError("invalid_file_type", "图片类资产只接受 png/jpg/jpeg/webp/bmp 文件", 422)
+
+
+def _make_thumb_safe(file_path: str, stem: str) -> str | None:
+    """生成缩略图，失败不阻断落库（前端回退原文件展示）。"""
+    try:
+        from app.services.thumbnail import make_thumb
+        return make_thumb(file_path, stem)
+    except Exception:
+        return None
+
+
+def _next_version_by_name(db: Session, project_id: str, asset_type: str, name: str) -> int:
+    """同一 项目+类型+名称 范围内版本号递增，无历史则为 1。"""
+    latest = (
+        db.query(func.max(Asset.version))
+        .filter(
+            Asset.project_id == project_id,
+            Asset.asset_type == asset_type,
+            Asset.name == name,
+        )
+        .scalar()
+    )
+    return int(latest or 0) + 1
+
+
+def _sync_entity_pointer(db: Session, old_id: str, new_id: str, asset_type: str) -> list[str]:
+    """实体主图指针同步：仅当指针正好指向被替换版本时才切换到新版本。"""
+    changed: list[str] = []
+    if asset_type == "character":
+        for ch in db.query(Character).filter(Character.portrait_asset_id == old_id).all():
+            ch.portrait_asset_id = new_id
+            changed.append(ch.id)
+    elif asset_type == "scene":
+        for sc in db.query(Scene).filter(Scene.baseline_asset_id == old_id).all():
+            sc.baseline_asset_id = new_id
+            changed.append(sc.id)
+    elif asset_type == "prop":
+        for pr in db.query(Prop).filter(Prop.anchor_asset_id == old_id).all():
+            pr.anchor_asset_id = new_id
+            changed.append(pr.id)
+    return changed
+
+
+def _mark_referencing_shots(db: Session, asset_id: str) -> list[str]:
+    """引用该资产的镜头标记待重做（只标记，不自动触发任务）。"""
+    shot_ids: list[str] = []
+    for ref in db.query(AssetRef).filter(AssetRef.asset_id == asset_id).all():
+        shot = db.get(Shot, ref.shot_id)
+        if shot is None:
+            continue
+        if hasattr(shot, "redo_required"):
+            shot.redo_required = True
+        if hasattr(shot, "keyframe_confirmed"):
+            shot.keyframe_confirmed = False
+        shot_ids.append(shot.id)
+    return shot_ids
+
+
+def _entity_for_asset(db: Session, asset: Asset):
+    """按实体主图指针反查归属实体，指针未命中时回退按名称匹配。"""
+    if asset.asset_type == "character":
+        obj = db.query(Character).filter(Character.portrait_asset_id == asset.id).first()
+        if obj is None:
+            obj = (
+                db.query(Character)
+                .filter(Character.project_id == asset.project_id, Character.name == asset.name)
+                .first()
+            )
+        return obj
+    if asset.asset_type == "scene":
+        obj = db.query(Scene).filter(Scene.baseline_asset_id == asset.id).first()
+        if obj is None:
+            obj = (
+                db.query(Scene)
+                .filter(Scene.project_id == asset.project_id, Scene.title == asset.name)
+                .first()
+            )
+        return obj
+    if asset.asset_type == "prop":
+        obj = db.query(Prop).filter(Prop.anchor_asset_id == asset.id).first()
+        if obj is None:
+            obj = (
+                db.query(Prop)
+                .filter(Prop.project_id == asset.project_id, Prop.name == asset.name)
+                .first()
+            )
+        return obj
+    return None
+
+
+def _default_prompt_for(db: Session, asset: Asset) -> tuple[str, str]:
+    """按资产类型模板渲染默认提示词与负面约束（与生成端点同源，保证一致性）。"""
+    from app.services import asset_prompts
+    ent = _entity_for_asset(db, asset)
+    if asset.asset_type == "character":
+        prompt = asset_prompts.build_character_prompt(
+            getattr(ent, "name", None) or asset.name,
+            getattr(ent, "appearance", "") or "",
+            description=getattr(ent, "description", "") or "",
+        )
+    elif asset.asset_type == "scene":
+        prompt = asset_prompts.build_scene_prompt(
+            getattr(ent, "title", None) or asset.name,
+            getattr(ent, "description", "") or "",
+        )
+    else:
+        prompt = asset_prompts.build_prop_prompt(
+            getattr(ent, "name", None) or asset.name,
+            getattr(ent, "appearance", "") or "",
+            description=getattr(ent, "description", "") or "",
+        )
+    return prompt, asset_prompts.negative_for_asset_type(asset.asset_type)
+
+
+def _match_image_workflow(db: Session, workflow_id: str | None):
+    """图片工作流匹配：显式 ID 优先，其次 默认 → 内置 → 任意。"""
+    from app.models import Workflow
+    if workflow_id:
+        wf = db.get(Workflow, workflow_id)
+        if wf is None:
+            raise errors.AppError("workflow_not_found", "工作流不存在", 404)
+        return wf
+    wf = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "image", Workflow.is_default == True)  # noqa: E712
+        .first()
+    )
+    if wf is None:
+        wf = (
+            db.query(Workflow)
+            .filter(Workflow.workflow_type == "image", Workflow.is_builtin == True)  # noqa: E712
+            .first()
+        )
+    if wf is None:
+        wf = db.query(Workflow).filter(Workflow.workflow_type == "image").first()
+    if wf is None:
+        raise errors.AppError("workflow_not_found", "未找到可用的图片工作流", 404)
+    return wf
+
+
+@router.get("/{asset_id}/regenerate/config")
+def get_asset_regenerate_config(asset_id: str, db: Session = Depends(get_db)) -> dict:
+    """重新生成弹窗初值：默认沿用资产模板渲染的提示词，仅提示词可改。"""
+    asset = _get_asset(db, asset_id)
+    if asset.asset_type not in _REGENERATABLE_TYPES:
+        raise errors.AppError(
+            "invalid_request",
+            f"仅角色/场景/道具资产支持在此重新生成，当前类型：{asset.asset_type}",
+            422,
+        )
+    from app.services import asset_prompts
+    try:
+        prompt, negative = _default_prompt_for(db, asset)
+    except ValueError as e:
+        raise errors.AppError("invalid_request", str(e), 422)
+    return {
+        "asset_id": asset.id,
+        "asset_type": asset.asset_type,
+        "version": asset.version,
+        "prompt": prompt,
+        "negative_prompt": negative,
+        "asset_prompt_version": asset_prompts.ASSET_PROMPTS_VERSION,
+        "editable": {
+            "prompt": True,
+            "negative_prompt": True,
+            "refs": False,
+            "workflow": False,
+            "params": False,
+        },
+    }
+
+
+@router.post("/{asset_id}/replace", status_code=201)
+async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(get_db)) -> dict:
+    """上传新文件替换资产：生成 vN+1 并置为生效版本，旧版本转 superseded 保留可回滚。"""
+    old = _get_asset(db, asset_id)
+    if old.locked:
+        raise errors.AppError("asset_locked", "资产已锁定，请先解锁再替换", 409)
+    data = await file.read()
+    if not data:
+        raise errors.AppError("invalid_request", "上传文件为空", 400)
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise errors.AppError("invalid_request", "单文件上限 500MB", 400)
+    suffix = Path(file.filename or "").suffix or ".bin"
+    _check_file_type(old.asset_type, suffix)
+    settings = get_settings()
+    media_dir = Path(settings.media_dir)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    new_id = ids.asset_id()
+    version = _next_version_by_name(db, old.project_id, old.asset_type, old.name)
+    dest = media_dir / f"{new_id}_v{version}{suffix}"
+    dest.write_bytes(data)
+    # 分镜图/视频等镜头产物与镜头的关联依赖 source_job_id（_current_asset_info 按此反查），
+    # 替换后必须继承原产物的来源任务，否则新图无法被镜头识别为当前分镜图
+    _inherit_job_id = old.source_job_id if old.asset_type in _SHOT_BOUND_TYPES else None
+    new_asset = Asset(
+        id=new_id,
+        project_id=old.project_id,
+        asset_type=old.asset_type,
+        name=old.name,
+        version=version,
+        parent_id=old.id,
+        source_job_id=_inherit_job_id,
+        file_path=str(dest),
+        thumb_path=_make_thumb_safe(str(dest), f"{new_id}_v{version}"),
+        validity="current",
+        input_snapshot={
+            "created_at": _now().isoformat(),
+            "replace_of": old.id,
+            "replaced_version": old.version,
+            "original_filename": file.filename,
+        },
+    )
+    old.validity = "superseded"
+    db.add(new_asset)
+    changed_entities = _sync_entity_pointer(db, old.id, new_asset.id, old.asset_type)
+    affected_shots = _mark_referencing_shots(db, old.id)
+    # 人工审核闸口（D-23）：公共资产换版后原审核结论失效，需重新提交审核
+    if old.asset_type in ("character", "scene", "prop"):
+        from app.services.assets_review import reset_assets_review
+        reset_assets_review(db, old.project_id)
+    # 分镜图换图后该镜分镜图需重新人工确认（D-13 静图先行闸口）
+    if old.asset_type == "keyframe":
+        from app.models import Shot as _Shot
+        _src = db.get(Job, old.source_job_id) if old.source_job_id else None
+        if _src is not None and _src.shot_id:
+            _shot = db.get(_Shot, _src.shot_id)
+            if _shot is not None:
+                _shot.keyframe_confirmed = False
+                affected_shots = list({*affected_shots, _shot.id})
+    db.commit()
+    out = _to_out(new_asset)
+    out.update({
+        "previous_asset_id": old.id,
+        "previous_version": old.version,
+        "synced_entities": changed_entities,
+        "affected_shots": affected_shots,
+    })
+    return out
+
+
+@router.post("/{asset_id}/regenerate", status_code=202)
+def regenerate_asset(asset_id: str, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
+    """资产级重新生成：角色/场景/道具按可编辑提示词重跑图片工作流，结果落候选版本。"""
+    asset = _get_asset(db, asset_id)
+    if asset.asset_type not in _REGENERATABLE_TYPES:
+        raise errors.AppError(
+            "invalid_request",
+            f"仅角色/场景/道具资产支持资产级重新生成，当前类型：{asset.asset_type}；"
+            "分镜图/视频请在分镜重新生成工作台操作",
+            422,
+        )
+    if asset.locked:
+        raise errors.AppError("asset_locked", "资产已锁定，请先解锁再重新生成", 409)
+    payload = payload or {}
+    idempotency_key = payload.get("idempotency_key")
+    if idempotency_key:
+        exist = db.query(Job).filter(Job.request_key == idempotency_key).first()
+        if exist is not None:
+            return {
+                "job_id": exist.id,
+                "status": exist.status,
+                "asset_id": asset.id,
+                "base_version": asset.version,
+                "idempotent": True,
+            }
+    prompt = (payload.get("prompt") or "").strip()
+    negative = (payload.get("negative_prompt") or "").strip()
+    prompt_edited = bool(prompt)
+    if not prompt:
+        try:
+            default_prompt, default_negative = _default_prompt_for(db, asset)
+        except ValueError as e:
+            raise errors.AppError("invalid_request", str(e), 422)
+        prompt = default_prompt
+        negative = negative or default_negative
+    ent = _entity_for_asset(db, asset)
+    if ent is None:
+        raise errors.AppError(
+            "asset_entity_missing",
+            "未找到该资产对应的角色/场景/道具实体，无法重新生成",
+            409,
+        )
+    wf = _match_image_workflow(db, payload.get("workflow_id"))
+    from app.services import asset_prompts
+    params: dict = {"prompt": prompt, "__asset_prompt_version__": asset_prompts.ASSET_PROMPTS_VERSION}
+    if negative:
+        params["negative"] = negative
+    params[_ENTITY_KEY[asset.asset_type]] = ent.id
+    job = Job(
+        id=ids.job_id(),
+        project_id=asset.project_id,
+        shot_id=None,
+        job_type="generate_keyframe",
+        workflow_id=wf.id,
+        workflow_version=wf.version,
+        params=params,
+        status="queued",
+        request_key=idempotency_key,
+        created_at=_now(),
+        input_snapshot={
+            "workflow_version": wf.version,
+            "params": params,
+            "generation_mode": "asset_regenerate",
+            "regeneration": {
+                "asset_id": asset.id,
+                "asset_type": asset.asset_type,
+                "base_version": asset.version,
+                "entity_id": ent.id,
+                "prompt_edited": prompt_edited,
+            },
+        },
+    )
+    db.add(job)
+    db.commit()
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "asset_id": asset.id,
+        "base_version": asset.version,
+        "workflow_id": wf.id,
+        "workflow_version": wf.version,
+        "prompt_edited": prompt_edited,
+    }
 
 
 @router.delete("/{asset_id}", status_code=204)

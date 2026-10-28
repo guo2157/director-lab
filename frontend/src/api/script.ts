@@ -65,6 +65,16 @@ export function getShot(id: string) {
   return get<Shot>(`/shots/${id}`)
 }
 
+/** 确认分镜图（人工审核通过，置 keyframe_confirmed=true，放行该镜视频生成） */
+export function confirmShotKeyframe(shotId: string) {
+  return post<{ id: string; keyframe_confirmed: boolean }>(`/shots/${shotId}/keyframe/confirm`)
+}
+
+/** 取消分镜图确认（重绘或重新审核时回退） */
+export function unconfirmShotKeyframe(shotId: string) {
+  return post<{ id: string; keyframe_confirmed: boolean }>(`/shots/${shotId}/keyframe/unconfirm`)
+}
+
 /** 新建镜头（dialogue/narration 时 dialogue 必填；(scene_id, episode) 须存在于 scene_episode，否则 422） */
 export function createShot(payload: {
   scene_id: string

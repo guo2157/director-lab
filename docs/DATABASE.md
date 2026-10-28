@@ -55,6 +55,8 @@
 | estimated_text_hash | string | 兼容字段：最近一次评估的剧本文本哈希 |
 | current_script_version_id | string | 当前生效的剧本版本 ID |
 | current_parse_version_id | string | 当前生效的解析版本 ID |
+| assets_review_status | string | 公共资产人工审核状态（pending / approved / rejected），默认 pending；资产库→分镜图的必经闸口（D-23） |
+| assets_reviewed_at | datetime | 最近一次人工审核时间，未审核为空；审核状态回退为 pending 时清空 |
 | deleted_at | datetime | 软删除时间，可为空 |
 | created_at / updated_at | datetime | 时间戳 |
 
@@ -201,6 +203,38 @@
 | created_at | datetime | 绑定时间 |
 
 说明：本表只表达引用关系，不用于判断产物是否具备（判定规则见 ARCHITECTURE.md 4.2 节）。
+
+### asset_plan（资产定义）
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| project_id | string | 项目 ID（外键 project.id） |
+| plan_type | string | character / scene / prop / keyframe / clip |
+| asset_key | string | 固定唯一名称 `{类型前缀}_{语义片段}_{8位短哈希}`，一经生成永不修改 |
+| media_path | string | 固定占位路径 `data/media/plans/{project_id}/{asset_key}.png|mp4`，生成前即确定 |
+| thumb_path | string | 缩略图路径，可空 |
+| prompt | text | 生成提示词；分镜图/视频用 @名称 语法引用角色/场景 |
+| status | string | pending 待生成 / generated 已生成 / rejected 人工驳回 |
+| owner_type | string | character / scene / prop / shot，可空 |
+| owner_id | string | 归属实体或镜头 ID，可空 |
+| episode / seq | int | 集数与镜头序号（keyframe/clip），可空 |
+| asset_id | string | 生成成功后回写的正式资产 ID，可空 |
+| version | int | 版本号，默认 1 |
+| confirmed | bool | 人工确认标记；keyframe 确认同步 shot.keyframe_confirmed（D-13） |
+
+说明：解析落库后由 build_asset_plans 一次性定稿，幂等可重复调用；名称与路径不变，提示词随重新解析刷新；孤儿定义（镜头被替换且未生成产物）随重建清理。迁移脚本 f3a7c1d9e2b8。
+
+### asset_plan_dependency（资产定义依赖）
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| plan_id | string | 定义 ID（外键 asset_plan.id） |
+| slot | string | ref_identity / ref_costume / ref_scene / ref_prop / ref_image；按 (plan_id, slot) 唯一 |
+| ref_plan_id | string | 被依赖定义 ID，可空 |
+| ref_key | string | 被依赖定义的固定名称（冗余存储，便于校验断链） |
+| ref_path | string | 被依赖定义的占位路径，可空 |
+
+说明：按定义生成时按槽位注入参考图（仅注入工作流 capabilities.reference_slots 声明的槽位），绑定快照（槽位/资产ID/版本/路径/状态）随任务参数持久化；ref_prev_frame/first_frame/end_frame 为系统保留槽位，由执行器按镜头实际产物回填，不写入本表。
 
 ### workflow（工作流）
 

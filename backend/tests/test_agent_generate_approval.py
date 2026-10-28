@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import make_engine
-from app.models import Base, Job, Project, Scene, Shot, Workflow, ids
+from app.models import Asset, Base, Job, Project, Scene, Shot, Workflow, ids
 from app.services import approvals
 from app.services.agent_tools import TOOL_REGISTRY, execute_tool
 
@@ -47,7 +47,32 @@ def db(tmp_path):
         version=1,
         definition={},
     )
-    session.add_all([project, scene, shot, workflow])
+    video_workflow = Workflow(
+        id=ids.workflow_id(),
+        name="默认视频工作流",
+        workflow_type="video",
+        is_default=True,
+        is_builtin=True,
+        version=1,
+        definition={},
+    )
+    # D-23 资产门禁：场景须绑定有效基准图（文件真实存在），项目审核状态须为 approved
+    media = tmp_path / "media"
+    media.mkdir(exist_ok=True)
+    baseline_file = media / "baseline.png"
+    baseline_file.write_bytes(b"x")
+    baseline = Asset(
+        id=ids.asset_id(),
+        project_id=project.id,
+        asset_type="scene",
+        name="场景一基准图",
+        version=1,
+        file_path=str(baseline_file),
+        validity="current",
+    )
+    scene.baseline_asset_id = baseline.id
+    project.assets_review_status = "approved"
+    session.add_all([project, scene, shot, workflow, video_workflow, baseline])
     session.commit()
     yield session, project.id, shot.id
     session.close()
@@ -164,3 +189,162 @@ def test_shot_must_belong_to_project(db):
     assert not result.ok
     assert result.error_code == "shot_not_in_project"
     assert _job_count(session) == 0
+
+
+def test_entity_generate_request_and_run(db):
+    """实体目标（角色公共资产）：申请只建审批记录，批准后执行建任务并注入归属键。"""
+    session, pid, _sid = db
+    from app.models import Character
+
+    ch = Character(id=ids.character_id(), project_id=pid, name="主角")
+    session.add(ch)
+    session.commit()
+
+    requested = execute_tool(
+        session,
+        "request_generate",
+        session_id="ags_t7",
+        project_id=pid,
+        entity_id=ch.id,
+        target="character",
+    )
+    assert requested.ok, requested.error_message
+    assert requested.data["target"] == "character"
+    assert _job_count(session) == 0
+
+    confirmation_id = requested.data["confirmation_id"]
+    approvals.resolve_confirmation(session, confirmation_id=confirmation_id, approve=True, comment="同意")
+    run = execute_tool(session, "run_generate", confirmation_id=confirmation_id, approved=True)
+    assert run.ok, run.error_message
+    assert run.data["job_type"] == "generate_keyframe"
+    job = session.get(Job, run.data["job_id"])
+    assert job.params.get("__character_id__") == ch.id
+    assert job.shot_id is None
+
+
+def test_entity_generate_rejects_foreign_entity(db):
+    """实体不属于当前项目时拒绝，防跨项目触发生成。"""
+    session, pid, _sid = db
+    from app.models import Character
+
+    now = datetime.now()
+    other = Project(
+        id=ids.project_id(),
+        name="实体越权项目",
+        aspect_ratio="9:16",
+        creation_type="script",
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    ch = Character(id=ids.character_id(), project_id=other.id, name="别人角色")
+    session.add(other)
+    session.commit()
+    session.add(ch)
+    session.commit()
+
+    result = execute_tool(
+        session,
+        "request_generate",
+        session_id="ags_t8",
+        project_id=pid,
+        entity_id=ch.id,
+        target="character",
+    )
+    assert not result.ok
+    assert result.error_code == "entity_not_in_project"
+    assert _job_count(session) == 0
+
+
+def test_clip_blocked_by_keyframe_not_confirmed(db):
+    """D-13 闸口：分镜图未人工确认时，Agent 通道 clip 生成被拦下。"""
+    session, pid, sid = db
+    shot = session.get(Shot, sid)
+    assert shot.keyframe_confirmed is False
+
+    requested = execute_tool(
+        session,
+        "request_generate",
+        session_id="ags_t9",
+        project_id=pid,
+        shot_id=sid,
+        target="clip",
+    )
+    assert requested.ok, requested.error_message
+    confirmation_id = requested.data["confirmation_id"]
+    approvals.resolve_confirmation(session, confirmation_id=confirmation_id, approve=True, comment="同意")
+
+    run = execute_tool(session, "run_generate", confirmation_id=confirmation_id, approved=True)
+    assert not run.ok
+    assert run.error_code == "keyframe_not_confirmed"
+    assert _job_count(session) == 0
+
+
+def test_clip_passes_after_keyframe_confirmed(db):
+    """D-13 闸口：分镜图人工确认后，Agent 通道 clip 生成放行。"""
+    session, pid, sid = db
+    shot = session.get(Shot, sid)
+    shot.keyframe_confirmed = True
+    session.commit()
+
+    requested = execute_tool(
+        session,
+        "request_generate",
+        session_id="ags_t10",
+        project_id=pid,
+        shot_id=sid,
+        target="clip",
+    )
+    assert requested.ok, requested.error_message
+    confirmation_id = requested.data["confirmation_id"]
+    approvals.resolve_confirmation(session, confirmation_id=confirmation_id, approve=True, comment="同意")
+
+    run = execute_tool(session, "run_generate", confirmation_id=confirmation_id, approved=True)
+    assert run.ok, run.error_message
+    assert run.data["job_type"] == "generate_clip"
+
+
+def test_list_asset_plans_tool(db):
+    """list_asset_plans：返回定义清单与依赖摘要，不泄露文件路径。"""
+    session, pid, _sid = db
+    from app.models.asset_plan import AssetPlan, AssetPlanDependency
+
+    plan = AssetPlan(
+        id=ids.asset_plan_id(),
+        project_id=pid,
+        plan_type="keyframe",
+        asset_key="kf_scene1_01_ab12",
+        media_path="data/media/kf_scene1_01_ab12.png",
+        status="pending",
+        owner_type="shot",
+        owner_id=None,
+        episode=1,
+        seq=1,
+    )
+    dep = AssetPlanDependency(
+        id=ids.asset_plan_dep_id(),
+        plan_id=plan.id,
+        slot="ref_identity",
+        ref_key="chr_zhujue_ab12",
+    )
+    session.add_all([plan, dep])
+    session.commit()
+
+    result = execute_tool(session, "list_asset_plans", project_id=pid)
+    assert result.ok, result.error_message
+    items = result.data["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["plan_id"] == plan.id
+    assert item["status"] == "pending"
+    assert item["confirmed"] is False
+    assert item["dependencies"] == [{"slot": "ref_identity", "ref_key": "chr_zhujue_ab12"}]
+    # 不泄露文件系统路径
+    assert "media_path" not in item
+    assert "thumb_path" not in item
+
+    # 按状态过滤
+    pending = execute_tool(session, "list_asset_plans", project_id=pid, status="pending")
+    assert pending.ok and len(pending.data["items"]) == 1
+    generated = execute_tool(session, "list_asset_plans", project_id=pid, status="generated")
+    assert generated.ok and generated.data["count"] == 0

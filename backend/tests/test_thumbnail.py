@@ -67,6 +67,17 @@ def test_mock_job_generates_thumb(client: TestClient, monkeypatch, tmp_path):
     monkeypatch.setattr(ex_mod, "get_settings", lambda: Settings(render_mock=True, media_dir=tmp_path / "media"))
 
     pid = client.post("/api/projects", json={"name": "缩略图项目", "aspect_ratio": "9:16"}).json()["id"]
+    # D-23 资产审核闸口：本用例聚焦缩略图生成，
+    # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
+    from app.core.database import SessionLocal as _SL
+    from app.models import Project as _Project
+    _db0 = _SL()
+    try:
+        _p0 = _db0.get(_Project, pid)
+        _p0.assets_review_status = "approved"
+        _db0.commit()
+    finally:
+        _db0.close()
     scn = client.post("/api/scenes", json={"project_id": pid, "title": "教室", "episode": 1}).json()
     shot = client.post("/api/shots", json={
         "scene_id": scn["id"], "episode": 1, "shot_kind": "visual", "duration": 5,

@@ -89,6 +89,8 @@ export interface AssetMaterialRef {
   thumb_path?: string | null
   url?: string
   thumb_url?: string | null
+  /** 锁定状态：锁定后该资产禁止被重新生成或替换覆盖 */
+  locked?: boolean
 }
 
 /** 镜头聚合素材（与后端返回一致：current_assets.{keyframe, clip, audio} 扁平结构） */
@@ -115,6 +117,8 @@ export interface Prop {
   project_id: string
   name: string
   description?: string
+  /** 是否需要锚定图：只有 true 的道具参与公共资产齐全度判定（与后端审核口径一致） */
+  anchor_required?: boolean
   anchor_asset_id?: string | null
   created_at: string
   updated_at: string

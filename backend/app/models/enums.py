@@ -49,6 +49,9 @@ ASPECT_RATIO = _values("9:16", "16:9", "1:1")
 # ============ 解析版本状态 ============
 PARSE_VERSION_STATUS = _values("candidate", "current", "superseded", "failed")
 
+# ============ 公共资产人工审核状态（D-23：资产库 → 分镜图 的必经闸口） ============
+ASSETS_REVIEW_STATUS = _values("pending", "approved", "rejected")
+
 # ============ 资产引用角色（asset_ref.role） ============
 ASSET_REF_ROLE = _values(
     "identity", "costume", "scene", "prop", "reference",

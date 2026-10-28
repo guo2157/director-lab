@@ -26,6 +26,10 @@ export interface Project {
   current_stage?: string
   /** 当前解析版本 ID（乐观锁） */
   current_parse_version_id?: string | null
+  /** 公共资产人工审核状态：pending 待审核 / approved 通过 / rejected 驳回 */
+  assets_review_status?: 'pending' | 'approved' | 'rejected'
+  /** 公共资产人工审核时间 */
+  assets_reviewed_at?: string | null
 }
 
 /** 集数规划条目（job.finished result.episodes 写入 project.episode_plan） */

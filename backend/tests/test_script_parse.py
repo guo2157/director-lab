@@ -98,22 +98,24 @@ def test_estimate_hash_validation(client):
     assert len(body["episode_breakdown"]) == body["estimated_episodes"]
 
 
-def test_parse_requires_confirmed_estimate(client):
+def test_parse_allows_without_confirmed_estimate(client):
+    """口径变更：解析不再强制前置确认评估（集数由解析器自主分析），未评估直接解析返回 202。"""
     pid = _make_project(client)
     sv = _save_script(client, pid)
-    # 未评估直接解析 → 400
+    # 未评估直接解析 → 202 入队
     r = client.post(f"/api/projects/{pid}/parse",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
                           "episode_start": 1, "episode_count": 1})
-    assert r.status_code == 400
-    # 评估但未确认 → 仍 400
+    assert r.status_code == 202
+    assert r.json()["status"] == "queued"
+    # 评估后解析同样返回 202，不受是否确认评估影响
     r = client.post(f"/api/projects/{pid}/estimate",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT})
     assert r.status_code == 201
     r = client.post(f"/api/projects/{pid}/parse",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
                           "episode_start": 1, "episode_count": 1})
-    assert r.status_code == 400
+    assert r.status_code == 202
 
 
 def test_parse_job_lifecycle(client, monkeypatch):

@@ -12,6 +12,8 @@ export interface Asset {
   id: string
   project_id: string
   asset_type: AssetType
+  /** 资产名称（后端 _to_out 返回，角色/场景/道具为实体名称） */
+  name?: string
   status: AssetStatus
   version: number
   file_path?: string

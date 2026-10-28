@@ -44,6 +44,17 @@ def test_mock_generate_job_full_lifecycle(client: TestClient):
     """Mock 模式下生成任务走 queued → running → succeeded，占位资产入库。"""
     # 准备项目/场景/镜头/工作流
     pid = client.post("/api/projects", json={"name": "mock 项目", "aspect_ratio": "9:16"}).json()["id"]
+    # D-23 资产审核闸口：本文件聚焦 mock 渲染与任务生命周期，
+    # 直接放行公共资产人工审核，避免与资产审核前置条件耦合
+    from app.core.database import SessionLocal
+    from app.models import Project
+    _db = SessionLocal()
+    try:
+        _p = _db.get(Project, pid)
+        _p.assets_review_status = "approved"
+        _db.commit()
+    finally:
+        _db.close()
     scn = client.post("/api/scenes", json={"project_id": pid, "title": "教室", "episode": 1}).json()
     shot = client.post("/api/shots", json={
         "scene_id": scn["id"], "episode": 1, "shot_kind": "visual", "duration": 5,

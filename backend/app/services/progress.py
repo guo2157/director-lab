@@ -69,6 +69,10 @@ def derive_progress(db: Session, project: Project) -> tuple[int, int, str]:
     if missing_baseline > 0:
         return shot_total, shot_done, "scenes"
 
+    # 规则 5.5：公共资产已齐全，但尚未通过人工审核（D-23 资产审核闸口）
+    # 资产库出图后必须人工确认，未通过前不得进入分镜图生成
+    if (project.assets_review_status or "pending") != "approved":
+        return shot_total, shot_done, "assets_review"
     # 规则 6：存在分镜图未完成或未人工确认的镜头（D-13 静图先行闸口）
     for s in shots:
         if not _shot_has_current_asset(db, s.id, "keyframe") or not s.keyframe_confirmed:

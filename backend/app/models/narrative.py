@@ -58,6 +58,12 @@ class Project(TimestampMixin, Base):
     estimated_text_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_script_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     current_parse_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 公共资产（角色定妆图/场景基准图/道具锚定图）人工审核状态（D-23）：
+    # pending=待审核 / approved=审核通过（放行分镜图） / rejected=审核驳回（需返工）
+    assets_review_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    assets_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 

@@ -305,11 +305,12 @@ def _try_create_generate_approval(
 ) -> tuple[str, dict | None]:
     """把对话中的生成请求落地为审批申请（只建申请，绝不执行生成）。
 
-    只有在消息明确给出镜头标识时才创建申请；定位不到时返回澄清提示，
-    不猜测目标（猜错会生成错镜头，浪费算力与成本）。
+    镜头目标：消息明确给出镜头标识（sht_ ID 或『第 N 镜』）时创建申请；
+    实体目标（角色/场景/道具公共资产）：消息明确给出实体 ID（chr_/scn_/prp_）时创建申请；
+    定位不到时返回澄清提示，不猜测目标（猜错会生成错对象，浪费算力与成本）。
     """
     from app.services.agent_tools import execute_tool
-    from app.services.generate_intent import resolve_shot, resolve_target
+    from app.services.generate_intent import resolve_entity, resolve_shot, resolve_target
 
     if not session.project_id:
         return (
@@ -317,15 +318,43 @@ def _try_create_generate_approval(
             None,
         )
 
+    # 实体目标优先：消息中给出明确的实体 ID（chr_/scn_/prp_）时按公共资产生成处理
+    entity, entity_target, entity_reason = resolve_entity(db, session.project_id, text)
+    if entity is not None:
+        result = execute_tool(
+            db,
+            "request_generate",
+            session_id=session_id,
+            project_id=session.project_id,
+            entity_id=entity.id,
+            target=entity_target,
+        )
+        if not result.ok:
+            return f"生成申请提交失败：{result.error_message}", {
+                "ok": False,
+                "error_code": result.error_code,
+            }
+        data = result.data or {}
+        reply = (
+            f"已提交生成申请（{entity_target} 公共资产 · 实体 {entity.id}），"
+            f"审批编号 {data.get('confirmation_id')}。"
+            "请在右侧『待审批生成』中批准后点执行，任务才会真正创建；我不会在对话中直接触发生成。"
+        )
+        return reply, {"ok": True, **data}
+    if entity_reason == "entity_not_found":
+        return "没有找到你提到的角色/场景/道具，请确认实体 ID 是否存在。", None
+    if entity_reason == "entity_not_in_project":
+        return "该角色/场景/道具不属于当前项目，请确认后重试。", None
+
     shot, reason = resolve_shot(db, session.project_id, text)
     if shot is None:
         hints = {
-            "shot_unspecified": "请明确要生成的镜头，例如『为第 3 镜生成关键帧』，或直接给出镜头 ID（sht_ 开头）。",
+            "shot_unspecified": "请明确要生成的目标：镜头（例如『为第 3 镜生成关键帧』或镜头 ID），或角色/场景/道具（给出实体 ID，chr_/scn_/prp_ 开头）。",
             "shot_not_found": "没有找到你提到的镜头，请确认镜头编号是否存在。",
             "shot_not_in_project": "该镜头不属于当前项目，请确认后重试。",
             "shot_ambiguous": "『第 N 镜』在本项目内命中多个镜头，请补充场景或直接给出镜头 ID。",
         }
-        return hints.get(reason or "shot_unspecified", "无法确定要生成的镜头，请补充镜头信息。"), None
+        return hints.get(reason or "shot_unspecified", "无法确定要生成的目标，请补充镜头或实体信息。"), None
 
     target = resolve_target(text)
     result = execute_tool(

@@ -20,7 +20,7 @@ _MIN_SIDE = 256
 # 纯色判定：单色像素占比阈值
 _FLAT_COLOR_RATIO = 0.99
 # 边缘高对比度像素占比阈值（超过视为疑似裁切/边框拼贴）
-_EDGE_ACTIVE_RATIO = 0.95
+_EDGE_ACTIVE_RATIO = 0.60
 
 
 def check_image_quality(file_path: str, *, asset_type: str | None = None) -> dict:

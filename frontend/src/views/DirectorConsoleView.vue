@@ -21,7 +21,7 @@ const message = useMessage()
 const router = useRouter()
 
 // --- 面板折叠 ---
-const sessionsCollapsed = ref(false)
+const sessionsCollapsed = ref(typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches)
 const contextCollapsed = ref(false)
 
 // --- 左栏：历史会话导航（唯一职责：找到/切换/管理会话） ---
@@ -62,9 +62,17 @@ async function newSession() {
     const s = await createSession({ title: '新会话' })
     sessions.value.unshift(s)
     activeSessionId.value = s.id
+    // 手机端新建会话后自动收起，回到聊天布局
+    if (window.matchMedia('(max-width: 768px)').matches) sessionsCollapsed.value = true
   } catch (e) {
     message.error(`创建会话失败: ${e instanceof Error ? e.message : String(e)}`)
   }
+}
+
+/** 选择会话：手机端选择后自动收起会话浮层，回到聊天布局 */
+function selectSession(s: { id: string }) {
+  activeSessionId.value = s.id
+  if (window.matchMedia('(max-width: 768px)').matches) sessionsCollapsed.value = true
 }
 
 const editingId = ref<string | null>(null)
@@ -97,10 +105,14 @@ async function removeSession(s: AgentSession) {
   try {
     await archiveSession(s.id)
     await loadSessions()
-    if (activeSessionId.value === s.id) activeSessionId.value = sessions.value[0]?.id ?? null
-    message.success('会话已归档')
+    if (activeSessionId.value === s.id) {
+      activeSessionId.value = sessions.value[0]?.id ?? null
+      messages.value = []
+      await loadContext()
+    }
+    message.success('会话已删除')
   } catch (e) {
-    message.error(`归档失败: ${e instanceof Error ? e.message : String(e)}`)
+    message.error(`删除失败: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
 
@@ -172,21 +184,78 @@ watch(activeSessionId, (id) => {
   if (id) void loadMessages(id)
 })
 
+/** 思考过程展示：等待响应期间分阶段推进状态，响应到达后由最终消息体替换 */
+const thinking = ref(false)
+const thinkingStage = ref('')
+const THINKING_STAGES = ['正在理解你的意图…', '正在查询项目状态…', '正在组织回复…']
+let thinkingTimer: ReturnType<typeof setInterval> | null = null
+function startThinking() {
+  thinking.value = true
+  let stageIdx = 0
+  thinkingStage.value = THINKING_STAGES[0]
+  thinkingTimer = setInterval(() => {
+    stageIdx = Math.min(stageIdx + 1, THINKING_STAGES.length - 1)
+    thinkingStage.value = THINKING_STAGES[stageIdx]
+  }, 2500)
+}
+function stopThinking() {
+  if (thinkingTimer) {
+    clearInterval(thinkingTimer)
+    thinkingTimer = null
+  }
+  thinking.value = false
+}
+
 async function send() {
   const content = inputText.value.trim()
   if (!content || !activeSessionId.value || sending.value) return
   sending.value = true
   inputText.value = ''
+  // 乐观更新：用户消息立即上屏，等待期间展示思考过程，消除阻塞感
+  const optimisticId = `local-${Date.now()}`
+  messages.value.push({
+    id: optimisticId,
+    session_id: activeSessionId.value,
+    role: 'user',
+    content,
+    payload: null,
+    attachment_id: null,
+    seq: -1,
+    created_at: new Date().toISOString(),
+  })
+  scrollToBottom(true)
+  startThinking()
   try {
     const chatRes = await post<{
       user_message: AgentMessage
       assistant_message: AgentMessage
     }>(`/agent/sessions/${activeSessionId.value}/chat`, { content })
-    messages.value.push(chatRes.user_message, chatRes.assistant_message)
+    stopThinking()
+    // 用服务端消息替换乐观消息；思考气泡由最终回复无缝接管
+    const optimisticIdx = messages.value.findIndex((m) => m.id === optimisticId)
+    if (optimisticIdx >= 0) messages.value.splice(optimisticIdx, 1, chatRes.user_message)
+    else messages.value.push(chatRes.user_message)
+    messages.value.push(chatRes.assistant_message)
     scrollToBottom(true)
+    // 首条消息后自动命名：标题仍为默认『新会话』时，用用户消息摘要命名
+    const cur = sessions.value.find((s) => s.id === activeSessionId.value)
+    if (cur && (cur.title === '新会话' || !cur.title.trim())) {
+      const firstLine = content.split('\n').map((l) => l.trim()).find((l) => l) ?? '新会话'
+      const autoTitle = firstLine.length > 20 ? `${firstLine.slice(0, 20)}…` : firstLine
+      try {
+        const updated = await updateSession(activeSessionId.value, { title: autoTitle })
+        cur.title = updated.title
+      } catch {
+        // 命名失败不影响聊天流程
+      }
+    }
     await loadSessions()
     await loadContext()
   } catch (e) {
+    stopThinking()
+    // 失败回滚：移除乐观消息并恢复输入
+    const optimisticIdx = messages.value.findIndex((m) => m.id === optimisticId)
+    if (optimisticIdx >= 0) messages.value.splice(optimisticIdx, 1)
     if (e instanceof ApiError) {
       message.error(`发送失败: ${e.message}`)
     } else {
@@ -447,7 +516,7 @@ onMounted(() => {
             :key="s.id"
             class="session-item"
             :class="{ active: s.id === activeSessionId }"
-            @click="activeSessionId = s.id"
+            @click="selectSession(s)"
           >
             <template v-if="editingId === s.id">
               <NInput
@@ -469,9 +538,9 @@ onMounted(() => {
               </div>
               <NPopconfirm @positive-click="removeSession(s)">
                 <template #trigger>
-                  <NButton size="tiny" quaternary type="error" class="archive-btn" @click.stop>归档</NButton>
+                  <NButton size="tiny" quaternary type="error" class="archive-btn" @click.stop>删除</NButton>
                 </template>
-                归档后消息保留，可恢复。确认归档？
+                删除后该会话将从列表移除。确认删除？
               </NPopconfirm>
             </template>
           </div>
@@ -485,6 +554,7 @@ onMounted(() => {
       <div class="panel-header">
         <span class="panel-title chat-title">{{ activeSession?.title ?? '导演台' }}</span>
         <div class="header-actions">
+          <NButton size="small" quaternary class="session-toggle" @click="sessionsCollapsed = false">☰ 会话</NButton>
           <NSelect
             :value="modelSelectValue"
             :options="modelOptions"
@@ -547,6 +617,15 @@ onMounted(() => {
                     ▶ {{ a.asset_type }}
                   </a>
                 </template>
+              </div>
+            </div>
+          </div>
+          <!-- 思考过程气泡：等待响应期间分阶段展示，响应到达后由最终回复替换 -->
+          <div v-if="thinking" class="message-row assistant">
+            <div class="message-bubble thinking-bubble">
+              <div class="message-role">导演台助手</div>
+              <div class="message-content thinking-content">
+                {{ thinkingStage }}<span class="thinking-dots"><i></i><i></i><i></i></span>
               </div>
             </div>
           </div>
@@ -694,6 +773,9 @@ onMounted(() => {
   max-width: 1600px;
   margin: 0 auto;
   box-sizing: border-box;
+}
+.session-toggle {
+  display: none;
 }
 .expand-btn {
   align-self: flex-start;
@@ -843,6 +925,40 @@ onMounted(() => {
 }
 .message-row {
   display: flex;
+}
+.thinking-bubble {
+  border-style: dashed;
+}
+.thinking-content {
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary, #666);
+}
+.thinking-dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+}
+.thinking-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinking-blink 1.2s infinite ease-in-out;
+}
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes thinking-blink {
+  0%, 80%, 100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
 }
 .message-row.user {
   justify-content: flex-end;
@@ -1074,11 +1190,48 @@ onMounted(() => {
   }
 }
 @media (max-width: 768px) {
+  /* 会话栏改为浮层：覆盖在聊天区左上角，选择/新建后自动收起 */
+  .director-console {
+    position: relative;
+  }
   .sessions-panel {
-    width: 200px;
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    bottom: 8px;
+    width: min(260px, 72vw);
+    z-index: 20;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+  .sessions-panel .panel-title {
+    display: none;
+  }
+  .sessions-panel .panel-header {
+    justify-content: flex-end;
+  }
+  /* 手机端显示聊天头部的会话入口，隐藏左侧旧展开按钮 */
+  .session-toggle {
+    display: inline-flex;
+  }
+  .expand-btn.left {
+    display: none;
   }
   .model-select {
     width: 130px;
+  }
+  .chat-input {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .chat-input :deep(.n-button) {
+    align-self: flex-end;
+  }
+  .message-bubble {
+    max-width: 88%;
+  }
+  .director-console {
+    padding: 8px;
+    gap: 8px;
   }
 }
 </style>

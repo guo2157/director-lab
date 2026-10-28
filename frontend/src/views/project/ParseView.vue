@@ -316,7 +316,15 @@ const { data: parseStatusData } = useQuery({
 const parseStatus = computed(() => parseStatusData.value ?? null)
 const episodeNumbers = computed<number[]>(() => {
   if (flow.selectedEpisodes.length) return [...flow.selectedEpisodes].sort((a, b) => a - b)
-  const total = flow.estimate?.estimated_episodes ?? parseStatus.value?.total_episodes ?? flow.totalEpisodes ?? 0
+  // 兜底：历史数据的 version.total_episodes 可能为空，此时用已有解析记录中的最大集号反推集数，
+  // 否则集数会被算成 0，导致集数方格区与完成卡片都显示不出结果
+  const records = parseStatus.value?.records ?? []
+  const maxRecorded = records.reduce((m, r) => Math.max(m, r.episode_no), 0)
+  const total =
+    flow.estimate?.estimated_episodes ??
+    parseStatus.value?.total_episodes ??
+    flow.totalEpisodes ??
+    maxRecorded
   return Array.from({ length: total }, (_, i) => i + 1)
 })
 const statusTotalEpisodes = computed(() => episodeNumbers.value.length)
@@ -467,10 +475,9 @@ const props = computed(() => propsData.value?.items ?? [])
         <span class="project-name">{{ project?.name ?? '' }}</span>
       </div>
       <div class="header-actions">
-        <NButton size="small" @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
+        <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
         <NButton
           v-if="pendingEpisodes.length && !parseJobRunning"
-          size="small"
           type="primary"
           :loading="continuing"
           @click="doContinueAgent()"
@@ -479,7 +486,6 @@ const props = computed(() => propsData.value?.items ?? [])
         </NButton>
         <NButton
           v-if="flow.selectedEpisodes.length"
-          size="small"
           :type="statusTotalEpisodes && flow.selectedEpisodes.length && !flow.candidateVersionId ? 'primary' : 'default'"
           :disabled="!flow.scriptVersionId || !statusTotalEpisodes || !flow.selectedEpisodes.length || !!flow.candidateVersionId || submitting"
           :loading="parsing"
@@ -508,7 +514,7 @@ const props = computed(() => propsData.value?.items ?? [])
           <template v-else-if="candidateReady && agentHasMore">
             <span class="candidate-bar-badge">✓</span>
             <span class="candidate-bar-text">已解析 {{ statusSummary.succeeded }}/{{ statusTotalEpisodes }} 集，还有 {{ pendingEpisodes.length }} 集待继续</span>
-            <NButton size="tiny" type="primary" :loading="continuing" @click="doContinueAgent()">继续分析</NButton>
+            <NButton size="small" type="primary" :loading="continuing" @click="doContinueAgent()">继续分析</NButton>
           </template>
           <template v-else-if="candidateReady">
             <span class="candidate-bar-badge">✓</span>
@@ -517,21 +523,20 @@ const props = computed(() => propsData.value?.items ?? [])
           <template v-else-if="parseJobLost">
             <span class="candidate-bar-badge is-error">!</span>
             <span class="candidate-bar-text">无法获取分析任务状态（任务可能已过期），请返回剧本页重新发起分析</span>
-            <NButton size="tiny" @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
+            <NButton size="small" quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
           </template>
           <template v-else>
             <span class="candidate-bar-badge is-error">!</span>
             <span class="candidate-bar-text">解析失败：{{ parseJob?.error_msg || '未知原因' }}</span>
-            <NButton size="tiny" @click="handleParse()">重新解析</NButton>
+            <NButton size="small" @click="handleParse()">重新解析</NButton>
           </template>
         </div>
 
         <!-- 解析完成摘要卡片 -->
         <div v-if="parseDone" class="parse-done-card">
           <div class="parse-done-head">
-            <span class="parse-done-badge">✓</span>
+            <span class="parse-done-badge"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg></span>
             <span class="parse-done-title">解析完成</span>
-            <span class="parse-done-sub">{{ submittedEpsLabel || '选中集' }}已解析并确认</span>
           </div>
           <div class="parse-done-stats">
             <div class="parse-done-stat">
@@ -552,14 +557,14 @@ const props = computed(() => propsData.value?.items ?? [])
             </div>
           </div>
           <div class="parse-done-actions">
-            <NButton size="small" type="primary" @click="router.push(`/project/${projectId}/assets`)">去资产库 →</NButton>
+            <NButton type="primary" @click="router.push(`/project/${projectId}/assets`)">去资产库 →</NButton>
           </div>
         </div>
 
         <!-- 集数解析状态：分析进行中不展示，分析完成后才显示 -->
-        <div v-if="statusTotalEpisodes && !parseJobRunning" class="parse-status-panel">
+        <div v-if="statusTotalEpisodes && !parseJobRunning" class="parse-status-panel panel-card">
           <div class="episode-toolbar">
-            <span class="pane-label">集数状态</span>
+            <span class="pane-label">集数解析状态</span>
             <span class="episode-count-tag">{{ statusSummary.succeeded }}/{{ statusTotalEpisodes || 0 }} 集完成</span>
             <span v-if="flow.selectedEpisodes.length" class="episode-count-tag" style="background:rgba(99,102,241,0.08);color:var(--brand-primary,#6366f1);">选中 {{ flow.selectedEpisodes.length }} 集</span>
             <button
@@ -572,7 +577,7 @@ const props = computed(() => propsData.value?.items ?? [])
             </button>
             <NButton
               v-if="failedEpisodes.length"
-              size="tiny"
+              size="small"
               type="warning"
               :loading="retrying"
               @click="doRetryParse()"
@@ -586,10 +591,10 @@ const props = computed(() => propsData.value?.items ?? [])
               :key="ep.episode_no"
               class="episode-cell"
               :class="`is-${ep.status}`"
-              :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${ep.asset_count ? '，' + ep.asset_count + ' 个镜头' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
+              :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${ep.asset_count ? '，解析出 ' + ep.asset_count + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
             >
-              <span class="episode-cell-no">{{ ep.episode_no }}</span>
-              <span class="episode-cell-meta">{{ ep.status === 'succeeded' ? ep.asset_count + ' 镜头' : statusLabel(ep.status) }}</span>
+              <span class="episode-cell-no">第 {{ ep.episode_no }} 集</span>
+              <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? ep.asset_count + ' 个分镜' : statusLabel(ep.status) }}</span>
               <button
                 v-if="ep.status === 'failed'"
                 class="episode-cell-retry"
@@ -628,12 +633,13 @@ const props = computed(() => propsData.value?.items ?? [])
 <style scoped>
 .parse-done-card { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 12px; padding: 14px 18px; background: rgba(34, 197, 94, 0.06); }
 .parse-done-head { display: flex; align-items: center; gap: 8px; }
-.parse-done-badge { width: 22px; height: 22px; border-radius: 50%; background: var(--state-success, #22c55e); color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.parse-done-title { font-size: 15px; font-weight: 600; color: var(--text-primary, #333); }
+.parse-done-badge { width: 26px; height: 26px; border-radius: 50%; background: var(--state-success, #22c55e); color: #fff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.parse-done-badge svg { display: block; }
+.parse-done-title { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; color: var(--text-primary, #333); }
 .parse-done-sub { font-size: 12px; color: var(--text-secondary, #64748b); }
 .parse-done-stats { display: flex; gap: 24px; }
 .parse-done-stat { display: flex; align-items: baseline; gap: 6px; }
-.parse-done-stat-value { font-size: 20px; font-weight: 700; color: var(--text-primary, #e5e7eb); }
+.parse-done-stat-value { font-size: 22px; font-weight: 700; color: var(--text-primary, #e5e7eb); }
 .parse-done-stat-label { font-size: 12px; color: var(--text-secondary, #64748b); }
 .parse-done-actions { display: flex; gap: 10px; margin-left: auto; }
 .parse-page {
@@ -677,28 +683,28 @@ const props = computed(() => propsData.value?.items ?? [])
 .quick-chip:hover:not(:disabled) { border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
 .quick-chip.active { background: rgba(99, 102, 241, 0.1); border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
 .quick-chip:disabled { opacity: 0.4; cursor: not-allowed; }
-.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
-.episode-cell { position: relative; height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; border-radius: 8px; border: 1px solid transparent; transition: transform 0.15s ease; }
+.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.episode-cell { position: relative; min-height: 64px; padding: 10px 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 8px; border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
-.episode-cell-no { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; }
-.episode-cell-meta { font-size: 10px; line-height: 1; opacity: 0.85; }
+.episode-cell-no { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
+.episode-cell-meta { font-size: 13px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
 @keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.3); } 50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0); } }
 .episode-cell.is-running { animation: cell-pulse 1.6s ease-in-out infinite; }
 .episode-cell.is-pending { background: rgba(128, 128, 128, 0.12); color: var(--text-secondary, #888); }
 .episode-cell.is-running { background: rgba(99, 102, 241, 0.15); color: var(--brand-primary, #6366f1); border-color: rgba(99, 102, 241, 0.4); }
 .episode-cell.is-succeeded { background: rgba(34, 197, 94, 0.1); color: var(--state-success, #22c55e); border-color: rgba(34, 197, 94, 0.25); }
 .episode-cell.is-failed { background: rgba(208, 48, 80, 0.12); color: var(--brand-error, #d03050); border-color: rgba(208, 48, 80, 0.4); }
-.episode-cell-retry { position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; border: none; border-radius: 50%; background: rgba(208, 48, 80, 0.15); color: var(--brand-error, #d03050); font-size: 10px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s ease; }
+.episode-cell-retry { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border: none; border-radius: 50%; background: rgba(208, 48, 80, 0.15); color: var(--brand-error, #d03050); font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s ease; }
 .episode-cell-retry:hover:not(:disabled) { background: rgba(208, 48, 80, 0.3); }
 .episode-cell-retry:disabled { opacity: 0.4; cursor: not-allowed; }
 .failed-error-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .failed-error-card { border: 1px solid rgba(208, 48, 80, 0.25); border-radius: 8px; padding: 8px 10px; background: rgba(208, 48, 80, 0.04); }
 .failed-error-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.failed-error-ep { font-size: 12px; font-weight: 600; color: var(--brand-error, #d03050); }
-.failed-error-retry { border: 1px solid rgba(208, 48, 80, 0.3); background: none; border-radius: 4px; padding: 2px 10px; font-size: 11px; color: var(--brand-error, #d03050); cursor: pointer; transition: all 0.15s ease; }
+.failed-error-ep { font-size: 13px; font-weight: 600; color: var(--brand-error, #d03050); }
+.failed-error-retry { border: 1px solid rgba(208, 48, 80, 0.3); background: none; border-radius: 4px; padding: 3px 12px; font-size: 12px; color: var(--brand-error, #d03050); cursor: pointer; transition: all 0.15s ease; }
 .failed-error-retry:hover:not(:disabled) { background: rgba(208, 48, 80, 0.1); }
 .failed-error-retry:disabled { opacity: 0.4; cursor: not-allowed; }
-.failed-error-msg { font-size: 12px; color: var(--text-secondary, #888); line-height: 1.5; margin: 0; }
+.failed-error-msg { font-size: 13px; color: var(--text-secondary, #888); line-height: 1.5; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .failed-error-msg.muted { font-style: italic; }
 .episode-legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary, #888); }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
@@ -708,7 +714,12 @@ const props = computed(() => propsData.value?.items ?? [])
 .dot.is-succeeded { background: rgba(34, 197, 94, 0.6); }
 .dot.is-failed { background: var(--brand-error, #d03050); }
 @media (max-width: 768px) {
-  .episode-grid { grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); }
+  .episode-grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
   .page-header { flex-wrap: wrap; }
+  .header-actions { flex-wrap: wrap; }
+  .candidate-bar { flex-wrap: wrap; }
+  .candidate-bar-text { min-width: 0; word-break: break-word; }
+  .parse-done-stats { flex-wrap: wrap; gap: 16px; }
+  .parse-done-actions { margin-left: 0; width: 100%; }
 }
 </style>
