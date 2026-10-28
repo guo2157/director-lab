@@ -16,8 +16,10 @@ from sqlalchemy.orm import Session
 from app.models import Asset, Character, Prop, Scene
 from app.services import errors
 
-# @引用语法：@后跟非空白字符（中文/字母/数字/下划线）
-_REF_RE = re.compile(r"@([\w\u4e00-\u9fff]+)")
+# @引用语法：@后跟非空白字符（中文/字母/数字/下划线/间隔号）
+# 间隔号『·』用于场景标题等实体命名（如『花园·红花丛前的草地』），
+# 不纳入会导致引用名被截断为前半段，触发 invalid_reference（2026-10-28 全流程测试实证）
+_REF_RE = re.compile(r"@([\w\u4e00-\u9fff·]+)")
 
 # 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），第 2 个 → ref_costume（服装参考）
 # P0 整改：ref_image 为当前镜头分镜图专用槽位（H3 ref2va 的 ref_image_1、Qwen Edit 的 image1），
