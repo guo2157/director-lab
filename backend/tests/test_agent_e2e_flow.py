@@ -129,6 +129,34 @@ def project_env(client, tmp_path):
     session.add_all([shot, character, image_wf, video_wf, tts_wf])
     session.flush()
     character.portrait_asset_id = portrait.id
+
+    # 补齐状态机前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
+    # 使 derive_progress 推进到 keyframes 阶段（公共资产已审核通过）
+    from app.models import Job, ScriptVersion
+
+    script_text = "第一场：主角在河边。"
+    script_hash = __import__("hashlib").sha256(script_text.encode("utf-8")).hexdigest()
+    script_version = ScriptVersion(
+        id=ids.script_version_id(),
+        project_id=project.id,
+        version=1,
+        content_snapshot=script_text,
+        content_hash=script_hash,
+        created_at=now,
+    )
+    session.add(script_version)
+    session.flush()
+    project.current_script_version_id = script_version.id
+    project.estimated_text_hash = script_hash
+    session.add(
+        Job(
+            id=ids.job_id(),
+            project_id=project.id,
+            job_type="parse",
+            status="succeeded",
+            created_at=now,
+        )
+    )
     session.commit()
     out = {
         "project_id": project.id,
@@ -277,6 +305,31 @@ def test_e2e_entity_flow(client, project_env):
     project = session.get(Project, project_env["project_id"])
     assert project.assets_review_status == "pending"
     session.close()
+
+
+def test_e2e_stage_gate_blocks_early_generate(client, project_env):
+    """状态机门禁：项目处于 estimate 阶段（无剧本）时，生成申请被拦截且不建审批记录。"""
+    from app.models import Project
+    import app.core.database as db_mod
+
+    # 将项目回退到 estimate 阶段：清空剧本版本与评估哈希
+    session = db_mod.SessionLocal()
+    project = session.get(Project, project_env["project_id"])
+    project.current_script_version_id = None
+    project.estimated_text_hash = None
+    session.commit()
+    session.close()
+
+    sid = _make_session(client, project_env["project_id"])
+    resp = _chat(client, sid, f"为第 1 镜生成关键帧")
+    assistant = resp["assistant_message"]
+    approval = (assistant.get("payload") or {}).get("approval") or {}
+    assert approval.get("ok") is False
+    assert approval.get("error_code") == "stage_gate_blocked"
+    # 不建审批记录
+    r = client.get(f"/api/agent/sessions/{sid}/approvals")
+    assert r.status_code == 200
+    assert r.json()["items"] == []
 
 
 def test_e2e_no_project_session(client, project_env):

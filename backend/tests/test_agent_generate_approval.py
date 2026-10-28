@@ -72,14 +72,46 @@ def db(tmp_path):
     )
     scene.baseline_asset_id = baseline.id
     project.assets_review_status = "approved"
-    session.add_all([project, scene, shot, workflow, video_workflow, baseline])
+    # 状态机门禁前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
+    # 使 derive_progress 推进到 keyframes 阶段
+    import hashlib
+
+    from app.models import ScriptVersion
+
+    script_text = "第一场：主角在河边。"
+    script_hash = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
+    script_version = ScriptVersion(
+        id=ids.script_version_id(),
+        project_id=project.id,
+        version=1,
+        content_snapshot=script_text,
+        content_hash=script_hash,
+        created_at=now,
+    )
+    parse_job = Job(
+        id=ids.job_id(),
+        project_id=project.id,
+        job_type="parse",
+        status="succeeded",
+        created_at=now,
+    )
+    session.add_all([project, scene, shot, workflow, video_workflow, baseline, script_version, parse_job])
+    session.flush()
+    project.current_script_version_id = script_version.id
+    project.estimated_text_hash = script_hash
     session.commit()
     yield session, project.id, shot.id
     session.close()
 
 
 def _job_count(session) -> int:
-    return int(session.scalar(select(func.count()).select_from(Job)) or 0)
+    """统计生成类任务数（排除夹具中的 parse 前置任务）。"""
+    return int(
+        session.scalar(
+            select(func.count()).select_from(Job).where(Job.job_type != "parse")
+        )
+        or 0
+    )
 
 
 def test_generate_tools_registered_with_approval_gate():

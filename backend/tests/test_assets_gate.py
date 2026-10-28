@@ -370,8 +370,36 @@ def test_agent_channel_blocked(client: TestClient, tmp_path):
     sid = _make_shot(client, entities["scene"])
 
     def _seed(db):
-        from app.models import AgentConfirmation, AgentTask
+        import hashlib
 
+        from app.models import AgentConfirmation, AgentTask, Job, Project, ScriptVersion
+
+        # 状态机门禁前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
+        # 使 derive_progress 推进到 keyframes 阶段（本用例验证 D-23 资产门禁）
+        project = db.get(Project, pid)
+        script_text = "第一场：主角在河边。"
+        script_hash = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
+        script_version = ScriptVersion(
+            id="scv_test_agent_0001",
+            project_id=pid,
+            version=1,
+            content_snapshot=script_text,
+            content_hash=script_hash,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        db.add(script_version)
+        db.flush()
+        project.current_script_version_id = script_version.id
+        project.estimated_text_hash = script_hash
+        db.add(
+            Job(
+                id="job_test_parse_0001",
+                project_id=pid,
+                job_type="parse",
+                status="succeeded",
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        )
         task = AgentTask(
             id="agt_test_0001",
             session_id="ags_test_0001",

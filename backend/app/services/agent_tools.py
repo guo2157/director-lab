@@ -397,6 +397,65 @@ def _assert_shot_in_project(db: Session, shot_id: str, project_id: str) -> Shot:
     return shot
 
 
+# 制作阶段顺序（与 progress.derive_progress 的 12 阶段一致，ARCHITECTURE.md §4.1）
+_STAGE_ORDER = [
+    "estimate",
+    "select_range",
+    "parse",
+    "characters",
+    "scenes",
+    "assets_review",
+    "keyframes",
+    "clips",
+    "audio",
+    "compose",
+    "export",
+    "done",
+]
+
+# 生成目标 → 允许生成的最早制作阶段（状态机门禁：
+# 目标生成不得早于其所属制作阶段，阶段判定以 derive_progress 为唯一权威）
+_STAGE_GATE_MIN_STAGE = {
+    "character": "characters",  # 角色定妆图：characters 阶段起（重生成会重置资产审核，D-23）
+    "scene": "scenes",  # 场景基准图：scenes 阶段起
+    "prop": "characters",  # 道具锚定图：公共资产，与角色同批可生成
+    # 分镜图：公共资产齐全（assets_review 阶段）即可发起申请，
+    # 审核未通过/资产缺失/版本无效等细粒度阻断由 D-23 evaluate_assets_gate 给出精确错误码
+    # （assets_review_pending 等），阶段门禁只拦截更早阶段（estimate/parse/characters/scenes）
+    "keyframe": "assets_review",
+    # clip/audio 与 API 通道同等强度：项目级门禁到 keyframes 阶段
+    # （公共资产审核通过），单镜细粒度由 D-13（keyframe_confirmed）逐镜校验，
+    # 不要求全部分镜图/视频完成（逐镜生成是正常操作）
+    "clip": "keyframes",
+    "audio": "keyframes",
+}
+
+
+def _assert_stage_gate(db: Session, project_id: str, target: str) -> None:
+    """状态机门禁：生成目标不得早于其所属制作阶段。
+
+    阶段以 derive_progress（ARCHITECTURE.md §4.1）为唯一权威判定；
+    阶段不足时拒绝，不猜测、不降级、不跳过人工审核闸口。
+    bgm/sfx 不在 12 阶段状态机内，不做阶段门禁。
+    """
+    required = _STAGE_GATE_MIN_STAGE.get(target)
+    if required is None:
+        return
+    from app.models import Project
+    from app.services.progress import derive_progress
+
+    project = db.get(Project, project_id)
+    if project is None:
+        raise ToolError("project_not_found", "项目不存在")
+    _total, _done, stage = derive_progress(db, project)
+    if _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(required):
+        raise ToolError(
+            "stage_gate_blocked",
+            f"当前制作阶段为 {stage}，生成 {target} 需项目进入 {required} 阶段；"
+            f"请先完成当前阶段的操作（含人工审核）后再发起",
+        )
+
+
 def tool_request_generate(
     db: Session,
     session_id: str,
@@ -417,6 +476,8 @@ def tool_request_generate(
 
     if target in _ENTITY_TARGETS:
         entity, owner_key = _assert_entity_in_project(db, entity_id or "", target, project_id)
+        # 状态机门禁：申请侧快速失败，阶段不足不建审批记录
+        _assert_stage_gate(db, project_id, target)
         wf = _match_generate_workflow(db, "keyframe")
         # 在途去重：同实体已有 queued/running 的公共资产生成任务时拒绝重复申请
         candidates = (
@@ -463,6 +524,8 @@ def tool_request_generate(
     if not shot_id:
         raise ToolError("tool_invalid_args", "镜头目标必须提供 shot_id")
     _assert_shot_in_project(db, shot_id, project_id)
+    # 状态机门禁：申请侧快速失败，阶段不足不建审批记录
+    _assert_stage_gate(db, project_id, target)
     wf = _match_generate_workflow(db, target)
     job_type = f"generate_{target}"
     inflight = db.scalars(
@@ -526,6 +589,9 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
     target = args.get("target", "keyframe")
     if not project_id or not (shot_id or entity_id):
         raise ToolError("tool_invalid_args", "审批记录缺少必要参数")
+    # 状态机门禁（纵深防御）：执行侧再次校验，
+    # 防止审批通过后项目阶段回退（如剧本变更回到 estimate）仍执行生成
+    _assert_stage_gate(db, project_id, target)
 
     owner_key = None
     entity = None
