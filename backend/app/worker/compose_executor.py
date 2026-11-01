@@ -66,7 +66,7 @@ def _latest_asset(db: Session, shot_id: str, asset_types: tuple[str, ...], job_t
     """取镜头指定类型、当前有效的最新版本资产。
 
     判定口径（ARCHITECTURE.md §4.2，与 progress.py 一致）：
-    asset_type 匹配 + validity=current + 来源任务 succeeded，三者缺一不可；
+    asset_type 匹配 + 来源任务 succeeded，二者缺一不可；
     asset_ref 只用于关联镜头与资产，不单独作为产物具备依据。
     """
     from app.models import Job as JobModel
@@ -74,7 +74,7 @@ def _latest_asset(db: Session, shot_id: str, asset_types: tuple[str, ...], job_t
         db.query(Asset)
         .join(JobModel, JobModel.id == Asset.source_job_id)
         .filter(JobModel.shot_id == shot_id,
-                Asset.validity == "current", Asset.asset_type.in_(asset_types),
+                Asset.asset_type.in_(asset_types),
                 JobModel.status == "succeeded")
     )
     if job_type is not None:
@@ -144,7 +144,7 @@ def execute_compose_job(job_id: str) -> dict:
         bgm_path = None
         if bgm_asset_id:
             bgm = db.get(Asset, bgm_asset_id)
-            if bgm and bgm.file_path and bgm.validity == "current":
+            if bgm and bgm.file_path:
                 bgm_path = bgm.file_path
 
         # 构建时间轴（含 ffprobe 与合成前校验，媒体操作在事务外）
@@ -191,23 +191,31 @@ def execute_compose_job(job_id: str) -> dict:
                 timeline.warnings.append("响度归一完成：-16 LUFS / -1 dBTP（两遍法）")
             else:
                 timeline.warnings.append("音频静音或响度测量无效，跳过响度归一")
-            # 字幕
+            # 字幕：sidecar 输出 SRT 外挂；burn 生成 ASS 后由 libass 烧入画面
             srt_rel = None
             final = mixed
             if include_subtitle:
-                srt_text = cs.generate_srt(timeline)
-                if srt_text.strip():
-                    srt_path = os.path.join(workdir, f"{comp_id}.srt")
-                    with open(srt_path, "w", encoding="utf-8") as f:
-                        f.write(srt_text)
-                    if subtitle_mode == "sidecar":
+                if subtitle_mode == "sidecar":
+                    srt_text = cs.generate_srt(timeline)
+                    if srt_text.strip():
                         srt_dest = media_dir / f"{comp_id}.srt"
                         srt_dest.write_text(srt_text, encoding="utf-8")
                         srt_rel = str(srt_dest)
-                    else:
+                else:
+                    ass_text = cs.build_ass(
+                        timeline, width=width, height=height,
+                        font=settings.subtitle_font or None,
+                    )
+                    if "Dialogue:" in ass_text:
+                        ass_path = os.path.join(workdir, f"{comp_id}.ass")
+                        with open(ass_path, "w", encoding="utf-8") as f:
+                            f.write(ass_text)
                         burned = os.path.join(workdir, "burned.mp4")
-                        cs.run_cmd(cs.burn_subtitle_cmd(mixed, srt_path, burned))
+                        cs.run_cmd(cs.burn_subtitle_cmd(mixed, ass_path, burned))
                         final = burned
+                        timeline.warnings.append("字幕已烧录（按镜头台词生成 ASS）")
+                    else:
+                        timeline.warnings.append("镜头均无台词，未生成字幕")
             # 产物落盘
             final_path = media_dir / f"{comp_id}.mp4"
             with open(final, "rb") as src, open(final_path, "wb") as dst:

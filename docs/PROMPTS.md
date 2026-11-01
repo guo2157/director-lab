@@ -315,7 +315,7 @@
 
 ### 6.1 模板实现与版本
 
-- 实现位置：`backend/app/services/asset_prompts.py`，模板版本常量 `ASSET_PROMPTS_VERSION`（当前 2.0）。
+- 实现位置：`backend/app/services/asset_prompts.py`，模板版本常量 `ASSET_PROMPTS_VERSION`（当前 2.1）。
 - 外置机制（P1）：静态模板文本外置为 `workspace/prompts/asset_*.md`（可 UI 编辑），动态变量 `{name}/{identity}/{style}` 由代码运行时 `str.format()` 注入。外置文件缺失时回退到模块内 `DEFAULT_PROMPTS` 兜底模板（零配置可用）。3 个构造器 `build_character_prompt` / `build_scene_prompt` / `build_prop_prompt` 已统一为 `get_prompt(name)` + `.format()` 模式，静态文本不再是代码的一部分。必填校验（`_require_identity`）、负面约束（`negative_for_asset_type`）、默认风格（`_DEFAULT_STYLE`）与版本标记保留在代码内，不进入外置模板。
 - 版本追溯：生成任务创建时版本写入 `job.params.__asset_prompt_version__`；executor 执行时剥离该标记并持久化到 `job.input_snapshot.asset_prompt_version`，不作为参数提交给工作流。
 - 必填校验：名称/外观/描述全部为空时构建函数抛 `ValueError`（`*_prompt_missing_identity`），API 层返回 422，不静默生成占位提示词；仅有名称时名称作为身份兜底，不虚构外观。
@@ -342,6 +342,25 @@
 
 当 LLM 未生成 `video_prompt` 时，`_assemble_video_prompt()` 从外置模板拼装兜底提示词（首镜/非首镜各一版）。静态文本已外置为 `workspace/prompts/video_prompt_{first,body}.md`，变量 `{episode}/{seq}/{beats}/{shot_purpose}/{camera_movement}/{start_state}/{end_state}/{sound}/{duration}` 由代码运行时注入。文件缺失时回退到模块内 `DEFAULT_PROMPTS`。
 
+### 6.6 项目风格配置注入（统一美术风格来源）
+项目级风格配置（`project.settings`，字段见 STYLE_CONFIG.md）是全流程美术风格的唯一来源，禁止在模板或代码中另写一套风格描述。
+
+统一入口为 `backend/app/services/style_config.py` 的 `compile_style_prompt(config, task_type=...)`，按任务类型分级注入：
+
+| task_type | 注入内容 | 设计理由 |
+| --- | --- | --- |
+| character / scene / prop | 主视觉风格 `prompt` 原文 + 自定义风格要求 | 资产图用于定义身份，不掺入剧情节奏与情绪，避免资产图讲述剧情 |
+| storyboard | 主视觉风格 + 节奏片段 + 主情绪（附前两个辅助情绪） | 约束分镜构图与光影氛围 |
+| shot_video | 同 storyboard | 保证分镜图与分镜视频视觉连续 |
+
+情绪片段格式为「情绪基调以{主情绪}为主，辅以{辅助情绪}」。`pacing` 与 `emotional_tone` 中首个值为主值，其余按序取用。
+
+默认视觉风格 `storybook_realism` 的 `prompt` 与 `asset_prompts._DEFAULT_STYLE` 完全一致，保证未配置风格的旧项目资产图提示词不变。
+
+剧本解析侧注入走 `parse_context_block(config)`，前置到用户消息中，包含 `describe_for_llm` 生成的中文配置描述、要求 `image_prompt`/`video_prompt` 的美术风格段使用主视觉风格原文，并要求模型在 `project_analysis` 中额外输出 `detected_genre_tags` 与 `detected_narrative_styles`（无法判断时输出空数组，不得臆测）。注入点覆盖 `app/services/script_agent.py` 与 `app/worker/parse_executor.py` 两条解析路径。
+
+所有注入段落末尾固定声明：风格只约束表达方式、构图、光影、节奏与情绪，不得新增人物、道具、事件，不得改变故事因果与镜头绑定关系。
+
 ## 7. 外置模板文件清单
 
 以下模板通过 `prompt_store` 统一管理，外置文件位于 `backend/workspace/prompts/`，可通过 `POST/PUT/DELETE /api/settings/prompts` 接口在 UI 中编辑，修改即时生效，写入自动备份 `.bak`（最多 5 份）。外置文件缺失时回退到代码内 `DEFAULT_PROMPTS`。
@@ -357,3 +376,54 @@
 | `asset_prop` | `asset_prop.md` | 生图 | 道具锚定图模板（`{name}/{identity}/{style}`） |
 | `video_prompt_first` | `video_prompt_first.md` | 生视频 | 集首镜兜底模板（9 个变量） |
 | `video_prompt_body` | `video_prompt_body.md` | 生视频 | 非首镜兜底模板（9 个变量） |
+
+## 8. 阶段 B 提示词编译器（两阶段一致性闭环）
+### 8.1 职责边界
+两阶段设计把『理解剧情』与『写提示词』彻底分开：
+- 阶段 A（`app/services/script_parse.py`）只产出结构化事实（角色外貌字段、场景空间结构、道具形状材质、镜头动作与连续性字段），**不产出最终生图/生视频提示词**；
+- 阶段 B（`app/services/prompt_compiler.py`）把『结构化事实 + 模板 + 已审核参考图 + 工作流真实能力』编译成可校验的 `positive_prompt` / `negative_prompt` / `reference_slots` / `generation_constraints`。
+
+禁止在阶段 A 中拼装最终提示词，也禁止在 executor 中二次改写提示词。
+
+### 8.2 模板标识与注册
+模板常量与注册表位于 `prompt_compiler.py`，通过 `prompt_store._register_default` 注册，可外置为 `workspace/prompts/*.md` 由 UI 编辑，缺失时回退模块内常量。
+| 模板标识 | 运行时名称 | task_type | asset_type |
+| --- | --- | --- | --- |
+| `character_asset_prompt` | `compile_character_asset` | asset_image | character |
+| `scene_asset_prompt` | `compile_scene_asset` | asset_image | scene |
+| `prop_asset_prompt` | `compile_prop_asset` | asset_image | prop |
+| `storyboard_image_prompt` | `compile_storyboard_image` | storyboard_image | keyframe |
+| `shot_video_prompt` | `compile_shot_video` | shot_video | clip |
+`ASSET_TEMPLATE_BY_TYPE` 固定 character/scene/prop → 三个不同模板，不允许共用。
+
+### 8.3 编译产物结构
+`CompiledPrompt` 字段（全部写入 `job.input_snapshot.prompt_compilation` 供追溯）：
+`task_type`、`template_id`、`template_version`、`entity_id`、`asset_type`、`positive_prompt`、`negative_prompt`、`reference_slots`、`generation_constraints`、`blocking_issues`、`warnings`、`canonical_snapshot`。
+状态判定：`blocking_issues` 为空 → `ready`，否则 → `needs_review`。非 `ready` 时 `apply_to_params` 拒绝写入参数，生成请求返回 `prompt_compilation_not_ready`。
+
+### 8.4 负向提示词合并
+`negative_for(asset_or_task_type)` = `COMMON_NEGATIVE`（通用层）+ 类型专用层（character/scene/prop/keyframe/clip）+ 历史 P1 层（仅三类资产）。
+`merge_negative` 按中英文分隔符切分后去重，保持首次出现顺序，输出统一用中文逗号连接。
+
+### 8.5 参考槽位与容量
+- 槽位只能来自工作流 `capabilities.reference_slots`，超出能力即 `reference_capacity_exceeded` 阻断，不静默丢图；
+- `wf_image_ref_qwen_edit`：`ref_identity` / `ref_costume` / `ref_scene`，上限 3 图；
+- `wf_video_h3_ref2va`：`ref_prev_frame→ref_image_0`、`ref_image→1`、`ref_identity→2`、`ref_costume→3`、`ref_scene→4`、`ref_prop→5`；上限 9 图 / 3 视频 / 3 音频；
+- 未注入槽位必须剔除对应 `image{n}` 连线，提示词中 `<Picture N>` 按连线顺序重编号；
+- `wf_image_t2i_qwen` 无参考槽位，仅可编译正向/负向提示词。
+
+### 8.6 审核门禁与阻断码
+分镜图编译要求公共资产审核通过（`project.assets_review_status=approved`），否则 `assets_review_pending`；视频编译要求分镜图已人工确认，否则 `storyboard_not_approved`。
+阻断码集合：`asset_identity_missing`、`assets_review_pending`、`character_portrait_missing`、`scene_baseline_missing`、`prop_asset_missing`、`storyboard_asset_missing`、`storyboard_file_missing`、`reference_asset_missing`、`reference_asset_file_missing`、`reference_capacity_exceeded`、`storyboard_not_approved`、`prev_frame_missing`、`prompt_template_missing`、`prompt_only_patch_locked`、`prompt_compilation_not_ready`。
+
+### 8.7 只改提示词补丁锁定
+`assert_prompt_only_patch(original, patch)` 只允许替换提示词相关键，工作流结构参数（steps/cfg/sampler/模型文件名/分辨率等）与槽位映射不可变更，越界返回 `prompt_only_patch_locked_fields`。
+
+### 8.8 视频帧数与连续性约束
+`fps=24`；`length` 步长 17、偏移 5、范围 124–362；尾帧连续性必须绑定 `source_shot_id` 与 `source_file_id`（对应上一镜 `last_frame_asset_id`），缺失即 `prev_frame_missing`。
+
+### 8.9 文档与运行时一致性
+`docs/prompts/` 下的 5 个编译模板与 6 个负向词文件是运行时常量的可读副本，二者必须逐字符一致。该约束由 `backend/tests/test_prompt_docs_sync.py` 固化：模板正文比对、负向词比对、模板注册表完整性、三类资产模板映射唯一性，任一偏离即测试失败。
+
+### 8.10 调用链
+`app/api/v1/generate.py` 提供统一入口 `_compile_asset_prompt(db, asset_type, entity_id, wf, params)` 与 `_compile_shot_prompt(db, shot, wf, params, target, fallback)`，被角色/道具/场景生成端点与镜头生成端点统一调用；`app/services/agent_tools.py` 复用同一入口，不再保留独立的 `build_*_prompt` 兜底分支。资产图分支额外写入 `params.__asset_prompt_version__`，镜头分支在 `owner_key is None` 时把 `prompt_compilation` 写入 `Job.input_snapshot`。

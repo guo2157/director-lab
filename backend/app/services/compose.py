@@ -24,8 +24,18 @@ RESOLUTION_BY_RATIO = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 72
                        "4:3": (960, 720), "3:4": (720, 960)}
 DEFAULT_RESOLUTION = (1280, 720)
 LOUDNESS_TARGET = "I=-16:TP=-1"  # PRD M7-04：-16 LUFS，峰值 -1 dBTP
-SUBTITLE_SPLIT_THRESHOLD = 40  # 单句超 40 字切分
+SUBTITLE_SPLIT_THRESHOLD = 40  # SRT 单句超 40 字切分
 SUBTITLE_MIN_SECONDS = 1.0     # 最短显示时长（软约束）
+SUBTITLE_MAX_LINES = 2         # 单条烧录字幕最多两行，超出按标点再切
+# 烧录用中文字体候选（按优先级；缺失时用 fontconfig 里任一 CJK 字体兜底）
+SUBTITLE_FONT_FALLBACKS = (
+    "WenQuanYi Zen Hei", "Noto Sans CJK SC", "Source Han Sans SC",
+    "Microsoft YaHei", "Noto Sans SC", "DejaVu Sans",
+)
+SUBTITLE_FONT_SIZE_RATIO_PORTRAIT = 0.028   # 竖屏：1280 高约 36px，每行约 18 字
+SUBTITLE_FONT_SIZE_RATIO_LANDSCAPE = 0.033  # 横屏：720 高约 24px，每行约 49 字
+SUBTITLE_BOTTOM_RATIO = 0.055               # 底部留白 / 成片高度
+SUBTITLE_SIDE_RATIO = 0.03                  # 左右留白 / 成片宽度
 
 
 @dataclass
@@ -137,13 +147,13 @@ def build_timeline(shots: list[ShotInput], *, tolerance: float = 0.5) -> Timelin
 
 
 # --- 字幕（PRD 字幕规则） ---
-_PUNCT = "，。！？；、,.!?;:：\n"
+_PUNCT = "，。！？；、,.!?;:：…—\n"
 
 
-def _split_dialogue(text: str) -> list[str]:
-    """超 40 字按标点切分为多条；不足 40 字原样返回。"""
+def _split_dialogue(text: str, threshold: int = SUBTITLE_SPLIT_THRESHOLD) -> list[str]:
+    """超过 threshold 字时按标点切分为多条；不足则原样返回。"""
     text = text.strip()
-    if len(text) <= SUBTITLE_SPLIT_THRESHOLD:
+    if len(text) <= threshold:
         return [text] if text else []
     parts, buf = [], ""
     for ch in text:
@@ -156,12 +166,188 @@ def _split_dialogue(text: str) -> list[str]:
     # 标点切不出短句时按阈值硬切
     final = []
     for p in parts:
-        while len(p) > SUBTITLE_SPLIT_THRESHOLD:
-            final.append(p[:SUBTITLE_SPLIT_THRESHOLD])
-            p = p[SUBTITLE_SPLIT_THRESHOLD:]
+        while len(p) > threshold:
+            final.append(p[:threshold])
+            p = p[threshold:]
         if p:
             final.append(p)
     return final or [text]
+
+
+# --- 烧录字幕排版（ASS）：显式指定中文字体、字号与换行，避免 libass 默认真空 ---
+def subtitle_layout(width: int, height: int) -> dict:
+    """按成片分辨率推导字幕排版参数（字号、边距、每行字数、单条上限）。
+
+    PlayRes 直接取成片分辨率，字号按高度比例计算：
+    9:16（720×1280）约 44px，16:9（1280×720）约 24px，避免两套画幅共用字号。
+    """
+    ratio = (SUBTITLE_FONT_SIZE_RATIO_PORTRAIT if height >= width
+             else SUBTITLE_FONT_SIZE_RATIO_LANDSCAPE)
+    font_size = max(18, round(height * ratio))
+    margin_v = max(12, round(height * SUBTITLE_BOTTOM_RATIO))
+    margin_h = max(16, round(width * SUBTITLE_SIDE_RATIO))
+    # CJK 字形近似 1em 宽，留 2% 安全余量
+    chars_per_line = max(8, int((width - margin_h * 2) // (font_size * 1.02)))
+    return {
+        "font_size": font_size,
+        "margin_v": margin_v,
+        "margin_h": margin_h,
+        "chars_per_line": chars_per_line,
+        "cue_chars": chars_per_line * SUBTITLE_MAX_LINES,
+        "outline": max(1.5, round(font_size * 0.09, 1)),
+    }
+
+
+def _zh_fonts() -> list[str]:
+    """当前系统可用的中文字体族名（fc-list 不可用时返回空列表）。"""
+    try:
+        proc = subprocess.run(["fc-list", ":lang=zh", "family"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        for part in line.split(","):
+            name = part.strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def resolve_subtitle_font(preferred: str | None = None) -> str:
+    """选一个真正能渲染中文的字体：显式配置 > 候选表 > 系统任一 CJK 字体。"""
+    available = _zh_fonts()
+    if preferred:
+        return preferred  # 显式配置优先，由 libass/fontconfig 自行处理缺失
+    for name in SUBTITLE_FONT_FALLBACKS:
+        if name in available:
+            return name
+    if available:
+        return available[0]
+    return "sans-serif"
+
+
+def _ass_time(seconds: float) -> str:
+    """秒 → ASS 时间码 H:MM:SS.cc（厘秒，向下取整避免条目重叠）。"""
+    cs = max(0, int(round(seconds * 100)))
+    h, cs = divmod(cs, 360000)
+    m, cs = divmod(cs, 6000)
+    s, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _wrap_cue(text: str, chars_per_line: int) -> list[str]:
+    """把一条字幕折成多行：优先在标点后断行（至少占行宽 60%），其次按字数硬断。"""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= chars_per_line:
+        return [text]
+    lines: list[str] = []
+    rest = text
+    min_fill = max(1, int(chars_per_line * 0.6))
+    while len(rest) > chars_per_line:
+        window = rest[:chars_per_line]
+        cut = chars_per_line
+        for i in range(len(window) - 1, min_fill - 1, -1):
+            if window[i] in _PUNCT:
+                cut = i + 1
+                break
+        lines.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        lines.append(rest)
+    return lines
+
+
+def _sentences(text: str) -> list[str]:
+    """按句末标点切句（保留标点），逗号留在句内。"""
+    sentences: list[str] = []
+    buf = ""
+    for ch in text:
+        buf += ch
+        if ch in "。！？!?\n":
+            if buf.strip():
+                sentences.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        sentences.append(buf.strip())
+    return sentences
+
+
+def _display_cues(text: str, chars_per_line: int,
+                  max_lines: int = SUBTITLE_MAX_LINES) -> list[list[str]]:
+    """台词 → 字幕条目（每条 1–2 行）：整句独立成条，超长句先按标点切分再折行。"""
+    cues: list[list[str]] = []
+    for sentence in _sentences(text):
+        for part in _split_dialogue(sentence, chars_per_line * max_lines):
+            lines = _wrap_cue(part, chars_per_line)
+            for i in range(0, len(lines), max_lines):
+                cues.append(lines[i:i + max_lines])
+    return cues
+
+
+def _ass_escape(lines: list[str]) -> str:
+    """ASS 事件文本转义：花括号会触发覆盖标签，换行用 \\N 显式指定。"""
+    safe = [ln.replace("\\", "\\\\").replace("{", "(").replace("}", ")") for ln in lines]
+    return "\\N".join(safe)
+
+
+def build_ass(timeline: TimelineResult, *, width: int, height: int,
+              font: str | None = None) -> str:
+    """生成烧录用 ASS：文本来自 shot.dialogue，时间按镜头归属与字符数比例分配。
+
+    与 generate_srt 的时间轴规则完全一致（逐镜不跨镜、末条收编到镜头边界、
+    最短 1 秒软约束），差别只在排版：显式中文字体、按分辨率定字号、
+    每条最多两行并按标点折行。
+    """
+    layout = subtitle_layout(width, height)
+    font_name = resolve_subtitle_font(font)
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "WrapStyle: 2",              # 已显式折行，禁止 libass 二次自动换行
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        ("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"),
+        (f"Style: Default,{font_name},{layout['font_size']},&H00FFFFFF,&H000000FF,"
+         f"&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{layout['outline']},0,2,"
+         f"{layout['margin_h']},{layout['margin_h']},{layout['margin_v']},1"),
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    events: list[str] = []
+    chars_per_line = layout["chars_per_line"]
+    for item in timeline.items:
+        text = (item.shot.dialogue or "").strip()
+        if not text:
+            continue
+        start = item.start_time
+        end = start + item.target_duration
+        span = end - start
+        # 整句优先：每句独立成条，最多两行，避免两句话拼在一条里
+        cues = _display_cues(text, chars_per_line)
+        total_chars = sum(len("".join(cue)) for cue in cues) or 1
+        cursor = start
+        for i, cue in enumerate(cues):
+            if i == len(cues) - 1:
+                p_end = end  # 最后一条收编到镜头边界
+            else:
+                p_end = cursor + span * (len("".join(cue)) / total_chars)
+            if p_end - cursor < SUBTITLE_MIN_SECONDS and i < len(cues) - 1:
+                p_end = min(end, cursor + SUBTITLE_MIN_SECONDS)
+            events.append(
+                f"Dialogue: 0,{_ass_time(cursor)},{_ass_time(p_end)},Default,,0,0,0,,"
+                f"{_ass_escape(cue)}"
+            )
+            cursor = p_end
+    return "\n".join(header + events) + "\n"
 
 
 def _srt_time(seconds: float) -> str:
@@ -301,11 +487,11 @@ def loudnorm_apply_cmd(video_path: str, out_path: str, measured: dict) -> list[s
              "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", out_path])
 
 
-def burn_subtitle_cmd(video_path: str, srt_path: str, out_path: str) -> list[str]:
-    """烧入字幕（libass subtitles 滤镜）。"""
-    srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+def burn_subtitle_cmd(video_path: str, ass_path: str, out_path: str) -> list[str]:
+    """烧入字幕（libass ass 滤镜）：排版参数全部在 ASS 里，命令侧不再带 force_style。"""
+    ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
     return (["ffmpeg", "-y", "-i", video_path,
-             "-vf", f"subtitles='{srt_escaped}'",
+             "-vf", f"ass='{ass_escaped}'",
              "-c:v", "libx264", "-preset", "fast", "-crf", "20",
              "-c:a", "copy", out_path])
 

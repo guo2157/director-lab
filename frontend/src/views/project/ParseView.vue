@@ -395,6 +395,99 @@ const candidateResult = computed<ParseJobResult | null>(
 watch(() => candidateResult.value?.parse_version_id, (v) => {
   if (v && !flow.candidateVersionId) flow.candidateVersionId = v
 }, { immediate: true })
+/* ---------- job.result JSON 转可读格式化文本 ---------- */
+function fmtSeverity(s: string) {
+  const m: Record<string, string> = { critical: '严重', major: '重要', minor: '轻微' }
+  return m[s] ?? s
+}
+const formattedResult = computed(() => {
+  const r = candidateResult.value
+  if (!r) return ''
+  const lines: string[] = []
+  const ev = (r as any).evaluation as Record<string, any> | undefined
+  if (ev) {
+    lines.push('══ 剧本评估 ══')
+    if (ev.overall_score != null) lines.push(`综合评分：${ev.overall_score} / 10`)
+    if (ev.summary) lines.push(`总结：${ev.summary}`)
+    if (Array.isArray(ev.strengths) && ev.strengths.length) {
+      lines.push('')
+      lines.push('▸ 优点')
+      for (const s of ev.strengths) {
+        const detail = typeof s === 'string' ? s : (s.detail || JSON.stringify(s))
+        lines.push(`  ✓ ${detail}`)
+      }
+    }
+    if (Array.isArray(ev.issues) && ev.issues.length) {
+      lines.push('')
+      lines.push('▸ 问题')
+      for (const s of ev.issues) {
+        const detail = typeof s === 'string' ? s : s.detail || ''
+        const sev = typeof s === 'object' && s.severity ? ` [${fmtSeverity(s.severity)}]` : ''
+        lines.push(`  ✗${sev} ${detail}`)
+      }
+    }
+    if (Array.isArray(ev.suggestions) && ev.suggestions.length) {
+      lines.push('')
+      lines.push('▸ 修改建议')
+      for (const s of ev.suggestions) {
+        const detail = typeof s === 'string' ? s : (s.suggestion || s.detail || JSON.stringify(s))
+        lines.push(`  → ${detail}`)
+      }
+    }
+    if (Array.isArray(ev.production_risks) && ev.production_risks.length) {
+      lines.push('')
+      lines.push('▸ 制作风险')
+      for (const s of ev.production_risks) {
+        const detail = typeof s === 'string' ? s : s.detail || ''
+        const sev = typeof s === 'object' && s.severity ? ` [${fmtSeverity(s.severity)}]` : ''
+        lines.push(`  ⚠${sev} ${detail}`)
+      }
+    }
+    if (Array.isArray(ev.plot_holes) && ev.plot_holes.length) {
+      lines.push('')
+      lines.push('▸ 剧情漏洞')
+      for (const s of ev.plot_holes) {
+        const detail = typeof s === 'string' ? s : s.detail || ''
+        const sev = typeof s === 'object' && s.severity ? ` [${fmtSeverity(s.severity)}]` : ''
+        lines.push(`  ⚡${sev} ${detail}`)
+      }
+    }
+    lines.push('')
+  }
+  // 解析结果摘要
+  lines.push('══ 解析结果 ══')
+  if (Array.isArray(r.characters) && r.characters.length) {
+    lines.push(`角色（${r.characters.length}）：`)
+    for (const c of r.characters) lines.push(`  · ${c.name}${c.description ? ' — ' + c.description : ''}`)
+    lines.push('')
+  }
+  if (Array.isArray(r.props) && r.props.length) {
+    lines.push(`道具（${r.props.length}）：`)
+    for (const p of r.props) lines.push(`  · ${p.name}${p.description ? ' — ' + p.description : ''}`)
+    lines.push('')
+  }
+  if (Array.isArray(r.scenes) && r.scenes.length) {
+    const shotCount = r.scenes.reduce((n: number, sc: any) => n + (sc.shots?.length || 0), 0)
+    lines.push(`场景（${r.scenes.length}） / 分镜（${shotCount}）：`)
+    for (const sc of r.scenes as any[]) {
+      const shots = (sc.shots || []) as any[]
+      const epSet = new Set(shots.map((s: any) => s.episode).filter(Boolean))
+      const epLabel = epSet.size ? `[第 ${[...epSet].sort((a: any,b: any) => a-b).join('、')} 集]` : ''
+      lines.push(`  ▸ ${sc.title || '未命名'}${sc.time_note ? '（' + sc.time_note + '）' : ''} ${epLabel}  ${shots.length} 镜`)
+      for (const sh of shots) {
+        const prefix = sh.shot_no ? `#${sh.shot_no}` : ''
+        lines.push(`     ${prefix} ${sh.description || ''}`.trimEnd())
+      }
+    }
+    lines.push('')
+  }
+  const warns = (r as any).parse_warnings as any[] | undefined
+  if (warns?.length) {
+    lines.push(`解析警告（${warns.length} 条）：`)
+    for (const w of warns) lines.push(`  ⚠ ${typeof w === 'string' ? w : w.message || JSON.stringify(w)}`)
+  }
+  return lines.join('\n')
+})
 
 /** 刷新恢复：项目已有已确认解析版本且全部集解析成功时，恢复完成态与『去资产库』引导 */
 const allEpisodesSucceeded = computed(
@@ -532,6 +625,13 @@ const props = computed(() => propsData.value?.items ?? [])
           </template>
         </div>
 
+        <!-- 解析结果可读文本面板 -->
+        <div v-if="candidateReady && formattedResult" class="formatted-result-card">
+          <div class="formatted-result-head">
+            <span>📋 解析报告</span>
+          </div>
+          <pre class="formatted-result-body">{{ formattedResult }}</pre>
+        </div>
         <!-- 解析完成摘要卡片 -->
         <div v-if="parseDone" class="parse-done-card">
           <div class="parse-done-head">
@@ -631,16 +731,19 @@ const props = computed(() => propsData.value?.items ?? [])
 </template>
 
 <style scoped>
-.parse-done-card { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 12px; padding: 14px 18px; background: rgba(34, 197, 94, 0.06); }
+.formatted-result-card { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 12px; background: var(--bg-panel, #fff); margin-bottom: 12px; overflow: hidden; }
+.formatted-result-head { padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text-primary, #111); border-bottom: 1px solid var(--border-subtle, #e5e7eb); background: rgba(99, 102, 241, 0.04); }
+.formatted-result-body { margin: 0; padding: 16px 20px; font-size: 13px; line-height: 1.8; color: var(--text-primary, #333); white-space: pre-wrap; word-break: break-word; max-height: 600px; overflow-y: auto; font-family: inherit; }
+.parse-done-card { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 14px; padding: 20px 28px; background: rgba(34, 197, 94, 0.06); }
 .parse-done-head { display: flex; align-items: center; gap: 8px; }
 .parse-done-badge { width: 26px; height: 26px; border-radius: 50%; background: var(--state-success, #22c55e); color: #fff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .parse-done-badge svg { display: block; }
-.parse-done-title { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; color: var(--text-primary, #333); }
+.parse-done-title { font-size: 22px; font-weight: 700; letter-spacing: 0.3px; color: var(--text-primary, #333); }
 .parse-done-sub { font-size: 12px; color: var(--text-secondary, #64748b); }
-.parse-done-stats { display: flex; gap: 24px; }
+.parse-done-stats { display: flex; gap: 32px; }
 .parse-done-stat { display: flex; align-items: baseline; gap: 6px; }
-.parse-done-stat-value { font-size: 22px; font-weight: 700; color: var(--text-primary, #e5e7eb); }
-.parse-done-stat-label { font-size: 12px; color: var(--text-secondary, #64748b); }
+.parse-done-stat-value { font-size: 28px; font-weight: 700; color: var(--text-primary, #e5e7eb); }
+.parse-done-stat-label { font-size: 14px; color: var(--text-secondary, #64748b); }
 .parse-done-actions { display: flex; gap: 10px; margin-left: auto; }
 .parse-page {
   display: flex;
@@ -662,11 +765,11 @@ const props = computed(() => propsData.value?.items ?? [])
 .project-name { font-size: 12px; color: var(--text-secondary, #64748b); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .page-body { display: flex; flex: 1; min-height: 0; }
-.content-pane { flex: 1; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.content-pane { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
 .candidate-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
 .llm-stream-card { margin-bottom: 10px; border: 1px solid rgba(99, 226, 183, 0.35); border-radius: 8px; overflow: hidden; background: rgba(16, 24, 40, 0.6); }
 .llm-stream-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; color: #63e2b7; background: rgba(99, 226, 183, 0.08); }
-.llm-stream-body { max-height: 260px; overflow-y: auto; padding: 10px 12px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: rgba(224, 232, 240, 0.9); }
+.llm-stream-body { max-height: 360px; overflow-y: auto; padding: 14px 16px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; color: rgba(224, 232, 240, 0.9); }
 .candidate-bar.is-running { background: rgba(99, 102, 241, 0.06); }
 .candidate-bar.is-succeeded { background: rgba(34, 197, 94, 0.08); }
 .candidate-bar.is-failed { background: rgba(208, 48, 80, 0.06); }
@@ -675,19 +778,19 @@ const props = computed(() => propsData.value?.items ?? [])
 .candidate-bar-text { flex: 1; }
 .spin-dot { width: 12px; height: 12px; border: 2px solid var(--brand-primary, #6366f1); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.parse-status-panel { border: 1px solid var(--border-subtle, #e0e0e6); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.parse-status-panel { border: 1px solid var(--border-subtle, #e0e0e6); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .episode-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.pane-label { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
-.episode-count-tag { font-size: 12px; font-weight: 600; color: var(--brand-primary, #6366f1); font-variant-numeric: tabular-nums; }
+.pane-label { font-size: 16px; font-weight: 600; color: var(--text-primary, #333); }
+.episode-count-tag { font-size: 14px; font-weight: 600; color: var(--brand-primary, #6366f1); font-variant-numeric: tabular-nums; }
 .quick-chip { border: 1px solid var(--border-subtle, #e0e0e6); background: none; border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
 .quick-chip:hover:not(:disabled) { border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
 .quick-chip.active { background: rgba(99, 102, 241, 0.1); border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
 .quick-chip:disabled { opacity: 0.4; cursor: not-allowed; }
-.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
-.episode-cell { position: relative; min-height: 64px; padding: 10px 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 8px; border: 1px solid transparent; transition: transform 0.15s ease; }
+.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+.episode-cell { position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
-.episode-cell-no { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
-.episode-cell-meta { font-size: 13px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
+.episode-cell-no { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
+.episode-cell-meta { font-size: 14px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
 @keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.3); } 50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0); } }
 .episode-cell.is-running { animation: cell-pulse 1.6s ease-in-out infinite; }
 .episode-cell.is-pending { background: rgba(128, 128, 128, 0.12); color: var(--text-secondary, #888); }
@@ -706,7 +809,7 @@ const props = computed(() => propsData.value?.items ?? [])
 .failed-error-retry:disabled { opacity: 0.4; cursor: not-allowed; }
 .failed-error-msg { font-size: 13px; color: var(--text-secondary, #888); line-height: 1.5; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .failed-error-msg.muted { font-style: italic; }
-.episode-legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary, #888); }
+.episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary, #888); }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.is-pending { background: rgba(128, 128, 128, 0.4); }

@@ -12,6 +12,13 @@ export function generateShot(shotId: string, payload: GenerateShotPayload) {
 export function regenerateShot(shotId: string, payload: GenerateShotPayload) {
   return post<GenerateResponse>(`/shots/${shotId}/regenerate`, payload)
 }
+/** 重新生成分镜视频：先取消该镜头历史在途任务（释放 ComfyUI 资源）并覆盖原视频，返回新任务与被取消任务 ID */
+export function regenerateShotClip(shotId: string, payload?: GenerateShotPayload) {
+  return post<GenerateResponse & { cancelled_job_ids?: string[] }>(
+    `/shots/${shotId}/regenerate-clip`,
+    payload ?? { target: 'clip' },
+  )
+}
 
 /** 场景内批量生成（<3 镜头返回 400；按 seq 升序，前镜视频成功抽末帧后才继续下一镜；worker 并发 = 可用 ComfyUI 实例数） */
 export function generateSceneShots(sceneId: string, payload: {
@@ -30,6 +37,8 @@ export function generateProjectShots(projectId: string, payload: {
   scene_ids?: string[]
   target: 'keyframe' | 'clip'
   workflow_id?: string
+  /** 批量出视频方式：independent 独立并行（不依赖上一镜尾帧）/ chained 链式串行（逐镜衔接） */
+  chain_mode?: 'independent' | 'chained'
 }) {
   return post<BatchGenerateResponse>(`/projects/${projectId}/generate`, payload)
 }

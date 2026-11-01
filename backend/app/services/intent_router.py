@@ -58,6 +58,9 @@ _GENERATE_RULES: list[re.Pattern[str]] = [
 
 _QUERY_RULES: list[re.Pattern[str]] = [
     re.compile(r"(项目|当前|整体|制作).{0,4}(进展|进度|状态|概览|阶段)"),
+    # 进度类问句：『视频生成什么进度了』『出图到哪一步了』『还有多少没生成』
+    # 这类消息含『生成』字样，但说的是查询已发生/进行中的生成，不是发起新生成
+    re.compile(r"(进度|进展|状态|到哪|哪一步|还有多少|还剩|排队).{0,8}(了|吗|呢|？|\?|$)"),
     re.compile(r"(进展|进度|状态|概览)如何"),
     re.compile(r"哪些任务.{0,6}(失败|出错)"),
     re.compile(r"失败(的)?(原因|原因是什么)"),
@@ -263,6 +266,16 @@ def apply_fast_path_rules(user_content: str) -> IntentResult | None:
             source="rules",
         )
         return _apply_intent_rules(text, result)
+    # 进度类问句优先于生成规则：『视频生成什么进度了』「生成」只是描述性定语，
+    # 语义是查询已发生/进行中的生成；生成规则正则会把它误判为 generate_request，
+    # 进而走到「请明确要生成的目标」的引导，完全答非所问
+    _PROGRESS_ONLY = (
+        "进度", "进展", "到哪", "哪一步", "还有多少", "还剩", "排队",
+        # 完成时间预估：『还要多久』『什么时候能好』——同样是查询已发生/进行中的生成
+        "多久", "多长时间", "什么时候", "几点", "几天", "几小时",
+    )
+    if any(k in text for k in _PROGRESS_ONLY):
+        return _rule_intent("query", "规则命中进度查询模式", "low", text)
     for pattern in _GENERATE_RULES:
         if pattern.search(text):
             return _rule_intent("generate_request", "规则命中生成请求模式", "medium", text)

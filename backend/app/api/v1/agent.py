@@ -37,6 +37,8 @@ _DIRECTOR_SYSTEM_PROMPT = (
     "当前系统支持的制作阶段：剧本评估/解析 → 角色/场景/道具资产 → 分镜 → 视频片段 → 合成导出。"
     "回答保持简洁专业；涉及具体项目时基于用户提供的上下文作答，不虚构不存在的资产或任务。"
     "用户明确要求执行生成类操作时，说明需要通过对应页面或后续工具调用完成，不要虚构已执行。"
+    "用户询问项目/生成「进度」时，直接依据系统提供的进度数据回答（总数、已完成、进行中、排队、"
+    "失败、预计剩余时间），不要反问要生成哪个镜头或实体——那是发起新生成时才需要的信息。"
 )
 
 
@@ -313,7 +315,7 @@ def execute_approval(
 # 制作阶段 → 下一步指引（derive_progress 的 current_stage 映射；
 # 生成请求定位不到目标时按项目实际阶段引导，让 Agent 成为流程向导）
 _STAGE_GUIDANCE = {
-    "estimate": "当前项目还没有可用的剧本：请先在剧本页创作或保存剧本（也可用剧本创作辅助生成），再发起剧本一体化分析，解析出场景、镜头与资产定义。",
+    "estimate": "项目还没有进入分析阶段：请先在剧本页保存剧本（也可用剧本创作辅助生成），再发起剧本一体化分析，解析出场景、镜头与资产定义。",
     "select_range": "剧本已保存但尚未分析：请先发起剧本一体化分析，解析出镜头后再生成。",
     "parse": "剧本分析尚未产出镜头：请先完成剧本分析（或等待进行中的分析任务完成）。",
     "characters": "项目还有角色缺少定妆图：请先在资产库生成角色定妆图（对话中给出角色 ID，chr_ 开头，即可提交生成申请）。",
@@ -736,13 +738,12 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             ("list_jobs", {"project_id": s.project_id, "limit": 5}),
         ]
         # 资产缩略图仅在用户明确想看图片/视频时注入，避免每条消息都附带缩略图（UI 噪音 +
-        # 无谓带宽）；只查 validity=current 的资产，避免历史消息渲染到失效文件
         _asset_hint = ("图", "视频", "片段", "素材", "缩略", "画面", "看看", "长什么样")
         if any(k in payload.content for k in _asset_hint):
             base_tools.append(
                 (
                     "list_assets",
-                    {"project_id": s.project_id, "validity": "current", "limit": 6},
+                    {"project_id": s.project_id, "limit": 6},
                 )
             )
         tool_calls = []
@@ -754,6 +755,16 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         stats = next((r for n, _, r in tool_calls if n == "asset_stats"), None)
         jobs = next((r for n, _, r in tool_calls if n == "list_jobs"), None)
         assets = next((r for n, _, r in tool_calls if n == "list_assets"), None)
+        # 生成进度快照（与资产库/分镜图/分镜看板同口径）：
+        # 用户问「生成到什么进度了」时，助手必须能直接答出 X/Y、正在生成哪几个、排队多少、
+        # 最近失败多少，而不是反过来要求用户指明生成目标
+        progress_snapshot: dict = {}
+        try:
+            from app.api.v1.progress import generation_progress_snapshot
+
+            progress_snapshot = generation_progress_snapshot(db, s.project_id)
+        except Exception:  # 进度快照失败不影响主对话
+            progress_snapshot = {}
         # 工具调用审计落库（LLM 失败也不丢失审计记录，故在此即提交）
         for tool_name, tool_args, result in tool_calls:
             tool_event_seq += 1
@@ -785,6 +796,57 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         if stats is not None and stats.ok and stats.data:
             by_type = ", ".join(f"{k}×{v}" for k, v in stats.data["by_type"].items()) or "无"
             ctx_lines.append(f"项目资产统计：{by_type}（共 {stats.data['total']} 项）")
+        # 生成进度：直接给出可复述的数字，避免助手反问「要生成什么」
+        if progress_snapshot:
+            a = progress_snapshot.get("assets") or {}
+            if a.get("total"):
+                groups = a.get("groups") or {}
+                group_text = "、".join(
+                    f"{g.get('label', k)} {g.get('done', 0)}/{g.get('total', 0)}"
+                    for k, g in groups.items()
+                    if g.get("total")
+                )
+                ctx_lines.append(
+                    f"公共资产图进度：{a.get('done', 0)}/{a.get('total', 0)}"
+                    + (f"（{group_text}）" if group_text else "")
+                    + (f"，正在生成 {a.get('inflight_count')} 个" if a.get("inflight_count") else "")
+                    + (f"，最近失败 {a.get('failed_recent_count')} 个" if a.get("failed_recent_count") else "")
+                )
+            kf = progress_snapshot.get("keyframes") or {}
+            if kf.get("total"):
+                ctx_lines.append(
+                    f"分镜图进度：已出图 {kf.get('with_keyframe', 0)}/{kf.get('total', 0)}，"
+                    f"已人工确认 {kf.get('confirmed', 0)}"
+                    + (f"，正在生成 {kf.get('inflight_count')} 张" if kf.get("inflight_count") else "")
+                    + (f"，最近失败 {kf.get('failed_recent_count')} 张" if kf.get("failed_recent_count") else "")
+                )
+            cp = progress_snapshot.get("clips") or {}
+            if cp.get("total"):
+                clip_line = (
+                    f"分镜视频进度：已生成 {cp.get('with_clip', 0)}/{cp.get('total', 0)}"
+                    + (f"，正在渲染 {cp.get('inflight_running', 0)} 个" if cp.get("inflight_running") else "")
+                    + (
+                        f"，排队/等待前序 {cp.get('inflight_queued', 0) + cp.get('inflight_chained_wait', 0)} 个"
+                        if (cp.get("inflight_queued") or cp.get("inflight_chained_wait"))
+                        else ""
+                    )
+                    + (f"，最近失败 {cp.get('failed_recent_count')} 个" if cp.get("failed_recent_count") else "")
+                )
+                running = next(
+                    (j for j in (cp.get("inflight") or []) if j.get("status") == "running"), None
+                )
+                if running:
+                    clip_line += (
+                        f"；当前渲染：{running.get('scene_title') or '未知场景'} 镜 {running.get('shot_seq') or '—'}"
+                    )
+                ctx_lines.append(clip_line)
+                wait = cp.get("estimated_wait_seconds")
+                avg = cp.get("avg_seconds")
+                if isinstance(wait, int) and wait > 0:
+                    ctx_lines.append(
+                        f"视频剩余耗时预估：约 {max(1, round(wait / 60))} 分钟"
+                        + (f"（按近 7 日单镜平均 {avg} 秒估算）" if avg else "")
+                    )
         if jobs is not None and jobs.ok and jobs.data and jobs.data["count"] > 0:
             job_lines = ", ".join(
                 f"{j['job_type']}({j['status']}" + (f"/{j['error_code']}" if j.get("error_code") else "") + ")"
@@ -799,7 +861,6 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                     "asset_type": it["asset_type"],
                     "name": it["name"],
                     "has_thumb": it["has_thumb"],
-                    "validity": it["validity"],
                 }
                 for it in assets.data["items"]
             ]

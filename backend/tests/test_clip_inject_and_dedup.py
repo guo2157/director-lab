@@ -30,7 +30,7 @@ def client(tmp_path, monkeypatch):
 _IMAGE_DEF = {
     "1": {
         "class_type": "EmptyLatentImage",
-        "_meta": {"title": "$~width, $~height"},
+        "_meta": {"title": "$width, $height"},
         "inputs": {"width": 512, "height": 288, "batch_size": 1},
     },
     "2": {

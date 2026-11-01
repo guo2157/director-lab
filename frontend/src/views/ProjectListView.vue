@@ -16,9 +16,10 @@ import {
   useMessage,
 } from 'naive-ui'
 import type { DropdownOption, FormInst, FormRules } from 'naive-ui'
-import { archiveProject, createProject, deleteProject, listProjects } from '@/api/projects'
+import { archiveProject, createProject, deleteProject, getStyleOptions, listProjects } from '@/api/projects'
 import { getSettings, listComfyuiInstances } from '@/api/settings'
-import type { AspectRatio, CreationType, Project } from '@/types/project'
+import type { AspectRatio, CreationType, CreateProjectPayload, Project, StyleConfig } from '@/types/project'
+import StyleConfigForm from '@/components/StyleConfigForm.vue'
 const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
@@ -203,6 +204,21 @@ const formModel = ref<{ name: string; aspect_ratio: AspectRatio; creation_type: 
   aspect_ratio: '16:9',
   creation_type: 'novel',
 })
+/* ---------- 创建时可选风格配置（留空则完全使用后端默认值） ---------- */
+const styleOptionsQuery = useQuery({
+  queryKey: ['style-options'],
+  queryFn: () => getStyleOptions(),
+  staleTime: 5 * 60 * 1000,
+})
+const styleOptions = computed(() => styleOptionsQuery.data.value)
+const showStyleConfig = ref(false)
+const styleConfig = ref<StyleConfig | null>(null)
+function toggleStyleConfig(v: boolean) {
+  showStyleConfig.value = v
+  if (v && !styleConfig.value && styleOptions.value) {
+    styleConfig.value = { ...styleOptions.value.defaults }
+  }
+}
 const rules: FormRules = {
   name: [
     { required: true, message: '请输入项目名称', trigger: ['blur', 'input'] },
@@ -215,6 +231,8 @@ const rules: FormRules = {
 }
 function openCreateModal() {
   formModel.value = { name: '', aspect_ratio: '16:9', creation_type: 'novel' }
+  showStyleConfig.value = false
+  styleConfig.value = styleOptions.value ? { ...styleOptions.value.defaults } : null
   showModal.value = true
 }
 function onUpdateShow(v: boolean) {
@@ -242,11 +260,16 @@ async function handleCreate() {
   } catch {
     return
   }
-  mutateCreate({
+  const payload: CreateProjectPayload = {
     name: formModel.value.name.trim(),
     aspect_ratio: formModel.value.aspect_ratio,
     creation_type: formModel.value.creation_type,
-  })
+  }
+  // 仅当用户主动展开并修改过风格配置时才提交，避免覆盖后端默认基线
+  if (showStyleConfig.value && styleConfig.value) {
+    payload.style_config = { ...styleConfig.value }
+  }
+  mutateCreate(payload)
 }
 </script>
 <template>
@@ -437,6 +460,26 @@ async function handleCreate() {
             </button>
           </div>
         </n-form-item>
+        <div class="style-section">
+          <button
+            type="button"
+            class="style-toggle"
+            :class="{ open: showStyleConfig }"
+            @click="toggleStyleConfig(!showStyleConfig)"
+          >
+            <span class="toggle-title">剧本类型与风格配置</span>
+            <span class="toggle-hint">可选。不设置则使用默认风格，创建后也可在剧本页调整。</span>
+            <span class="toggle-arrow">{{ showStyleConfig ? '收起' : '展开' }}</span>
+          </button>
+          <div v-if="showStyleConfig" class="style-body">
+            <div v-if="!styleOptions" class="style-loading">正在加载风格选项…</div>
+            <StyleConfigForm
+              v-else-if="styleConfig"
+              v-model="styleConfig"
+              :options="styleOptions"
+            />
+          </div>
+        </div>
       </n-form>
       <template #footer>
         <div class="modal-footer">
@@ -884,6 +927,57 @@ async function handleCreate() {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+/* 新建项目弹窗内的可选风格配置折叠区 */
+.style-section {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle, #e5e7eb);
+}
+.style-toggle {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  background: var(--bg-elevated, #f8fafc);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s;
+}
+.style-toggle:hover,
+.style-toggle.open {
+  border-color: var(--brand-primary, #6366f1);
+}
+.toggle-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.toggle-hint {
+  flex: 1 1 auto;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-secondary);
+}
+.toggle-arrow {
+  font-size: 12px;
+  color: var(--brand-primary, #6366f1);
+  white-space: nowrap;
+}
+.style-body {
+  margin-top: 12px;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.style-loading {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 12px 0;
 }
 </style>
 <style>

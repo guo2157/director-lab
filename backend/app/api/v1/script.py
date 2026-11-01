@@ -22,7 +22,7 @@ from app.schemas.script import (
     ScriptVersionCreate, ScriptVersionOut,
 )
 from app.services import errors
-from app.services.script_parse import estimate_script
+from app.services.script_parse import analyze_script_outline
 
 router = APIRouter(prefix="/api/projects", tags=["script"])
 
@@ -108,6 +108,32 @@ def get_current_script_version(project_id: str,
     }
 
 
+@router.post("/{project_id}/script-normalize", status_code=200)
+def normalize_project_script(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """剧本规范化校验（保存前）：把原始素材整理为标准剧本格式，保真前提下做必要补全。
+
+    - 不落库：仅返回优化稿、变更清单与机器校验结果，由用户确认后再保存版本
+    - 人物集合守恒与原台词保真由服务端机器校验，blocked=true 时前端需明确提示
+    - LLM 失败按 llm_* 错误码返回 502，不产生半成品
+    """
+    from app.integrations.llm import LLMError
+    from app.services.script_writing import normalize_script
+
+    p = _get_project(db, project_id)
+    if p.status == "archived":
+        raise errors.invalid_state_transition("已归档项目不可校验剧本")
+    source_text = (payload.get("source_text") or "").strip()
+    if not source_text:
+        raise errors.invalid_request("source_text 必填（待校验的剧本素材）")
+    if len(source_text) > 50000:
+        raise errors.invalid_request("source_text 超过 50000 字符上限")
+    try:
+        result = normalize_script(source_text, p.settings or {})
+    except LLMError as e:
+        raise errors.AppError(e.code, e.message, 502)
+    return result
+
+
 @router.post("/{project_id}/script-write", status_code=201)
 def write_project_script(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     """AI 创作/扩写剧本（阶段1）：create（创意→剧本）/ expand（梗概→扩写）。
@@ -172,7 +198,7 @@ def evaluate_project_script(project_id: str, payload: dict, db: Session = Depend
     """剧本质量评估（阶段2）：调用 LLM 生成结构化评估报告。
 
     - 评估维度：优点、问题、修改建议、制作风险、剧情漏洞检测、总体评分、总结
-    - 在 estimate_script 算法估算基础上注入基础数据，LLM 进行深度质量评估
+    - 在 analyze_script_outline LLM 大纲分析基础上注入基础数据，LLM 进行深度质量评估
     - LLM 失败按 llm_* 错误码返回 502，不落库半成品
     - 评估为只读操作，不修改剧本版本或项目状态
     """
@@ -192,13 +218,16 @@ def evaluate_project_script(project_id: str, payload: dict, db: Session = Depend
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, text)
-    # 算法估算作为基础数据注入
+    # LLM 大纲分析作为基础数据注入（代码规则估算已移除，集数一律以 LLM 分析为准）
     settings_map = p.settings or {}
-    estimate_data = estimate_script(
-        text,
-        episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
-        max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
-    )
+    try:
+        estimate_data = analyze_script_outline(
+            text,
+            episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
+            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
+        )
+    except LLMError as e:
+        raise errors.AppError(e.code, e.message, 502)
     # LLM 深度评估（短事务外）
     try:
         report = evaluate_script(text, estimate_data, p.settings or {})
@@ -214,17 +243,21 @@ def evaluate_project_script(project_id: str, payload: dict, db: Session = Depend
 @router.post("/{project_id}/estimate", status_code=201)
 def create_estimate(project_id: str, payload: EstimateCreate,
                     db: Session = Depends(get_db)) -> EstimateOut:
+    from app.integrations.llm import LLMError
     p = _get_project(db, project_id)
     sv = _get_script_version(db, payload.script_version_id)
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, payload.text)
     settings_map = p.settings or {}
-    result = estimate_script(
-        payload.text,
-        episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
-        max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
-    )
+    try:
+        result = analyze_script_outline(
+            payload.text,
+            episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
+            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
+        )
+    except LLMError as e:
+        raise errors.AppError(e.code, e.message, 502)
     est = ScriptEstimate(
         id=ids.script_estimate_id(), script_version_id=sv.id,
         algorithm_version=result["algorithm_version"], result=result,

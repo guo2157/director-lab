@@ -4,21 +4,24 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NButton, NSpace, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
-  NInput, NTooltip, NModal, NAlert, NCheckbox, useMessage, useDialog,
-  NImage, NDropdown, NTimeline, NTimelineItem,
+  NInput, NTooltip, NModal, NAlert, NCheckbox, NProgress, useMessage, useDialog,
+  NImage, NDropdown,
 } from 'naive-ui'
 import {
-  listAssets, deleteAsset, lockAsset, unlockAsset, listAssetVersions,
+  listAssets, deleteAsset, lockAsset, unlockAsset,
   replaceAsset, regenerateAsset, getAssetRegenerateConfig,
 } from '@/api/assets'
 import type { AssetRegenerateConfig } from '@/api/assets'
-import type { Asset, AssetVersion } from '@/types/asset'
+import type { Asset } from '@/types/asset'
 import { fetchCandidates, adoptCandidate } from '@/api/regeneration'
 import type { CandidateAsset } from '@/api/regeneration'
 import { getJob } from '@/api/jobs'
 import { listCharacters, listProps, listScenes } from '@/api/script'
 import { getProject, reviewProjectAssets } from '@/api/projects'
 import { generateCharacterPortrait, generatePropAnchor, generateSceneBaseline } from '@/api/storyboard'
+import { getAssetGenerationProgress } from '@/api/generation'
+import { useGenerationProgress } from '@/composables/useGenerationProgress'
+import type { AssetGenerationJob, AssetGenerationProgress } from '@/types/generation'
 
 const route = useRoute()
 const router = useRouter()
@@ -122,8 +125,6 @@ const deleteMutation = useMutation({
 // --- Drawer ---
 const drawerVisible = ref(false)
 const activeAsset = ref<Asset | null>(null)
-const versions = ref<AssetVersion[]>([])
-const loadingVersions = ref(false)
 const drawerPrompt = ref('')
 const drawerPromptVersion = ref('')
 
@@ -136,29 +137,11 @@ async function copyText(text: string) {
   }
 }
 
-function formatTime(ts?: string | null): string {
-  if (!ts) return '-'
-  try {
-    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
-  } catch {
-    return ts
-  }
-}
-
 async function openDrawer(asset: Asset) {
   activeAsset.value = asset
   drawerVisible.value = true
-  loadingVersions.value = true
   drawerPrompt.value = ''
   drawerPromptVersion.value = ''
-  try {
-    const res = await listAssetVersions(asset.id)
-    versions.value = res
-  } catch (e: any) {
-    message.error(`加载版本失败: ${e?.message ?? e}`)
-  } finally {
-    loadingVersions.value = false
-  }
   // 展示用：可重新生成的资产附带提示词（只读展示，读取失败不影响详情）
   if (canRegenerate(asset)) {
     try {
@@ -370,8 +353,10 @@ async function submitRegenerate() {
       idempotency_key: `asset_regen_${regenAsset.value.id}_${Date.now()}`,
     })
     regenJobStatus.value = res.status
-    message.success('重新生成任务已提交')
+    message.success('重新生成任务已提交，正在生成（进度见页面顶部进度面板）')
     startRegenPoll(res.job_id)
+    // 重新生成同样属于资产图生产：让顶部进度面板也跟踪它，用户不打开抽屉也能看到进度
+    await assetProgress.start({ notifyOnComplete: true })
   } catch (e: any) {
     regenErrorMsg.value = e?.message ?? '提交失败'
   } finally {
@@ -443,6 +428,8 @@ const MAX_CARD_WIDTH = 320
 const GRID_GAP = 12
 let gridObserver: ResizeObserver | null = null
 onMounted(() => {
+  // 刷新页面/再次进入时也要能看到当前生成进度（有在途任务才轮询）
+  void assetProgress.bootstrap()
   if (!gridRef.value) return
   gridObserver = new ResizeObserver((entries) => {
     for (const entry of entries) gridWidth.value = entry.contentRect.width
@@ -472,7 +459,10 @@ const assetGroups = computed(() => {
     { type: 'scene', label: '场景' },
     { type: 'prop', label: '道具' },
   ]
-  return defs.map((d) => ({ ...d, items: items.filter((a) => a.asset_type === d.type) }))
+  const groups = defs.map((d) => ({ ...d, items: items.filter((a) => a.asset_type === d.type) }))
+  // 具体分类只展示该分类分组，避免其它分类以 0 计数形式出现在页面上
+  if (!activeCategory.value) return groups
+  return groups.filter((g) => g.type === activeCategory.value)
 })
 
 // --- 资产齐全度检查（角色/场景/道具参考图生成进度） ---
@@ -510,16 +500,161 @@ const { data: propsData } = useQuery({
 const readiness = computed(() => {
   const cs = charsData.value?.items ?? []
   const ss = (scenesData.value?.items ?? []) as Array<{ baseline_asset_id?: string | null }>
-  // 道具只统计需要锚定图的条目，与后端审核通过时的校验口径保持一致（anchor_required=true）
-  const ps = (propsData.value?.items ?? []) as Array<{ anchor_required?: boolean; anchor_asset_id?: string | null }>
-  const requiredProps = ps.filter((p) => p.anchor_required)
-  const total = cs.length + ss.length + requiredProps.length
+  const ps = (propsData.value?.items ?? []) as Array<{ anchor_asset_id?: string | null }>
+  // 与页面展示口径保持一致：制作资产区列出全部角色/场景/道具，齐全度亦按全部统计
+  // （道具不再按 anchor_required 过滤，否则页面上「已生成 8/8」与横幅「3/3」自相矛盾）
+  const total = cs.length + ss.length + ps.length
   const done =
     cs.filter((c) => !!c.portrait_asset_id).length +
     ss.filter((s) => !!s.baseline_asset_id).length +
-    requiredProps.filter((p) => !!p.anchor_asset_id).length
+    ps.filter((p) => !!p.anchor_asset_id).length
   return { total, done, all: total > 0 && done === total }
 })
+
+// --- 生成进度（后端聚合：正在生成什么 / 批量进度 / 是否全部完成） ---
+/** 本次会话提交的资产生成任务：用于「刚才这批」的进度条与失败重试 */
+interface SubmittedAsset {
+  id: string
+  name: string
+  kind: 'character' | 'scene' | 'prop'
+  unit: string
+}
+const submittedAssets = ref<SubmittedAsset[]>([])
+const submittedJobIds = ref<string[]>([])
+
+const assetProgress = useGenerationProgress<AssetGenerationProgress>({
+  fetcher: () => getAssetGenerationProgress(projectId.value),
+  onChange: async () => {
+    // 出图完成后重新拉取角色/场景/道具与资产列表，让卡片与图片立即更新
+    await refreshAll()
+  },
+  onAllComplete: () => {
+    message.success('公共资产图已全部生成完成，请检查效果后提交人工审核')
+  },
+})
+
+/** 资产图分组统计（角色/场景/道具）：模板里安全遍历，避免 Partial 记录取值可能为空 */
+const progressGroups = computed(() => {
+  const groups = assetProgress.data.value?.groups ?? {}
+  const defs: Array<{ kind: 'character' | 'scene' | 'prop'; label: string }> = [
+    { kind: 'character', label: '角色定妆图' },
+    { kind: 'scene', label: '场景基准图' },
+    { kind: 'prop', label: '道具锚定图' },
+  ]
+  return defs
+    .map((d) => ({ ...d, ...(groups[d.kind] ?? { total: 0, done: 0 }) }))
+    .filter((g) => g.total > 0)
+})
+
+/** 在途任务按角色/场景/道具分组：直接回答「正在生成的是什么类型的图」 */
+const inflightGroups = computed(() => {
+  const defs = [
+    { kind: 'character', label: '角色', unit: '定妆图' },
+    { kind: 'scene', label: '场景', unit: '基准图' },
+    { kind: 'prop', label: '道具', unit: '锚定图' },
+  ]
+  const list = assetProgress.data.value?.inflight ?? []
+  return defs
+    .map((d) => ({ ...d, items: list.filter((j) => j.kind === d.kind) }))
+    .filter((g) => g.items.length > 0)
+})
+
+/** 在途任务 → 卡片/分组可直接查询的状态 */
+const inflightById = computed(() => {
+  const map = new Map<string, AssetGenerationJob>()
+  for (const job of assetProgress.data.value?.inflight ?? []) map.set(job.entity_id, job)
+  return map
+})
+
+/** 本次提交批次里，仍在途的任务 ID 集（与后端在途明细求交） */
+const submittedInflightIds = computed(() => {
+  const inflight = new Set((assetProgress.data.value?.inflight ?? []).map((j) => j.entity_id))
+  return submittedAssets.value.filter((s) => inflight.has(s.id)).map((s) => s.id)
+})
+
+/** 批量进度：本次提交 N 个，其中完成 M 个 / 失败 K 个 / 仍在生成中 */
+const batchProgress = computed(() => {
+  const total = submittedAssets.value.length
+  if (!total) return null
+  const doneSet = new Set<string>()
+  // 已出图判定：任一资产图字段已回写即视为完成（与齐全度同口径）
+  const byId = new Map<string, boolean>()
+  for (const c of (charsData.value?.items ?? []) as Array<{ id: string; portrait_asset_id?: string | null }>) {
+    byId.set(c.id, !!c.portrait_asset_id)
+  }
+  for (const s of (scenesData.value?.items ?? []) as Array<{ id: string; baseline_asset_id?: string | null }>) {
+    byId.set(s.id, !!s.baseline_asset_id)
+  }
+  for (const p of (propsData.value?.items ?? []) as Array<{ id: string; anchor_asset_id?: string | null }>) {
+    byId.set(p.id, !!p.anchor_asset_id)
+  }
+  for (const s of submittedAssets.value) if (byId.get(s.id)) doneSet.add(s.id)
+  const done = doneSet.size
+  const failed = assetProgress.data.value?.failed_recent ?? []
+  const failedIds = new Set(failed.filter((f) => submittedAssets.value.some((s) => s.id === f.entity_id)).map((f) => f.entity_id))
+  const running = submittedInflightIds.value.length
+  // 「已完成 + 生成中 + 失败」= total 时批次才算收尾（失败项不阻塞完成提示，但会单独提示）
+  const percent = total ? Math.round((done / total) * 100) : 0
+  return {
+    total,
+    done,
+    running,
+    failedIds,
+    failed: [...failedIds].length,
+    percent,
+    finished: running === 0 && done + failedIds.size >= total,
+  }
+})
+
+/** 卡片上的生成状态文案：排队 / 生成中 42% */
+function inflightText(job?: AssetGenerationJob): string {
+  if (!job) return ''
+  if (job.status === 'running') return job.progress != null ? `生成中 ${job.progress}%` : '生成中'
+  if (job.status === 'queued') return '排队中'
+  return '提交确认中'
+}
+function formatTime(iso?: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString('zh-CN', { hour12: false })
+}
+/** 顶部生成状态：优先展示「正在生成什么」，其次展示「上次全部完成」 */
+const assetGenHeadline = computed(() => {
+  const p = assetProgress.data.value
+  const inflightCount = p?.inflight_count ?? 0
+  if (inflightCount > 0) {
+    const parts = inflightGroups.value.map(
+      (g) => `${g.label}${g.items.length}个（${g.unit}）`,
+    )
+    return `正在生成：${parts.join('、')}`
+  }
+  if (projectReadiness.value.all) {
+    const at = formatTime(p?.last_completed_at)
+    return `公共资产图已全部生成完成${at ? `（最近完成于 ${at}）` : ''}`
+  }
+  if (!projectReadiness.value.total) return '解析完成后此处展示待生成的资产'
+  return `待生成：还有 ${projectReadiness.value.total - projectReadiness.value.done} 个资产图未生成`
+})
+/** 项目级齐全度（后端权威口径，不受左侧分类筛选影响）：进度面板与审核闸口都用它 */
+const projectReadiness = computed(() => {
+  const p = assetProgress.data.value
+  if (p) return { total: p.total, done: p.done, all: p.all_done }
+  return readiness.value
+})
+
+/** 生成失败项（近 1 小时，按实体去重） */
+const failedEntities = computed(() => {
+  const list = assetProgress.data.value?.failed_recent ?? []
+  const seen = new Set<string>()
+  return list.filter((f) => {
+    if (seen.has(f.entity_id)) return false
+    seen.add(f.entity_id)
+    return true
+  })
+})
+/** 失败实体 ID 集：批量 chip 与重试按钮共用 */
+const failedEntityIds = computed(() => new Set(failedEntities.value.map((f) => f.entity_id)))
 // --- 制作资产区（公共资产生成：角色定妆图/场景基准图/道具锚定图） ---
 const craftingId = ref<string | null>(null)
 const batchCrafting = ref(false)
@@ -581,7 +716,7 @@ interface CraftItem {
 }
 const craftGroups = computed(() => {
   const cs = (charsData.value?.items ?? []) as Array<{ id: string; name: string; description?: string; portrait_asset_id?: string | null }>
-  const ss = (scenesData.value?.items ?? []) as Array<{ id: string; title?: string; summary?: string; baseline_asset_id?: string | null }>
+  const ss = (scenesData.value?.items ?? []) as Array<{ id: string; title?: string; description?: string; baseline_asset_id?: string | null }>
   const ps = (propsData.value?.items ?? []) as Array<{ id: string; name: string; description?: string; anchor_asset_id?: string | null }>
   return [
     {
@@ -590,7 +725,7 @@ const craftGroups = computed(() => {
     },
     {
       type: 'scene', label: '场景', unit: '基准图',
-      items: ss.map((s) => ({ id: s.id, name: s.title ?? s.id, prompt: s.summary ?? '', done: !!s.baseline_asset_id, kind: 'scene' as const })) as CraftItem[],
+      items: ss.map((s) => ({ id: s.id, name: s.title ?? s.id, prompt: s.description ?? '', done: !!s.baseline_asset_id, kind: 'scene' as const })) as CraftItem[],
     },
     {
       type: 'prop', label: '道具', unit: '锚定图',
@@ -603,13 +738,45 @@ const visibleCraftGroups = computed(() => {
   if (!activeCategory.value) return craftGroups.value
   return craftGroups.value.filter((g) => g.type === activeCategory.value)
 })
-function handleCraft(it: CraftItem) {
-  craftingId.value = it.id
-  const onSettled = () => { craftingId.value = null }
-  if (it.kind === 'character') genPortrait.mutate(it.id, { onSettled })
-  else if (it.kind === 'scene') genBaseline.mutate(it.id, { onSettled })
-  else genAnchor.mutate(it.id, { onSettled })
+/** 制作资产区副标题：随当前分类收敛，仅描述当前分类需要生成的图片类型 */
+const craftSubText = computed(() => {
+  const unitMap: Record<string, string> = {
+    character: '角色定妆图',
+    scene: '场景基准图',
+    prop: '道具锚定图',
+  }
+  const head = activeCategory.value
+    ? (unitMap[activeCategory.value] ?? '')
+    : '角色定妆图 / 场景基准图 / 道具锚定图'
+  return `${head}（项目级公共资产，按名称绑定供分镜引用）`
+})
+/** 提交批次：记录本次提交的资产与任务 ID，用于批次进度条与失败重试 */
+function trackSubmitted(items: CraftItem[], jobIds: string[]) {
+  const unitMap: Record<string, string> = { character: '定妆图', scene: '基准图', prop: '锚定图' }
+  submittedAssets.value = items.map((it) => ({
+    id: it.id,
+    name: it.name,
+    kind: it.kind,
+    unit: unitMap[it.kind] ?? '',
+  }))
+  submittedJobIds.value = jobIds
 }
+
+async function handleCraft(it: CraftItem) {
+  craftingId.value = it.id
+  try {
+    if (it.kind === 'character') await genPortrait.mutateAsync(it.id)
+    else if (it.kind === 'scene') await genBaseline.mutateAsync(it.id)
+    else await genAnchor.mutateAsync(it.id)
+    trackSubmitted([it], [])
+    await assetProgress.start({ notifyOnComplete: true })
+  } catch {
+    // 错误提示已由 mutation onError 统一处理
+  } finally {
+    craftingId.value = null
+  }
+}
+
 async function handleBatchCraft() {
   // 仅对勾选的制作资产批量触发：名称、占位路径、提示词均以库中定义为准
   const picked = visibleCraftGroups.value
@@ -620,25 +787,87 @@ async function handleBatchCraft() {
     return
   }
   batchCrafting.value = true
-  let submitted = 0
+  const submittedItems: CraftItem[] = []
+  const jobIds: string[] = []
   const failed: string[] = []
   try {
     for (const it of picked) {
       try {
-        if (it.kind === 'character') await genPortrait.mutateAsync(it.id)
-        else if (it.kind === 'scene') await genBaseline.mutateAsync(it.id)
-        else await genAnchor.mutateAsync(it.id)
-        submitted += 1
+        const res =
+          it.kind === 'character'
+            ? await genPortrait.mutateAsync(it.id)
+            : it.kind === 'scene'
+              ? await genBaseline.mutateAsync(it.id)
+              : await genAnchor.mutateAsync(it.id)
+        submittedItems.push(it)
+        const jobId = (res as { job?: { id?: string } } | undefined)?.job?.id
+        if (jobId) jobIds.push(jobId)
       } catch {
         failed.push(it.name)
       }
     }
-    if (submitted) message.success(`已提交 ${submitted} 个资产生成任务，生成进度见齐全度横幅`)
+    if (submittedItems.length) {
+      trackSubmitted(submittedItems, jobIds)
+      message.success(`已提交 ${submittedItems.length} 个图生成任务，正在生成：见上方批次进度`)
+      // 提交后立即建基线并开始轮询，全部结束后统一提示
+      await assetProgress.start({ notifyOnComplete: true })
+    }
     if (failed.length) message.error(`${failed.length} 个资产提交失败：${failed.slice(0, 3).join('、')}`)
     selectedCraftIds.value = []
   } finally {
     batchCrafting.value = false
   }
+}
+
+/** 失败项重试：只重提最近失败且属于本批次的资产 */
+const retryingFailed = ref(false)
+async function retryFailedCraft() {
+  const failedIds = new Set(
+    (assetProgress.data.value?.failed_recent ?? []).map((f) => f.entity_id),
+  )
+  const targets = submittedAssets.value.filter((s) => failedIds.has(s.id))
+  if (!targets.length) return
+  const all = visibleCraftGroups.value.flatMap((g) => g.items)
+  const picked = targets
+    .map((t) => all.find((i) => i.id === t.id && i.kind === t.kind))
+    .filter((i): i is CraftItem => Boolean(i))
+  retryingFailed.value = true
+  try {
+    const jobIds: string[] = []
+    const okItems: CraftItem[] = []
+    for (const it of picked) {
+      try {
+        const res =
+          it.kind === 'character'
+            ? await genPortrait.mutateAsync(it.id)
+            : it.kind === 'scene'
+              ? await genBaseline.mutateAsync(it.id)
+              : await genAnchor.mutateAsync(it.id)
+        okItems.push(it)
+        const jobId = (res as { job?: { id?: string } } | undefined)?.job?.id
+        if (jobId) jobIds.push(jobId)
+      } catch {
+        // 单个失败不阻断其余重试
+      }
+    }
+    if (okItems.length) {
+      submittedAssets.value = [
+        ...submittedAssets.value.filter((s) => !okItems.some((i) => i.id === s.id)),
+        ...targets.filter((t) => okItems.some((i) => i.id === t.id)),
+      ]
+      submittedJobIds.value = [...submittedJobIds.value, ...jobIds]
+      message.success(`已重新提交 ${okItems.length} 个失败任务`)
+      await assetProgress.start({ notifyOnComplete: true })
+    }
+  } finally {
+    retryingFailed.value = false
+  }
+}
+
+/** 取消本次批次的展示（不取消后端任务） */
+function clearBatch() {
+  submittedAssets.value = []
+  submittedJobIds.value = []
 }
 </script>
 
@@ -665,13 +894,103 @@ async function handleBatchCraft() {
 
       <!-- Main content -->
       <div class="assets-main">
-        <!-- 资产齐全度横幅 -->
-        <div class="readiness-banner" :class="{ done: readiness.all }">
-          <span class="readiness-badge">{{ readiness.all ? '✓' : '⏳' }}</span>
-          <span class="readiness-text">
-            {{ readiness.all ? '公共资产图已齐全，请完成人工审核后进入分镜图' : `资产图生成中：${readiness.done}/${readiness.total} 已完成` }}
-          </span>
-          <n-button size="small" quaternary @click="router.push(`/project/${projectId}/parse`)">返回解析页</n-button>
+        <!-- 生成进度面板：说明正在生成哪类图（角色/场景/道具）、批量进度、是否全部完成 -->
+        <div class="gen-panel" :class="{ done: projectReadiness.all && !assetProgress.hasInflight.value, fail: failedEntities.length > 0 }">
+          <div class="gen-head">
+            <span class="gen-badge">{{ assetProgress.hasInflight.value ? '⏳' : projectReadiness.all ? '✓' : '•' }}</span>
+            <span class="gen-title">{{ assetGenHeadline }}</span>
+            <span class="gen-nums">
+              {{ projectReadiness.done }}/{{ projectReadiness.total }} 已完成（{{ projectReadiness.total ? Math.round((projectReadiness.done / projectReadiness.total) * 100) : 0 }}%）
+            </span>
+            <n-button size="tiny" quaternary :loading="assetProgress.loading.value" @click="assetProgress.refresh()">刷新进度</n-button>
+            <n-button size="small" quaternary @click="router.push(`/project/${projectId}/parse`)">返回解析页</n-button>
+          </div>
+          <n-progress
+            type="line"
+            :percentage="projectReadiness.total ? Math.round((projectReadiness.done / projectReadiness.total) * 100) : 0"
+            :height="8"
+            :border-radius="4"
+            :show-indicator="false"
+            :color="projectReadiness.all ? 'var(--state-success, #22c55e)' : 'var(--brand-primary)'"
+            rail-color="var(--border-subtle, #e5e7eb)"
+            class="gen-bar"
+          />
+          <div class="gen-groups">
+            <span
+              v-for="g in progressGroups"
+              :key="g.kind"
+              class="gen-group"
+              :class="{ ok: g.total > 0 && g.done === g.total }"
+            >{{ g.label }} {{ g.done }}/{{ g.total }}</span>
+          </div>
+
+          <!-- 正在生成什么：按类型分组列出条目、状态与百分比 -->
+          <div v-if="inflightGroups.length" class="gen-inflight">
+            <div v-for="g in inflightGroups" :key="g.kind" class="gen-inflight-group">
+              <span class="gen-inflight-kind">{{ g.label }}{{ g.unit }}·{{ g.items.length }} 个</span>
+              <div class="gen-inflight-items">
+                <span v-for="job in g.items" :key="job.job_id" class="gen-inflight-item">
+                  <span class="gen-inflight-name">{{ job.entity_name }}</span>
+                  <span class="gen-inflight-state" :class="job.status">
+                    {{ inflightText(job) }}
+                    <template v-if="job.status === 'running' && job.progress != null">
+                      <n-progress
+                        type="line"
+                        :percentage="job.progress"
+                        :height="3"
+                        :border-radius="2"
+                        :show-indicator="false"
+                        class="gen-mini-bar"
+                      />
+                    </template>
+                  </span>
+                </span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="!projectReadiness.all && assetProgress.data.value?.last_completed_at" class="gen-done-hint">
+            最近一次生成完成于 {{ formatTime(assetProgress.data.value?.last_completed_at) }}
+          </div>
+
+          <!-- 本次提交批次进度：本次提交 N 个 / 生成中 / 已完成 / 失败 -->
+          <div v-if="batchProgress" class="batch-panel">
+            <div class="batch-head">
+              <span class="batch-title">本批任务进度</span>
+              <span class="batch-nums">
+                共 {{ batchProgress.total }} 个 · 已完成 {{ batchProgress.done }} · 生成中 {{ batchProgress.running }}<template v-if="batchProgress.failed"> · 失败 {{ batchProgress.failed }}</template>
+              </span>
+              <n-button size="tiny" quaternary @click="clearBatch">收起</n-button>
+            </div>
+            <n-progress
+              type="line"
+              :percentage="batchProgress.percent"
+              :height="6"
+              :border-radius="3"
+              :show-indicator="false"
+              :status="batchProgress.failed && !batchProgress.running ? 'error' : 'default'"
+              rail-color="var(--border-subtle, #e5e7eb)"
+            />
+            <div class="batch-items">
+              <span
+                v-for="s in submittedAssets"
+                :key="s.id"
+                class="batch-chip"
+                :class="{
+                  running: submittedInflightIds.includes(s.id),
+                  fail: failedEntityIds.has(s.id),
+                }"
+              >{{ s.name }}</span>
+            </div>
+          </div>
+
+          <!-- 失败项：明确列出失败原因，提供一键重试 -->
+          <div v-if="failedEntities.length" class="gen-failed">
+            <span class="gen-failed-title">最近生成失败 {{ failedEntities.length }} 个：</span>
+            <span v-for="f in failedEntities" :key="f.job_id" class="gen-failed-item">
+              {{ f.entity_name }}（{{ f.error_msg || '未知原因' }}）
+            </span>
+            <n-button v-if="batchProgress" size="tiny" type="warning" :loading="retryingFailed" @click="retryFailedCraft">重试失败项</n-button>
+          </div>
         </div>
         <!-- 人工审核闸口：资产库出图完毕后必须人工确认，通过后才放行分镜图 -->
         <div class="readiness-banner" :class="{ done: assetsReviewStatus === 'approved' }">
@@ -681,7 +1000,7 @@ async function handleBatchCraft() {
           <n-button
             size="small"
             type="primary"
-            :disabled="!readiness.all"
+            :disabled="!projectReadiness.all"
             :loading="reviewMutation.isPending.value"
             @click="reviewMutation.mutate('approve')"
           >审核通过</n-button>
@@ -703,8 +1022,16 @@ async function handleBatchCraft() {
         <div class="craft-section">
           <div class="craft-head">
             <span class="craft-title">制作资产区</span>
-            <span class="craft-sub">角色定妆图 / 场景基准图 / 道具锚定图（项目级公共资产，按名称绑定供分镜引用）</span>
-            <n-button size="medium" type="primary" :loading="batchCrafting" :disabled="!selectedCraftIds.length" @click="handleBatchCraft">批量生成（{{ selectedCraftIds.length }}）</n-button>
+            <span class="craft-sub">{{ craftSubText }}</span>
+            <n-button
+              size="medium"
+              type="primary"
+              :loading="batchCrafting"
+              :disabled="!selectedCraftIds.length"
+              @click="handleBatchCraft"
+            >
+              {{ assetProgress.hasInflight.value ? `生成中 ${assetProgress.inflightCount.value} 个 · 批量生成（${selectedCraftIds.length}）` : `批量生成（${selectedCraftIds.length}）` }}
+            </n-button>
           </div>
           <div class="craft-body">
           <div v-for="grp in visibleCraftGroups" :key="grp.type" class="craft-group">
@@ -719,7 +1046,12 @@ async function handleBatchCraft() {
             </div>
             <!-- 当前分类：展示该分类需要生成的图片卡片 -->
             <div v-if="grp.items.length" class="craft-grid">
-              <div v-for="it in grp.items" :key="it.id" class="craft-card" :class="{ done: it.done }">
+              <div
+                v-for="it in grp.items"
+                :key="it.id"
+                class="craft-card"
+                :class="{ done: it.done, inflight: !!inflightById.get(it.id), failed: failedEntityIds.has(it.id) }"
+              >
                 <div class="craft-card-head">
                   <n-checkbox
                     :checked="selectedCraftIds.includes(it.id)"
@@ -727,8 +1059,21 @@ async function handleBatchCraft() {
                     @click.stop
                   />
                   <span class="craft-card-name">{{ it.name }}</span>
-                  <n-tag v-if="it.done" size="tiny" type="success" :bordered="false">已生成</n-tag>
-                  <n-button v-else size="tiny" quaternary type="primary" :loading="craftingId === it.id" @click="handleCraft(it)">生成{{ grp.unit }}</n-button>
+                  <!-- 生成中的卡片直接显示排队/百分比，不必再点开才知道进度 -->
+                  <n-tag v-if="inflightById.get(it.id)" size="tiny" type="info" :bordered="false">
+                    {{ inflightText(inflightById.get(it.id)) }}
+                  </n-tag>
+                  <n-tag v-else-if="failedEntityIds.has(it.id)" size="tiny" type="error" :bordered="false">生成失败</n-tag>
+                  <n-tag v-else-if="it.done" size="tiny" type="success" :bordered="false">已生成</n-tag>
+                  <n-button
+                    v-else
+                    size="tiny"
+                    quaternary
+                    type="primary"
+                    :loading="craftingId === it.id"
+                    :disabled="!!inflightById.get(it.id)"
+                    @click="handleCraft(it)"
+                  >生成{{ grp.unit }}</n-button>
                 </div>
                 <p class="craft-card-prompt" :title="it.prompt">{{ it.prompt || '暂无提示词描述' }}</p>
               </div>
@@ -845,8 +1190,6 @@ async function handleBatchCraft() {
             <div class="drawer-meta">
               <div><span class="field-label">ID：</span>{{ activeAsset.id }}</div>
               <div><span class="field-label">类型：</span>{{ assetTypeLabels[activeAsset.asset_type] || activeAsset.asset_type }}</div>
-              <div><span class="field-label">当前版本：</span>v{{ activeAsset.version }}</div>
-              <div><span class="field-label">更新时间：</span>{{ formatTime(activeAsset.updated_at) }}</div>
               <div v-if="typeof activeAsset.reference_count === 'number'"><span class="field-label">引用次数：</span>{{ activeAsset.reference_count }}</div>
             </div>
             <div v-if="drawerPrompt" class="drawer-section">
@@ -856,22 +1199,6 @@ async function handleBatchCraft() {
                 <n-button size="tiny" quaternary @click="copyText(drawerPrompt)">复制</n-button>
               </div>
               <div class="drawer-prompt">{{ drawerPrompt }}</div>
-            </div>
-            <div class="drawer-section">
-              <div class="drawer-section-head">
-                <span class="drawer-section-title">版本记录</span>
-                <n-spin v-if="loadingVersions" :size="14" />
-              </div>
-              <n-timeline v-if="versions.length" size="medium">
-                <n-timeline-item
-                  v-for="v in versions"
-                  :key="v.version"
-                  :title="`v${v.version}`"
-                  :content="formatTime(v.created_at)"
-                  :type="v.version === activeAsset.version ? 'success' : 'default'"
-                />
-              </n-timeline>
-              <div v-else-if="!loadingVersions" class="drawer-empty">暂无版本记录</div>
             </div>
             <n-space :size="8">
               <n-button size="small" :disabled="activeAsset.locked" @click="openReplace(activeAsset)">上传替换</n-button>
@@ -1032,6 +1359,86 @@ async function handleBatchCraft() {
 .readiness-banner.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
 .readiness-badge { font-size: 14px; }
 .readiness-text { font-size: 13px; color: var(--text-primary, #333); margin-right: auto; }
+
+/* ===== 生成进度面板 ===== */
+.gen-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--bg-panel, #fff);
+}
+.gen-panel.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
+.gen-panel.fail { border-color: rgba(239, 68, 68, 0.35); }
+.gen-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gen-badge { font-size: 14px; }
+.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
+.gen-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-left: auto; }
+.gen-bar { width: 100%; }
+.gen-groups { display: flex; gap: 8px; flex-wrap: wrap; }
+.gen-group {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bg-elevated, #f1f5f9);
+  color: var(--text-secondary, #64748b);
+}
+.gen-group.ok { background: rgba(34, 197, 94, 0.12); color: #15803d; }
+.gen-inflight { display: flex; flex-direction: column; gap: 6px; }
+.gen-inflight-group { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.gen-inflight-kind {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-primary, #6366f1);
+  padding-top: 2px;
+}
+.gen-inflight-items { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.gen-inflight-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-elevated, #f8fafc);
+  border: 1px solid var(--border-subtle, #e5e7eb);
+}
+.gen-inflight-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gen-inflight-state { color: #b45309; display: inline-flex; align-items: center; gap: 6px; }
+.gen-inflight-state.running { color: var(--brand-primary, #6366f1); }
+.gen-inflight-state.queued { color: var(--text-secondary, #64748b); }
+.gen-mini-bar { width: 54px; }
+.gen-done-hint { font-size: 12px; color: #15803d; }
+.batch-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed var(--border-subtle, #e5e7eb);
+  padding-top: 8px;
+}
+.batch-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.batch-title { font-size: 12px; font-weight: 600; color: var(--text-primary, #333); }
+.batch-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-right: auto; }
+.batch-items { display: flex; gap: 6px; flex-wrap: wrap; }
+.batch-chip {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bg-elevated, #f1f5f9);
+  color: var(--text-secondary, #64748b);
+  border: 1px solid transparent;
+}
+.batch-chip.running { background: rgba(99, 102, 241, 0.12); color: #4338ca; border-color: rgba(99, 102, 241, 0.3); }
+.batch-chip.fail { background: rgba(239, 68, 68, 0.1); color: #b91c1c; border-color: rgba(239, 68, 68, 0.3); }
+.gen-failed { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #b91c1c; }
+.gen-failed-title { font-weight: 600; }
+.gen-failed-item { color: #b45309; }
+.craft-card.inflight { border-color: rgba(99, 102, 241, 0.45); background: rgba(99, 102, 241, 0.05); }
+.craft-card.failed { border-color: rgba(239, 68, 68, 0.4); }
 .assets-page {
   padding: 16px; min-height: calc(100vh - var(--app-header-height, 56px));
   /* 设计令牌（局部，暗色主题变量化预留） */

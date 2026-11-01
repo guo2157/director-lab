@@ -3,14 +3,19 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
-  NButton, NSpace, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
-  NInput, NTooltip, NCheckbox, NImage, useMessage,
+  NButton, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
+  NInput, NTooltip, NCheckbox, NImage, NModal, NRadioGroup, NRadio, NSelect, NProgress, useMessage,
 } from 'naive-ui'
-import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots } from '@/api/script'
-import { generateShot, generateProjectShots } from '@/api/storyboard'
+import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots, updateShot } from '@/api/script'
+import { generateShot, generateProjectShots, regenerateShotClip } from '@/api/storyboard'
+import { listJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
-import RegenerateConfigPanel from '@/components/RegenerateConfigPanel.vue'
+import { fetchRegenerateConfig, type RegenerateRef } from '@/api/regeneration'
+import { listWorkflows } from '@/api/workflows'
+import { getClipGenerationProgress } from '@/api/generation'
+import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Scene, Shot, ShotKind } from '@/types/script'
+import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
 
 const route = useRoute()
@@ -19,6 +24,26 @@ const message = useMessage()
 const queryClient = useQueryClient()
 
 const projectId = computed(() => route.params.id as string)
+
+// --- 视频生成档位：极速 5s / 标准 5s / 质量 10s（对应库里三套 4 步工作流） ---
+const clipTier = ref<'fast_5s' | 'std_5s' | 'quality_10s'>('std_5s')
+const clipTierOptions = [
+  { label: '极速 5s（最快，480×864）', value: 'fast_5s' },
+  { label: '标准 5s（推荐，640×1120）', value: 'std_5s' },
+  { label: '质量 10s（最清晰，768×1344）', value: 'quality_10s' },
+]
+const clipWorkflowsQuery = useQuery({
+  queryKey: ['workflows', 'video'],
+  queryFn: () => listWorkflows({ workflow_type: 'video', page_size: 50 }),
+  staleTime: 5 * 60 * 1000,
+})
+/** 当前档位对应的 workflow_id；库里没有时返回 undefined，后端按默认工作流匹配 */
+const clipWorkflowId = computed(() => {
+  // /api/workflows 返回的是数组（非分页对象），这里两种形态都兼容
+  const data: any = clipWorkflowsQuery.data.value
+  const items: Array<{ id: string; name: string }> = Array.isArray(data) ? data : (data?.items ?? [])
+  return items.find((w) => w.name.endsWith(clipTier.value))?.id
+})
 
 // --- Data fetching ---
 const scenesQuery = useQuery({
@@ -49,8 +74,10 @@ const generateMutation = useMutation({
   mutationFn: (params: { shotId: string; payload: GenerateShotPayload }) =>
     generateShot(params.shotId, params.payload),
   onSuccess: () => {
-    message.success('生成任务已提交')
+    message.success('生成任务已提交，正在生成（进度见顶部进度面板）')
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
+    void trackClipProgress()
   },
   onError: (e: any) => {
     message.error(`生成失败: ${e?.message ?? e}`)
@@ -63,13 +90,71 @@ function handleGenerateFromDrawer(target: 'keyframe' | 'clip') {
   const params: Record<string, string> = {}
   if (target === 'keyframe') {
     if (editImagePrompt.value) params.prompt = editImagePrompt.value
-    if (editNegativePrompt.value) params.negative_prompt = editNegativePrompt.value
   } else {
     if (editVideoPrompt.value) params.prompt = editVideoPrompt.value
+    // 负向提示词仅在当前工作流声明支持时传入，避免向不支持的节点强塞参数
+    if (negativeSupported.value && editNegativePrompt.value.trim()) {
+      params.negative_prompt = editNegativePrompt.value.trim()
+    }
   }
   generateMutation.mutate({
     shotId: activeShot.value.id,
-    payload: { target, params } as GenerateShotPayload,
+    payload: { target, params, workflow_id: target === 'clip' ? clipWorkflowId.value : undefined } as GenerateShotPayload,
+  })
+}
+
+// --- 重新生成分镜视频：覆盖原视频 + 取消该镜头历史任务（历史任务取消后不再占用 ComfyUI 资源） ---
+const showRegenClipModal = ref(false)
+/** 该镜头是否已有视频产物（含正在生成的在途任务）：有则可视为『重新生成』 */
+const clipActionIsRegenerate = computed(() => {
+  const shot = activeShot.value
+  if (!shot) return false
+  if (shot.current_assets?.clip) return true
+  return activeClipJobByShot.value.has(shot.id)
+})
+const clipActionLabel = computed(() =>
+  clipActionIsRegenerate.value ? '重新生成' : '生成视频',
+)
+const regenerateClipMutation = useMutation({
+  mutationFn: (params: { shotId: string; payload: GenerateShotPayload }) =>
+    regenerateShotClip(params.shotId, params.payload),
+  onSuccess: (res: any) => {
+    const cancelled: string[] = res?.cancelled_job_ids ?? []
+    message.success(
+      cancelled.length
+        ? `已提交重新生成，原视频将被覆盖，已取消 ${cancelled.length} 个历史任务`
+        : '已提交重新生成，原视频将被覆盖',
+    )
+    queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
+    void trackClipProgress()
+  },
+  onError: (e: any) => {
+    message.error(`重新生成失败: ${e?.message ?? e}`)
+  },
+})
+/** 抽屉内点击视频按钮：未生成过直接提交；已生成/在生成中先弹窗确认覆盖 */
+function handleClipActionClick() {
+  if (!activeShot.value) return
+  if (!clipActionIsRegenerate.value) {
+    handleGenerateFromDrawer('clip')
+    return
+  }
+  showRegenClipModal.value = true
+}
+/** 确认重新生成：携带当前编辑的提示词提交，后端取消历史任务并绑定新任务 */
+function confirmRegenerateClip() {
+  const shot = activeShot.value
+  if (!shot) return
+  const params: Record<string, string> = {}
+  if (editVideoPrompt.value) params.prompt = editVideoPrompt.value
+  if (negativeSupported.value && editNegativePrompt.value.trim()) {
+    params.negative_prompt = editNegativePrompt.value.trim()
+  }
+  showRegenClipModal.value = false
+  regenerateClipMutation.mutate({
+    shotId: shot.id,
+    payload: { target: 'clip', params, workflow_id: clipWorkflowId.value } as GenerateShotPayload,
   })
 }
 
@@ -118,9 +203,34 @@ function onDrop(e: DragEvent, targetShot: Shot, sceneId: string) {
 // --- Drawer ---
 const drawerVisible = ref(false)
 const activeShot = ref<Shot | null>(null)
+
+/** 系统级默认负向提示词：统一维护，用户未自定义时作为默认值；图文可共用，是否启用按模型能力决定 */
+const DEFAULT_NEGATIVE_PROMPT = [
+  'low quality, worst quality, low resolution, blurry, out of focus, pixelated, noisy',
+  'compression artifacts, excessive motion blur, overexposed, underexposed, poor lighting',
+  'unnatural colors, oversaturated, washed-out colors, excessive sharpening',
+  'distorted image, visual artifacts, malformed anatomy, deformed body, unnatural body proportions',
+  'deformed face, asymmetrical facial features, malformed hands, malformed feet',
+  'extra fingers, missing fingers, extra limbs, missing limbs, duplicated body parts',
+  'unnatural pose, unnatural movement, stiff motion, jerky motion, inconsistent motion',
+  'temporal inconsistency, flickering, jitter, ghosting, double images, frame instability',
+  'warped objects, distorted geometry, inconsistent perspective, inconsistent lighting, inconsistent shadows',
+  'floating objects, duplicated objects, disappearing objects, unwanted objects',
+  'unexpected background changes, inconsistent character appearance, identity drift',
+  'inconsistent facial features, inconsistent clothing, inconsistent hairstyle, inconsistent object shapes',
+  'unnatural physical interactions, broken contact between objects, clipping, penetration artifacts',
+  'text artifacts, random text, watermark, logo, unwanted borders, unwanted black bars',
+].join(', ')
+
 const editImagePrompt = ref('')
 const editVideoPrompt = ref('')
-const editNegativePrompt = ref('')
+/** 负向提示词：默认用统一模板，用户可改；工作流未声明支持时不显示也不传参 */
+const editNegativePrompt = ref(DEFAULT_NEGATIVE_PROMPT)
+/** 当前视频工作流是否支持负向提示词，由重生成配置接口的 negative_prompt.supported 决定 */
+const negativeSupported = ref(false)
+/** 打开抽屉时的原始提示词快照：用于判断用户是否真的改过，避免无改动也触发下游产物失效 */
+const originImagePrompt = ref('')
+const originVideoPrompt = ref('')
 
 /** 按 MiniMax H3 提示词规范（I2VA：首帧关键帧全参考）构建默认视频提示词。
  * <Picture 1> 为 H3 图片引用标签（对应后端自动注入的关键帧参考图 ref_image）；
@@ -144,37 +254,210 @@ function buildH3VideoPrompt(shot: Shot): string {
 
 function openDrawer(shot: Shot) {
   activeShot.value = shot
+  void loadRealRefs(shot)
   editImagePrompt.value = shot.image_prompt ?? ''
   editVideoPrompt.value = shot.video_prompt || buildH3VideoPrompt(shot)
-  editNegativePrompt.value = ''
+  // 负向提示词无独立存储字段，每次打开从系统默认模板起，用户可在本次生成前自行改写
+  editNegativePrompt.value = DEFAULT_NEGATIVE_PROMPT
+  // 以打开抽屉时实际展示的内容作为比对基准：
+  // 自动填充的默认视频提示词不算用户改动，避免只改图像提示词时连带作废视频
+  originImagePrompt.value = editImagePrompt.value
+  originVideoPrompt.value = editVideoPrompt.value
   drawerVisible.value = true
 }
 
-/** 重新生成目标：已生成分镜视频时配置面板展示视频配置，否则展示分镜图配置。
- * 重新生成必须基于已存在的产物版本，无产物时面板不展示，引导先完成首次生成。 */
-const regenerateTarget = computed<'keyframe' | 'clip' | null>(() => {
-  const assets = activeShot.value?.current_assets
-  if (!assets) return null
-  if (assets.clip) return 'clip'
-  if (assets.keyframe) return 'keyframe'
-  return null
+// --- 分镜视频任务状态：轮询在途 generate_clip 任务，视频未产出前不显示已完成 ---
+// 轮询间隔：存在在途任务时每 20s 刷新一次进度，无在途任务时停止轮询
+const clipJobsQuery = useQuery({
+  queryKey: ['jobs', projectId, 'generate_clip'],
+  queryFn: () => listJobs({ project_id: projectId.value, job_type: 'generate_clip', page_size: 100 }),
+  refetchInterval: (query) => {
+    const items = (query.state.data as { items?: Array<{ status: string }> } | undefined)?.items ?? []
+    const hasActive = items.some(
+      (j) =>
+        j.status === 'queued' ||
+        j.status === 'running' ||
+        j.status === 'chained_wait' ||
+        j.status === 'submission_unknown'
+    )
+    return hasActive ? 20000 : false
+  },
 })
+const CLIP_STATUS_RANK: Record<string, number> = {
+  running: 3,
+  submission_unknown: 3,
+  queued: 2,
+  chained_wait: 1,
+}
+const activeClipJobByShot = computed(() => {
+  // 同一镜头可能同时有多个在途任务（例如「重新生成」时旧任务在跑、批量又排了一条）：
+  // 优先级 running > queued > chained_wait，同级取创建时间最新的，避免"正在生成"被新排队任务盖掉
+  const best = new Map<string, { rank: number; created: string; status: string }>()
+  for (const j of clipJobsQuery.data.value?.items ?? []) {
+    if (!j.shot_id) continue
+    const rank = CLIP_STATUS_RANK[j.status]
+    if (!rank) continue
+    const created = j.created_at ?? ''
+    const cur = best.get(j.shot_id)
+    if (!cur || rank > cur.rank || (rank === cur.rank && created > cur.created)) {
+      best.set(j.shot_id, { rank, created, status: j.status })
+    }
+  }
+  const map = new Map<string, 'queued' | 'running' | 'chained_wait' | 'submission_unknown'>()
+  for (const [shotId, item] of best) {
+    map.set(shotId, item.status as 'queued' | 'running' | 'chained_wait' | 'submission_unknown')
+  }
+  return map
+})
+// 镜头生成进度百分比：取该镜头在途 generate_clip 任务的 progress（0-100）
+const clipProgressByShot = computed(() => {
+  const map = new Map<string, number>()
+  const latestCreatedByShot = new Map<string, string>()
+  for (const j of clipJobsQuery.data.value?.items ?? []) {
+    if (j.shot_id && j.status === 'running' && typeof j.progress === 'number') {
+      const created = j.created_at ?? ''
+      const prev = latestCreatedByShot.get(j.shot_id)
+      if (prev === undefined || created > prev) {
+        latestCreatedByShot.set(j.shot_id, created)
+        map.set(j.shot_id, j.progress)
+      }
+    }
+  }
+  return map
+})
+
+// --- 视频生成总体进度（后端聚合：X/Y、正在跑哪一镜、队列名次与预计等待） ---
+const clipProgress = useGenerationProgress<ClipGenerationProgress>({
+  fetcher: () => getClipGenerationProgress(projectId.value),
+  // 视频单镜耗时长，3s 轮询足够；有 chained_wait 时同样保持轮询，队列名次才会实时前移
+  onChange: () => {
+    // 完成一镜后刷新当前集镜头，让缩略图/状态跟上
+    for (const scene of filteredScenes.value) {
+      const ep = (scene.episodes ?? [])[0]
+      if (ep !== undefined) void loadSceneShots(scene.id, ep)
+    }
+  },
+  onAllComplete: () => {
+    message.success('全部分镜视频已生成完成，可进入合成与导出')
+  },
+})
+
+/** 在途视频任务 → 镜头（同镜多任务时 running 优先） */
+const inflightClipByShot = computed(() => {
+  const map = new Map<string, ClipGenerationJob>()
+  for (const job of clipProgress.data.value?.inflight ?? []) {
+    if (!job.shot_id) continue
+    const cur = map.get(job.shot_id)
+    if (!cur || (cur.status !== 'running' && job.status === 'running')) map.set(job.shot_id, job)
+  }
+  return map
+})
+
+/** 最近失败镜头（按镜头去重） */
+const failedClipByShot = computed(() => {
+  const map = new Map<string, string>()
+  for (const f of clipProgress.data.value?.failed_recent ?? []) {
+    if (f.shot_id && !map.has(f.shot_id)) map.set(f.shot_id, f.error_msg || '未知原因')
+  }
+  return map
+})
+
+/** 正在执行的镜头（running）与排队镜头数 */
+const runningClipJob = computed(
+  () => (clipProgress.data.value?.inflight ?? []).find((j) => j.status === 'running') ?? null,
+)
+const queuedClipCount = computed(() => {
+  const p = clipProgress.data.value
+  return (p?.inflight_queued ?? 0) + (p?.inflight_chained_wait ?? 0)
+})
+
+/** 剩余时间文案：把秒数转成「约 X 分」 */
+const estimatedWaitText = computed(() => {
+  const sec = clipProgress.data.value?.estimated_wait_seconds
+  if (!sec || sec <= 0) return ''
+  if (sec < 60) return '约 1 分钟内'
+  const min = Math.round(sec / 60)
+  return min >= 60 ? `约 ${Math.floor(min / 60)} 小时 ${min % 60} 分` : `约 ${min} 分`
+})
+
+const clipsDoneCount = computed(() => clipProgress.data.value?.with_clip ?? allShots.value.filter((s) => !!s.current_assets?.clip).length)
+
+const clipHeadline = computed(() => {
+  const p = clipProgress.data.value
+  const total = allShots.value.length || p?.total || 0
+  const done = clipsDoneCount.value
+  const running = runningClipJob.value
+  if (running) {
+    const pct = typeof running.progress === 'number' ? ` ${running.progress}%` : ''
+    const scene = running.scene_title ? `${running.scene_title} · ` : ''
+    return `正在生成视频：${scene}镜 ${running.shot_seq ?? '—'}${pct}`
+  }
+  if (p?.inflight_count) return `已排队 ${p.inflight_count} 个视频任务，等待开始渲染`
+  if (total > 0 && done === total) return '全部分镜视频已生成完成'
+  if (!total) return '暂无镜头'
+  return `还有 ${total - done} 个镜头未生成视频`
+})
+
+/** 单镜在途状态文案：生成中 42% / 排队第 3 位 / 等待前序镜头 */
+function clipInflightText(job?: ClipGenerationJob): string {
+  if (!job) return ''
+  if (job.status === 'running') return typeof job.progress === 'number' ? `视频生成中 ${job.progress}%` : '视频生成中'
+  if (job.status === 'chained_wait') return job.queue_rank > 0 ? `等待前序镜头（第 ${job.queue_rank} 位）` : '等待前序镜头'
+  if (job.status === 'queued') return job.queue_rank > 0 ? `排队第 ${job.queue_rank} 位` : '排队中'
+  return '提交确认中'
+}
+
+/** 批量出视频/重新生成后：立即建基线并轮询，全部完成后统一提示 */
+async function trackClipProgress() {
+  await clipProgress.start({ notifyOnComplete: true })
+}
+
+// 页面进入/刷新：有在途视频任务才轮询（放在 allShots 等依赖定义之后，避免初始化顺序问题）
+void clipProgress.bootstrap()
 
 // --- Status badge ---
 interface StatusInfo { label: string; color: string; icon?: string }
 function getShotStatus(shot: Shot): StatusInfo {
   const ca = shot.current_assets
+  // 正在生成优先：重新生成时镜头已有旧视频，也要显示"视频生成中"而不是"已完成"
+  const progressJob = inflightClipByShot.value.get(shot.id)
+  const jobStatus = progressJob?.status ?? activeClipJobByShot.value.get(shot.id)
+  if (jobStatus === 'running' || jobStatus === 'submission_unknown') {
+    const pct = progressJob?.progress ?? clipProgressByShot.value.get(shot.id)
+    return {
+      label: typeof pct === 'number' ? `视频生成中 ${pct}%` : '视频生成中',
+      color: '#3B82F6',
+    }
+  }
+
   const has = ca && (ca.keyframe || ca.clip || ca.audio)
   if (!has) {
     return { label: '未生成', color: 'var(--text-tertiary)' }
   }
-  const con = shot.consistency
-  if (con) {
-    if (con.verdict === 'passed') return { label: '已完成', color: '#22C55E' }
-    if (con.verdict === 'review') return { label: '待审核', color: '#F59E0B' }
-    if (con.verdict === 'failed') return { label: '待重做', color: '#EAB308' }
+  // 已有视频：排队的"重新生成"不影响展示，仍以已有产物为准（排队信息保留在任务列表里）
+  if (ca?.clip) {
+    const con = shot.consistency
+    if (con) {
+      if (con.verdict === 'passed') return { label: '已完成', color: '#22C55E' }
+      if (con.verdict === 'review') return { label: '待审核', color: '#F59E0B' }
+      if (con.verdict === 'failed') return { label: '待重做', color: '#EAB308' }
+    }
+    return { label: '已完成', color: '#22C55E' }
   }
-  return { label: '已完成', color: '#22C55E' }
+
+  // 还没有视频：显示排队/等前序（带队列名次），失败优先提示重试，否则待生成
+  if (failedClipByShot.value.has(shot.id)) {
+    return { label: '视频生成失败', color: '#EF4444' }
+  }
+  if (jobStatus === 'queued') {
+    const rank = progressJob?.queue_rank
+    return { label: rank ? `排队第 ${rank} 位` : '视频排队中', color: '#94A3B8' }
+  }
+  if (jobStatus === 'chained_wait') {
+    const rank = progressJob?.queue_rank
+    return { label: rank ? `等待前序（第 ${rank} 位）` : '等待前序镜头完成', color: '#A855F7' }
+  }
+  return { label: '待生成视频', color: 'var(--text-tertiary)' }
 }
 
 const shotKindLabels: Record<ShotKind, string> = {
@@ -204,6 +487,25 @@ const filteredScenes = computed(() => {
   if (ep === null) return items
   return items.filter((s) => (s.episodes ?? []).includes(ep))
 })
+// --- 全片连续镜头序号 ---
+// shot.seq 是场景内序号，各场景都会从 1 开始，直接展示会出现「镜头1 镜头2 镜头3」多组重复。
+// 这里按场景 seq 升序 + 场景内镜头 seq 升序累加，得到当前集内的全局镜号（1..N）。
+const orderedShots = computed<Shot[]>(() => {
+  const scenes = [...filteredScenes.value].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+  const list: Shot[] = []
+  for (const sc of scenes) {
+    const shots = [...(shotsMap.value[sc.id] ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    for (const s of shots) list.push(s)
+  }
+  return list
+})
+const globalSeqMap = computed(() => {
+  const map = new Map<string, number>()
+  orderedShots.value.forEach((s, i) => map.set(s.id, i + 1))
+  return map
+})
+/** 全片镜号：取不到时回落到场景内序号 */
+const shotGlobalSeq = (shot: Shot) => globalSeqMap.value.get(shot.id) ?? shot.seq
 // 场景数据或所选集数变化时按集加载镜头（episode 为后端必填参数，缺失会返回 422）
 watch(
   [() => scenesQuery.data.value, activeEpisode],
@@ -238,6 +540,273 @@ const readiness = computed(() => {
     ps.filter((p) => !!p.anchor_asset_id).length
   return { total, done, all: total > 0 && done === total }
 })
+
+// --- 参考图清单：以视频生成接口真实入参为准 ---
+// 数据来源优先级：
+// 1) 镜头已有产物时，读取生成配置接口返回的参考图记录（来自任务入参留痕，即真实传入的图）
+// 2) 尚无产物时，按视频工作流真实声明的参考图槽位推导「将传入」的图，并明确标注未生成
+// 视频工作流 wf_video_h3_ref2va 声明的槽位（含输入位置）：
+//   ref_prev_frame → ref_images.ref_image_0（上一镜尾帧，帧约束）
+//   ref_image      → ref_images.ref_image_1（本镜分镜图，首帧参考）
+//   ref_identity   → ref_images.ref_image_2（角色身份参考）
+//   ref_costume    → ref_images.ref_image_3（角色服装参考）
+//   ref_scene      → ref_images.ref_image_4（场景基准图）
+//   ref_prop       → ref_images.ref_image_5（道具锚定图）
+const SLOT_META: Record<string, { label: string; inputKey: string }> = {
+  ref_prev_frame: { label: '上一镜尾帧', inputKey: 'ref_images.ref_image_0' },
+  ref_image: { label: '本镜分镜图', inputKey: 'ref_images.ref_image_1' },
+  ref_identity: { label: '角色身份参考', inputKey: 'ref_images.ref_image_2' },
+  ref_costume: { label: '角色服装参考', inputKey: 'ref_images.ref_image_3' },
+  ref_scene: { label: '场景基准图', inputKey: 'ref_images.ref_image_4' },
+  ref_prop: { label: '道具锚定图', inputKey: 'ref_images.ref_image_5' },
+}
+
+interface ShotRefItem {
+  key: string
+  slot: string
+  name: string
+  roleLabel: string
+  inputKey: string
+  assetId: string
+  url: string
+  /** 缩略图地址（56px 小图用，避免加载 1.8MB 原图导致详情打开慢） */
+  thumbUrl?: string
+  required?: boolean
+  /** 已确认传入：来自生成任务入参留痕（本次生成真正用到的图） */
+  injected?: boolean
+  /** 对应定妆图 / 基准图 / 锚定图尚未生成 */
+  assetMissing?: boolean
+  /** 当前视频工作流无可用槽位，本次生成不会传入 */
+  noSlot?: boolean
+}
+
+/** 真实入参参考图：镜头已有产物时由接口返回，来自生成任务的入参留痕 */
+const realRefs = ref<RegenerateRef[]>([])
+const realRefsLoading = ref(false)
+
+async function loadRealRefs(shot: Shot) {
+  realRefs.value = []
+  negativeSupported.value = false
+  const hasOutput = Boolean(shot.current_assets?.clip || shot.current_assets?.keyframe)
+  if (!hasOutput) return
+  realRefsLoading.value = true
+  try {
+    const cfg = await fetchRegenerateConfig(shot.id, 'clip')
+    realRefs.value = (cfg.refs ?? []).filter((r) => r.enabled !== false)
+    // 只有当前工作流明确声明支持负向提示词时才展示该字段
+    negativeSupported.value = Boolean(cfg.negative_prompt?.supported)
+  } catch {
+    // 无产物或历史配置缺失时静默降级到槽位推导，不打断详情查看
+    realRefs.value = []
+  } finally {
+    realRefsLoading.value = false
+  }
+}
+const shotRefList = computed<ShotRefItem[]>(() => {
+  const shot = activeShot.value
+  if (!shot) return []
+  const chars = (charsData.value?.items ?? []) as Array<{ id: string; name: string; portrait_asset_id?: string | null }>
+  const scenes = (scenesQuery.data.value?.items ?? []) as Array<{ id: string; title: string; baseline_asset_id?: string | null }>
+  const props = (propsData.value?.items ?? []) as Array<{ id: string; name: string; anchor_asset_id?: string | null }>
+
+  const items: ShotRefItem[] = []
+  const seenAsset = new Set<string>()
+  const push = (v: ShotRefItem) => {
+    if (v.assetId) {
+      if (seenAsset.has(v.assetId)) return
+      seenAsset.add(v.assetId)
+    }
+    if (items.some((x) => x.key === v.key)) return
+    items.push(v)
+  }
+
+  // 按资产编号反查可辨认名称，取不到时回落到槽位用途名
+  const nameOfAsset = (assetId: string, slot: string): string => {
+    const primary = chars.find((c) => c.id === shot.character_id)
+    if (slot === 'ref_image') return `第 ${shotGlobalSeq(shot)} 镜分镜图`
+    if (slot === 'ref_prev_frame') return '上一镜尾帧'
+    const c = chars.find((x) => x.portrait_asset_id === assetId)
+    if (c) return c.name
+    const s = scenes.find((x) => x.baseline_asset_id === assetId)
+    if (s) return s.title
+    const p = props.find((x) => x.anchor_asset_id === assetId)
+    if (p) return p.name
+    if (slot === 'ref_identity' || slot === 'ref_costume') {
+      return primary ? primary.name : SLOT_META[slot]?.label ?? slot
+    }
+    return SLOT_META[slot]?.label ?? slot
+  }
+
+  // 一、真实入参优先：本镜已有产物时，接口留痕的图排在最前并标注已传入
+  for (const r of realRefs.value) {
+    if (!r.asset_id) continue
+    const slot = r.slot_param
+    const meta = SLOT_META[slot]
+    const assetId = r.asset_id as string
+    push({
+      key: `${slot}-${assetId}`,
+      slot,
+      name: nameOfAsset(assetId, slot),
+      roleLabel: meta?.label ?? r.role ?? slot,
+      inputKey: r.input_key || meta?.inputKey || '—',
+      assetId,
+      url: `/api/assets/${assetId}/file`,
+      thumbUrl: `/api/assets/${assetId}/file?thumb=true`,
+      required: Boolean(r.required),
+      injected: true,
+    })
+  }
+
+  // 二、本镜分镜图 → ref_image（首帧参考）
+  const kf = shot.current_assets?.keyframe
+  if (kf?.asset_id) {
+    push({
+      key: 'ref_image',
+      slot: 'ref_image',
+      name: `第 ${shotGlobalSeq(shot)} 镜分镜图`,
+      roleLabel: SLOT_META.ref_image.label,
+      inputKey: SLOT_META.ref_image.inputKey,
+      assetId: kf.asset_id,
+      url: kf.url || `/api/assets/${kf.asset_id}/file`,
+      thumbUrl: kf.thumb_url || `/api/assets/${kf.asset_id}/file?thumb=true`,
+      required: true,
+    })
+  }
+
+  // 提示词中的 @引用（与后端注入顺序一致）
+  const promptText = `${editVideoPrompt.value} ${shot.image_prompt ?? ''} ${shot.description ?? ''}`
+  const atNames = new Set<string>()
+  let atIdx = promptText.indexOf('@')
+  while (atIdx !== -1) {
+    const rest = promptText.slice(atIdx + 1)
+    const m = rest.match(/^[^\s，,。.;；:：@]+/)
+    if (m) atNames.add(m[0])
+    atIdx = promptText.indexOf('@', atIdx + 1)
+  }
+
+  // 三、角色：本镜主角色 + @引用的角色全部列出（缺定妆图、超槽位也照列）
+  const charSlots = ['ref_identity', 'ref_costume']
+  const relatedChars = chars
+    .filter((c) => shot.character_id === c.id || atNames.has(c.name))
+    .sort((a, b) => (a.id === shot.character_id ? -1 : b.id === shot.character_id ? 1 : 0))
+  relatedChars.forEach((c, idx) => {
+    const slot = charSlots[idx] ?? ''
+    const assetId = c.portrait_asset_id ?? ''
+    push({
+      key: `char-${c.id}`,
+      slot,
+      name: c.name,
+      roleLabel: slot ? SLOT_META[slot].label : '角色参考',
+      inputKey: slot ? SLOT_META[slot].inputKey : '—',
+      assetId,
+      url: assetId ? `/api/assets/${assetId}/file` : '',
+      thumbUrl: assetId ? `/api/assets/${assetId}/file?thumb=true` : '',
+      assetMissing: !assetId,
+      noSlot: !slot,
+    })
+  })
+
+  // 四、场景：本镜所属场景优先占用 ref_scene，@引用的其它场景照列
+  const relatedScenes = scenes
+    .filter((s) => shot.scene_id === s.id || atNames.has(s.title))
+    .sort((a, b) => (a.id === shot.scene_id ? -1 : b.id === shot.scene_id ? 1 : 0))
+  relatedScenes.forEach((s, idx) => {
+    const slot = idx === 0 ? 'ref_scene' : ''
+    const assetId = s.baseline_asset_id ?? ''
+    push({
+      key: `scene-${s.id}`,
+      slot,
+      name: s.title,
+      roleLabel: slot ? SLOT_META.ref_scene.label : '场景参考',
+      inputKey: slot ? SLOT_META[slot].inputKey : '—',
+      assetId,
+      url: assetId ? `/api/assets/${assetId}/file` : '',
+      thumbUrl: assetId ? `/api/assets/${assetId}/file?thumb=true` : '',
+      assetMissing: !assetId,
+      noSlot: !slot,
+    })
+  })
+
+  // 五、道具：@引用的道具全部列出，首个占用 ref_prop
+  const relatedProps = props.filter((p) => atNames.has(p.name))
+  relatedProps.forEach((p, idx) => {
+    const slot = idx === 0 ? 'ref_prop' : ''
+    const assetId = p.anchor_asset_id ?? ''
+    push({
+      key: `prop-${p.id}`,
+      slot,
+      name: p.name,
+      roleLabel: slot ? SLOT_META.ref_prop.label : '道具参考',
+      inputKey: slot ? SLOT_META[slot].inputKey : '—',
+      assetId,
+      url: assetId ? `/api/assets/${assetId}/file` : '',
+      thumbUrl: assetId ? `/api/assets/${assetId}/file?thumb=true` : '',
+      assetMissing: !assetId,
+      noSlot: !slot,
+    })
+  })
+
+  return items
+})
+
+// --- 保存提示词 ---
+// 后端在提示词变化时会做失效传播：改分镜图提示词会让分镜图与视频一并过期、
+// 分镜图确认状态回退；只改视频提示词仅影响视频。
+// 因此这里只提交真正改过的字段，未改动直接返回，避免误触导致已有产物作废。
+const savingPrompts = ref(false)
+async function handleSavePrompts() {
+  if (!activeShot.value) return
+  const shot = activeShot.value
+
+  const imageChanged = editImagePrompt.value !== originImagePrompt.value
+  const videoChanged = editVideoPrompt.value !== originVideoPrompt.value
+  if (!imageChanged && !videoChanged) {
+    message.info('提示词没有改动')
+    return
+  }
+  // 分镜图提示词变更会让分镜图与视频一并失效，视频提示词变更只影响视频：按实际改动分字段提交
+  const payload: { image_prompt?: string; video_prompt?: string } = {}
+  if (imageChanged) payload.image_prompt = editImagePrompt.value
+  if (videoChanged) payload.video_prompt = editVideoPrompt.value
+
+  const hasKeyframe = Boolean(shot.current_assets?.keyframe)
+  const hasClip = Boolean(shot.current_assets?.clip)
+  if (imageChanged && (hasKeyframe || hasClip)) {
+    message.warning('分镜图提示词已修改，已有分镜图与视频会被标记为过期，需要重新生成。')
+  } else if (videoChanged && hasClip) {
+    message.warning('视频提示词已修改，原有视频会被标记为过期，需要重新生成。')
+  }
+
+  savingPrompts.value = true
+  try {
+    await updateShot(shot.id, payload)
+    if (payload.video_prompt !== undefined) {
+      shot.video_prompt = payload.video_prompt
+      originVideoPrompt.value = payload.video_prompt
+    }
+    if (payload.image_prompt !== undefined) {
+      shot.image_prompt = payload.image_prompt
+      originImagePrompt.value = payload.image_prompt
+    }
+    const list = shotsMap.value[shot.scene_id]
+    const target = list?.find((s) => s.id === shot.id)
+    if (target) {
+      if (payload.video_prompt !== undefined) target.video_prompt = payload.video_prompt
+      if (payload.image_prompt !== undefined) target.image_prompt = payload.image_prompt
+    }
+    message.success('提示词已保存')
+    if (hasKeyframe || hasClip) {
+      queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+      await loadSceneShots(shot.scene_id, shot.episode)
+      const refreshed = shotsMap.value[shot.scene_id]?.find((s) => s.id === shot.id)
+      if (refreshed) activeShot.value = refreshed
+    }
+  } catch (e: any) {
+    message.error(`保存失败: ${e?.message ?? e}`)
+  } finally {
+    savingPrompts.value = false
+  }
+}
 // --- 出口：全部镜头视频生成完成后可去合成导出 ---
 const allShots = computed(() => Object.values(shotsMap.value).flat())
 const clipsDone = computed(() => {
@@ -261,12 +830,28 @@ function toggleSelectAllShots(checked: boolean) {
   selectedShotIds.value = checked ? allShots.value.map((s) => s.id) : []
 }
 const batchClipMutation = useMutation({
-  mutationFn: (ids: string[]) => generateProjectShots(projectId.value, { shot_ids: ids, target: 'clip' }),
-  onSuccess: (res: any) => {
-    message.success(`已提交 ${res?.count ?? 0} 个分镜视频任务，完成后请刷新查看`)
+  mutationFn: (payload: { ids: string[]; chainMode: 'independent' | 'chained' }) =>
+    generateProjectShots(projectId.value, { shot_ids: payload.ids, target: 'clip', chain_mode: payload.chainMode, workflow_id: clipWorkflowId.value }),
+  onSuccess: async (res: any) => {
+    const skipped = (res?.skipped || []).filter((s: any) => s.reason === 'already_generated')
+    if ((res?.count ?? 0) > 0) {
+      message.success(`已提交 ${res.count} 个分镜视频任务，正在生成（进度见顶部进度面板）`)
+    }
+    if (skipped.length) {
+      message.info(`${skipped.length} 个镜头已由该工作流生成过视频，已跳过；如需重做请在分镜视频详情页重新生成`)
+    }
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
+    await trackClipProgress()
   },
-  onError: (e: any) => message.error(`批量出视频失败: ${e?.message ?? e}`),
+  onError: (e: any) => {
+    // 幂等：全部镜头都已生成过视频时不是故障，提示用户走详情页重新生成
+    if (e?.code === 'already_generated') {
+      message.info(e?.message ?? '选中镜头均已生成过视频，如需重做请在分镜视频详情页重新生成')
+      return
+    }
+    message.error(`批量出视频失败: ${e?.message ?? e}`)
+  },
 })
 
 function handleBatchClip() {
@@ -289,11 +874,22 @@ function handleBatchClip() {
   if (pending > 0) {
     message.info(`本次提交 ${confirmed.length} 个已确认镜头，${pending} 个未确认分镜图的镜头已跳过`)
   }
-  void submitClipsByPlans(confirmed)
+  // 弹窗选择批量生成方式：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接）
+  pendingClipShots.value = confirmed
+  showChainModeModal.value = true
+}
+
+// --- 批量出视频方式选择弹窗 ---
+const showChainModeModal = ref(false)
+const chainMode = ref<'independent' | 'chained'>('independent')
+const pendingClipShots = ref<Shot[]>([])
+function confirmChainMode() {
+  showChainModeModal.value = false
+  void submitClipsByPlans(pendingClipShots.value, chainMode.value)
 }
 
 /** 按已定稿的视频定义批量提交：名称与关联以库中定义为准；定义缺失时回退镜头级批量 */
-async function submitClipsByPlans(picked: Shot[]) {
+async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained') {
   try {
     const res = await listAssetPlans(projectId.value, { plan_type: 'clip' })
     const pickedIds = new Set(picked.map((s) => s.id))
@@ -301,18 +897,31 @@ async function submitClipsByPlans(picked: Shot[]) {
       .filter((p) => p.owner_id && pickedIds.has(p.owner_id))
       .map((p) => p.id)
     if (!planIds.length) {
-      batchClipMutation.mutate(picked.map((s) => s.id))
+      batchClipMutation.mutate({ ids: picked.map((s) => s.id), chainMode: mode })
       return
     }
-    const gen = await generateFromPlans(projectId.value, { plan_type: 'clip', plan_ids: planIds })
+    const gen = await generateFromPlans(projectId.value, { plan_type: 'clip', plan_ids: planIds, chain_mode: mode, workflow_id: clipWorkflowId.value })
     message.success(`已按定义提交 ${gen.count} 个分镜视频任务，完成后请刷新查看`)
     const skipped = (gen.skipped || []).filter((s) => s.reason !== 'no_pending_plans')
     if (skipped.length) {
-      const reasons = [...new Set(skipped.map((s) => s.reason))].join('、')
-      message.info(`另有 ${skipped.length} 条定义被跳过：${reasons}`)
+      const doneCount = skipped.filter((s) => s.reason === 'already_generated').length
+      const others = skipped.filter((s) => s.reason !== 'already_generated')
+      if (doneCount) {
+        message.info(`${doneCount} 条定义已由该工作流生成过视频，已跳过；如需重做请在分镜视频详情页重新生成`)
+      }
+      if (others.length) {
+        const reasons = [...new Set(others.map((s) => s.reason))].join('、')
+        message.info(`另有 ${others.length} 条定义被跳过：${reasons}`)
+      }
     }
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
   } catch (e: any) {
+    // 幂等：定义对应的视频均已生成过，属于预期跳过而非失败
+    if (e?.code === 'no_generatable_plans' || e?.code === 'already_generated') {
+      message.info('所选定义对应的视频均已生成过，已全部跳过；如需重做请在分镜视频详情页重新生成')
+      return
+    }
     message.error(`批量出视频失败: ${e?.message ?? e}`)
   }
 }
@@ -337,6 +946,66 @@ async function submitClipsByPlans(picked: Shot[]) {
         @click="activeEpisode = ep"
       >第 {{ ep }} 集</button>
     </div>
+    <!-- 视频生成总体进度：X/Y、正在跑哪一镜、队列名次与预计等待、是否全部完成 -->
+    <div
+      class="gen-panel"
+      :class="{
+        done: clipsDoneCount > 0 && clipsDoneCount === (allShots.length || clipProgress.data.value?.total || 0) && !clipProgress.hasInflight.value,
+        fail: failedClipByShot.size > 0,
+      }"
+    >
+      <div class="gen-head">
+        <span class="gen-badge">{{ clipProgress.hasInflight.value ? '⏳' : clipsDoneCount > 0 && clipsDoneCount === (allShots.length || 0) ? '✓' : '•' }}</span>
+        <span class="gen-title">{{ clipHeadline }}</span>
+        <span class="gen-nums">
+          视频 {{ clipsDoneCount }}/{{ allShots.length || clipProgress.data.value?.total || 0 }}（{{ clipProgress.data.value?.percent ?? 0 }}%）
+        </span>
+        <n-button size="tiny" quaternary :loading="clipProgress.loading.value" @click="clipProgress.refresh()">刷新进度</n-button>
+      </div>
+      <n-progress
+        type="line"
+        :percentage="clipProgress.data.value?.percent ?? 0"
+        :height="8"
+        :border-radius="4"
+        :show-indicator="false"
+        :color="clipProgress.data.value?.all_done ? 'var(--state-success, #22c55e)' : 'var(--brand-primary)'"
+        rail-color="var(--border-subtle, #e5e7eb)"
+        class="gen-bar"
+      />
+      <div class="gen-sub">
+        <span v-if="clipProgress.data.value?.inflight_running" class="gen-state running">
+          渲染中 {{ clipProgress.data.value.inflight_running }}
+        </span>
+        <span v-if="queuedClipCount" class="gen-state queued">
+          排队/等待前序 {{ queuedClipCount }}
+        </span>
+        <span v-if="estimatedWaitText" class="gen-state">预计剩余 {{ estimatedWaitText }}</span>
+        <span v-if="clipProgress.data.value?.all_done" class="gen-state ok">
+          全部分镜视频已生成完成<template v-if="clipProgress.data.value?.last_completed_at">（最近完成于 {{ new Date(clipProgress.data.value.last_completed_at).toLocaleTimeString('zh-CN', { hour12: false }) }}）</template>
+        </span>
+        <span v-else-if="allShots.length" class="gen-state">未生成 {{ allShots.length - clipsDoneCount }}</span>
+        <span v-if="failedClipByShot.size" class="gen-state fail">
+          最近失败 {{ failedClipByShot.size }} 个
+        </span>
+        <span v-if="clipProgress.error.value" class="gen-state fail">{{ clipProgress.error.value }}</span>
+      </div>
+      <!-- 在途明细：正在渲染的那一镜 + 接下来排队的几镜 -->
+      <div v-if="clipProgress.data.value?.inflight?.length" class="gen-inflight">
+        <span
+          v-for="job in clipProgress.data.value.inflight.slice(0, 6)"
+          :key="job.job_id"
+          class="gen-inflight-item"
+        >
+          <span class="gen-inflight-name">
+            {{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}
+          </span>
+          <span class="gen-inflight-state" :class="job.status">{{ clipInflightText(job) }}</span>
+        </span>
+        <span v-if="clipProgress.data.value.inflight.length > 6" class="gen-inflight-more">
+          等 {{ clipProgress.data.value.inflight.length }} 个任务
+        </span>
+      </div>
+    </div>
     <!-- 公共资产齐全度门禁横幅 -->
     <div class="gate-banner" :class="{ ok: readiness.all }">
       <span class="gate-badge">{{ readiness.all ? '✓' : '⏳' }}</span>
@@ -352,6 +1021,13 @@ async function submitClipsByPlans(picked: Shot[]) {
         :disabled="!allShots.length"
         @update:checked="toggleSelectAllShots"
       >全选</n-checkbox>
+      <n-select
+        v-model:value="clipTier"
+        :options="clipTierOptions"
+        size="small"
+        style="width: 210px"
+        title="批量出视频使用的档位（极速/标准/质量）"
+      />
       <n-button
         size="medium"
         type="primary"
@@ -425,7 +1101,7 @@ async function submitClipsByPlans(picked: Shot[]) {
                   </div>
                 </div>
                 <div class="shot-info">
-                  <div class="shot-title">{{ shot.title || `镜头 ${shot.seq}` }}</div>
+                  <div class="shot-title">{{ shot.title || `镜头 ${shotGlobalSeq(shot)}` }}</div>
                   <div class="shot-meta">
                     <span>{{ shot.duration }}s</span>
                     <span>第{{ shot.episode }}集</span>
@@ -442,72 +1118,258 @@ async function submitClipsByPlans(picked: Shot[]) {
     <n-drawer v-model:show="drawerVisible" :width="'min(480px, 100vw)'">
       <n-drawer-content title="镜头详情" closable>
         <template v-if="activeShot">
-          <div class="drawer-preview">
-            <n-image
-              v-if="activeShot.current_assets?.keyframe?.url"
-              :src="activeShot.current_assets.keyframe!.url"
-              object-fit="contain"
-              class="preview-img"
-            />
-            <div v-else class="preview-placeholder">暂无预览图</div>
-          </div>
-          <div v-if="activeShot.current_assets?.clip?.url" class="drawer-video">
-            <div class="drawer-section-title">分镜视频</div>
+          <!-- 成片优先：分镜看板以完成视频生成为目标，打开抽屉先看到视频 -->
+          <div class="drawer-hero">
+            <div class="hero-head">
+              <span class="section-name">镜头视频</span>
+              <n-tag size="small" :bordered="false" :color="{ color: getShotStatus(activeShot).color, textColor: '#fff' }">
+                {{ getShotStatus(activeShot).label }}
+              </n-tag>
+            </div>
             <video
+              v-if="activeShot.current_assets?.clip?.url"
               :src="activeShot.current_assets.clip.url"
               controls
               preload="metadata"
               class="preview-video"
             />
+            <div v-else class="hero-empty">
+              <div class="hero-empty-title">该镜头尚未生成视频</div>
+              <div class="hero-empty-hint">
+                {{ activeShot.keyframe_confirmed ? '分镜图已确认，可在下方「生成操作」中提交视频生成。' : '需先到分镜图环节确认关键帧，之后才能生成视频。' }}
+              </div>
+            </div>
           </div>
 
-          <n-space vertical :size="16">
-            <div>
-              <label class="field-label">提示词</label>
-              <n-input v-model:value="editImagePrompt" type="textarea" :rows="4" />
+          <!-- 分区一：镜头信息与提示词 -->
+          <section class="drawer-section">
+            <div class="section-head">
+              <span class="section-index">1</span>
+              <span class="section-name">镜头信息与提示词</span>
             </div>
-            <div>
-              <label class="field-label">负向提示词</label>
-              <n-input v-model:value="editNegativePrompt" type="textarea" :rows="2" />
+            <div class="shot-brief">
+              <n-tag size="small" :bordered="false">{{ shotKindLabels[activeShot.shot_kind] }}</n-tag>
+              <span class="brief-item">第 {{ activeShot.episode }} 集 · 第 {{ shotGlobalSeq(activeShot) }} 镜（全片第 {{ shotGlobalSeq(activeShot) }} 镜）</span>
+              <span class="brief-item">{{ activeShot.duration }} 秒</span>
+              <n-tag size="small" :bordered="false" :color="{ color: getShotStatus(activeShot).color, textColor: '#fff' }">
+                {{ getShotStatus(activeShot).label }}
+              </n-tag>
             </div>
-            <div>
-              <label class="field-label">视频提示词（MiniMax H3 规范：首帧指令 + integrated_multimodal_description / overall_soundscape / non_diegetic_music；&lt;Picture 1&gt; 对应关键帧参考图，@角色名/@场景名 自动携带定妆图/基准图）</label>
+
+            <div class="field">
+              <div class="field-head">
+                <label class="field-label">分镜图正向提示词</label>
+                <span class="field-badge">生图</span>
+              </div>
+              <n-input
+                v-model:value="editImagePrompt"
+                type="textarea"
+                :rows="4"
+                placeholder="描述该镜头关键帧的画面：主体、动作、环境、构图、光线与风格"
+              />
+              <div class="field-hint">
+                用于生成本镜分镜图（关键帧）。修改后已有分镜图与视频会一并标记为过期。
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="field-head">
+                <label class="field-label">视频提示词（MiniMax H3）</label>
+                <span class="field-badge">生视频</span>
+              </div>
               <n-input v-model:value="editVideoPrompt" type="textarea" :rows="8" />
+              <div class="field-hint">
+                首帧指令 + integrated_multimodal_description / overall_soundscape / non_diegetic_music；&lt;Picture 1&gt; 对应本镜分镜图，@角色名/@场景名 自动携带定妆图与基准图。
+              </div>
             </div>
+
+            <div v-if="negativeSupported" class="field">
+              <div class="field-head">
+                <label class="field-label">负向提示词</label>
+                <span class="field-badge soft">默认模板</span>
+                <n-button
+                  text
+                  size="tiny"
+                  @click="editNegativePrompt = DEFAULT_NEGATIVE_PROMPT"
+                >恢复默认</n-button>
+              </div>
+              <n-input v-model:value="editNegativePrompt" type="textarea" :rows="4" />
+              <div class="field-hint">
+                系统统一默认模板，可直接改写；仅在当前工作流声明支持负向提示词时生效并随生成提交，不支持时不显示也不传参。该模板用于降低缺陷概率，不保证完全消除。
+              </div>
+            </div>
+
+            <div class="section-foot">
+              <span class="foot-hint">负向提示词不单独保存，随本次生成提交。</span>
+              <n-button size="small" :loading="savingPrompts" @click="handleSavePrompts">保存提示词</n-button>
+            </div>
+          </section>
+
+          <!-- 分区二：参考图 -->
+          <section class="drawer-section">
+            <div class="section-head">
+              <span class="section-index">2</span>
+              <span class="section-name">参考图</span>
+            </div>
+
+            <n-spin :show="realRefsLoading">
+              <div v-if="shotRefList.length" class="ref-list">
+                <div v-for="r in shotRefList" :key="r.key" class="ref-item">
+                  <n-image
+                    v-if="r.url"
+                    :src="r.thumbUrl || r.url"
+                    :preview-src="r.url"
+                    width="56"
+                    height="56"
+                    object-fit="cover"
+                    class="ref-thumb"
+                    :img-props="{ style: 'width:56px;height:56px;object-fit:cover;border-radius:6px' }"
+                  />
+                  <div v-else class="ref-thumb ref-thumb-empty">未生成</div>
+                  <div class="ref-item-meta">
+                    <div class="ref-item-name">
+                      {{ r.name }}
+                      <span v-if="r.injected" class="ref-tag ok">已传入</span>
+                      <span v-else-if="r.assetMissing" class="ref-tag warn">图未生成</span>
+                      <span v-else-if="r.noSlot" class="ref-tag warn">无可用槽位</span>
+                      <span v-else class="ref-tag plan">将传入</span>
+                    </div>
+                    <div class="ref-item-role">
+                      {{ r.roleLabel }}
+                      <span v-if="r.slot" class="ref-item-slot">{{ r.slot }}</span>
+                      <span v-if="r.required" class="ref-item-req">必需</span>
+                    </div>
+                    <div class="ref-item-input">输入位置 {{ r.inputKey }}</div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="panel-hint">
+                该镜头暂无可展示的参考图：请先补齐角色定妆图与场景基准图，或在视频提示词中使用 @角色名 / @场景名 / @道具名 引用。
+              </div>
+            </n-spin>
+            <div class="ref-source-hint">
+              已传入＝本次生成实际传给接口的图；将传入＝按当前引用与工作流槽位会传入；无可用槽位＝该类型槽位已被占用，本次不会传入；图未生成＝对应定妆图 / 基准图 / 锚定图尚未生成，请先到资产库补齐。
+            </div>
+          </section>
+
+          <!-- 分区三：生成操作 -->
+          <section class="drawer-section">
+            <div class="section-head">
+              <span class="section-index">3</span>
+              <span class="section-name">生成操作</span>
+            </div>
+            <div v-if="!readiness.all" class="gate-hint">
+              公共资产尚未齐全（角色定妆图 / 场景基准图 / 道具锚定图），请先到资产库补齐后再生成。
+            </div>
+            <!-- 视频生成档位：极速 5s / 标准 5s / 质量 10s -->
+            <div class="tier-row">
+              <span class="tier-label">视频档位</span>
+              <n-select
+                v-model:value="clipTier"
+                :options="clipTierOptions"
+                size="small"
+                style="width: 210px"
+              />
+              <span class="tier-hint">极速/标准 5s、质量 10s 分别对应一套 4 步工作流</span>
+            </div>
+            <!-- 按当前阶段只展示可行的生成动作：未确认分镜图先生图，确认后再出视频 -->
             <div class="drawer-actions">
-              <n-button
-                quaternary
-                :disabled="!readiness.all"
-                @click="router.push(`/project/${projectId}/storyboard-images`)"
-              >
-                去分镜图生成 / 确认
-              </n-button>
-              <n-tooltip>
+              <n-tooltip v-if="!activeShot.keyframe_confirmed">
                 <template #trigger>
                   <n-button
                     type="primary"
-                    :disabled="!readiness.all || !activeShot.keyframe_confirmed"
+                    :disabled="!readiness.all"
                     :loading="generateMutation.isPending.value"
-                    @click="handleGenerateFromDrawer('clip')"
+                    @click="handleGenerateFromDrawer('keyframe')"
                   >
-                    生成视频
+                    生成分镜图
                   </n-button>
                 </template>
-                {{ activeShot.keyframe_confirmed ? '提交视频生成任务' : '需先确认分镜图（关键帧）后才能生成视频' }}
+                {{ readiness.all ? '提交分镜图（关键帧）生成任务' : '公共资产尚未齐全，暂不能生成分镜图' }}
+              </n-tooltip>
+              <n-tooltip v-else>
+                <template #trigger>
+                  <n-button
+                    type="primary"
+                    :disabled="!readiness.all"
+                    :loading="generateMutation.isPending.value || regenerateClipMutation.isPending.value"
+                    @click="handleClipActionClick"
+                  >
+                    {{ clipActionLabel }}
+                  </n-button>
+                </template>
+                {{ readiness.all
+                  ? (clipActionIsRegenerate ? '重新生成视频：会覆盖原视频并取消该镜头历史任务' : '提交视频生成任务')
+                  : '公共资产尚未齐全，暂不能生成视频' }}
               </n-tooltip>
             </div>
-          </n-space>
-
-          <!-- 参考图与生成配置：默认沿用原配置，只允许修改提示词 -->
-          <RegenerateConfigPanel
-            v-if="regenerateTarget"
-            :key="`${activeShot.id}-${regenerateTarget}`"
-            :shot-id="activeShot.id"
-            :target="regenerateTarget"
-          />
+            <div class="action-hint">
+              <template v-if="!activeShot.keyframe_confirmed">
+                当前阶段：待确认分镜图。生成并确认分镜图后，这里会切换为生成视频。
+              </template>
+              <template v-else>
+                当前阶段：分镜图已确认。可调整上方视频提示词与参考图后提交视频生成。
+              </template>
+            </div>
+          </section>
         </template>
       </n-drawer-content>
     </n-drawer>
+    <!-- 重新生成视频确认弹窗：说明会覆盖原视频，确认后取消该镜头历史任务并提交新任务 -->
+    <n-modal
+      v-model:show="showRegenClipModal"
+      preset="dialog"
+      type="warning"
+      title="重新生成视频"
+      positive-text="确认重新生成"
+      negative-text="取消"
+      :loading="regenerateClipMutation.isPending.value"
+      @positive-click="confirmRegenerateClip"
+    >
+      <div style="line-height: 1.7; margin: 8px 0 4px">
+        将使用当前提示词重新生成本镜视频，<b>原视频会被覆盖</b>（旧版本转历史留痕，不物理删除）。
+      </div>
+      <div style="line-height: 1.7; color: #999; font-size: 12px">
+        同时会取消该镜头尚未完成的生成任务，取消后不再占用 ComfyUI 显卡资源，并把这些历史任务从当前任务中移除。
+      </div>
+    </n-modal>
+    <!-- 批量出视频方式选择弹窗：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接） -->
+    <n-modal
+      v-model:show="showChainModeModal"
+      preset="dialog"
+      title="选择批量生成方式"
+      positive-text="开始生成"
+      negative-text="取消"
+      @positive-click="confirmChainMode"
+    >
+      <div style="margin: 12px 0 4px">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px">
+          <span style="font-size: 13px; color: #666">视频档位</span>
+          <n-select
+            v-model:value="clipTier"
+            :options="clipTierOptions"
+            size="small"
+            style="width: 210px"
+          />
+        </div>
+        <n-radio-group v-model:value="chainMode">
+          <div style="display: flex; flex-direction: column; gap: 12px">
+            <n-radio value="independent">
+              独立生成（并行）
+              <div style="font-size: 12px; color: #999; margin-top: 2px">
+                各镜头互不依赖，不使用上一镜尾帧，多 ComfyUI 实例可并行生成，速度快
+              </div>
+            </n-radio>
+            <n-radio value="chained">
+              链式生成（串行）
+              <div style="font-size: 12px; color: #999; margin-top: 2px">
+                按镜头顺序逐镜生成，下一镜首帧取上一镜实际尾帧，画面衔接更连贯，耗时较长
+              </div>
+            </n-radio>
+          </div>
+        </n-radio-group>
+      </div>
+    </n-modal>
   </div>
 </template>
 
@@ -535,6 +1397,47 @@ async function submitClipsByPlans(picked: Shot[]) {
 .episode-chip.active { background: rgba(99, 102, 241, 0.1); border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); font-weight: 600; }
 .gate-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); }
 .gate-banner.ok { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
+
+/* ===== 视频生成总体进度面板 ===== */
+.gen-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--bg-panel, #fff);
+}
+.gen-panel.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
+.gen-panel.fail { border-color: rgba(239, 68, 68, 0.35); }
+.gen-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gen-badge { font-size: 14px; }
+.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
+.gen-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-left: auto; }
+.gen-bar { width: 100%; }
+.gen-sub { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.gen-state { color: var(--text-secondary, #64748b); }
+.gen-state.queued { color: #b45309; }
+.gen-state.running { color: var(--brand-primary, #6366f1); }
+.gen-state.ok { color: #15803d; font-weight: 500; }
+.gen-state.fail { color: #b91c1c; }
+.gen-inflight { display: flex; gap: 6px; flex-wrap: wrap; }
+.gen-inflight-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-elevated, #f8fafc);
+  border: 1px solid var(--border-subtle, #e5e7eb);
+}
+.gen-inflight-name { color: var(--text-primary, #333); }
+.gen-inflight-state { color: var(--text-secondary, #64748b); }
+.gen-inflight-state.running { color: var(--brand-primary, #6366f1); }
+.gen-inflight-state.chained_wait { color: #7c3aed; }
+.gen-inflight-more { font-size: 11px; color: var(--text-tertiary); align-self: center; }
 .gate-badge { font-size: 14px; }
 .gate-text { font-size: 13px; color: var(--text-primary, #333); margin-right: auto; }
 .page-loading {
@@ -702,6 +1605,268 @@ async function submitClipsByPlans(picked: Shot[]) {
 .drawer-actions {
   display: flex;
   gap: 8px;
+}
+.tier-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.tier-label {
+  font-size: 13px;
+  color: var(--text-secondary, #666);
+}
+.tier-hint {
+  font-size: 12px;
+  color: var(--text-tertiary, #999);
+}
+
+/* ===== 镜头详情抽屉分区 ===== */
+.drawer-hero {
+  margin-bottom: 4px;
+}
+.hero-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.hero-empty {
+  padding: 28px 16px;
+  border: 1px dashed var(--border-subtle, #e5e7eb);
+  border-radius: 10px;
+  text-align: center;
+  background: var(--bg-elevated, #fafafa);
+}
+.hero-empty-title {
+  font-size: 13px;
+  color: var(--text-secondary, #666);
+  margin-bottom: 6px;
+}
+.hero-empty-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary, #909399);
+}
+.ref-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ref-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  background: var(--bg-panel, #fff);
+}
+.ref-item-meta {
+  flex: 1;
+  min-width: 0;
+}
+.ref-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #333);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ref-item-role {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-tertiary, #909399);
+}
+.ref-item-req {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+}
+.ref-item-slot {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-elevated, #f5f7fa);
+  font-family: monospace;
+  font-size: 10px;
+}
+.ref-thumb-empty {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border-subtle, #e5e7eb);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary, #909399);
+  flex-shrink: 0;
+}
+.ref-tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 400;
+}
+.ref-tag.ok {
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
+}
+.ref-tag.plan {
+  background: rgba(99, 102, 241, 0.12);
+  color: #4338ca;
+}
+.ref-tag.warn {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+.ref-item-input {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-tertiary, #909399);
+  font-family: monospace;
+}
+.ref-source-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-tertiary, #909399);
+}
+.ref-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-tertiary, #909399);
+}
+.drawer-section {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--divider-color, #efeff5);
+}
+.drawer-section:last-of-type {
+  border-bottom: none;
+  padding-bottom: 4px;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.section-index {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--brand-primary, #6366f1);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.section-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #333);
+}
+.shot-brief {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.brief-item {
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+}
+.field {
+  margin-bottom: 12px;
+}
+.field:last-child {
+  margin-bottom: 0;
+}
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.field-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4338ca;
+  font-size: 10px;
+  line-height: 16px;
+}
+.field-badge.soft {
+  background: var(--bg-elevated, #f5f7fa);
+  color: var(--text-tertiary, #909399);
+}
+.field-head :deep(.n-button) {
+  margin-left: auto;
+}
+.field-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary, #909399);
+}
+.panel-hint {
+  padding: 12px;
+  border: 1px dashed var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-tertiary, #909399);
+}
+.gate-hint {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  font-size: 12px;
+  color: #b45309;
+}
+.section-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+}
+.foot-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary, #909399);
+}
+.action-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary, #909399);
+}
+@media (max-width: 768px) {
+  .drawer-section { padding: 12px 0; }
+  .section-name { font-size: 13px; }
+  .drawer-actions { flex-wrap: wrap; }
+  .drawer-actions :deep(.n-button) { flex: 1; }
+  .section-foot { flex-wrap: wrap; }
+  .foot-hint { flex: 1 1 100%; }
+  .ref-item { gap: 10px; padding: 8px 6px; }
+  .ref-item-name { white-space: normal; }
+}
+@media (max-width: 480px) {
+  .drawer-section { padding: 10px 0; }
+  .field-hint, .ref-source-hint { font-size: 11px; }
+  .ref-item-input, .ref-item-slot { font-size: 10px; }
+  .drawer-actions :deep(.n-button) { width: 100%; }
 }
 
 /* ===== 窄屏适配 ===== */

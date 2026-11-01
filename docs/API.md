@@ -84,7 +84,10 @@
 | POST | /api/projects | 创建项目 |
 | GET | /api/projects | 项目列表 |
 | GET | /api/projects/{id} | 项目详情 |
-| PATCH | /api/projects/{id} | 更新项目 |
+| PATCH | /api/projects/{id} | 更新项目（settings 含风格字段时自动规范化） |
+| GET | /api/projects/style-options | 风格配置可选项下发（类型分组/叙事风格/视觉风格/节奏/情绪/枚举/默认值） |
+| GET | /api/projects/{id}/style-config | 读取项目风格配置（规范化后 + 校验问题） |
+| PUT | /api/projects/{id}/style-config | 保存项目风格配置（返回规范化结果与问题列表） |
 | DELETE | /api/projects/{id} | 删除项目 |
 | POST | /api/projects/{id}/archive | 归档项目 |
 | POST | /api/projects/{id}/unarchive | 取消归档 |
@@ -101,10 +104,15 @@
 | POST | /api/projects/{id}/estimates/{estimate_id}/confirm | 确认评估与制作范围（兼容保留） |
 | POST | /api/projects/{id}/parse | 解析剧本（按选定集范围；兼容保留） |
 | POST | /api/projects/{id}/parse-versions/{parse_version_id}/confirm | 确认候选解析版本 |
+| GET | /api/projects/{id}/parse/status | 解析状态（job + 集级解析记录） |
+| POST | /api/projects/{id}/parse/retry | 重试失败解析（从失败集继续） |
+| POST | /api/projects/{id}/script-write | AI 创作/扩写剧本（阶段1，mode=create/expand） |
+| POST | /api/projects/{id}/script-evaluate | 剧本质量评估（阶段2，返回结构化评估报告） |
 | GET | /api/projects/{id}/scenes | 场景列表，可选 include_shots |
 | POST | /api/scenes | 创建场景 |
+| GET | /api/scenes/{id} | 场景详情（含出场集数与基准图） |
 | PATCH | /api/scenes/{id} | 更新场景 |
-| DELETE | /api/scenes/{id} | 删除场景 |
+| DELETE | /api/scenes/{id} | 删除场景（级联其下镜头） |
 | POST | /api/scenes/{id}/episodes | 追加场景出现集数 |
 | DELETE | /api/scenes/{id}/episodes/{episode} | 移除场景某集出场 |
 | GET | /api/scenes/{id}/shots | 场景内镜头列表（按集，分页） |
@@ -114,6 +122,13 @@
 | PATCH | /api/shots/{id} | 更新镜头 |
 | DELETE | /api/shots/{id} | 删除镜头 |
 | PUT | /api/scenes/{id}/shots/order | 镜头排序 |
+| POST | /api/shots/{id}/keyframe/confirm | 确认单镜分镜图（D-13 静图闸口放行） |
+| POST | /api/shots/{id}/keyframe/unconfirm | 取消单镜分镜图确认 |
+| POST | /api/projects/{id}/keyframe/confirm | 批量确认项目内分镜图（body: shot_ids，省略则全部） |
+| DELETE | /api/shots/{id}/assets/{asset_id} | 解绑镜头与资产的引用关系 |
+| GET | /api/shots/{id}/regenerate/config | 重做配置初值（槽位、参考图、提示词） |
+| POST | /api/shots/{id}/regenerate/workbench | 重做工作台提交（结果落候选版本，不覆盖生效版本） |
+| GET | /api/shots/{id}/impact | 受影响下游镜头清单（只标记，不自动重生成） |
 | GET | /api/projects/{id}/characters | 项目角色列表 |
 | POST | /api/characters | 创建角色 |
 | POST | /api/characters/merge | 合并重复角色 |
@@ -140,6 +155,11 @@
 | POST | /api/assets/batch/lock | 批量锁定资产 |
 | POST | /api/assets/batch/unlock | 批量解锁资产 |
 | POST | /api/assets/export | 打包导出资产 |
+| GET | /api/assets/{id}/regenerate/config | 重新生成弹窗初值（提示词由阶段 B 编译器产出一致） |
+| POST | /api/assets/{id}/regenerate | 重新生成资产（可带自定义提示词，202） |
+| POST | /api/assets/{id}/replace | 用上传文件替换资产生成新版本 |
+| GET | /api/assets/{id}/candidates | 同镜头同类型的候选版本列表 |
+| POST | /api/assets/{id}/adopt | 采用候选版本（原版本转历史，实体指针同步） |
 | POST | /api/shots/{id}/assets | 绑定资产到镜头 |
 
 ### 工作流
@@ -170,6 +190,9 @@
 | GET | /api/jobs/{id} | 任务详情 |
 | POST | /api/jobs/{id}/retry | 重试任务 |
 | POST | /api/jobs/{id}/cancel | 取消任务 |
+| POST | /api/jobs/projects/{id}/retry-failed | 批量重试项目内失败任务（body: job_ids） |
+| GET | /api/jobs/{id}/llm-stream | LLM 调用流式输出（进行中任务的增量内容） |
+| GET | /api/jobs/{id}/snapshot | 任务输入快照（含 prompt_compilation 编译产物） |
 
 ### 合成与导出
 | 方法 | 路径 | 说明 |
@@ -180,6 +203,17 @@
 | POST | /api/projects/{id}/export | 创建独立导出任务 |
 | GET | /api/projects/{id}/exports | 导出记录列表 |
 | GET | /api/exports/{id}/download | 下载导出文件 |
+| GET | /api/projects/{id}/exports/{export_id}/acceptance-check | 成片验收检查（分辨率/时长/音轨/字幕） |
+| GET | /api/media/{file_path} | 媒体文件服务（限定 media_dir 内，防路径穿越） |
+
+### 资产定义（AssetPlan）
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | /api/projects/{id}/asset-plans | 查询项目资产定义（可按 plan_type/status/episode 过滤，可选 with_dependencies） |
+| POST | /api/projects/{id}/asset-plans/generate | 生成资产定义计划 |
+| POST | /api/projects/{id}/asset-plans/{plan_id}/confirm | 确认单条资产定义 |
+| POST | /api/projects/{id}/asset-plans/{plan_id}/unconfirm | 取消确认 |
+| POST | /api/projects/{id}/asset-plans/batch-confirm | 批量确认资产定义 |
 
 ### 设置与事件流
 | 方法 | 路径 | 说明 |
@@ -193,6 +227,8 @@
 | GET | /api/settings/comfyui-instances | 获取 ComfyUI 实例列表（多实例加权负载均衡） |
 | PUT | /api/settings/comfyui-instances | 更新 ComfyUI 实例列表 |
 | POST | /api/settings/comfyui-instances/test | 逐实例测试连通性 |
+| GET | /api/settings/comfyui-instances/status | 实例健康状态汇总（含队列深度与最近错误） |
+| POST | /api/settings/llm-models | 拉取可用模型列表（按 Provider 探测） |
 | GET | /api/settings/prompts | 列出全部提示词（D-15） |
 | GET | /api/settings/prompts/{name} | 读取提示词内容（D-15） |
 | PUT | /api/settings/prompts/{name} | 写入提示词（D-15） |
@@ -200,6 +236,8 @@
 | GET | /api/health | 服务健康状态 |
 | GET | /api/events | 实时事件流（SSE） |
 | GET | /api/events/backfill | 事件增量补齐（按 event_seq） |
+
+> 导演台 Agent 会话的 12 条路由（`/api/agent/sessions*`）为独立专题，完整清单见 §12 路由总览，此处不重复列出。
 
 ---
 
@@ -213,6 +251,7 @@
 | aspect_ratio | string | 是 | 枚举 9:16 / 16:9 / 1:1 |
 | creation_type | string | 否 | 枚举 novel / script，默认 novel |
 | description | string | 否 | ≤500 字符 |
+| style_config | object | 否 | 风格配置子集。提供时以默认值为基线合并后规范化落库；未提供或留空则完全使用默认风格。字段与取值见 STYLE_CONFIG.md |
 
 响应 201，返回项目对象，初始 `status` 为 `draft`。
 
@@ -222,11 +261,22 @@
 
 **PATCH /api/projects/{id}**：可改 `name`、`description`、`settings`。`settings` 可含 `default_image_workflow_id`、`default_video_workflow_id`、`default_tts_workflow_id`、`consistency_pass_threshold`、`consistency_fail_threshold`（须满足 fail 小于 pass，否则返回 400），以及产能参数 `episode_duration_target`（默认 90 秒，软指标）、`shots_per_episode_target`（默认 9）、`shot_duration_default`（默认 10 秒，仅作生成参考）、`max_episodes_per_batch`（单次制作建议上限，默认 10）。
 
+`settings` 中若含风格字段（`genre_tags`、`narrative_styles`、`visual_style`、`pacing`、`emotional_tone`、`conflict_intensity`、`twist_density`、`dialogue_style`、`narration_mode`、`target_audience`、`custom_style_requirements`）或旧键 `genre`、`audience`、`requirements`，将自动执行规范化并写入 `style_config_version`；非风格键（如 `episode_duration_target`）原样保留。字段含义与取值见 STYLE_CONFIG.md。
+
 **DELETE /api/projects/{id}**：存在进行中任务时返回 409；成功执行软删除并返回 204。删除后进入延迟清理期，恢复期内可恢复，任务引用的文件不立即物理删除。
 
 **POST /api/projects/{id}/archive**：仅 `active` 可调用，置为 `archived`，返回项目对象。
 
 **POST /api/projects/{id}/unarchive**：仅 `archived` 可调用，置回 `active`，返回项目对象。
+
+**GET /api/projects/style-options**
+返回 `version`、`genre_groups`（分组名 + 标签数组）、`genre_tags`、`narrative_styles`、`visual_styles`、`pacing`、`emotional_tones`、`conflict_intensity`、`twist_density`、`dialogue_styles`、`narration_modes`、`target_audiences`（枚举项均为 `{value, label, description}`）、`max_custom_length`、`defaults`（默认配置）。前端据此渲染配置面板，禁止硬编码词表。
+
+**GET /api/projects/{id}/style-config**
+返回 `config`（规范化后的完整配置）、`version`（当前 `STYLE_CONFIG_VERSION`）、`issues`（校验问题数组，每项含 `code`、`message`，可选 `severity`）、`visual_style_label`、`visual_style_prompt`、`raw`（仅含请求中实际出现的风格键原值）。
+
+**PUT /api/projects/{id}/style-config**
+请求体为风格字段的任意子集，未提供字段沿用当前值。返回 `config`、`version`、`issues`、`visual_style_label`、`saved`。校验问题不阻断保存，异常取值按 STYLE_CONFIG.md 第 5 节规则修正（未知视觉风格回退默认、超长自定义文本截断等）。保存后 `project.settings` 同时写入 `visual_style` 与 `style_config_version`。
 
 ## 5. 剧本与分镜
 
@@ -396,6 +446,13 @@
 
 返回 202 与 job 对象，并返回/持久化 `effective_inputs`（实际注入的资产 ID 与版本、工作流版本、参数）。一致性模式下锚定资产存在但未锁定时返回 409；缺少必需参考图时返回 422 `workflow_media_missing` 或 `no_matching_workflow`。单镜、批量和重做共享同一输入解析器。
 
+### 提示词编译前置校验（阶段 B，D-24）
+所有生成通道在入队前先经过阶段 B 编译器（`app/services/prompt_compiler.py`），由 `generate.py` 的 `_compile_asset_prompt` / `_compile_shot_prompt` 统一调用。编译器输出写入 `job.input_snapshot.prompt_compilation`，包含 `task_type`、`template_id`、`template_version`、`positive_prompt`、`negative_prompt`、`reference_slots`、`generation_constraints`、`blocking_issues`、`warnings`。
+- 编译状态 `ready` 才写入工作流参数并创建任务；`needs_review` 时不创建任务，按首个阻断项返回对应错误码。
+- 编译期阻断错误码：`asset_identity_missing`、`assets_review_pending`、`character_portrait_missing`、`scene_baseline_missing`、`prop_asset_missing`、`storyboard_asset_missing`、`storyboard_file_missing`、`reference_asset_missing`、`reference_asset_file_missing`、`reference_capacity_exceeded`、`storyboard_not_approved`、`prev_frame_missing`、`prompt_template_missing`、`prompt_compilation_not_ready`（均返回 409 或 422，不静默降级、不空跑任务）。
+- 只改提示词的补丁经 `assert_prompt_only_patch` 校验，工作流结构参数与槽位映射被锁定，越界返回 `prompt_only_patch_locked_fields`。
+- 参考槽位只能取自工作流 `capabilities.reference_slots`；需求超过能力上限返回 `reference_capacity_exceeded`，未注入槽位的 `image{n}` 连线在提交前剔除，`<Picture N>` 按连线顺序重编号。
+
 **POST /api/characters/{id}/generate**：生成角色定妆图，`target` 固定为 `keyframe`，以角色的 `appearance` 作为 prompt 基础，无需参考图，不受锚定锁定校验限制。可选 `workflow_id`、`params`（不含结构参数）。返回 202 与 job 对象。成功后新资产以 `asset_type=character` 落库，并回写 `character.portrait_asset_id`。
 
 **POST /api/props/{id}/generate**：生成道具锚定图，规则同角色定妆图。成功后新资产以 `asset_type=prop` 落库，并回写 `prop.anchor_asset_id`。
@@ -527,7 +584,7 @@
 2. **意图识别**（B 档）：先走确定性**规则快路径**（`apply_fast_path_rules`，结果 `source=rules`），未命中再调用 LLM 结构化识别（`source=llm`）。规则优先级 unsafe > generate_request > query，命中即返回（confidence=1.0，省一次 LLM 往返）：unsafe 拦索要密钥/凭据、删除或清空全部数据、绕过规则或审批；generate_request 要求生成动作 + 产物词（生成/出图/渲染 + 关键帧/分镜/视频/角色图等），并带负向断言排除描述性表述（『最近生成的角色图长什么样』是在查看已有产物，判为 query 而不是生成请求）；query 覆盖进展/进度/状态/概览、失败原因、任务列表、资产统计，以及查看类表述（看看/看一下/给我看看/长什么样 + 图/视频/片段/素材/角色/场景/道具/关键帧/分镜/资产）。未命中规则的模糊消息交由 LLM 输出经 Pydantic Schema 校验，提取 intent/goal/entities/missing_information/risk_level/confidence；规则兜底高风险关键词；置信度 < 0.7 或信息缺失时返回澄清问题（route_action=clarify），不进入主对话。
 3. **确定性路由**：unsafe → 拒绝（reject）；generate_request → 落地为审批申请（guide 分支内 `_try_create_generate_approval`，只建申请绝不执行生成）；识别失败降级 query 继续主对话。
    生成申请的目标定位（不猜用户意图对象）：镜头目标须消息明确给出镜头标识（`sht_` ID 或『第 N 镜』且项目内唯一命中）；实体目标（角色/场景/道具公共资产）须明确给出实体 ID（`chr_`/`scn_`/`prp_` 前缀），不按名称猜测；定位不到时返回澄清提示。生成目标由关键词判定：音频（配音/语音/台词/朗读/TTS/旁白）→ audio，视频（视频/片段/动态）→ clip，图片类 → keyframe，判定不出默认 keyframe（成本最低）。
-4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（query/analysis → project_overview、asset_stats、list_jobs、list_asset_plans；其余意图不授予任何工具），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
+4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（query/analysis → project_overview、asset_stats、list_jobs、list_asset_plans、get_style_config；其余意图不授予任何工具），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
 
    `list_assets` 为**条件注入**：仅当用户消息命中资产类关键词（图/视频/片段/素材/缩略/画面/看看/长什么样）时，才以 `validity=current, limit=6` 追加查询。既避免每条回复都附带缩略图（UI 噪音与无谓带宽），也只展示仍然有效的资产。
 5. **LLM 回复**：历史窗口最近 40 条 user/assistant 消息；瞬态错误指数退避重试最多 3 次；`llm_unconfigured` → 409，其余失败 → 502（用户消息已持久化，可重试）。
@@ -543,8 +600,17 @@
 | list_asset_plans | read | low | 无 | 否 |
 | request_generate | generate | medium | 有 | 否（只建审批记录，不建任务） |
 | run_generate | generate | high | 有 | 是（须先人工批准） |
+| get_style_config | read | low | 无 | 否 |
+| request_style_update | write | medium | 无 | 否（只建审批记录，不改配置） |
+| run_style_update | write | high | 有 | 是（须先人工批准） |
 
 `list_asset_plans` 返回项目资产定义清单（plan_id / plan_type / asset_key / status / confirmed / owner_type / owner_id / episode / seq / asset_id / version / dependencies[{slot, ref_key}]），支持 plan_type（character/scene/prop/keyframe/clip）与 status（pending/generated/reviewed/rejected）过滤及分页（limit 默认 20、最大 50），**不返回文件系统路径**（media_path/thumb_path）。
+
+风格配置工具（三个）用于让对话读取与调整项目级风格基线，字段与取值口径见 STYLE_CONFIG.md：
+
+- **get_style_config**：只读，返回规范化后的 config、version、saved_version、issues 与完整可选值 options，便于模型解释当前风格并给出一致取值。
+- **request_style_update**：提交风格变更申请，只创建审批记录，不改配置、不影响在途任务。只提交需要修改的字段，未提交字段沿用当前值；无有效字段时返回 tool_invalid_args。side_effect 为 false 且不须审批，避免申请环节自身也需要审批造成死锁。
+- **run_style_update**：执行已批准的变更，合并现有 settings 后规范化落库并写 style_config_version，返回 changed_fields 与 issues。双重门禁：requires_approval 的 approved 放行标志与审批记录状态必须为 approved，缺一不可。非法取值按规范化规则回退默认并回传问题码，不写入脏值。
 
 ### 生成申请与审批（申请-审批-执行三段分离）
 - **request_generate**：提交生成申请，只创建审批记录（agent_confirmation），不建任务、不消耗算力。镜头目标（keyframe/clip/audio/bgm/sfx）须给 `shot_id`；实体目标（character/scene/prop 公共资产）须给 `entity_id`。同会话同入参重复申请复用同一条待审记录（幂等）；同镜头/同实体已有在途任务时拒绝（`job_in_flight`）。

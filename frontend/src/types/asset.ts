@@ -54,6 +54,8 @@ export interface Workflow {
   is_default: boolean
   is_builtin?: boolean
   definition?: Record<string, unknown>
+  /** 工作流能力声明（reference_slots / negative 相关槽位等），由后端返回 */
+  capabilities?: Record<string, unknown> | null
   parsed_schema?: WorkflowParsedSchema
   used_by_jobs?: number
   created_at: string

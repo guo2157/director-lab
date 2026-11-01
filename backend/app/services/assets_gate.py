@@ -12,7 +12,7 @@
 - 就绪状态由后端根据实际资产与审核数据计算，前端传入的任何标志不可绕过；
 - 必需性规则沿用现有模型：角色定妆图、场景基准图、anchor_required=True 的
   道具锚定图为必需资产，可选道具不作为阻断条件；
-- 检查的是资产真实状态（指针、validity、文件存在、在途任务），不是记录存在性。
+- 检查的是资产真实状态（指针、文件存在、在途任务），不是记录存在性。
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ GATE_REJECTED = "ASSETS_REJECTED"
 _SUGGESTIONS = {
     "asset_missing": "请在资产库生成该资产后再提交审核",
     "asset_generating": "请等待该资产生成任务完成后再提交审核",
-    "asset_invalid": "该资产版本已失效，请重新生成或回滚到有效版本",
+    "asset_invalid": "该资产业已失效，请重新生成",
     "asset_file_missing": "资产文件缺失，请重新生成该资产",
     "review_pending": "请在资产库完成人工审核（审核通过）后再生成分镜图",
     "review_rejected": "请在资产库修改或替换被驳回的资产后重新提交审核",
@@ -105,7 +105,7 @@ def _check_entity_assets(
     db: Session,
     project_id: str,
 ) -> list[GateItem]:
-    """逐个校验必需资产的真实状态：指针 → validity → 文件存在。"""
+    """逐个校验必需资产的真实状态：指针 → 文件存在。"""
     blockers: list[GateItem] = []
 
     characters = db.query(Character).filter(Character.project_id == project_id).all()
@@ -116,9 +116,9 @@ def _check_entity_assets(
             )
             continue
         a = db.get(Asset, c.portrait_asset_id)
-        if a is None or a.validity != "current":
+        if a is None:
             blockers.append(
-                GateItem(c.portrait_asset_id, c.name, "character", "asset_invalid", "定妆图版本已失效")
+                GateItem(c.portrait_asset_id, c.name, "character", "asset_invalid", "定妆图已失效")
             )
             continue
         if not _media_file_exists(a.file_path):
@@ -132,9 +132,9 @@ def _check_entity_assets(
             blockers.append(GateItem(None, sc.title or sc.id, "scene", "asset_missing", "场景缺少基准图"))
             continue
         a = db.get(Asset, sc.baseline_asset_id)
-        if a is None or a.validity != "current":
+        if a is None:
             blockers.append(
-                GateItem(sc.baseline_asset_id, sc.title or sc.id, "scene", "asset_invalid", "基准图版本已失效")
+                GateItem(sc.baseline_asset_id, sc.title or sc.id, "scene", "asset_invalid", "基准图已失效")
             )
             continue
         if not _media_file_exists(a.file_path):
@@ -148,8 +148,8 @@ def _check_entity_assets(
             blockers.append(GateItem(None, p.name, "prop", "asset_missing", "必需道具缺少锚定图"))
             continue
         a = db.get(Asset, p.anchor_asset_id)
-        if a is None or a.validity != "current":
-            blockers.append(GateItem(p.anchor_asset_id, p.name, "prop", "asset_invalid", "锚定图版本已失效"))
+        if a is None:
+            blockers.append(GateItem(p.anchor_asset_id, p.name, "prop", "asset_invalid", "锚定图已失效"))
             continue
         if not _media_file_exists(a.file_path):
             blockers.append(

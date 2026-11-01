@@ -74,8 +74,13 @@ def list_assets(
             allowed = "、".join(ASSET_TYPE)
             raise errors.AppError("invalid_asset_type", f"asset_type 取值无效，允许值：{allowed}", 422)
         q = q.filter(Asset.asset_type == asset_type)
+    # 默认只返回当前有效资产（原地覆盖模型下每个实体只应展示 1 张）；
+    # 需要查看历史行时显式传 status=stale 或 status=all
     if status:
-        q = q.filter(Asset.validity == status)
+        if status != "all":
+            q = q.filter(Asset.validity == status)
+    else:
+        q = q.filter(Asset.validity == "current")
     if keyword:
         q = q.filter(Asset.name.contains(keyword))
     total = q.count()
@@ -455,28 +460,24 @@ def _entity_for_asset(db: Session, asset: Asset):
     return None
 
 
-def _default_prompt_for(db: Session, asset: Asset) -> tuple[str, str]:
-    """按资产类型模板渲染默认提示词与负面约束（与生成端点同源，保证一致性）。"""
-    from app.services import asset_prompts
+def _default_prompt_for(db: Session, asset: Asset, workflow=None) -> tuple[str, str]:
+    """默认提示词统一由阶段 B 编译器产出（D-24），与生成端点同源。
+
+    历史实现曾在此用 build_*_prompt 本地拼装，导致资产库「重新生成」弹窗预览的
+    提示词与生成端点实际编译结果不一致，已统一收敛到 compile_asset_image。
+    """
+    from app.services.prompt_compiler import compile_asset_image
+
     ent = _entity_for_asset(db, asset)
-    if asset.asset_type == "character":
-        prompt = asset_prompts.build_character_prompt(
-            getattr(ent, "name", None) or asset.name,
-            getattr(ent, "appearance", "") or "",
-            description=getattr(ent, "description", "") or "",
+    if ent is None:
+        raise ValueError(
+            f"asset_entity_missing: 未找到该资产对应的角色/场景/道具实体（{asset.asset_type}）"
         )
-    elif asset.asset_type == "scene":
-        prompt = asset_prompts.build_scene_prompt(
-            getattr(ent, "title", None) or asset.name,
-            getattr(ent, "description", "") or "",
-        )
-    else:
-        prompt = asset_prompts.build_prop_prompt(
-            getattr(ent, "name", None) or asset.name,
-            getattr(ent, "appearance", "") or "",
-            description=getattr(ent, "description", "") or "",
-        )
-    return prompt, asset_prompts.negative_for_asset_type(asset.asset_type)
+    compiled = compile_asset_image(db, asset.asset_type, ent.id, workflow=workflow)
+    if compiled.status != "ready":
+        first = compiled.blocking_issues[0]
+        raise ValueError(f"{first['code']}: {first['message']}")
+    return compiled.positive_prompt, compiled.negative_prompt
 
 
 def _match_image_workflow(db: Session, workflow_id: str | None):
@@ -651,6 +652,9 @@ def regenerate_asset(asset_id: str, payload: dict | None = None, db: Session = D
         workflow_version=wf.version,
         params=params,
         status="queued",
+        # 用户手工发起的历史版本刷新优先于批量排队的生成任务（与重新生成分镜视频同口径）：
+        # 否则一次大批量出视频会让这次重新生成排在几十个任务之后，半天看不到结果
+        priority=100,
         request_key=idempotency_key,
         created_at=_now(),
         input_snapshot={

@@ -76,6 +76,54 @@ def _reconcile_submission_unknown(db: Session) -> int:
     return reconciled
 
 
+def _reconcile_comfy_timeout_jobs(db: Session) -> int:
+    """comfy_timeout/comfy_unreachable 任务对账：本地等待超时或实例失联判失败，
+    但远端 ComfyUI 并不会停止渲染（失联多为瞬时网络抖动/实例过载）。
+    对 failed 且 error_code in (comfy_timeout, comfy_unreachable)、带 prompt_id 的任务，
+    按提交时绑定的实例（input_snapshot.comfyui_instance）查远端 history；
+    发现已成功完成则重置为 queued 并打 resume_prompt 标记，由 executor 续跑分支
+    直接下载产物（不重复提交、不浪费算力）。
+    返回对账处理数。"""
+    from app.integrations.comfyui import ComfyUIClient, ComfyUIError
+    reconciled = 0
+    timeout_jobs = db.query(Job).filter(
+        Job.status == "failed",
+        Job.error_code.in_(("comfy_timeout", "comfy_unreachable")),
+        Job.prompt_id.isnot(None),
+    ).all()
+    for job in timeout_jobs:
+        snapshot = job.input_snapshot or {}
+        base_url = snapshot.get("comfyui_instance")
+        if not base_url:
+            continue
+        try:
+            client = ComfyUIClient(base_url=base_url, timeout=10.0)
+            history = client.get_history(job.prompt_id)
+        except (ComfyUIError, Exception):
+            continue  # 实例不可达：保持现状，下轮再对账
+        if history is None:
+            continue
+        try:
+            done, err = client.is_job_done(history)
+        except Exception:
+            continue
+        if not done or err:
+            continue
+        # 远端已成功完成：重置为 queued 续跑（executor 走续跑分支直接下载产物）
+        job.status = "queued"
+        job.error_code = None
+        job.error_msg = None
+        job.finished_at = None
+        job.submission_state = "submitted"
+        _snap = dict(job.input_snapshot or {})
+        _snap["resume_prompt"] = True
+        job.input_snapshot = _snap
+        reconciled += 1
+    if reconciled:
+        db.commit()
+    return reconciled
+
+
 def _recover_interrupted_jobs(db: Session) -> int:
     """启动恢复：将 worker 宕机时残留的 running/submission_unknown 任务重置为 queued 续跑。
     规则（§5.4）：优先续跑，确认远端无该任务后再重跑；此处采用保守策略——
@@ -199,6 +247,9 @@ def run_worker(once: bool = False) -> None:
     reconciled = _reconcile_submission_unknown(db)
     if reconciled:
         print(f"[worker] 对账 {reconciled} 个 submission_unknown 任务")
+    resumed = _reconcile_comfy_timeout_jobs(db)
+    if resumed:
+        print(f"[worker] 对账取回 {resumed} 个远端已完成的 comfy_timeout 任务")
     db.close()
     # 启动 ComfyUI 实例健康心跳（熔断机制后台探测，幂等）
     comfyui_pool.start_heartbeat()
@@ -225,6 +276,9 @@ def run_worker(once: bool = False) -> None:
                     stalled = _recover_stalled_llm_jobs(db, set(in_flight.values()))
                     if stalled:
                         print(f"[worker] 回收 {stalled} 个长时间无进展的 LLM 任务为 queued")
+                    resumed = _reconcile_comfy_timeout_jobs(db)
+                    if resumed:
+                        print(f"[worker] 对账取回 {resumed} 个远端已完成的 comfy_timeout 任务")
                 job = _next_job(db)
             finally:
                 db.close()
@@ -240,10 +294,24 @@ def run_worker(once: bool = False) -> None:
                 # 测试模式：等待该任务完成后结束（保持旧串行语义）
                 fut.result()
                 break
-            # 并发已满时等待任一任务完成再继续取任务，避免任务在内存中堆积
+            # 并发已满时等待任一任务完成再继续取任务，避免任务在内存中堆积。
+            # 注意：该等待段可能持续数分钟（视频生成耗时），必须在此继续执行周期性对账，
+            # 否则只要有一个任务在跑，comfy_timeout/comfy_unreachable 任务的取回就会停摆。
             while len(in_flight) >= concurrency and _RUNNING:
                 time.sleep(0.2)
                 in_flight = {f: jid for f, jid in in_flight.items() if not f.done()}
+                now_ts = time.monotonic()
+                if now_ts - last_stall_check >= 30.0:
+                    last_stall_check = now_ts
+                    db2 = SessionLocal()
+                    try:
+                        resumed = _reconcile_comfy_timeout_jobs(db2)
+                        if resumed:
+                            print(f"[worker] 对账取回 {resumed} 个远端已完成的 comfy_timeout 任务")
+                    except Exception as _re:
+                        print(f"[worker] 等待期对账异常: {type(_re).__name__}: {_re}")
+                    finally:
+                        db2.close()
         # 优雅停止：等待在途任务完成
         for f in in_flight:
             try:

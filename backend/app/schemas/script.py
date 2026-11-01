@@ -175,6 +175,8 @@ class JobOut(BaseModel):
     project_id: str
     job_type: str
     status: str
+    # 关联镜头 ID（生成任务必填，供前端按镜头关联任务状态）
+    shot_id: str | None = None
     # 展示用关联信息（列表/详情接口补充，便于用户识别任务归属）
     project_name: str | None = None
     episode: int | None = None
@@ -186,6 +188,8 @@ class JobOut(BaseModel):
     result: dict | None
     attempts: int
     seq: int | None = None
+    # 生成进度百分比（0-100）：running 任务从最近 job.progress 事件（value/max）计算，其余状态为 None
+    progress: int | None = None
     created_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None

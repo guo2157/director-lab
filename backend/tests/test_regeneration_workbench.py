@@ -122,12 +122,12 @@ def test_real_workflow_slots_are_authoritative():
 
 def test_t2i_workflow_has_no_reference_slots():
     """t2i 工作流不声明任何参考槽位，不得凭空补造。"""
-    caps = json.loads((WORKFLOW_DIR / "wf_image_t2i_qwen.meta.json").read_text("utf-8"))["capabilities"]
+    caps = json.loads((WORKFLOW_DIR / "wf_image_t2i_qwen21_turbo.meta.json").read_text("utf-8"))["capabilities"]
     assert regen.normalize_reference_slots(caps) == []
 
 
 def test_qwen_edit_supports_three_slots():
-    caps = json.loads((WORKFLOW_DIR / "wf_image_ref_qwen_edit.meta.json").read_text("utf-8"))["capabilities"]
+    caps = json.loads((WORKFLOW_DIR / "wf_image_ref_qwen21_turbo.meta.json").read_text("utf-8"))["capabilities"]
     slots = regen.normalize_reference_slots(caps)
     assert [s["param"] for s in slots] == ["ref_identity", "ref_costume", "ref_scene"]
 

@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models import Asset, AssetRef, Character, Job, Project, Prop, Scene, Shot, Workflow, ids
+from app.models import (Asset, AssetRef, Character, Job, JobEvent, Project, Prop, Scene,
+                       Shot, Workflow, ids)
 from app.services import errors
 
 router = APIRouter(prefix="/api", tags=["generate"])
@@ -31,12 +32,16 @@ _TARGET_WF_TYPE = {
 # 手动绑定允许的 role（API.md §6）
 _MANUAL_ROLES = {"reference", "first_frame", "end_frame", "audio"}
 
+# 重新生成分镜视频的调度优先级：高于普通任务（0）与重试加权（+100），
+# 用户手动发起的重新生成在有空闲 ComfyUI 实例时优先插队执行，不必排在批量任务末尾
+_REGENERATE_CLIP_PRIORITY = 1000
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workflow:
+def _match_workflow_exact(db: Session, target: str, workflow_id: str | None) -> Workflow:
     """工作流匹配：显式 workflow_id 优先；否则按 workflow_type 依次尝试 默认 → 内置 → 任意。"""
     if workflow_id:
         wf = db.get(Workflow, workflow_id)
@@ -71,6 +76,40 @@ def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workfl
     return wf
 
 
+_REF_CHAR_SLOTS = ("ref_identity", "ref_costume", "ref_image")
+
+
+def _find_ref_capable_image_workflow(db: Session) -> Workflow | None:
+    """找带角色参考槽位的图片工作流（分镜图默认用它，避免 @角色 撞上 0 槽位）。"""
+    rows = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "image")
+        .order_by(Workflow.is_default.desc())
+        .all()
+    )
+    for wf in rows:
+        slots = (wf.capabilities or {}).get("reference_slots") or []
+        names = [item.get("param") if isinstance(item, dict) else item for item in slots]
+        if any(name in _REF_CHAR_SLOTS for name in names):
+            return wf
+    return None
+
+
+def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workflow:
+    """工作流匹配：显式 workflow_id 优先；分镜图默认自动改用带参考槽位的工作流。
+
+    默认图片工作流是无参考的纯文生图（0 槽位），而分镜图提示词通常带 @角色，
+    直接用会在 ref_inject 里报"当前工作流仅支持 0 个角色参考槽位"。
+    """
+    wf = _match_workflow_exact(db, target, workflow_id)
+    if workflow_id is None and target == "keyframe":
+        if not (wf.capabilities or {}).get("reference_slots"):
+            alt = _find_ref_capable_image_workflow(db)
+            if alt is not None:
+                return alt
+    return wf
+
+
 def _workflow_binds_param(wf: Workflow, param_name: str) -> bool:
     """检查工作流定义是否绑定了指定参数标记（$param.*）。
     用于判断负面约束等参数能否实际注入，避免写入无人消费的参数。
@@ -83,10 +122,232 @@ def _workflow_binds_param(wf: Workflow, param_name: str) -> bool:
     return param_name in parsed.params and not parsed.errors
 
 
+def _attach_compilation(job: Job, compilation: dict | None) -> None:
+    """把阶段 B 编译结果写入 input_snapshot，便于复现与排障。"""
+    if not compilation:
+        return
+    snap = dict(job.input_snapshot or {})
+    snap["prompt_compilation"] = compilation
+    job.input_snapshot = snap
+
+
+# 结构性错误：槽位超出能力、槽位重复、资产类型不匹配、参考文件缺失等，必须硬阻断，
+# 不允许静默丢图或把错误槽位塞给工作流。
+_HARD_BLOCKING = {
+    "reference_capacity_exceeded",
+    "reference_slot_duplicated",
+    "reference_asset_type_mismatch",
+    "reference_asset_foreign",
+    "reference_asset_file_missing",
+    "reference_asset_not_current",
+    "asset_identity_missing",
+}
+
+
+def _compilation_blocked(compiled, http: int = 422) -> list:
+    """编译结果未就绪时的处理：结构性错误硬阻断，其余交由既有资产门禁处理并留痕。"""
+    if compiled.status == "ready":
+        return []
+    hard = [i for i in compiled.blocking_issues if i.get("code") in _HARD_BLOCKING]
+    if not hard:
+        return list(compiled.blocking_issues)
+    messages = [issue.get("message", issue.get("code", "")) for issue in hard]
+    raise errors.AppError(
+        "prompt_validation_failed",
+        f"提示词校验未通过（{compiled.template_id}）：" + "；".join(m for m in messages if m),
+        http,
+        blocking_issues=compiled.blocking_issues,
+        template_id=compiled.template_id,
+    )
+
+
+def _apply_compiled_media(compiled, params: dict) -> dict:
+    """只合并编译出的参考图槽位，不改写用户已确认的提示词。"""
+    out = dict(params)
+    if compiled.reference_slots:
+        media = dict(out.get("__media__") or {})
+        for slot in compiled.reference_slots:
+            media[slot["slot_key"]] = slot["file_path"]
+        out["__media__"] = media
+    return out
+
+
+def _finalize_negative(compiled, wf: Workflow, params: dict) -> dict:
+    """负向提示词仅在当前工作流真实绑定 negative 参数时注入，否则不假装生效。"""
+    out = dict(params)
+    if not compiled.negative_prompt:
+        return out
+    if _workflow_binds_param(wf, "negative"):
+        out.setdefault("negative", compiled.negative_prompt)
+    else:
+        out.pop("negative", None)
+    return out
+
+
+def _match_pure_asset_workflow(db: Session, workflow_id: str | None) -> Workflow:
+    """资产图专用工作流匹配：优先无参考图槽位的纯文生图工作流。
+
+    带参考图槽位的工作流在未提供参考图时，模型会自行补全主体，
+    导致角色图、道具图中混入无关人物、场景与杂物，破坏资产纯净度。
+    """
+    if workflow_id:
+        wf = db.get(Workflow, workflow_id)
+        if wf is None:
+            raise errors.AppError("workflow_not_found", "工作流不存在", 404)
+        if (wf.capabilities or {}).get("reference_slots"):
+            raise errors.AppError(
+                "invalid_request",
+                "资产图只允许无参考图的纯文生图工作流，当前工作流声明了 reference_slots",
+                422,
+            )
+        return wf
+    candidates = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "image")
+        .order_by(Workflow.is_default.desc(), Workflow.is_builtin.desc())
+        .all()
+    )
+    for wf in candidates:
+        if not (wf.capabilities or {}).get("reference_slots"):
+            return wf
+    raise errors.AppError(
+        "workflow_not_found", "未找到可用的纯文生图工作流，资产图生成已阻断", 404
+    )
+
+
+# 资产图纯净约束：调用方自带提示词时也必须附带，避免净化模板被整体跳过
+_ASSET_PURITY_CLAUSE = {
+    "character": (
+        "画面纯净约束：只出现这一个角色，不出现第二个人物、人物剪影、镜中人物或背景人物；"
+        "不出现剧情场景背景，背景为干净统一的纯色或简单摄影棚背景；"
+        "不出现文字、标签、水印、Logo、边框、拼贴或多视图。"
+    ),
+    "scene": (
+        "画面纯净约束：只表现环境本身，不出现任何人物、动物、角色剪影或人体局部；"
+        "不出现剧情中的可移动道具、手持物品或临时摆放物；"
+        "不出现文字、标签、水印、Logo、边框、拼贴或多场景拼接。"
+    ),
+    "prop": (
+        "画面纯净约束：只出现这一件道具，不出现人物、手部或无关物品；"
+        "背景为干净统一的纯色或简单背景；"
+        "不出现文字、标签、水印、Logo、边框或拼贴。"
+    ),
+}
+
+
+def _purify_custom_prompt(compiled, params: dict) -> dict:
+    """调用方自带提示词时补齐类型隔离约束，保证净化规则不因自定义提示词失效。"""
+    out = dict(params)
+    prompt = str(out.get("prompt") or "").strip()
+    clause = _ASSET_PURITY_CLAUSE.get(compiled.asset_type or "")
+    if prompt and clause and clause not in prompt:
+        out["prompt"] = f"{prompt}\n{clause}"
+    return out
+
+
+def _compile_asset_prompt(db: Session, asset_type: str, entity_id: str, wf: Workflow,
+                          params: dict) -> tuple[dict, dict]:
+    """阶段 B：编译独立资产图提示词（单主体、干净背景、类型隔离）。"""
+    from app.services.prompt_compiler import apply_to_params, compile_asset_image, validate_compilation
+
+    try:
+        raw = compile_asset_image(db, asset_type, entity_id, workflow=wf).to_dict()
+    except ValueError as exc:
+        raise errors.AppError("invalid_request", str(exc), 422)
+    compiled = validate_compilation(raw)
+    _compilation_blocked(compiled, 422)
+    out = dict(params)
+    if "prompt" not in out:
+        out = apply_to_params(compiled, out)
+    else:
+        # 自带提示词时净化模板不再整体失效：补齐类型隔离禁令后继续走负向词落地
+        out = _purify_custom_prompt(compiled, out)
+    out = _finalize_negative(compiled, wf, out)
+    return out, compiled.to_dict()
+
+
+def _compile_shot_prompt(db: Session, shot: Shot, wf: Workflow, params: dict,
+                         task: str, fallback_prompt: str = "") -> tuple[dict, dict]:
+    """阶段 B：编译分镜图/分镜视频提示词，只组合镜头绑定且审核通过的资产。
+
+    结构性错误硬阻断；资产未审核等软阻断沿用既有资产门禁语义，仅在无提示词时回退，
+    并把解码结果完整写入快照，避免重复拦截破坏既有入口。
+    """
+    from app.services.prompt_compiler import (
+        apply_to_params,
+        compile_shot_video,
+        compile_storyboard_image,
+        validate_compilation,
+    )
+
+    raw = (compile_storyboard_image(db, shot.id, workflow=wf) if task == "keyframe"
+           else compile_shot_video(db, shot.id, workflow=wf))
+    compiled = validate_compilation(raw.to_dict())
+    soft = _compilation_blocked(compiled, 409)
+    out = dict(params)
+    if soft and "prompt" not in out:
+        out["prompt"] = fallback_prompt
+        snapshot = compiled.to_dict()
+        snapshot["deferred_blocking_issues"] = soft
+        return out, snapshot
+    if "prompt" not in out:
+        out = apply_to_params(compiled, out)
+    else:
+        out = _apply_compiled_media(compiled, out)
+    out = _finalize_negative(compiled, wf, out)
+    snapshot = compiled.to_dict()
+    if soft:
+        snapshot["deferred_blocking_issues"] = soft
+    return out, snapshot
+
+
+def _workflow_frame_size(definition: dict | None) -> tuple[int, int] | None:
+    """取工作流里 H3 视频节点的 width/height。"""
+    if not isinstance(definition, dict):
+        return None
+    for node in definition.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") != "MiniMaxH3ReferenceToVideo":
+            continue
+        inputs = node.get("inputs") or {}
+        width, height = inputs.get("width"), inputs.get("height")
+        if isinstance(width, int) and isinstance(height, int):
+            return width, height
+    return None
+
+
+def _apply_tier_frame_size(wf: Workflow, params: dict) -> dict:
+    """档位工作流（capabilities.tier）自带画幅时，写入 width/height。
+
+    只在调用方没显式指定时填；非档位工作流保持原行为（由 worker 按项目宽高比注入）。
+    """
+    if params.get("width") is not None and params.get("height") is not None:
+        return params
+    if not (wf.capabilities or {}).get("tier"):
+        return params
+    size = _workflow_frame_size(wf.definition)
+    if size is None:
+        return params
+    out = dict(params)
+    out.setdefault("width", size[0])
+    out.setdefault("height", size[1])
+    return out
+
+
 def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
-                wf: Workflow, params: dict, generation_mode: str | None = None) -> Job:
-    """创建生成任务并持久化 effective_inputs 快照。"""
+                wf: Workflow, params: dict, generation_mode: str | None = None,
+                priority: int = 0) -> Job:
+    """创建生成任务并持久化 effective_inputs 快照。
+
+    priority 越大越先被 worker 取到（同优先级按入队顺序），用于人工发起的
+    重新生成插队；普通任务保持 0。
+    """
     job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
+    if target == "clip":
+        # 极速/标准/质量三档工作流各自带画幅，创建任务时就落到 params，
+        # 避免 worker 再按项目宽高比覆盖
+        params = _apply_tier_frame_size(wf, params)
     job = Job(
         id=ids.job_id(),
         project_id=project_id,
@@ -96,6 +357,7 @@ def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
         workflow_version=wf.version,
         params=params,
         status="queued",
+        priority=priority,
         created_at=_now(),
         input_snapshot={
             "workflow_version": wf.version,
@@ -263,6 +525,24 @@ def _assert_prev_frames_available(db: Session, shots: list, target: str) -> None
         )
 
 
+def _apply_chain_mode(jobs: list[Job], chain_mode: str) -> None:
+    """批量 clip 生成方式标记（批量出视频弹窗选择）。
+    - independent：各镜头独立并行，执行时不注入上一镜尾帧
+    - chained：按顺序串行，仅首任务 queued，其余置 chained_wait，
+      由 worker 在前一任务成功且尾帧绑定后释放为 queued；
+      前一任务失败时链条保持暂停，可重新发起批量继续
+    """
+    prev = None
+    for j in jobs:
+        snap = dict(j.input_snapshot or {})
+        snap["chain_mode"] = chain_mode
+        if chain_mode == "chained" and prev is not None:
+            j.status = "chained_wait"
+            snap["chain"] = {"prev_job_id": prev.id, "mode": "chained"}
+        j.input_snapshot = snap
+        prev = j
+
+
 def _project_id_from_shot(db: Session, shot: Shot) -> str:
     """从镜头获取项目 ID。"""
     scene = db.get(Scene, shot.scene_id)
@@ -378,6 +658,72 @@ def _check_inflight_duplicate(db: Session, shot_id: str, target: str) -> None:
             409,
         )
 
+def _check_asset_inflight(db: Session, entity_id: str, param_key: str, target: str) -> None:
+    """资产图在途任务去重：同实体+同目标已有 queued/running 任务时返回 409，
+    防止重复提交导致同一 ComfyUI prompt 被多次调用（浪费 ComfyUI 资源且可能出图结果异常）。
+    
+    entity_id 通过 job.params[param_key] 查询（如 __scene_id__ / __character_id__ / __prop_id__）。
+    """
+    job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
+    # SQLite 无原生 JSONB 查询，取所有 queued/running 的资产类 Job 在 Python 中过滤
+    candidates = (
+        db.query(Job)
+        .filter(
+            Job.job_type == job_type,
+            Job.status.in_(("queued", "running")),
+        )
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    for j in candidates:
+        if (j.params or {}).get(param_key) == entity_id:
+            raise errors.AppError(
+                "job_in_flight",
+                f"该资产已有同目标在途任务（{j.id}，状态 {j.status}），请等待完成或先取消",
+                409,
+            )
+
+
+
+def _cancel_inflight_jobs(db: Session, shot_id: str, target: str) -> list[str]:
+    """重新生成前取消该镜头同目标的在途任务，释放 ComfyUI 显卡资源。
+
+    running 的生成任务调用 ComfyUI /interrupt（多实例按 input_snapshot.comfyui_instance 定向中断），
+    queued/chained_wait/submission_unknown 直接本地置 cancelled。
+    返回被取消的任务 ID 列表，用于前端提示与追溯。
+    """
+    job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
+    inflight = (
+        db.query(Job)
+        .filter(
+            Job.shot_id == shot_id,
+            Job.job_type == job_type,
+            Job.status.in_(("queued", "running", "chained_wait", "submission_unknown")),
+        )
+        .all()
+    )
+    cancelled: list[str] = []
+    for j in inflight:
+        if j.status == "running" and j.prompt_id:
+            try:
+                from app.integrations.comfyui import ComfyUIClient
+                used_url = (j.input_snapshot or {}).get("comfyui_instance")
+                if used_url:
+                    ComfyUIClient(base_url=used_url).interrupt()
+                else:
+                    ComfyUIClient().interrupt()
+            except Exception as e:  # 中断失败不阻断本地取消，记入事件
+                db.add(JobEvent(job_id=j.id, event_type="job.interrupt_failed",
+                                payload={"reason": type(e).__name__}, created_at=_now()))
+        j.status = "cancelled"
+        j.finished_at = _now()
+        db.add(JobEvent(job_id=j.id, event_type="job.cancelled",
+                        payload={"reason": "shot_clip_regenerate"}, created_at=_now()))
+        cancelled.append(j.id)
+    if cancelled:
+        db.commit()
+    return cancelled
+
 
 def _filter_inflight(db: Session, shots: list, target: str) -> tuple[list, list]:
     """批量生成时过滤在途任务：跳过已有同目标 queued/running 任务的镜头，
@@ -392,7 +738,7 @@ def _filter_inflight(db: Session, shots: list, target: str) -> tuple[list, list]
         .filter(
             Job.shot_id.in_(shot_ids),
             Job.job_type == job_type,
-            Job.status.in_(("queued", "running")),
+            Job.status.in_(("queued", "running", "chained_wait")),
         )
         .all()
     }
@@ -400,6 +746,49 @@ def _filter_inflight(db: Session, shots: list, target: str) -> tuple[list, list]
     for s in shots:
         if s.id in inflight:
             skipped.append({"shot_id": s.id, "job_id": inflight[s.id], "reason": "job_in_flight"})
+        else:
+            ok.append(s)
+    return ok, skipped
+
+
+def _filter_already_generated(db: Session, shots: list, target: str,
+                             wf_id: str | None, wf_version: int | None) -> tuple[list, list]:
+    """批量生成幂等过滤（仅分镜视频 clip）：跳过已由同一工作流生成过当前有效视频的镜头。
+
+    判定口径：镜头存在 validity=current 的 clip 资产，其来源任务 succeeded，
+    且该任务的 workflow_id 与本次批量使用的工作流一致。
+    目的：重复点击批量出视频不会对已产出的镜头再次创建任务、重复消耗 ComfyUI。
+    重新生成走详情页的 regenerate-clip / regenerate 接口，不受此处限制。
+    """
+    if target != "clip" or not wf_id or not shots:
+        return shots, []
+    shot_ids = [s.id for s in shots]
+    rows = (
+        db.query(Job.shot_id)
+        .join(Asset, Asset.source_job_id == Job.id)
+        .filter(
+            Job.shot_id.in_(shot_ids),
+            Job.job_type == "generate_clip",
+            Job.status == "succeeded",
+            Job.workflow_id == wf_id,
+            Asset.asset_type == "clip",
+            Asset.validity == "current",
+        )
+        .distinct()
+        .all()
+    )
+    done = {r[0] for r in rows if r[0]}
+    if not done:
+        return shots, []
+    ok, skipped = [], []
+    for s in shots:
+        if s.id in done:
+            skipped.append({
+                "shot_id": s.id,
+                "reason": "already_generated",
+                "workflow_id": wf_id,
+                "workflow_version": wf_version,
+            })
         else:
             ok.append(s)
     return ok, skipped
@@ -450,10 +839,18 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
                 _existing = params.get("__media__", {})
                 _existing.update(media)
                 params["__media__"] = _existing
+    # 阶段 B：分镜图/分镜视频提示词编译——只组合镜头绑定且审核通过的资产，
+    # 结构性错误（槽位超限、参考文件缺失、槽位重复）硬阻断，不静默丢图。
+    compilation = None
+    if target in ("keyframe", "clip"):
+        _fallback = params.get("prompt") or shot.image_prompt or ""
+        params, compilation = _compile_shot_prompt(db, shot, wf, params, target, _fallback)
+
     # 镜间尾帧依赖（P0）：非首镜使用前序镜头实际尾帧，缺失时按声明决定拦截或记录
     prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
                       generation_mode=payload.get("generation_mode"))
+    _attach_compilation(job, compilation)
     if target == "clip":
         # 无论是否注入成功都记录判定依据，便于事后追溯串图与缺帧问题
         _snap = dict(job.input_snapshot or {})
@@ -542,30 +939,89 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     return _job_out(job)
 
 
+@router.post("/shots/{shot_id}/regenerate-clip", status_code=202)
+def regenerate_shot_clip(shot_id: str, payload: dict | None = None,
+                         db: Session = Depends(get_db)) -> dict:
+    """重新生成分镜视频：覆盖原视频，并把该镜头绑定到新任务。
+
+    - 提交前先取消该镜头所有在途 generate_clip 任务（running 任务调用 ComfyUI /interrupt），
+      取消后不再占用 ComfyUI 显卡资源；
+    - 原有视频资产转历史版本（validity=superseded），不物理删除，便于追溯；
+    - 新任务成功后写入新的 current 视频资产，即『镜头绑定到新任务』。
+    返回新任务 + 被取消的历史任务 ID 列表。
+    """
+    payload = payload or {}
+    shot = _get_shot(db, shot_id)
+    scene = db.get(Scene, shot.scene_id)
+    target = "clip"
+    # 关键帧门禁：未确认分镜图不允许生成视频
+    _check_keyframe_gate(db, [shot.id])
+    # 先取消历史在途任务（含 running 的 ComfyUI 中断），释放显卡资源并解除在途去重
+    cancelled = _cancel_inflight_jobs(db, shot.id, target)
+    # 旧视频转历史版本 + 下游尾帧失效传播（分镜图不变，不回退关键帧确认状态）
+    olds = (
+        db.query(Asset)
+        .join(AssetRef, AssetRef.asset_id == Asset.id)
+        .filter(AssetRef.shot_id == shot.id, Asset.asset_type == "clip",
+                Asset.validity == "current")
+        .all()
+    )
+    if olds:
+        from app.services.shot_chain import invalidate_chain_after_regenerate
+        invalidate_chain_after_regenerate(db, shot, reset_keyframe_confirmed=False)
+        for a in olds:
+            a.validity = "superseded"
+    wf = _match_workflow(db, target, payload.get("workflow_id"))
+    params = dict(payload.get("params") or {})
+    wf = _inject_continuity_first_frame(db, shot, target, wf, params)
+    params.setdefault("prompt", shot.video_prompt or shot.image_prompt or "")
+    # @引用注入（D-16）：解析提示词中的 @角色/@场景，自动携带参考图
+    from app.services.ref_inject import build_media_params
+    prompt_text = params.get("prompt") or ""
+    if prompt_text:
+        slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+        media = build_media_params(db, scene.project_id, prompt_text, slots)
+        if media:
+            _existing = params.get("__media__", {})
+            _existing.update(media)
+            params["__media__"] = _existing
+    # 阶段 B：提示词编译（槽位超限/参考图缺失硬阻断）
+    _fallback = params.get("prompt") or shot.image_prompt or ""
+    params, compilation = _compile_shot_prompt(db, shot, wf, params, target, _fallback)
+    # 镜间尾帧依赖（P0）
+    prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
+    job = _create_job(db, scene.project_id, shot.id, target, wf, params,
+                      generation_mode=payload.get("generation_mode"),
+                      priority=_REGENERATE_CLIP_PRIORITY)
+    _attach_compilation(job, compilation)
+    _snap = dict(job.input_snapshot or {})
+    _snap["prev_frame"] = prev_frame_info
+    _snap["replaced_job_ids"] = cancelled
+    _snap["priority_reason"] = "shot_clip_regenerate"
+    job.input_snapshot = _snap
+    db.commit()
+    out = _job_out(job)
+    out["cancelled_job_ids"] = cancelled
+    return out
+
+
 @router.post("/characters/{character_id}/generate", status_code=202)
-def generate_character(character_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+def generate_character(character_id: str, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
     """生成角色定妆图：target 固定 keyframe，appearance 为 prompt 基础，无需参考图。"""
+    payload = payload or {}
     ch = db.get(Character, character_id)
     if ch is None:
         raise errors.AppError("not_found", "角色不存在", 404)
-    wf = _match_workflow(db, "keyframe", payload.get("workflow_id"))
+    wf = _match_pure_asset_workflow(db, payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
-    # P1：角色定妆图使用纯净化结构化模板（单一主体/干净背景/负面约束分段）
-    # P4 整改：必填变量缺失时明确报错（422），不静默生成占位提示词
-    from app.services.asset_prompts import ASSET_PROMPTS_VERSION, build_character_prompt, negative_for_asset_type
-    try:
-        params.setdefault(
-            "prompt",
-            build_character_prompt(ch.name, ch.appearance or "", description=ch.description or ""),
-        )
-    except ValueError as e:
-        raise errors.AppError("invalid_request", str(e), 422)
+    # 阶段 B：角色资产图提示词由编译器从结构化资料 + 集中模板产出（单角色/全身/无场景）
+    # 必填外观缺失时硬阻断 422，不静默生成占位提示词
+    _check_asset_inflight(db, ch.id, "__character_id__", "keyframe")
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION
+    params, compilation = _compile_asset_prompt(db, "character", ch.id, wf, params)
     params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-    # P4 整改：负面约束按工作流实际参数绑定注入（标记 $negative.*），
-    # 不再依赖 capabilities.negative_prompt 声明（现有工作流均未声明该字段，导致约束从未生效）
-    if "negative" not in params and _workflow_binds_param(wf, "negative"):
-        params["negative"] = negative_for_asset_type("character")
     job = _create_job(db, ch.project_id, None, "keyframe", wf, params)
+    _attach_compilation(job, compilation)
     job.params = {**job.params, "__character_id__": ch.id}
     # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
     from app.services.assets_review import reset_assets_review
@@ -575,27 +1031,21 @@ def generate_character(character_id: str, payload: dict, db: Session = Depends(g
 
 
 @router.post("/props/{prop_id}/generate", status_code=202)
-def generate_prop(prop_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+def generate_prop(prop_id: str, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
     """生成道具锚定图：规则同角色定妆图。"""
+    payload = payload or {}
     p = db.get(Prop, prop_id)
     if p is None:
         raise errors.AppError("not_found", "道具不存在", 404)
-    wf = _match_workflow(db, "keyframe", payload.get("workflow_id"))
+    wf = _match_pure_asset_workflow(db, payload.get("workflow_id"))
     params = dict(payload.get("params") or {})
-    # P1：道具锚定图使用纯净化结构化模板
-    # P4 整改：必填变量缺失时明确报错（422）
-    from app.services.asset_prompts import ASSET_PROMPTS_VERSION, build_prop_prompt, negative_for_asset_type
-    try:
-        params.setdefault(
-            "prompt",
-            build_prop_prompt(p.name, p.appearance or "", description=p.description or ""),
-        )
-    except ValueError as e:
-        raise errors.AppError("invalid_request", str(e), 422)
+    # 阶段 B：道具资产图提示词编译（单件道具/无手无人物/无场景背景）
+    _check_asset_inflight(db, p.id, "__prop_id__", "keyframe")
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION
+    params, compilation = _compile_asset_prompt(db, "prop", p.id, wf, params)
     params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-    if "negative" not in params and _workflow_binds_param(wf, "negative"):
-        params["negative"] = negative_for_asset_type("prop")
     job = _create_job(db, p.project_id, None, "keyframe", wf, params)
+    _attach_compilation(job, compilation)
     job.params = {**job.params, "__prop_id__": p.id}
     # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
     from app.services.assets_review import reset_assets_review
@@ -605,27 +1055,38 @@ def generate_prop(prop_id: str, payload: dict, db: Session = Depends(get_db)) ->
 
 
 @router.post("/scenes/{scene_id}/generate-baseline", status_code=202)
-def generate_scene_baseline(scene_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+def generate_scene_baseline(scene_id: str, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
     """生成场景基准图：target 固定 keyframe，title+description 为 prompt 基础。"""
+    payload = payload or {}
     sc = db.get(Scene, scene_id)
     if sc is None:
         raise errors.AppError("scene_not_found", "场景不存在", 404)
-    wf = _match_workflow(db, "keyframe", payload.get("workflow_id"))
+    # 场景基准图必须使用无参考图的纯文生图工作流（D-18 修订 D-03b：
+    # 带参考图槽位的工作流会在无参考图时由模型自行补全主体，导致画面中出现人物与道具）。
+    # 显式指定 workflow_id 时信任调用方，但校验其 reference_slots 必须为空。
+    wf_id = payload.get("workflow_id")
+    if wf_id:
+        wf = db.get(Workflow, wf_id)
+        if wf is None:
+            raise errors.AppError("workflow_not_found", "工作流不存在", 404)
+        if (wf.capabilities or {}).get("reference_slots"):
+            raise errors.AppError(
+                "invalid_request",
+                "场景基准图只允许无参考图的纯文生图工作流，当前工作流声明了 reference_slots",
+                422,
+            )
+    else:
+        wf = db.get(Workflow, "wf_2babab605508")
+        if wf is None or wf.workflow_type != "image":
+            raise errors.AppError("workflow_not_found", "纯文生图工作流 wf_image_t2i_qwen21_turbo 不存在", 404)
     params = dict(payload.get("params") or {})
-    # P1：场景基准图使用纯净化结构化模板（无角色/无独立道具/空间布局完整）
-    # P4 整改：必填变量缺失时明确报错（422）
-    from app.services.asset_prompts import ASSET_PROMPTS_VERSION, build_scene_prompt, negative_for_asset_type
-    try:
-        params.setdefault(
-            "prompt",
-            build_scene_prompt(sc.title or "", sc.description or ""),
-        )
-    except ValueError as e:
-        raise errors.AppError("invalid_request", str(e), 422)
+    # 阶段 B：场景资产图提示词编译（纯环境/无人无角色/空间结构完整）
+    _check_asset_inflight(db, sc.id, "__scene_id__", "keyframe")
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION
+    params, compilation = _compile_asset_prompt(db, "scene", sc.id, wf, params)
     params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-    if "negative" not in params and _workflow_binds_param(wf, "negative"):
-        params["negative"] = negative_for_asset_type("scene")
     job = _create_job(db, sc.project_id, None, "keyframe", wf, params)
+    _attach_compilation(job, compilation)
     job.params = {**job.params, "__scene_id__": sc.id}
     # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
     from app.services.assets_review import reset_assets_review
@@ -668,6 +1129,17 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
         # 尾帧依赖预检（P0）：避免循环中途失败导致部分任务已入队
         _assert_prev_frames_available(db, shots, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"))
+    # 幂等过滤（P0）：同一工作流已生成过视频的镜头直接跳过，避免重复渲染；
+    # 需要重做时走分镜视频详情页的重新生成，不受此处限制
+    shots, already_done = _filter_already_generated(db, shots, target, wf.id, wf.version)
+    if already_done:
+        skipped.extend(already_done)
+    if not shots:
+        raise errors.AppError(
+            "already_generated",
+            f"选中镜头均已由该工作流生成过视频（{len(already_done)} 个），如需重做请在分镜视频详情页重新生成",
+            409,
+        )
     # @引用注入（D-16，P0 修复）：与单镜生成/项目批量生成行为一致，
     # 解析每个镜头提示词中的 @角色/@场景/@道具，自动携带参考图
     from app.services.ref_inject import build_media_params
@@ -751,11 +1223,28 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
         # 前置闸口（P2 合规）：生成分镜图前校验角色定妆图与场景基准图齐全
         _check_character_portraits(db, project_id)
         _check_scene_baselines(db, project_id)
+    # 批量生成方式（仅 clip）：independent 独立并行（不依赖上一镜尾帧）/ chained 链式串行（逐镜衔接）
+    chain_mode = payload.get("chain_mode") if target == "clip" else None
+    if chain_mode is not None and chain_mode not in ("independent", "chained"):
+        raise errors.AppError("invalid_request", "chain_mode 仅允许 independent/chained", 400)
     if target == "clip":
         _check_keyframe_gate(db, [s.id for s in shots])
-        # 尾帧依赖预检（P0）：避免循环中途失败导致部分任务已入队
-        _assert_prev_frames_available(db, shots, target)
+        # 尾帧依赖预检（P0）：仅传统模式（未指定 chain_mode）执行；
+        # independent 不依赖尾帧；chained 由链式任务在执行时解析上一镜尾帧
+        if chain_mode is None:
+            _assert_prev_frames_available(db, shots, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"))
+    # 幂等过滤（P0）：同一工作流已生成过视频的镜头直接跳过，避免重复渲染；
+    # 需要重做时走分镜视频详情页的重新生成，不受此处限制
+    shots, already_done = _filter_already_generated(db, shots, target, wf.id, wf.version)
+    if already_done:
+        skipped.extend(already_done)
+    if not shots:
+        raise errors.AppError(
+            "already_generated",
+            f"选中镜头均已由该工作流生成过视频（{len(already_done)} 个），如需重做请在分镜视频详情页重新生成",
+            409,
+        )
     jobs = []
     slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
     for shot in shots:
@@ -779,13 +1268,21 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
                     _existing = params.get("__media__", {})
                     _existing.update(media)
                     params["__media__"] = _existing
-        prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
+        # 镜间尾帧依赖（P0）：仅传统模式在提交时注入；
+        # independent 不注入；chained 由执行期 ref_prev_frame 注入逻辑解析上一镜尾帧
+        prev_frame_info = None
+        if target == "clip" and chain_mode is None:
+            prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
         _job = _create_job(db, project_id, shot.id, target, shot_wf, params)
         if target == "clip":
             _snap = dict(_job.input_snapshot or {})
-            _snap["prev_frame"] = prev_frame_info
+            if prev_frame_info is not None:
+                _snap["prev_frame"] = prev_frame_info
             _job.input_snapshot = _snap
         jobs.append(_job)
+    # 生成方式标记：chained 仅首任务 queued，其余 chained_wait 等待前一任务成功后释放
+    if target == "clip" and chain_mode:
+        _apply_chain_mode(jobs, chain_mode)
     db.commit()
     return {"jobs": [_job_out(j) for j in jobs], "count": len(jobs), "skipped": skipped}
 

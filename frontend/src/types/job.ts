@@ -10,12 +10,14 @@ export type JobType =
   | 'export'
 
 /** 任务状态 */
-export type JobStatus = 'queued' | 'running' | 'submission_unknown' | 'succeeded' | 'failed' | 'lost' | 'cancelled'
+export type JobStatus = 'queued' | 'running' | 'chained_wait' | 'submission_unknown' | 'succeeded' | 'failed' | 'lost' | 'cancelled'
 
 /** 任务（ID 前缀 job_，retry 仅 failed/lost 且 retryable=true） */
 export interface Job {
   id: string
   project_id?: string | null
+  /** 关联镜头 ID（生成任务必填，供按镜头关联任务状态） */
+  shot_id?: string | null
   /** 展示用关联信息（后端列表/详情接口补充） */
   project_name?: string | null
   episode?: number | null
@@ -34,6 +36,8 @@ export interface Job {
   retryable?: boolean
   attempts?: number
   seq?: number
+  /** 生成进度百分比（0-100）：running 任务从最近 job.progress 事件计算，其余状态为空 */
+  progress?: number | null
   created_at: string
   updated_at: string
   finished_at?: string | null

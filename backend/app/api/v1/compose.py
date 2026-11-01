@@ -26,6 +26,11 @@ from app.services import errors
 
 router = APIRouter(prefix="/api", tags=["compose"])
 
+# 合成/导出任务的调度优先级：两者只跑本地 FFmpeg、不占 ComfyUI 算力，
+# 与批量生成共用串行队列时会被数十个 clip 任务压在后面（表现为“点了合成没反应”），
+# 因此高于普通生成（0），低于人工重生成（1000）。
+_COMPOSE_JOB_PRIORITY = 500
+
 
 def _now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -78,7 +83,7 @@ def create_compose(project_id: str, payload: ComposeCreate,
             "bgm_volume": payload.bgm_volume,
             "compose_tolerance": payload.compose_tolerance,
         },
-        status="queued", created_at=_now_naive(),
+        status="queued", created_at=_now_naive(), priority=_COMPOSE_JOB_PRIORITY,
     )
     db.add(job)
     _activate_if_draft(db, p)
@@ -135,7 +140,7 @@ def create_export(project_id: str, payload: ExportCreate,
             "composition_id": comp.id,
             "delivery_profile": payload.delivery_profile,
         },
-        status="queued", created_at=_now_naive(),
+        status="queued", created_at=_now_naive(), priority=_COMPOSE_JOB_PRIORITY,
     )
     db.add(job)
     db.commit()
@@ -151,12 +156,25 @@ def list_exports(project_id: str, db: Session = Depends(get_db)) -> dict:
         .order_by(Export.created_at.desc())
         .all()
     )
-    return {"total": len(items), "items": [{
-        "id": e.id, "composition_id": e.composition_id, "file_name": e.file_name,
-        "size": e.size, "status": e.status,
-        "created_at": e.created_at.isoformat() if e.created_at else None,
-        "download_url": f"/api/exports/{e.id}/download",
-    } for e in items]}
+    media_dir = Path(get_settings().media_dir)
+    out = []
+    for e in items:
+        # 交付文件位置：file_path 为 media 目录相对路径，abs_path 供页面直接展示“导出到哪了”
+        abs_path = None
+        if e.file_name:
+            try:
+                abs_path = str((media_dir / e.file_name).resolve())
+            except OSError:
+                abs_path = None
+        out.append({
+            "id": e.id, "composition_id": e.composition_id, "file_name": e.file_name,
+            "size": e.size, "status": e.status,
+            "file_path": (str(media_dir / e.file_name) if e.file_name else None),
+            "abs_path": abs_path,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "download_url": f"/api/exports/{e.id}/download",
+        })
+    return {"total": len(items), "items": out}
 
 
 @router.get("/projects/{project_id}/exports/{export_id}/acceptance-check")
@@ -201,12 +219,40 @@ def check_export_acceptance(project_id: str, export_id: str,
     return report.to_dict()
 
 
+def _resolve_media_file(file_path: str) -> Path | None:
+    """把入参路径解析为 media_dir 内的真实文件（越界一律拒绝）。
+
+    兼容两种历史口径：
+    - 相对 media_dir（新建合成记录：cmp_xxx.mp4）
+    - 相对后端工作目录、带 data/media 前缀（早期记录：data/media/cmp_xxx.mp4，
+      预览页直接拼 /api/media/ 会变成 data/media/data/media/... 导致 400）
+    """
+    media_dir = Path(get_settings().media_dir).resolve()
+    raw = Path(file_path)
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        candidates.append(media_dir / raw)
+        for parent in media_dir.parents:
+            candidates.append(parent / raw)
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            continue
+        if resolved != media_dir and media_dir not in resolved.parents:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
 @router.get("/media/{file_path:path}")
 def serve_media(file_path: str) -> FileResponse:
-    """提供合成预览视频文件（路径须在 media_dir 内）。"""
-    media_dir = Path(get_settings().media_dir).resolve()
-    target = (media_dir / file_path).resolve()
-    if not str(target).startswith(str(media_dir)) or not target.exists():
+    """提供合成预览视频文件（路径须在 media_dir 内；支持 Range 拖动播放）。"""
+    target = _resolve_media_file(file_path)
+    if target is None:
         raise errors.invalid_request("文件不存在")
     return FileResponse(path=str(target), media_type="video/mp4")
 

@@ -6,7 +6,6 @@
 - 任务创建即冻结输入快照；再次修改必须创建新任务，不复用旧快照。
 - 参考图能力以工作流 capabilities.reference_slots 为唯一事实来源，
   不臆造槽位、不假设所有模型共用同一参考图格式。
-- 重新生成结果先落为候选版本（validity=candidate），采用后才切为 current。
 """
 from __future__ import annotations
 
@@ -108,7 +107,6 @@ def _asset_brief(asset: Asset | None) -> dict | None:
         "asset_type": asset.asset_type,
         "name": asset.name,
         "version": asset.version,
-        "validity": asset.validity,
         "file_path": asset.file_path,
         "source_job_id": asset.source_job_id,
     }
@@ -139,9 +137,16 @@ def _refs_from_records(db: Session, job_id: str) -> list[dict]:
     ]
 
 
-def _refs_from_snapshot(db: Session, snapshot: dict) -> list[dict]:
-    """历史任务兼容：从 injected_media 的 {槽位: 文件路径} 反查资产。"""
-    injected = snapshot.get("injected_media") or {}
+def _refs_from_snapshot(db: Session, snapshot: dict, media_params: dict | None = None) -> list[dict]:
+    """历史任务兼容：从 {槽位: 文件路径} 反查资产。
+
+    参考图在任务里的存放位置有两种，都要识别，否则真实参考图会整体丢失：
+    - snapshot['injected_media']：视频任务分支写入
+    - params['__media__']：生成提交时的媒体参数，分镜图任务走这里
+    """
+    injected = snapshot.get("injected_media") or media_params or {}
+    if not isinstance(injected, dict):
+        injected = {}
     refs: list[dict] = []
     for slot, path in injected.items():
         asset = None
@@ -195,7 +200,7 @@ def build_base_config(db: Session, asset: Asset) -> dict:
 
     refs = _refs_from_records(db, job.id) if job is not None else []
     if not refs:
-        refs = _refs_from_snapshot(db, snapshot)
+        refs = _refs_from_snapshot(db, snapshot, params.get("__media__"))
 
     slot_index = {s["param"]: s for s in slots}
     for ref in refs:

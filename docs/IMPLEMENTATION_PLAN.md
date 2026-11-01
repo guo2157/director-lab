@@ -9,7 +9,7 @@
 - 文档终审：12/12 齐备、互引无断裂、跨文档一致性 PASS（2026-10-23）
 - 工作流：8 主文件 + 8 meta 校验 8/8 PASS；画布残留键已修复并加防复发检测
 - 远端 ComfyUI：0.41.0，模型 8/8 就位；遗留 AUD3-P0-02（Qwen3-TTS 节点包）、AUD3-P1-01（低显存可行性）、AUD3-P2-01（H3 账号额度）为联调期问题
-- 2026-10-24 更新：工作流现为 9 主文件 + 9 meta（新增 wf_video_h3_ref2va_turbo），已迁入 backend/data/workflows/，校验脚本位于 backend/scripts/；docs 权威目录为项目内 docs/（非 /home/ubuntu/docs/）；AUD3-P0-02 与 AUD3-P2-01 已解除（见第 3 节）
+- 2026-10-24 更新：工作流现为 8 主文件 + 8 meta（wf_video_h3_ref2va_turbo 本期未交付，见 WORKFLOW.md），已迁入 backend/data/workflows/，校验脚本位于 backend/scripts/；docs 权威目录为项目内 docs/（非 /home/ubuntu/docs/）；AUD3-P0-02 与 AUD3-P2-01 已解除（见第 3 节）
 
 ## 1. 阶段划分（按依赖关系排序）
 

@@ -8,7 +8,7 @@
  * - 生成结果先落候选版本，需用户预览比较后采用
  */
 import { computed, ref, watch } from 'vue'
-import { useMessage } from 'naive-ui'
+import { NImage, useMessage } from 'naive-ui'
 import {
   adoptCandidate,
   fetchCandidates,
@@ -33,7 +33,6 @@ const submitting = ref(false)
 const config = ref<RegenerateConfig | null>(null)
 const mode = ref<RegenerateMode>('inherit_prompt_only')
 const promptText = ref('')
-const negativeText = ref('')
 const candidates = ref<CandidateAsset[]>([])
 const localRefs = ref<RegenerateRef[]>([])
 /** 本次提交使用的幂等键：提交期间保持不变，成功后才重置，避免重复点击产生重复任务 */
@@ -48,7 +47,6 @@ const modeOptions = [
 const incomplete = computed(() => config.value !== null && !config.value.snapshot_complete)
 const promptOnly = computed(() => mode.value === 'inherit_prompt_only')
 const refsEditable = computed(() => mode.value !== 'inherit_prompt_only')
-const negativeSupported = computed(() => Boolean(config.value?.negative_prompt?.supported))
 
 const referenceRefs = computed(() => localRefs.value.filter((r) => r.semantic !== 'frame_constraint'))
 const constraintRefs = computed(() => localRefs.value.filter((r) => r.semantic === 'frame_constraint'))
@@ -75,7 +73,6 @@ async function load() {
     const data = await fetchRegenerateConfig(props.shotId, props.target, props.baseAssetId)
     config.value = data
     promptText.value = data.prompt?.rendered ?? ''
-    negativeText.value = data.negative_prompt?.rendered ?? ''
     localRefs.value = (data.refs ?? []).map((r) => ({ ...r }))
     if (!data.snapshot_complete) {
       mode.value = 'full_reconfigure'
@@ -129,7 +126,6 @@ async function submit() {
       target: props.target,
       mode: mode.value,
       prompt: promptText.value,
-      negative_prompt: negativeText.value,
       idempotency_key: pendingKey.value,
     }
     if (props.baseAssetId) payload.base_asset_id = props.baseAssetId
@@ -197,7 +193,15 @@ async function adopt(candidate: CandidateAsset) {
       <div class="section-title">参考图与帧约束</div>
       <n-empty v-if="!localRefs.length" description="本次生成不携带参考图" size="small" />
       <div v-for="ref in referenceRefs" :key="ref.slot_param" class="ref-card">
-        <img v-if="ref.file_path" :src="`/api/assets/${ref.asset_id}/file`" class="ref-thumb" alt="ref" />
+        <n-image
+          v-if="ref.file_path"
+          :src="`/api/assets/${ref.asset_id}/file`"
+          width="48"
+          height="48"
+          object-fit="cover"
+          class="ref-thumb"
+          :img-props="{ style: 'width:100%;height:100%;object-fit:cover;border-radius:4px' }"
+        />
         <div v-else class="ref-thumb placeholder">无预览</div>
         <div class="ref-meta">
           <div class="ref-line">
@@ -218,7 +222,15 @@ async function adopt(candidate: CandidateAsset) {
       <template v-if="constraintRefs.length">
         <div class="section-title">帧约束（区别于参考图）</div>
         <div v-for="ref in constraintRefs" :key="ref.slot_param" class="ref-card constraint">
-          <img v-if="ref.file_path" :src="`/api/assets/${ref.asset_id}/file`" class="ref-thumb" alt="frame" />
+          <n-image
+            v-if="ref.file_path"
+            :src="`/api/assets/${ref.asset_id}/file`"
+            width="48"
+            height="48"
+            object-fit="cover"
+            class="ref-thumb"
+            :img-props="{ style: 'width:100%;height:100%;object-fit:cover;border-radius:4px' }"
+          />
           <div v-else class="ref-thumb placeholder">无预览</div>
           <div class="ref-meta">
             <div class="ref-line">
@@ -240,14 +252,6 @@ async function adopt(candidate: CandidateAsset) {
       <div class="section-title">正向提示词</div>
       <n-input v-model:value="promptText" type="textarea" :rows="4" />
 
-      <template v-if="negativeSupported">
-        <div class="section-title">负向提示词</div>
-        <n-input v-model:value="negativeText" type="textarea" :rows="2" />
-      </template>
-      <n-text v-else depth="3" style="font-size: 12px">
-        当前工作流未绑定负向提示词输入，已隐藏该项。
-      </n-text>
-
       <div v-if="lockedItems.length" class="locked-box">
         <div class="locked-title">本次不修改</div>
         <ul>
@@ -262,7 +266,15 @@ async function adopt(candidate: CandidateAsset) {
       <template v-if="candidates.length">
         <div class="section-title">候选版本</div>
         <div v-for="c in candidates" :key="c.asset_id" class="ref-card">
-          <img v-if="c.thumb_path || c.file_path" :src="`/api/assets/${c.asset_id}/file?thumb=true`" class="ref-thumb" alt="candidate" />
+          <n-image
+            v-if="c.thumb_path || c.file_path"
+            :src="`/api/assets/${c.asset_id}/file?thumb=true`"
+            width="48"
+            height="48"
+            object-fit="cover"
+            class="ref-thumb"
+            :img-props="{ style: 'width:100%;height:100%;object-fit:cover;border-radius:4px' }"
+          />
           <div v-else class="ref-thumb placeholder">无预览</div>
           <div class="ref-meta">
             <div class="ref-line"><span class="ref-slot">候选 v{{ c.version }}</span></div>

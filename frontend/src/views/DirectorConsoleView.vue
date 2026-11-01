@@ -15,7 +15,8 @@ import {
   updateSession,
 } from '@/api/agent'
 import type { AgentApproval, AgentMessage, AgentSession } from '@/api/agent'
-import { listJobs } from '@/api/jobs'
+import { getProjectStyleConfig, getStyleOptions } from '@/api/projects'
+import type { StyleConfig, StyleOptions } from '@/types/project'
 
 const message = useMessage()
 const router = useRouter()
@@ -328,17 +329,7 @@ interface ProjectBrief {
   shot_total: number
   shot_done: number
 }
-interface JobBrief {
-  id: string
-  job_type: string
-  status: string
-  error_code?: string | null
-  created_at?: string | null
-}
-
 const projects = ref<ProjectBrief[]>([])
-const contextJobs = ref<JobBrief[]>([])
-const contextLoading = ref(false)
 // 生成类操作的待审批申请（批准与执行分离：批准只放行，执行才建任务）
 const approvals = ref<AgentApproval[]>([])
 const approvalLoading = ref(false)
@@ -350,27 +341,6 @@ const linkedProject = computed(
   () => projects.value.find((p) => p.id === activeSession.value?.project_id) ?? null,
 )
 
-const JOB_STATUS_TEXT: Record<string, string> = {
-  queued: '排队中',
-  running: '执行中',
-  succeeded: '成功',
-  failed: '失败',
-  cancelled: '已取消',
-  lost: '丢失',
-}
-
-function jobStatusText(s: string): string {
-  return JOB_STATUS_TEXT[s] ?? s
-}
-
-function jobStatusType(s: string): 'default' | 'success' | 'error' | 'warning' | 'info' {
-  if (s === 'succeeded') return 'success'
-  if (s === 'failed' || s === 'lost') return 'error'
-  if (s === 'running') return 'info'
-  if (s === 'queued') return 'warning'
-  return 'default'
-}
-
 async function loadProjects() {
   try {
     const res = await get<{ items: ProjectBrief[] }>('/projects', { page_size: 50 })
@@ -380,19 +350,43 @@ async function loadProjects() {
   }
 }
 
+/* ---------- 风格基线（只读摘要，完整编辑在剧本页） ---------- */
+const styleConfig = ref<StyleConfig | null>(null)
+const styleLabel = ref('')
+const styleLoading = ref(false)
+const styleOptions = ref<StyleOptions | null>(null)
+
+/** 把后端下发的枚举值映射为中文展示名，前端不硬编码枚举 */
+function labelOf(
+  list: Array<{ value: string; label: string }> | undefined,
+  value: string | undefined,
+): string {
+  if (!value) return '未设置'
+  return list?.find((i) => i.value === value)?.label ?? value
+}
+
+async function loadStyleConfig(pid: string) {
+  styleLoading.value = true
+  try {
+    const [cfg, opts] = await Promise.all([
+      getProjectStyleConfig(pid),
+      styleOptions.value ? Promise.resolve(null) : getStyleOptions().catch(() => null),
+    ])
+    styleConfig.value = cfg.config
+    styleLabel.value = cfg.visual_style_label
+    if (opts) styleOptions.value = opts
+  } catch {
+    styleConfig.value = null
+  } finally {
+    styleLoading.value = false
+  }
+}
+
 async function loadContext() {
   const pid = activeSession.value?.project_id
-  contextJobs.value = []
+  styleConfig.value = null
   if (!pid) return
-  contextLoading.value = true
-  try {
-    const res = await listJobs({ project_id: pid, page_size: 8 })
-    contextJobs.value = (res.items as unknown as JobBrief[]) ?? []
-  } catch {
-    contextJobs.value = []
-  } finally {
-    contextLoading.value = false
-  }
+  void loadStyleConfig(pid)
 }
 
 async function loadApprovals() {
@@ -632,22 +626,25 @@ onMounted(() => {
         </div>
       </div>
       <div class="chat-input">
-        <NInput
-          v-model:value="inputText"
-          type="textarea"
-          :rows="2"
-          placeholder="输入消息，Enter 发送（Shift+Enter 换行）"
-          :disabled="!activeSessionId || sending"
-          @keydown.enter.exact.prevent="send"
-        />
-        <NButton
-          type="primary"
-          :loading="sending"
-          :disabled="!inputText.trim() || !activeSessionId"
-          @click="send"
-        >
-          发送
-        </NButton>
+        <div class="composer">
+          <NInput
+            v-model:value="inputText"
+            type="textarea"
+            :rows="2"
+            placeholder="输入消息，Enter 发送（Shift+Enter 换行）"
+            :disabled="!activeSessionId || sending"
+            @keydown.enter.exact.prevent="send"
+          />
+          <NButton
+            class="composer-send"
+            type="primary"
+            :loading="sending"
+            :disabled="!inputText.trim() || !activeSessionId"
+            @click="send"
+          >
+            发送
+          </NButton>
+        </div>
       </div>
     </section>
 
@@ -706,6 +703,33 @@ onMounted(() => {
               <a @click="goProject('compose')">合成导出</a>
               <a class="muted" @click="linkProject(null)">取消关联</a>
             </div>
+            <div class="ctx-style">
+              <div class="ctx-style-head">
+                <span>风格基线</span>
+                <a class="style-edit" @click="goProject('script')">调整 →</a>
+              </div>
+              <NSpin :show="styleLoading" size="small">
+                <div v-if="!styleConfig" class="ctx-empty">尚未读取风格配置</div>
+                <div v-else class="style-lines">
+                  <div class="style-line">
+                    <span class="style-k">视觉风格</span>
+                    <span class="style-v">{{ styleLabel || styleConfig.visual_style }}</span>
+                  </div>
+                  <div class="style-line">
+                    <span class="style-k">剧本类型</span>
+                    <span class="style-v">{{ styleConfig.genre_tags.length ? styleConfig.genre_tags.join('、') : '未设置' }}</span>
+                  </div>
+                  <div class="style-line">
+                    <span class="style-k">剧情节奏</span>
+                    <span class="style-v">{{ labelOf(styleOptions?.pacing, styleConfig.pacing) }}</span>
+                  </div>
+                  <div class="style-line">
+                    <span class="style-k">主情绪</span>
+                    <span class="style-v">{{ styleConfig.emotional_tone[0] ?? '未设置' }}</span>
+                  </div>
+                </div>
+              </NSpin>
+            </div>
           </div>
 
           <div class="ctx-label">待审批生成</div>
@@ -743,19 +767,6 @@ onMounted(() => {
               </div>
             </div>
           </NSpin>
-          <div class="ctx-label">最近任务</div>
-          <NSpin :show="contextLoading" size="small">
-            <div v-if="!contextJobs.length" class="ctx-empty">暂无任务记录</div>
-            <div v-else class="job-list">
-              <div v-for="j in contextJobs" :key="j.id" class="job-item">
-                <span class="job-type">{{ j.job_type }}</span>
-                <NTag size="tiny" :type="jobStatusType(j.status)">{{ jobStatusText(j.status) }}</NTag>
-                <span v-if="j.status === 'failed' && j.error_code" class="job-error" :title="j.error_code">
-                  {{ j.error_code }}
-                </span>
-              </div>
-            </div>
-          </NSpin>
         </template>
       </div>
     </aside>
@@ -766,10 +777,10 @@ onMounted(() => {
 <style scoped>
 .director-console {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
-  padding: 10px;
+  padding: 12px;
   max-width: 1600px;
   margin: 0 auto;
   box-sizing: border-box;
@@ -796,12 +807,13 @@ onMounted(() => {
 .panel {
   background: var(--bg-panel, #fff);
   border: 1px solid var(--border-subtle, #e5e7eb);
-  border-radius: 10px;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.03);
 }
 .panel-header {
   display: flex;
@@ -899,6 +911,10 @@ onMounted(() => {
 .chat-panel {
   flex: 1;
   min-width: 520px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 .chat-title {
   font-size: 14px;
@@ -910,6 +926,22 @@ onMounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scroll-behavior: smooth;
+  display: flex;
+  flex-direction: column;
+}
+.chat-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
 }
 .chat-state {
   display: flex;
@@ -918,13 +950,26 @@ onMounted(() => {
   height: 100%;
 }
 .message-list {
-  padding: 16px 20px;
+  padding: 24px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;
+  flex: 1;
+  min-height: min-content;
 }
 .message-row {
   display: flex;
+  animation: msg-fade-in 0.25s ease-out;
+}
+@keyframes msg-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .thinking-bubble {
   border-style: dashed;
@@ -964,15 +1009,27 @@ onMounted(() => {
   justify-content: flex-end;
 }
 .message-row.user .message-bubble {
-  background: rgba(99, 102, 241, 0.08);
-  border-color: rgba(99, 102, 241, 0.25);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(139, 92, 246, 0.07) 100%);
+  border-color: rgba(99, 102, 241, 0.28);
+  border-radius: 16px 4px 16px 16px;
+  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.08);
+}
+.message-row.user .message-bubble:hover {
+  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.16);
+  transform: translateY(-1px);
 }
 .message-bubble {
   max-width: 76%;
-  padding: 10px 14px;
-  border-radius: 12px;
+  padding: 14px 18px;
+  border-radius: 4px 16px 16px 16px;
   border: 1px solid var(--border-subtle, #e5e7eb);
   background: var(--bg-elevated, #f9f9f9);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  transition: box-shadow 0.2s ease, transform 0.15s ease;
+}
+.message-bubble:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  transform: translateY(-1px);
 }
 .message-role {
   font-size: 11px;
@@ -984,7 +1041,34 @@ onMounted(() => {
   color: var(--text-primary, #111);
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.6;
+  line-height: 1.7;
+}
+.message-content :deep(a) {
+  color: #6366f1;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.3);
+  transition: border-color 0.15s;
+}
+.message-content :deep(a:hover) {
+  border-bottom-color: #6366f1;
+}
+.message-content :deep(code) {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.message-content :deep(pre) {
+  background: rgba(0, 0, 0, 0.04);
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.message-content :deep(pre code) {
+  background: none;
+  padding: 0;
 }
 /* 气泡内资产缩略图（agent asset_refs） */
 .asset-thumbs {
@@ -1066,15 +1150,100 @@ onMounted(() => {
 }
 
 .chat-input {
-  display: flex;
-  gap: 10px;
-  padding: 12px 14px;
+  display: block;
+  padding: 12px 16px 14px;
   border-top: 1px solid var(--border-subtle, #e5e7eb);
-  align-items: flex-end;
   flex-shrink: 0;
+  background: var(--bg-panel, #fff);
+}
+/* 输入框与发送按钮合为一体：按钮内嵌在输入框右下角，不再单独占一行 */
+.composer {
+  position: relative;
+  display: block;
+}
+.composer :deep(.n-input) {
+  border-radius: 12px;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.composer :deep(.n-input.n-input--focus) {
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+.composer :deep(.n-input .n-input__textarea) {
+  font-size: 14px;
+  line-height: 1.7;
+}
+/* 让输入文字避开右下角的发送按钮，避免被遮挡 */
+.composer :deep(.n-input .n-input__textarea-el) {
+  padding-right: 92px;
+}
+.composer-send {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  border-radius: 9px !important;
+  height: 32px !important;
+  min-width: 58px !important;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+.composer-send.n-button--primary-type {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  border: none;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+}
+.composer-send.n-button--primary-type:hover {
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+}
+.composer-send.n-button--primary-type:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.2);
 }
 
 /* 右栏 */
+.ctx-style {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-subtle, #e5e7eb);
+}
+.ctx-style-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+.style-edit {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--brand-primary, #6366f1);
+  cursor: pointer;
+}
+.style-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.style-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+.style-k {
+  flex: 0 0 56px;
+  color: var(--text-secondary);
+}
+.style-v {
+  flex: 1 1 auto;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .context-panel {
   width: 300px;
   flex-shrink: 0;
@@ -1134,29 +1303,6 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-tertiary, #999);
   padding: 8px 0;
-}
-.job-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.job-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  min-width: 0;
-}
-.job-type {
-  color: var(--text-primary, #111);
-  flex-shrink: 0;
-}
-.job-error {
-  color: var(--text-tertiary, #999);
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .link-btn {
   align-self: flex-start;
@@ -1220,11 +1366,10 @@ onMounted(() => {
     width: 130px;
   }
   .chat-input {
-    flex-direction: column;
-    align-items: stretch;
+    padding: 10px 12px 12px;
   }
-  .chat-input :deep(.n-button) {
-    align-self: flex-end;
+  .composer :deep(.n-input .n-input__textarea-el) {
+    padding-right: 82px;
   }
   .message-bubble {
     max-width: 88%;

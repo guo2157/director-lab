@@ -71,10 +71,6 @@ class ListAssetsInput(BaseModel):
         default=None,
         description="可选：资产类型过滤（keyframe/clip/character/scene/prop/reference 等）",
     )
-    validity: str | None = Field(
-        default=None,
-        description="可选：有效性过滤（current/stale/superseded）",
-    )
     limit: int = Field(default=8, ge=1, le=30, description="可选：返回条数上限，默认 8，最大 30")
     offset: int = Field(default=0, ge=0, description="可选：偏移量（翻页用），默认 0")
 
@@ -93,6 +89,32 @@ class ListAssetPlansInput(BaseModel):
     )
     limit: int = Field(default=20, ge=1, le=50, description="可选：返回条数上限，默认 20，最大 50")
     offset: int = Field(default=0, ge=0, description="可选：偏移量（翻页用），默认 0")
+
+
+class GetStyleConfigInput(BaseModel):
+    """get_style_config 入参。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+
+
+class UpdateStyleConfigInput(BaseModel):
+    """update_style_config 入参：只提交需要修改的字段。"""
+
+    session_id: str = Field(min_length=1, description="会话 ID（审批记录归属）")
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+    genre_tags: list[str] | None = Field(default=None, description="可选：题材标签，第一个为主类型")
+    narrative_styles: list[str] | None = Field(default=None, description="可选：叙事风格，第一个为主风格")
+    visual_style: str | None = Field(default=None, description="可选：主视觉风格（单选）")
+    pacing: str | None = Field(default=None, description="可选：剧情节奏")
+    emotional_tone: list[str] | None = Field(default=None, description="可选：情绪基调，第一个为主情绪")
+    conflict_intensity: str | None = Field(default=None, description="可选：冲突强度")
+    twist_density: str | None = Field(default=None, description="可选：反转密度")
+    dialogue_style: str | None = Field(default=None, description="可选：对白风格")
+    narration_mode: str | None = Field(default=None, description="可选：叙述方式")
+    target_audience: str | None = Field(default=None, description="可选：目标受众")
+    custom_style_requirements: str | None = Field(
+        default=None, description="可选：自定义风格要求（不覆盖资产绑定等硬约束）"
+    )
 
 
 @dataclass
@@ -183,7 +205,7 @@ def tool_list_assets(
     db: Session,
     project_id: str,
     asset_type: str | None = None,
-    validity: str | None = None,
+    validity: str | None = None,  # deprecated
     limit: int = 8,
     offset: int = 0,
 ) -> dict:
@@ -204,8 +226,6 @@ def tool_list_assets(
     )
     if asset_type:
         q = q.where(Asset.asset_type == asset_type)
-    if validity:
-        q = q.where(Asset.validity == validity)
     # 无关联任务的资产（Job.created_at 为 NULL）排在最后：布尔升序 False(0) 先于 True(1)
     rows = db.execute(
         q.order_by(Job.created_at.is_(None).asc(), Job.created_at.desc(), Asset.id.asc())
@@ -220,7 +240,6 @@ def tool_list_assets(
                 "asset_type": a.asset_type,
                 "name": a.name,
                 "version": a.version,
-                "validity": a.validity,
                 "quality_status": a.quality_status,
                 "has_file": bool(a.file_path),
                 "has_thumb": bool(a.thumb_path),
@@ -639,46 +658,23 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
         # 实体目标（公共资产）：与 API 通道（generate.py 实体端点）行为一致
         params["prompt"] = args.get("prompt") or ""
         params[owner_key] = entity.id
-        # 空 prompt 兜底：按实体属性用纯净化模板构造提示词，
-        # 避免空提示词提交 ComfyUI 生成无意义图片浪费算力
-        from app.services.asset_prompts import (
-            ASSET_PROMPTS_VERSION,
-            build_character_prompt,
-            build_prop_prompt,
-            build_scene_prompt,
-            negative_for_asset_type,
-        )
+        # 空 prompt 兜底：统一走阶段 B 提示词编译器（与 API 通道完全同源），
+        # 按实体结构化资料 + 集中模板编译，避免空提示词提交 ComfyUI 浪费算力
+        from app.services.asset_prompts import ASSET_PROMPTS_VERSION
 
-        if not params["prompt"]:
-            if target == "character":
-                params["prompt"] = build_character_prompt(
-                    entity.name,
-                    entity.appearance or "",
-                    description=entity.description or "",
-                )
-            elif target == "scene":
-                params["prompt"] = build_scene_prompt(
-                    entity.title or "",
-                    entity.description or "",
-                )
-            elif target == "prop":
-                params["prompt"] = build_prop_prompt(
-                    entity.name,
-                    entity.appearance or "",
-                    description=entity.description or "",
-                )
+        from app.api.v1.generate import _compile_asset_prompt
+
+        if not params.get("prompt"):
+            params.pop("prompt", None)
+        params, _compilation = _compile_asset_prompt(db, target, entity.id, wf, params)
         params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-        # 负面约束：仅当工作流实际绑定 negative 参数标记时注入（与 API 通道一致），
-        # 避免写入无人消费的参数
-        from app.api.v1.generate import _workflow_binds_param
-
-        if "negative" not in params and _workflow_binds_param(wf, "negative"):
-            params["negative"] = negative_for_asset_type(target)
+        params[owner_key] = entity.id
     else:
         # 镜头目标：与 API 通道（generate.py 单镜生成端点）行为对齐
         from fastapi import HTTPException
 
         from app.api.v1.generate import (
+            _compile_shot_prompt,
             _inject_continuity_first_frame,
             _inject_prev_shot_frame,
         )
@@ -718,6 +714,13 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
                         _existing = params.get("__media__", {})
                         _existing.update(media)
                         params["__media__"] = _existing
+            # 阶段 B：分镜图/分镜视频提示词编译（与 API 通道同源，参考槽位按工作流真实能力校验）
+            compilation: dict | None = None
+            if target in ("keyframe", "clip"):
+                _fallback = params.get("prompt") or shot.image_prompt or ""
+                params, compilation = _compile_shot_prompt(
+                    db, shot, wf, params, target, _fallback
+                )
             # 镜间尾帧依赖（P0）：非首镜 clip 注入前一镜实际尾帧，缺失时按声明拦截
             prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
         except HTTPException as e:
@@ -752,6 +755,11 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
             "cost_basis": cost_basis,
             "idempotency_key": request_key,
             **({"prev_frame": prev_frame_info} if prev_frame_info is not None else {}),
+            **(
+                {"prompt_compilation": compilation}
+                if (owner_key is None and locals().get("compilation"))
+                else {}
+            ),
         },
         created_at=datetime.now(),
     )
@@ -779,6 +787,118 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
 
 
 # --- 注册表（Schema 化：每工具含 input_model 与风险/超时/重试元数据） ---
+
+# --- 风格配置工具（读 / 申请 / 执行，写操作走审批） ---
+_STYLE_FIELDS = (
+    "genre_tags",
+    "narrative_styles",
+    "visual_style",
+    "pacing",
+    "emotional_tone",
+    "conflict_intensity",
+    "twist_density",
+    "dialogue_style",
+    "narration_mode",
+    "target_audience",
+    "custom_style_requirements",
+)
+
+
+class RunStyleUpdateInput(BaseModel):
+    """run_style_update 入参。"""
+
+    confirmation_id: str = Field(min_length=1, description="审批记录 ID")
+
+
+def tool_get_style_config(db: Session, project_id: str) -> dict:
+    """读取项目风格配置：规范化结果 + 校验问题 + 可选值清单（只读）。"""
+    from app.services import style_config
+
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    cfg, issues = style_config.validate_style_config(p.settings or {})
+    return {
+        "project_id": p.id,
+        "version": style_config.STYLE_CONFIG_VERSION,
+        "saved_version": (p.settings or {}).get("style_config_version"),
+        "config": cfg,
+        "issues": issues,
+        "options": style_config.options_payload(),
+    }
+
+
+def tool_request_style_update(db: Session, session_id: str, project_id: str, **fields) -> dict:
+    """提交风格配置变更申请（需人工审批）：只建审批记录，不改配置、不影响在途任务。"""
+    from app.services import approvals
+
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    patch = {k: v for k, v in fields.items() if k in _STYLE_FIELDS and v is not None}
+    if not patch:
+        raise ToolError("tool_invalid_args", "没有需要修改的风格字段")
+    confirmation = approvals.create_confirmation(
+        db,
+        session_id=session_id,
+        tool_name="run_style_update",
+        args={"project_id": project_id, **patch},
+        goal="更新项目剧本类型与风格配置（需人工审批）",
+        risk_level="medium",
+    )
+    return {
+        "confirmation_id": confirmation.id,
+        "status": confirmation.status,
+        "project_id": project_id,
+        "pending_changes": patch,
+        "note": "风格配置仅在审批通过后生效，审批前项目配置保持不变",
+    }
+
+
+def tool_run_style_update(db: Session, confirmation_id: str) -> dict:
+    """执行已批准的风格变更：合并现有配置后规范化落库，返回问题码与变更字段。
+
+    双重门禁：审批状态必须为 approved，且审批记录必须真实存在，
+    避免仅凭调用方传入的放行标志绕过审批。
+    """
+    from app.models import AgentConfirmation
+    from app.services import approvals, style_config
+
+    confirmation = db.get(AgentConfirmation, confirmation_id)
+    if confirmation is None:
+        raise ToolError("confirmation_not_found", "审批记录不存在")
+    if confirmation.status != "approved":
+        raise ToolError(
+            "approval_required",
+            f"审批未通过（当前 {confirmation.status}），不能修改风格配置",
+        )
+    args = dict(confirmation.args or {})
+    project_id = args.pop("project_id", None)
+    if not project_id:
+        raise ToolError("tool_invalid_args", "审批记录缺少项目 ID")
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    before, _ = style_config.validate_style_config(p.settings or {})
+    merged = dict(p.settings or {})
+    merged.update(args)
+    cfg, issues = style_config.validate_style_config(merged)
+    merged.update(cfg)
+    merged["style_config_version"] = style_config.STYLE_CONFIG_VERSION
+    p.settings = merged
+    db.commit()
+    db.refresh(p)
+    approvals.mark_task_finished(db, confirmation_id, "已更新项目风格配置")
+    changed = [k for k in _STYLE_FIELDS if before.get(k) != cfg.get(k)]
+    return {
+        "project_id": p.id,
+        "version": style_config.STYLE_CONFIG_VERSION,
+        "config": cfg,
+        "issues": issues,
+        "changed_fields": changed,
+        "note": "配置仅影响后续任务，不会自动重生成已审核资产与已生成结果",
+    }
+
 
 TOOL_REGISTRY: dict = {
     "project_overview": {
@@ -837,7 +957,6 @@ TOOL_REGISTRY: dict = {
         "params": {
             "project_id": "项目 ID",
             "asset_type": "可选：资产类型过滤（keyframe/clip/character/scene/prop/reference）",
-            "validity": "可选：有效性过滤（current/stale/superseded）",
             "limit": "可选：返回条数上限，默认 8，最大 30",
             "offset": "可选：偏移量（翻页用），默认 0",
         },
@@ -894,6 +1013,54 @@ TOOL_REGISTRY: dict = {
         "params": {"confirmation_id": "审批记录 ID"},
         "fn": tool_run_generate,
     },
+    "get_style_config": {
+        "description": "读取项目剧本类型与风格配置：题材、叙事风格、主视觉风格、节奏、情绪、受众及校验问题",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": GetStyleConfigInput,
+        "params": {"project_id": "项目 ID（prj_ 前缀）"},
+        "fn": tool_get_style_config,
+    },
+    "request_style_update": {
+        "description": "提交项目风格配置变更申请（需人工审批）：只建审批记录，不改配置；只提交需要修改的字段",
+        "permission": "write",
+        "risk_level": "medium",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": UpdateStyleConfigInput,
+        "params": {
+            "session_id": "会话 ID（审批记录归属）",
+            "project_id": "项目 ID",
+            "visual_style": "可选：主视觉风格（单选）",
+            "genre_tags": "可选：题材标签列表",
+            "narrative_styles": "可选：叙事风格列表",
+            "pacing": "可选：剧情节奏",
+            "emotional_tone": "可选：情绪基调列表",
+            "custom_style_requirements": "可选：自定义风格要求",
+        },
+        "fn": tool_request_style_update,
+    },
+    "run_style_update": {
+        "description": "执行已批准的风格配置变更：合并现有配置后规范化落库（须先通过人工审批）",
+        "permission": "write",
+        "risk_level": "high",
+        "side_effect": True,
+        "idempotent": True,
+        "requires_approval": True,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": RunStyleUpdateInput,
+        "params": {"confirmation_id": "审批记录 ID"},
+        "fn": tool_run_style_update,
+    },
 }
 
 # 意图 → 候选工具映射（只向模型暴露当前意图需要的工具，降低选错/越权/Token 消耗）
@@ -904,6 +1071,7 @@ INTENT_TOOL_MAPPING: dict[str, list[str]] = {
         "asset_stats",
         "list_assets",
         "list_asset_plans",
+        "get_style_config",
     ],
     "analysis": [
         "project_overview",
@@ -911,6 +1079,7 @@ INTENT_TOOL_MAPPING: dict[str, list[str]] = {
         "list_jobs",
         "list_assets",
         "list_asset_plans",
+        "get_style_config",
     ],
 }
 

@@ -70,9 +70,9 @@ def test_api_accepts_name_only_character(client: TestClient):
     r = client.post(f"/api/characters/{ch['id']}/generate", json={"workflow_id": wf_id})
     assert r.status_code == 202, r.text
     params = r.json()["effective_inputs"]["params"]
-    # 名称作为身份兜底，不虚构外观描述
-    assert "角色定义：空角色" in params["prompt"]
-    assert params.get("__asset_prompt_version__") == "2.0"
+    # 名称作为身份兜底，不虚构外观描述（阶段 B 新模板：单主体表述）
+    assert "画面中只能有一个主体：空角色" in params["prompt"]
+    assert params.get("__asset_prompt_version__") == "2.1"
 
 
 # ---------- 负面约束按实际参数绑定注入 ----------
@@ -198,7 +198,7 @@ def test_prompt_version_recorded_in_snapshot(mock_client: TestClient):
     try:
         job = db.get(Job, jid)
         snap = job.input_snapshot or {}
-        assert snap.get("asset_prompt_version") == "2.0"
+        assert snap.get("asset_prompt_version") == "2.1"
         # 版本标记不得残留在提交参数中
         assert "__asset_prompt_version__" not in (snap.get("params") or {})
     finally:

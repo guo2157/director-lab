@@ -36,10 +36,13 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""  # 凭据只走环境变量 DLAB_LLM_API_KEY，禁止写入代码与日志
     llm_model: str = ""
+    # 多 LLM 实例配置（JSON 数组：[{id, name, provider, base_url, api_key, model, enabled}]），
+    # 为空时回退单实例 llm_* 字段；同一时刻仅一个 enabled，后端实时调用启用中的模型
+    llm_instances_json: str = ""
     llm_timeout_seconds: float = 120.0
     # 流式接收空闲超时（httpx read timeout 语义）：远端连续该时长不吐数据即抛 llm_timeout，
     # 避免 LLM 流式中途停摆时任务线程永久阻塞，把串行队列堵死
-    llm_stream_idle_timeout_seconds: float = 60.0
+    llm_stream_idle_timeout_seconds: float = 300.0
     llm_max_retries: int = 2
 
     # --- 任务调度（D-18 修订 D-03：并发 = 可用 ComfyUI 实例数，单实例串行排队，多实例负载均衡并行） ---
@@ -68,6 +71,10 @@ class Settings(BaseSettings):
     tts_emotion_map_json: str = (
         '{"neutral": "", "happy": "Happy", "sad": "Sad", "angry": "Angry", "surprised": "Surprised"}'
     )
+
+    # --- 字幕烧录（PRD M7：burn 模式由 libass 渲染，需要中文字体） ---
+    # 留空则自动挑选系统可用的中文字体（fc-list :lang=zh）；显式配置优先
+    subtitle_font: str = ""
 
     # --- 媒体存储 ---
     media_dir: Path = Path("./data/media")
@@ -113,7 +120,7 @@ def clear_settings_cache() -> None:
 _PERSISTED_FIELDS = [
     "comfyui_base_url", "comfyui_instances_json",
     "comfyui_timeout_seconds", "comfyui_job_timeout_seconds",
-    "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "llm_timeout_seconds",
+    "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "llm_instances_json", "llm_timeout_seconds",
     "llm_stream_idle_timeout_seconds",
     "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
 ]

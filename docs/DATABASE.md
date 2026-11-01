@@ -49,7 +49,7 @@
 | description | text | 项目描述，≤500 字符，可为空 |
 | aspect_ratio | string | 画幅比（9:16 / 16:9 / 1:1） |
 | status | string | 项目状态（draft / active / archived） |
-| settings | json | 项目级配置（可覆盖一致性阈值等系统默认） |
+| settings | json | 项目级配置（可覆盖一致性阈值等系统默认）。风格配置键：`genre_tags`、`narrative_styles`（数组，首个为主）、`visual_style`（单值）、`pacing`、`emotional_tone`（数组，首个为主）、`conflict_intensity`、`twist_density`、`dialogue_style`、`narration_mode`、`target_audience`、`custom_style_requirements`，另存 `style_config_version`（当前 style-v1.0）。旧键 `genre`、`audience`、`requirements` 在写入时迁移为对应新键。风格键不参与一致性阈值校验，字段定义见 STYLE_CONFIG.md |
 | episode_plan | json | 分集规划数组，每项含 episode、goal、rhythm_curve、cliffhanger_type、hook_to_next、locked；重新解析时仅覆盖 locked=false 的集 |
 | estimated_at | datetime | 最近一次剧本体量评估时间，未评估为空 |
 | estimated_text_hash | string | 兼容字段：最近一次评估的剧本文本哈希 |
@@ -141,6 +141,7 @@
 | bgm | text | 背景音乐描述，含情绪与变化节点 |
 | duration | int | 预估时长（秒），必须为正整数 |
 | status | string | pending / generating / review / done / redo；pending 可附带 blocked_reason 子状态 |
+| keyframe_confirmed | bool | 分镜图人工确认标记（D-13 静图先行闸口），默认 false；重绘或上游失效时回退 false |
 | actual_duration | number | 当前有效对白/旁白音频实际时长（秒）；优先 H3 VA 音频时长，TTS 补救后取补救音频时长；来源失效/替换时同步更新 |
 | video_actual_duration | number | 当前有效 H3 VA/视频产物实际时长（秒），由媒体探测写入 |
 | audio_source | string | h3_va / tts_fallback / none；当前有效对白/旁白音频来源 |
@@ -190,6 +191,10 @@
 | locked | bool | 是否锁定 |
 | validity | string | current / stale / superseded / archived |
 | input_snapshot | json | 产物输入版本与参数快照 |
+| quality_status | string | 图片质量检查状态：pending / passed / failed，默认 pending |
+| quality_issues | json | 质量检查发现的具体问题清单 |
+
+索引：`ix_asset_project_type_validity(project_id, asset_type, validity)`，支撑按项目+类型+有效性筛选。
 
 ### asset_ref（镜头-资产绑定）
 
@@ -350,6 +355,152 @@
 | file_name | string | 导出文件名 |
 | size | int | 文件大小（字节） |
 | status | string | exporting / succeeded / failed |
+| created_at | datetime | 创建时间 |
+
+### job_input_ref（任务输入引用）
+
+任务提交时的参考图槽位快照，与 job 同事务写入。`slot_param` 与工作流 `capabilities.reference_slots[].param` 对齐，`input_key` 为其连线键。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| job_id | string | 外键 |
+| slot_param | string | 槽位参数名（如 ref_identity / ref_scene） |
+| input_key | string | 工作流输入键（如 ref_images.ref_image_2） |
+| asset_id | string | 引用的资产 ID |
+| asset_version | int | 引用时的资产版本 |
+| asset_type | string | 资产类型 |
+| role | string | 引用角色（asset_ref_role 取值域） |
+| required | bool | 是否必需槽位 |
+| file_path | string | 实际注入的文件路径 |
+| semantic | string | 语义，默认 reference |
+| enabled | bool | 是否启用，默认 true |
+| seq | int | 顺序 |
+| created_at | datetime | 创建时间 |
+
+索引：`ix_job_input_ref_job(job_id)`、`ix_job_input_ref_asset(asset_id)`。
+
+### episode_continuity（跨集连续性）
+
+记录跨集首帧衔接的来源抽帧与验证结果。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| project_id | string | 外键 |
+| episode | int | 当前集 |
+| previous_episode / next_episode | int | 相邻集号，可空 |
+| source_composition_id | string | 上一集末帧来源合成版本 |
+| source_video_path / source_frame_path | string | 源视频与抽帧路径 |
+| source_frame_hash | string | 抽帧哈希，用于一致性校验 |
+| source_frame_timestamp | number | 抽帧时间点（秒） |
+| source_video_duration / source_video_fps | number | 源视频时长与帧率 |
+| opening_frame_path / opening_frame_asset_id | string | 当前集首帧路径与资产 ID |
+| continuity_status | string | 连续性状态，默认 pending |
+| continuity_version | int | 版本号，默认 1 |
+| continuity_summary | json | 连续性摘要 |
+| verification_result | json | 首帧一致性验证结果 |
+| error_detail | text | 失败原因 |
+| fallback_used | bool | 末帧提取是否使用回退帧 |
+| fallback_reason | string | 回退原因 |
+| created_at / updated_at | datetime | 时间戳 |
+
+索引：`ix_continuity_project_episode(project_id, episode)`、`ix_continuity_project_status(project_id, continuity_status)`。
+
+### episode_parse_record（集级解析记录）
+
+按「集 × 资产类型」双粒度跟踪解析状态。Job 仍是任务入口，本表为集级明细。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| project_id | string | 外键 |
+| episode_no | int | 集号 |
+| asset_type | string | characters / scenes / props / shots |
+| status | string | pending / running / succeeded / failed |
+| attempt_count | int | 尝试次数，默认 0 |
+| error_msg | text | 失败原因 |
+| version | int | 乐观锁版本，并发提交终态校验用，默认 0 |
+| asset_count | int | 该集该类型产出数量 |
+| parse_version_id | string | 关联解析版本 |
+| created_at / updated_at | datetime | 时间戳 |
+
+唯一键 `uq_epr_project_episode_type(project_id, episode_no, asset_type)`：同一集同一资产类型只有一条记录。
+
+### agent_session（导演台会话）
+
+一次连续的多轮对话上下文。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| title | string | 标题，默认「新会话」 |
+| project_id | string | 关联项目，可空（通用问答无项目上下文） |
+| status | string | active / archived |
+| model | string | 会话使用的模型快照，切换模型不回写历史消息 |
+| created_at / updated_at | datetime | 时间戳 |
+
+### agent_message（导演台消息）
+
+会话内的一条用户/助手/工具/审批事件记录。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| session_id | string | 外键 |
+| role | string | user / assistant / system / tool_event / approval |
+| content | text | 纯文本正文，默认空串 |
+| payload | json | 结构化负载：工具调用（tool_name/args/result）、审批（target/action/comment）、附件引用列表 |
+| attachment_id | string | 首个附件 ID（冗余便于检索，完整列表在 payload） |
+| seq | int | 会话内递增序号，用于排序与增量加载 |
+| created_at | datetime | 创建时间 |
+
+### agent_task（Agent 任务）
+
+一次用户目标的结构化执行单元，意图识别结果落库。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| session_id | string | 外键 |
+| message_id | string | 触发消息 ID |
+| intent | string | 意图分类，默认 query |
+| intent_goal | text | 目标描述 |
+| risk_level | string | 风险等级，默认 low |
+| confidence | number | 置信度，默认 1.0 |
+| success_criteria | json | 可验证的完成标准数组 |
+| status | string | pending / running / completed / failed / cancelled |
+| result_summary | text | 执行结果摘要 |
+| created_at | datetime | 创建时间 |
+
+### agent_plan_step（Agent 计划步骤）
+
+任务的执行计划：模型提议、代码裁决。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| task_id | string | 外键 |
+| step_index | int | 任务内递增序号 |
+| step_type | string | tool_call / clarification / reply |
+| tool_name | string | tool_call 时为 TOOL_REGISTRY 工具名 |
+| args | json | 步骤入参，经 input_model 校验后落库 |
+| status | string | pending / running / succeeded / failed / skipped |
+| result | json | 执行结果（错误码/耗时等） |
+| created_at | datetime | 创建时间 |
+
+### agent_confirmation（Agent 审批记录）
+
+高风险操作的审批门禁：requires_approval=True 的工具执行前须有 approved 记录。审批事件同步以 agent_message(role=approval) 落审计消息。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | string | 主键 |
+| task_id | string | 外键 |
+| tool_name | string | 待审批工具名（TOOL_REGISTRY） |
+| args | json | 审批时的入参快照 |
+| status | string | pending / approved / rejected |
+| comment | text | 审批意见 |
 | created_at | datetime | 创建时间 |
 
 ## 3. 存储设计

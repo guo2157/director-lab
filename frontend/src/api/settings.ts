@@ -16,9 +16,9 @@ export function testComfyui(baseUrl?: string) {
   return post<{ ok: boolean; reason?: string; message?: string; latency_ms?: number }>('/settings/test-comfyui', baseUrl ? { base_url: baseUrl } : undefined)
 }
 
-/** 测试语言模型连接 */
-export function testLlm() {
-  return post<{ ok: boolean; reason?: string; message?: string }>('/settings/test-llm')
+/** 测试语言模型连接（可传入卡片配置：base_url/model/api_key） */
+export function testLlm(payload?: { base_url?: string; model?: string; api_key?: string }) {
+  return post<{ ok: boolean; reason?: string; message?: string; latency_ms?: number }>('/settings/test-llm', payload)
 }
 
 /** 查询语言模型列表（OpenAI 兼容 /models 接口，供模型名称下拉选择） */

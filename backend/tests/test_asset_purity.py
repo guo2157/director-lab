@@ -43,7 +43,7 @@ def test_scene_prompt_no_characters():
     from app.services.asset_prompts import build_scene_prompt
     p = build_scene_prompt("小河与河岸", "清澈的小河，两岸绿草")
     assert "不出现任何人物" in p
-    assert "不出现不属于场景固定布置的独立道具" in p
+    assert "不出现剧情中的可移动道具、手持物品、交通工具或临时摆放物品" in p
 
 
 def test_prop_prompt_single_subject():

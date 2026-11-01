@@ -81,6 +81,124 @@ def build_writing_user_prompt(mode: str, source_text: str, config: dict) -> str:
     return "\n".join(parts)
 
 
+SCRIPT_NORMALIZE_SYSTEM_PROMPT = _register_default("script_normalize_system", """你是资深短剧编剧与剧本格式规范专家。用户会提供一份原始剧本素材，可能只是一个故事标题、一句话、一段梗概，也可能是格式混乱的完整剧本。你的任务是在不偏离用户原意的前提下，把素材整理成符合影视短剧标准格式的可拍摄剧本。
+
+三层处理策略，按输入信息量选择，宁可少补不可乱补：
+第一层 格式规范化（任何输入都执行，不产生新剧情）：每集以「第X集」明确分隔；集内场次连续编号；场次标题包含时间与地点，格式为「场次N 时间·地点」；场景描述、人物动作、对白分层书写；对白格式为「人物名：台词」；旁白与声音提示单独成行；人物名称全剧统一，不使用他、那个人等代称。
+第二层 语义明确化（原文存在含混表述时执行）：把模糊指代落实为具体描述，例如把他走进来补全为张三推门走进屋内；补全信息必须可从原文上下文推导，不得引入原文没有的事件、人物、地点与结局。
+第三层 结构性补全（输入信息量不足一集时执行，必须标注为 AI 补全）：若输入只有一个标题或一句话，不足以支撑一集剧本，此时禁止自行编造完整剧情，必须在 questions 字段提出最少必要的追问，包括主角是谁、核心冲突是什么、结局走向、目标集数与单集时长；若用户已在创作配置中给出集数与单集时长，可在该框架内补全场次与对白，但所有补全内容必须在 changes 中标明 ai_generated 为 true。
+
+四条硬约束，违反即视为失败：
+1. 人物集合守恒：normalized_characters 必须包含 original_characters 中全部人物，不得新增原文未出现的主要角色。
+2. 原台词保真：original_dialogues 中每条台词必须原样出现在 normalized_text 中，只允许修正错别字，不得改写语义、不得替换说话人。
+3. 场景与道具不得凭空增加，确需新增必须在 changes 中写明依据。
+4. 不得改动结局走向与人物关系。
+
+输出严格 JSON，字段说明：
+- normalized_text：规范化后的完整剧本正文，字符串
+- level：本次实际执行到第几层，整数 1 或 2 或 3
+- original_characters：原文出现的人物名数组，原样摘录
+- normalized_characters：优化稿出现的全部人物名数组
+- original_dialogues：原文已有的台词原文数组，逐条摘录，没有则为空数组
+- changes：变更清单数组，每项含 category（format 或 clarity 或 completion）、summary（一句话说明改了什么）、evidence（对应原文哪一句作为依据，无法对应时为空字符串）、ai_generated（布尔，是否属于模型补出的内容）
+- questions：需要用户补充的关键要素数组，信息充足时为空数组
+
+只输出 JSON，不要输出任何解释文字。""")
+
+
+def _config_lines(config: dict) -> list:
+    """把项目创作配置转成提示词可读行（与创作/扩写共用同一套键）。"""
+    label_map = {
+        "genre": "题材",
+        "audience": "目标受众",
+        "visual_style": "视觉风格",
+        "episode_count": "集数",
+        "episode_duration_target": "每集目标时长（秒）",
+        "language": "语言",
+        "dialogue_style": "对白风格",
+        "content_rating": "内容尺度",
+        "character_settings": "角色设定",
+        "worldview": "故事世界观",
+        "requirements": "创作要求",
+    }
+    lines = []
+    for key, label in label_map.items():
+        val = (config or {}).get(key)
+        if val not in (None, ""):
+            lines.append(f"{label}：{val}")
+    return lines
+
+
+def build_normalize_user_prompt(source_text: str, config: dict) -> str:
+    """组装规范化校验的用户提示词：源文本 + 创作配置（供模型约束补全范围）。"""
+    parts = ["请对以下剧本素材做规范化校验与必要补全：", source_text]
+    lines = _config_lines(config)
+    if lines:
+        parts.append("创作配置：")
+        parts.extend(lines)
+    return "\n".join(parts)
+
+
+def verify_normalize_output(raw: dict, source_text: str) -> dict:
+    """机器校验规范化结果：人物集合守恒 + 原台词保真，任一不通过则 blocked。"""
+    text = str(raw.get("normalized_text") or "").strip()
+    if not text:
+        raise ValueError('规范化结果为空')
+    orig_chars = [str(x).strip() for x in (raw.get("original_characters") or []) if str(x).strip()]
+    norm_chars = [str(x).strip() for x in (raw.get("normalized_characters") or []) if str(x).strip()]
+    orig_dialogues = [str(x).strip() for x in (raw.get("original_dialogues") or []) if str(x).strip()]
+    missing_chars = [c for c in orig_chars if c not in norm_chars]
+    missing_dialogues = [d for d in orig_dialogues if d not in text]
+    changes = []
+    for c in (raw.get("changes") or []):
+        if not isinstance(c, dict):
+            continue
+        changes.append({
+            "category": str(c.get("category") or "format"),
+            "summary": str(c.get("summary") or ""),
+            "evidence": str(c.get("evidence") or ""),
+            "ai_generated": bool(c.get("ai_generated")),
+        })
+    questions = [str(q).strip() for q in (raw.get("questions") or []) if str(q).strip()]
+    try:
+        level = int(raw.get("level") or 1)
+    except (TypeError, ValueError):
+        level = 1
+    return {
+        "normalized_text": text,
+        "level": level,
+        "changes": changes,
+        "questions": questions,
+        "checks": {
+            "characters_preserved": not missing_chars,
+            "dialogue_preserved": not missing_dialogues,
+            "missing_characters": missing_chars,
+            "missing_dialogues": missing_dialogues,
+            "blocked": bool(missing_chars or missing_dialogues),
+        },
+        "original_chars": len(source_text),
+        "normalized_chars": len(text),
+    }
+
+
+def normalize_script(source_text: str, config: dict) -> dict:
+    """剧本规范化校验：保真前提下整理为标准剧本格式，返回优化稿与变更清单。
+
+    LLM 错误向上抛 LLMError，由调用方转为 HTTP 错误；本函数不落库。
+    """
+    from app.integrations.llm import LLMClient, LLMError
+    from app.services.prompt_store import get_prompt
+
+    system = get_prompt("script_normalize_system")
+    user = build_normalize_user_prompt(source_text, config or {})
+    client = LLMClient()
+    raw = client.chat_json(system, user)
+    try:
+        return verify_normalize_output(raw, source_text)
+    except ValueError as e:
+        raise LLMError('llm_invalid_output', str(e))
+
+
 def write_script(mode: str, source_text: str, config: dict) -> str:
     """调用语言模型创作/扩写剧本，返回剧本正文。
 

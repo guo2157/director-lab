@@ -13,7 +13,7 @@ import {
 import {
   listWorkflows, uploadWorkflow, validateWorkflow,
 } from '@/api/workflows'
-import type { AppSettings, ComfyUIInstance, ComfyUIInstanceTestResult } from '@/types/compose'
+import type { LlmInstance, ComfyUIInstance, ComfyUIInstanceTestResult } from '@/types/compose'
 import type { Workflow, WorkflowType } from '@/types/asset'
 
 const message = useMessage()
@@ -31,15 +31,16 @@ const tabs = [
 // --- Settings data ---
 const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: () => getSettings() })
 
-const editSettings = ref<Partial<AppSettings>>({})
+// --- LLM 多模型卡片配置（同一时刻仅一个启用，后端实时调用启用中的模型） ---
+const editLlmInstances = ref<LlmInstance[]>([])
 watch(() => settingsQuery.data.value, (data) => {
-  if (data) editSettings.value = { ...data }
+  if (data?.llm_instances) editLlmInstances.value = data.llm_instances.map((i) => ({ ...i }))
 }, { immediate: true })
 
-const saveMutation = useMutation({
-  mutationFn: (payload: Partial<AppSettings>) => updateSettings(payload),
+const saveLlmMutation = useMutation({
+  mutationFn: () => updateSettings({ llm_instances: editLlmInstances.value }),
   onSuccess: () => {
-    message.success('设置已保存')
+    message.success('LLM 配置已保存')
     queryClient.invalidateQueries({ queryKey: ['settings'] })
   },
   onError: (e: any) => message.error(`保存失败: ${e?.message ?? e}`),
@@ -113,18 +114,26 @@ const testInstanceMutation = useMutation({
   onSettled: () => { testingUrl.value = '' },
 })
 
-// --- LLM test ---
+// --- LLM 逐卡片测试连接 ---
+const testingLlmId = ref('')
 const testLlmMutation = useMutation({
-  mutationFn: () => testLlm(),
-  onSuccess: () => message.success('语言模型连接正常'),
+  mutationFn: (inst: LlmInstance) => {
+    const payload: { base_url?: string; model?: string; api_key?: string } = {}
+    if (inst.base_url) payload.base_url = inst.base_url
+    if (inst.model) payload.model = inst.model
+    if (inst.api_key && !String(inst.api_key).includes('*')) payload.api_key = inst.api_key
+    return testLlm(Object.keys(payload).length ? payload : undefined)
+  },
+  onMutate: (inst: LlmInstance) => { testingLlmId.value = inst.id },
+  onSuccess: (data: any) => message.success(`语言模型连接正常（${data?.latency_ms ?? 0}ms）`),
   onError: (e: any) => message.error(`连接失败: ${e?.message ?? e}`),
+  onSettled: () => { testingLlmId.value = '' },
 })
 
 // --- LLM options ---
 const llmProviderOptions = [
   { label: 'DeepSeek', value: 'deepseek' },
   { label: 'OpenAI', value: 'openai' },
-  { label: '通义千问', value: 'qwen' },
   { label: 'Ollama', value: 'ollama' },
   { label: '自定义', value: 'custom' },
 ]
@@ -132,31 +141,85 @@ const llmProviderOptions = [
 const LLM_PROVIDER_URLS: Record<string, string> = {
   deepseek: 'https://api.deepseek.com/v1',
   openai: 'https://api.openai.com/v1',
-  qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   ollama: 'http://127.0.0.1:11434/v1',
 }
-function handleProviderChange(value: string) {
-  editSettings.value.llm_provider = value as AppSettings['llm_provider']
+const handleLlmProviderChange = (inst: LlmInstance, value: string) => {
+  inst.provider = value as LlmInstance['provider']
   const url = LLM_PROVIDER_URLS[value]
-  if (url) editSettings.value.llm_base_url = url
+  if (url) inst.base_url = url
 }
-// --- LLM 模型列表（查询下拉选择） ---
-const llmModelOptions = ref<Array<{ label: string; value: string }>>([])
-const llmModelsLoading = ref(false)
-const fetchLlmModels = async () => {
-  llmModelsLoading.value = true
+// 提供商值 → 显示名
+const providerLabel = (value: string) => llmProviderOptions.find((o) => o.value === value)?.label || value || '未设置'
+// 新增/编辑模型弹窗
+const showLlmModal = ref(false)
+const llmForm = ref<LlmInstance>({ id: '', name: '', provider: 'deepseek', base_url: LLM_PROVIDER_URLS.deepseek, api_key: '', model: '', enabled: false })
+const openLlmModal = (inst?: LlmInstance) => {
+  if (inst) {
+    llmForm.value = { ...inst }
+  } else {
+    llmForm.value = {
+      id: `llm-${Date.now()}`,
+      name: '',
+      provider: 'deepseek',
+      base_url: LLM_PROVIDER_URLS.deepseek,
+      api_key: '',
+      model: '',
+      enabled: editLlmInstances.value.length === 0,
+    }
+  }
+  showLlmModal.value = true
+}
+// 弹窗确定：新增或回写编辑结果并保存
+const confirmLlmModal = () => {
+  const form = llmForm.value
+  if (!form.base_url.trim()) {
+    message.error('请输入模型 API URL')
+    return
+  }
+  const idx = editLlmInstances.value.findIndex((i) => i.id === form.id)
+  if (idx >= 0) {
+    editLlmInstances.value[idx] = { ...form }
+  } else {
+    editLlmInstances.value.push({ ...form })
+  }
+  showLlmModal.value = false
+  saveLlmMutation.mutate()
+}
+// 删除模型卡片（自动保存）
+const removeLlmCard = (idx: number) => {
+  editLlmInstances.value.splice(idx, 1)
+  saveLlmMutation.mutate()
+}
+// 开启一个模型时自动关闭其余（同一时刻仅一个启用），切换后自动保存
+const handleLlmEnable = (inst: LlmInstance, value: boolean) => {
+  inst.enabled = value
+  if (value) {
+    for (const other of editLlmInstances.value) {
+      if (other !== inst) other.enabled = false
+    }
+  }
+  saveLlmMutation.mutate()
+}
+// --- LLM 逐卡片模型列表（查询下拉选择） ---
+const llmModelOptionsMap = ref<Record<string, Array<{ label: string; value: string }>>>({})
+const llmModelsLoadingMap = ref<Record<string, boolean>>({})
+const fetchLlmModels = async (inst: LlmInstance) => {
+  llmModelsLoadingMap.value = { ...llmModelsLoadingMap.value, [inst.id]: true }
   try {
     const payload: { base_url?: string; api_key?: string } = {}
-    if (editSettings.value.llm_base_url) payload.base_url = String(editSettings.value.llm_base_url)
-    const key = editSettings.value.llm_api_key
+    if (inst.base_url) payload.base_url = inst.base_url
+    const key = inst.api_key
     if (key && !String(key).includes('*')) payload.api_key = String(key)
     const data = await listLlmModels(Object.keys(payload).length ? payload : undefined)
-    llmModelOptions.value = (data.models ?? []).map((m: string) => ({ label: m, value: m }))
-    if (!llmModelOptions.value.length) message.warning('未查询到模型，可手动输入')
+    llmModelOptionsMap.value = {
+      ...llmModelOptionsMap.value,
+      [inst.id]: (data.models ?? []).map((m: string) => ({ label: m, value: m })),
+    }
+    if (!(llmModelOptionsMap.value[inst.id] ?? []).length) message.warning('未查询到模型，可手动输入')
   } catch (e: any) {
     message.error(`查询模型列表失败: ${e?.message ?? e}`)
   } finally {
-    llmModelsLoading.value = false
+    llmModelsLoadingMap.value = { ...llmModelsLoadingMap.value, [inst.id]: false }
   }
 }
 
@@ -352,48 +415,92 @@ const downloadWorkflow = (wf: Workflow) => {
           </n-modal>
         </template>
 
-        <!-- LLM -->
+        <!-- LLM（多模型卡片配置：同一时刻仅一个启用，后端实时调用启用中的模型） -->
         <template v-else-if="activeTab === 'llm'">
           <div class="page-header">
             <h2 class="page-title">语言模型配置</h2>
-            <p class="page-subtitle">用于剧本评估与解析，OpenAI 兼容接口</p>
+            <p class="page-subtitle">多模型卡片配置：开启一个模型后其余自动关闭，后端实时调用启用中的模型</p>
           </div>
-          <n-card class="settings-card" :bordered="false">
+          <div class="llm-card-toolbar">
+            <n-tag size="small" :bordered="false" type="info">{{ editLlmInstances.length }} 个模型</n-tag>
+            <n-button size="small" type="primary" @click="openLlmModal()">+ 新增模型</n-button>
+          </div>
+          <n-empty v-if="!editLlmInstances.length" description="暂无模型，点击右上角按钮新增" style="margin: 12px 0" />
+          <div v-else class="llm-mini-grid">
+            <div v-for="(inst, idx) in editLlmInstances" :key="inst.id" class="llm-mini-card" :class="{ active: inst.enabled }">
+              <div class="llm-mini-head">
+                <n-tag v-if="inst.enabled" type="success" size="small" :bordered="false">启用中</n-tag>
+                <n-tag v-else size="small" :bordered="false">未启用</n-tag>
+                <span class="llm-mini-name">{{ inst.name || inst.model || ('模型 ' + (idx + 1)) }}</span>
+              </div>
+              <div class="llm-mini-meta">
+                <span class="llm-mini-provider">{{ providerLabel(inst.provider) }}</span>
+                <span class="llm-mini-model hint-text">{{ inst.model || '未设置模型' }}</span>
+              </div>
+              <div class="llm-mini-url hint-text">{{ inst.base_url || '未设置 API URL' }}</div>
+              <div class="llm-mini-ops">
+                <n-switch :value="inst.enabled" size="small" @update:value="handleLlmEnable(inst, $event)" />
+                <div class="llm-mini-btns">
+                  <n-button size="tiny" quaternary @click="openLlmModal(inst)">编辑</n-button>
+                  <n-popconfirm @positive-click="removeLlmCard(idx)">
+                    <template #trigger>
+                      <n-button size="tiny" quaternary type="error">删除</n-button>
+                    </template>
+                    确认删除该模型配置？
+                  </n-popconfirm>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 新增/编辑模型弹窗 -->
+          <n-modal
+            v-model:show="showLlmModal"
+            preset="card"
+            :title="llmForm.id ? '编辑模型' : '新增模型'"
+            style="width: 560px; max-width: 92vw"
+            :bordered="false"
+          >
             <div class="form-grid">
               <div class="form-item">
-                <label class="field-label">模型提供商</label>
-                <n-select v-model:value="editSettings.llm_provider" :options="llmProviderOptions" @update:value="handleProviderChange" />
+                <label class="field-label">模型备注名</label>
+                <n-input v-model:value="llmForm.name" placeholder="如 主力模型" />
               </div>
               <div class="form-item">
-                <label class="field-label">模型 API URL</label>
-                <n-input v-model:value="editSettings.llm_base_url" placeholder="如 https://api.deepseek.com/v1" />
+                <label class="field-label">模型提供商</label>
+                <n-select :value="llmForm.provider" :options="llmProviderOptions" @update:value="handleLlmProviderChange(llmForm, $event)" />
               </div>
             </div>
             <div class="form-item">
+              <label class="field-label">模型 API URL</label>
+              <n-input v-model:value="llmForm.base_url" placeholder="如 https://api.deepseek.com/v1" />
+            </div>
+            <div class="form-item">
               <label class="field-label">API Key</label>
-              <n-input v-model:value="editSettings.llm_api_key" type="password" show-password-on="click" :placeholder="editSettings.llm_api_key_set ? '已设置（留空清除）' : '请输入 API Key'" />
+              <n-input v-model:value="llmForm.api_key" type="password" show-password-on="click" :placeholder="llmForm.api_key_set ? '已设置（留空清除）' : '请输入 API Key'" />
             </div>
             <div class="form-item">
               <label class="field-label">模型名称（点击查询按钮拉取列表，也可手动输入）</label>
               <div style="display: flex; gap: 8px; width: 100%">
                 <n-select
-                  v-model:value="editSettings.llm_model"
-                  :options="llmModelOptions"
+                  v-model:value="llmForm.model"
+                  :options="llmModelOptionsMap[llmForm.id] ?? []"
                   filterable
                   tag
                   clearable
-                  :loading="llmModelsLoading"
+                  :loading="llmModelsLoadingMap[llmForm.id]"
                   placeholder="查询模型列表后选择，或直接输入"
                   style="flex: 1"
                 />
-                <n-button :loading="llmModelsLoading" @click="fetchLlmModels">查询模型</n-button>
+                <n-button :loading="llmModelsLoadingMap[llmForm.id]" @click="fetchLlmModels(llmForm)">查询模型</n-button>
               </div>
             </div>
-            <div class="card-actions">
-              <n-button type="primary" :loading="saveMutation.isPending.value" @click="saveMutation.mutate(editSettings)">保存</n-button>
-              <n-button :loading="testLlmMutation.isPending.value" @click="testLlmMutation.mutate()">测试连接</n-button>
+            <div class="card-actions" style="margin-top: 0">
+              <n-button :loading="testingLlmId === llmForm.id" @click="testLlmMutation.mutate(llmForm)">测试连接</n-button>
+              <n-button type="primary" @click="confirmLlmModal">确定</n-button>
+              <n-button quaternary @click="showLlmModal = false">取消</n-button>
             </div>
-          </n-card>
+          </n-modal>
         </template>
 
         <!-- Workflows -->
@@ -806,6 +913,81 @@ const downloadWorkflow = (wf: Workflow) => {
   display: flex;
   justify-content: center;
   padding: 80px 0;
+}
+/* --- LLM 多模型小卡片列表布局 --- */
+.llm-card-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.llm-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.llm-mini-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.llm-mini-card:hover {
+  background: var(--bg-elevated);
+}
+.llm-mini-card.active {
+  border-color: rgba(24, 160, 88, 0.55);
+}
+.llm-mini-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.llm-mini-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-mini-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.llm-mini-provider {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.llm-mini-model {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-mini-url {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-mini-ops {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+.llm-mini-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* --- Responsive --- */

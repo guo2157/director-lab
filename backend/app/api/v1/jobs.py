@@ -28,6 +28,7 @@ def _to_out(j: Job, db: Session | None = None) -> JobOut:
     settings = get_settings()
     retryable = j.status in _RETRYABLE_STATUS and (j.attempts or 0) < settings.job_max_attempts
     project_name = episode = scene_title = shot_seq = None
+    progress = None
     if db is not None:
         project = db.get(Project, j.project_id)
         project_name = project.name if project else None
@@ -38,11 +39,24 @@ def _to_out(j: Job, db: Session | None = None) -> JobOut:
                 episode = shot.episode
                 scene = db.get(Scene, shot.scene_id)
                 scene_title = scene.title if scene else None
+        # 生成进度百分比：running 任务取最近 job.progress 事件（value/max）换算 0-100
+        if j.status == "running":
+            ev = (
+                db.query(JobEvent)
+                .filter(JobEvent.job_id == j.id, JobEvent.event_type == "job.progress")
+                .order_by(JobEvent.event_seq.desc())
+                .first()
+            )
+            if ev is not None:
+                value = (ev.payload or {}).get("value")
+                maxv = (ev.payload or {}).get("max")
+                if isinstance(value, (int, float)) and isinstance(maxv, (int, float)) and maxv > 0:
+                    progress = max(0, min(100, round(value / maxv * 100)))
     return JobOut(
-        id=j.id, project_id=j.project_id, job_type=j.job_type, status=j.status,
+        id=j.id, project_id=j.project_id, job_type=j.job_type, status=j.status, shot_id=j.shot_id,
         project_name=project_name, episode=episode, scene_title=scene_title, shot_seq=shot_seq,
         error_code=j.error_code, error_msg=j.error_msg, retryable=retryable,
-        result=j.result, attempts=j.attempts or 0, seq=j.event_seq,
+        result=j.result, attempts=j.attempts or 0, seq=j.event_seq, progress=progress,
         created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at,
     )
 
@@ -120,8 +134,9 @@ _GENERATE_TYPES = {"generate_keyframe", "generate_clip", "generate_audio", "gene
 
 @router.post("/{job_id}/cancel", status_code=204)
 def cancel_job(job_id: str, db: Session = Depends(get_db)):
-    """取消任务：仅 queued/running 可取消。
+    """取消任务：queued/running/chained_wait 可取消。
     running 的生成类任务调用 ComfyUI /interrupt（全局中断，§5.2）；
+    chained_wait 尚未提交远端，仅本地置 cancelled（链式改并行重提场景）；
     其余 running 任务标记取消，worker 在下一检查点确认终态。
     """
     from datetime import datetime, timezone
@@ -129,7 +144,7 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     j = db.get(Job, job_id)
     if j is None:
         raise errors.job_not_found()
-    if j.status not in ("queued", "running"):
+    if j.status not in ("queued", "running", "chained_wait"):
         raise errors.invalid_state_transition(f"任务状态 {j.status} 不可取消")
     if j.status == "running" and j.job_type in _GENERATE_TYPES and j.prompt_id:
         try:

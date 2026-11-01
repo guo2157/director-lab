@@ -48,8 +48,42 @@ def _derive_provider(base_url: str) -> str:
     return "custom"
 
 
+def _parse_llm_instances(s) -> list[dict]:
+    """解析 llm_instances_json（多 LLM 实例配置），失败返回空列表。"""
+    import json
+    raw = getattr(s, "llm_instances_json", "") or ""
+    if not raw.strip():
+        return []
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return [i for i in items if isinstance(i, dict)]
+
+
+def _llm_instances_to_list(s) -> list[dict]:
+    """多 LLM 实例配置回显：api_key 掩码 + api_key_set 标志。"""
+    result = []
+    for inst in _parse_llm_instances(s):
+        key = inst.get("api_key") or ""
+        result.append({
+            "id": inst.get("id") or "",
+            "name": inst.get("name") or "",
+            "provider": inst.get("provider") or "",
+            "base_url": inst.get("base_url") or "",
+            "api_key": _mask_key(key),
+            "api_key_set": bool(key),
+            "model": inst.get("model") or "",
+            "enabled": bool(inst.get("enabled")),
+        })
+    return result
+
+
 def _settings_to_dict(s) -> dict:
     return {
+        "llm_instances": _llm_instances_to_list(s),
         "comfyui_base_url": s.comfyui_base_url,
         "comfyui_timeout_seconds": s.comfyui_timeout_seconds,
         "comfyui_job_timeout_seconds": s.comfyui_job_timeout_seconds,
@@ -91,6 +125,50 @@ def update_settings_api(payload: dict) -> dict:
             s.llm_api_key = ""
         elif payload["llm_api_key"] and not str(payload["llm_api_key"]).startswith("*"):
             s.llm_api_key = str(payload["llm_api_key"])
+    # 多 LLM 实例配置（卡片式）：同一时刻仅一个启用，保存时同步到单实例 llm_* 字段
+    if "llm_instances" in payload:
+        import json as _json
+        items = payload.get("llm_instances")
+        if not isinstance(items, list):
+            items = []
+        old_instances = _parse_llm_instances(s)
+        cleaned = []
+        for idx, inst in enumerate(items):
+            if not isinstance(inst, dict):
+                continue
+            key = inst.get("api_key") or ""
+            if "*" in str(key):
+                # 掩码回显（前4位+星号+后4位，不以星号开头）：按 id 保留已保存的真实密钥
+                old = next(
+                    (o for o in old_instances if inst.get("id") and o.get("id") == inst.get("id")),
+                    None,
+                )
+                key = (old or {}).get("api_key") or ""
+            cleaned.append({
+                "id": str(inst.get("id") or f"llm-{int(time.time() * 1000)}-{idx}"),
+                "name": str(inst.get("name") or ""),
+                "provider": str(inst.get("provider") or ""),
+                "base_url": str(inst.get("base_url") or ""),
+                "api_key": key,
+                "model": str(inst.get("model") or ""),
+                "enabled": bool(inst.get("enabled")),
+            })
+        # 同一时刻仅允许一个启用：保留第一个 enabled，其余强制关闭
+        enabled_seen = False
+        for inst in cleaned:
+            if inst["enabled"] and not enabled_seen:
+                enabled_seen = True
+            else:
+                inst["enabled"] = False
+        s.llm_instances_json = _json.dumps(cleaned, ensure_ascii=False)
+        # 同步启用实例到单实例 llm_* 字段，保证旧读取路径与前后端一致
+        active = next((i for i in cleaned if i["enabled"]), None)
+        if active is not None:
+            s.llm_provider = active["provider"] or _derive_provider(active["base_url"])
+            s.llm_base_url = active["base_url"]
+            if active["api_key"]:
+                s.llm_api_key = active["api_key"]
+            s.llm_model = active["model"]
     save_runtime_settings(s)
     return _settings_to_dict(s)
 

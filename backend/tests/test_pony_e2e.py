@@ -100,10 +100,13 @@ def test_pony_crossing_river_e2e(client: TestClient):
         r = client.post(f"/api/characters/{ch['id']}/generate", json={"workflow_id": wf_id})
         assert r.status_code == 202, r.text
         jid = r.json()["id"]
-        # 验证纯净化提示词已注入任务
+        # 验证阶段 B 纯净化提示词已注入任务：单主体 + 禁止多视图拼图
         params = r.json()["effective_inputs"]["params"]
-        assert "只出现这一个指定角色" in params["prompt"], name
-        assert "第二个人物" in params["prompt"], name
+        assert "画面中只能有一个主体" in params["prompt"], name
+        assert "不生成角色设定表、四视图、表情合集或多角色拼图" in params["prompt"], name
+        compilation = (r.json()["effective_inputs"].get("prompt_compilation") or {})
+        if compilation:
+            assert compilation["generation_constraints"]["isolation_rule"] == "single_character_only"
         result = execute_generate_job(jid)
         assert result["ok"], result
         portraits[name] = result["assets"][0]["asset_id"]
@@ -123,7 +126,7 @@ def test_pony_crossing_river_e2e(client: TestClient):
         r = client.post(f"/api/scenes/{sc['id']}/generate-baseline", json={"workflow_id": wf_id})
         assert r.status_code == 202, r.text
         params = r.json()["effective_inputs"]["params"]
-        assert "不出现任何人物" in params["prompt"], title
+        assert "只表现环境本身，不出现任何角色、人物、动物" in params["prompt"], title
         result = execute_generate_job(r.json()["id"])
         assert result["ok"], result
         baselines[title] = result["assets"][0]["asset_id"]
@@ -131,7 +134,7 @@ def test_pony_crossing_river_e2e(client: TestClient):
     # --- 5. 道具锚定图生成 ---
     r = client.post(f"/api/props/{prop['id']}/generate", json={"workflow_id": wf_id})
     assert r.status_code == 202, r.text
-    assert "只出现这一个指定道具" in r.json()["effective_inputs"]["params"]["prompt"]
+    assert "画面中只能有一件道具" in r.json()["effective_inputs"]["params"]["prompt"]
     result = execute_generate_job(r.json()["id"])
     assert result["ok"], result
     anchor_id = result["assets"][0]["asset_id"]

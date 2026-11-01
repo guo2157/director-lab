@@ -17,6 +17,7 @@ from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVe
 from app.models import ids
 from app.services.script_parse import normalize_parse_output
 from app.services.prompt_store import get_prompt
+from app.services import style_config
 
 
 def _now() -> datetime:
@@ -124,8 +125,14 @@ def execute_parse_job(job_id: str) -> dict:
         }
 
         # 调用语言模型（事务外）
+        from app.models import Project
+        project = db.get(Project, job.project_id)
+        style_settings = (project.settings if project is not None else {}) or {}
+        style_snap = style_config.style_snapshot(style_settings,
+                                                 project_id=job.project_id)
         user_prompt = (
-            f"请解析以下剧本，仅解析第 {episode_start} 集到第 {episode_start + episode_count - 1} 集，"
+            style_config.parse_context_block(style_settings)
+            + f"请解析以下剧本，仅解析第 {episode_start} 集到第 {episode_start + episode_count - 1} 集，"
             f"共 {episode_count} 集。范围外的集不要输出。\n\n剧本全文：\n{text}"
         )
         client = LLMClient()
@@ -144,8 +151,12 @@ def execute_parse_job(job_id: str) -> dict:
         )
 
         # 结果落库：完整解析结果存 job.result（API.md §5 parse 契约）
+        style_diffs = style_config.compute_style_diff(
+            style_settings, norm.data.get("project_analysis"))
         parse_result = {
             **norm.data,
+            "style_config_snapshot": style_snap,
+            "style_config_diffs": style_diffs,
             "parse_warnings": norm.parse_warnings,
             "review_issues": norm.review_issues,
             "episode_start": episode_start,

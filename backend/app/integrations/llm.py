@@ -30,6 +30,34 @@ class LLMError(Exception):
         self.message = message
 
 
+def _active_llm_instance(settings) -> dict | None:
+    """解析多 LLM 实例配置（llm_instances_json），返回当前启用的实例（同一时刻仅一个 enabled）。
+
+    配置格式：[{id, name, provider, base_url, api_key, model, enabled}]
+    未配置或解析失败时返回 None，调用方回退单实例 llm_* 字段。
+    api_key 为掩码（以 * 开头）时视为未修改，回退到单实例已保存密钥。
+    """
+    import json
+    raw = getattr(settings, "llm_instances_json", "") or ""
+    if not raw.strip():
+        return None
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(items, list):
+        return None
+    for inst in items:
+        if not isinstance(inst, dict) or not inst.get("enabled"):
+            continue
+        api_key = inst.get("api_key") or ""
+        if "*" in str(api_key):
+            # 掩码回显（前4位+星号+后4位，不以星号开头）：保留已保存的真实密钥
+            inst = {**inst, "api_key": settings.llm_api_key}
+        return inst
+    return None
+
+
 class LLMClient:
     def __init__(
         self,
@@ -39,9 +67,17 @@ class LLMClient:
         timeout: float | None = None,
     ):
         settings = get_settings()
-        self.base_url = (base_url or settings.llm_base_url).rstrip("/")
-        self.api_key = api_key if api_key is not None else settings.llm_api_key
-        self.model = model or settings.llm_model
+        # 多 LLM 实例配置：优先使用当前启用的实例（同一时刻仅一个 enabled），
+        # 未配置实例时回退单实例 llm_* 字段；显式传参优先级最高
+        inst = _active_llm_instance(settings)
+        if inst is not None:
+            self.base_url = (base_url or inst.get("base_url") or "").rstrip("/")
+            self.api_key = api_key if api_key is not None else (inst.get("api_key") or "")
+            self.model = model or inst.get("model") or ""
+        else:
+            self.base_url = (base_url or settings.llm_base_url).rstrip("/")
+            self.api_key = api_key if api_key is not None else settings.llm_api_key
+            self.model = model or settings.llm_model
         self.timeout = timeout or settings.llm_timeout_seconds
 
     def _check_config(self) -> None:

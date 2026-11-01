@@ -76,7 +76,7 @@ def test_confirm_then_clip_passes_gate(client: TestClient, monkeypatch):
     definition = {
         "1": {
             "class_type": "EmptyLatentImage",
-            "_meta": {"title": "$~width, $~height"},
+            "_meta": {"title": "$width, $height"},
             "inputs": {"width": 512, "height": 288, "batch_size": 1},
         },
         "2": {
@@ -116,7 +116,7 @@ def test_regenerate_keyframe_resets_confirmation(client: TestClient, monkeypatch
     definition = {
         "1": {
             "class_type": "EmptyLatentImage",
-            "_meta": {"title": "$~width, $~height"},
+            "_meta": {"title": "$width, $height"},
             "inputs": {"width": 512, "height": 288, "batch_size": 1},
         },
         "2": {

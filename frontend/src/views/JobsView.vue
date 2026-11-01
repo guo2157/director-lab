@@ -127,11 +127,13 @@ const runningJobs = computed<Job[]>(() =>
 
 // --- Labels & colors ---
 const statusColors: Record<string, string> = {
-  queued: '#3B82F6', running: '#3B82F6', submission_unknown: '#F59E0B', succeeded: '#22C55E',
+  queued: '#3B82F6', running: '#3B82F6', chained_wait: '#A855F7',
+  submission_unknown: '#F59E0B', succeeded: '#22C55E',
   failed: '#EF4444', lost: '#EF4444', cancelled: '#9CA3AF',
 }
 const statusLabels: Record<string, string> = {
-  queued: '排队中', running: '执行中', submission_unknown: '提交未知', succeeded: '成功',
+  queued: '排队中', running: '执行中', chained_wait: '等待前序',
+  submission_unknown: '提交未知', succeeded: '成功',
   failed: '失败', lost: '丢失', cancelled: '已取消',
 }
 const typeLabels: Record<string, string> = {
@@ -171,7 +173,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
           default: () => row.error_msg || '未知原因',
         })
       }
-      if (row.status === 'queued' || row.status === 'running') {
+      if (row.status === 'queued' || row.status === 'running' || row.status === 'chained_wait') {
         return h(NButton, { size: 'tiny', type: 'error', quaternary: true,
           onClick: () => cancelMutation.mutate(row.id) }, { default: () => '取消' })
       }

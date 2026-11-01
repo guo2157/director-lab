@@ -11,6 +11,8 @@ const router = useRouter()
 
 const projectId = computed(() => route.params.id as string | undefined)
 const isProjectPage = computed(() => Boolean(projectId.value))
+/** 导演台为固定视口布局：页面级滚动条不滚动，改由页面内部面板各自滚动 */
+const isFixedViewport = computed(() => route.name === 'director')
 
 const topMenuOptions: MenuOption[] = [
   { label: '导演台', key: 'director' },
@@ -79,7 +81,7 @@ function goProjects() {
         />
       </div>
     </n-layout-header>
-    <n-layout-content class="app-content">
+    <n-layout-content class="app-content" :class="{ 'is-fixed': isFixedViewport }">
       <div class="content-body">
         <ProjectProgressRail v-if="isProjectPage && projectId" :project-id="projectId" />
         <div class="content-main">
@@ -186,6 +188,17 @@ function goProjects() {
 .content-main {
   flex: 1;
   min-width: 0;
+}
+.app-content.is-fixed {
+  overflow: hidden;
+}
+.app-content.is-fixed .content-body {
+  height: 100%;
+  overflow: hidden;
+}
+.app-content.is-fixed .content-main {
+  height: 100%;
+  overflow: hidden;
 }
 
 @media (max-width: 768px) {

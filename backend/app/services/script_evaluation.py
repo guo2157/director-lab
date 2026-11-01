@@ -1,7 +1,7 @@
 """剧本质量评估服务（阶段2）：AI 生成结构化评估报告。
 
 设计约定：
-- 在 estimate_script 算法估算基础上，调用 LLM 对剧本进行深度质量评估
+- 在 analyze_script_outline LLM 大纲分析基础上，调用 LLM 对剧本进行深度质量评估
 - 评估维度：优点、问题、修改建议、制作风险、剧情漏洞检测
 - 提示词经 prompt_store 外置（script_evaluation_system），UI 可编辑即时生效
 - LLM 调用为同步短事务外调用；失败按 llm_* 错误码分类，不落库半成品
@@ -25,7 +25,7 @@ SCRIPT_EVALUATION_SYSTEM_PROMPT = _register_default("script_evaluation_system", 
 - 严格输出 JSON，不要输出其他内容
 - 每个问题/风险/漏洞需包含 severity（critical/major/minor）和 detail 字段
 - 修改建议需与问题一一对应，包含 suggestion 字段
-- 评估应结合算法估算数据（字数、预估集数、每集时长）进行可制作性分析
+- 评估应结合大纲分析数据（字数、预估集数、每集时长）进行可制作性分析
 """)
 
 
@@ -34,8 +34,8 @@ def build_evaluation_user_prompt(script_text: str, estimate_data: dict, config: 
     parts = ["请对以下剧本进行全面质量评估："]
     parts.append(script_text)
 
-    # 注入算法估算数据
-    parts.append("\n--- 算法估算数据 ---")
+    # 注入 LLM 大纲分析数据
+    parts.append("\n--- 大纲分析数据 ---")
     parts.append(f"字数：{estimate_data.get('char_count', '未知')}")
     parts.append(f"对白字数估算：{estimate_data.get('dialogue_char_estimate', '未知')}")
     parts.append(f"预估总时长：{estimate_data.get('estimated_total_duration', '未知'):.1f} 秒")

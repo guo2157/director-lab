@@ -1,7 +1,7 @@
 """剧本评估与解析服务：PROMPTS.md §2/§3 规范的实现。
 
-- estimate：集数与时长估算。结合对白、旁白、动作、停顿、转场的时长模型，
-  字符数/语速仅作缺少结构信息时的 fallback（API.md §5 estimate 约定）
+- estimate：集数与时长分析。LLM 大纲分析（analyze_script_outline）输出分集结构，
+  代码规则估算已移除，一律以 LLM 分析为准（API.md §5 estimate 约定）
 - parse：调用语言模型一次性解析剧本，按归一化规则（P0 强约束）补齐字段
 - 归一化：补齐 shot_kind/duration/time_jump/requires_prev_frame、
   speaker_id 按角色名映射（失败保留原名并记审核问题）、emotion 缺失落 neutral 记警告
@@ -10,19 +10,13 @@
 import re
 from dataclasses import dataclass, field
 
-# --- 估算算法常量（API.md §5：记录算法/提示词版本及主要假设） ---
-ESTIMATE_ALGORITHM_VERSION = "est-v1.0"
-# 语速模型（字/秒）：对白正常语速，旁白稍快，动作/视觉按节拍估算
-DIALOGUE_CHARS_PER_SECOND = 5.0
-NARRATION_CHARS_PER_SECOND = 7.0
-# 单镜平均时长与转场/停顿附加（秒）
+# --- 大纲分析版本（LLM 大纲替代代码规则估算，集数一律以 LLM 分析为准） ---
+OUTLINE_ALGORITHM_VERSION = "llm-outline-v1.0"
+# 单镜平均时长（秒）：归一化补齐 duration 默认值
 AVG_SHOT_DURATION = 10.0
-TRANSITION_OVERHEAD_PER_SCENE = 2.0
 # 单集目标时长（秒），来自项目 settings.episode_duration_target 默认值
 DEFAULT_EPISODE_DURATION = 90
 DEFAULT_SHOTS_PER_EPISODE = 9
-
-_DIALOGUE_RE = re.compile(r'["“](.*?)["”]|[:：]\s*["“](.*?)["”]', re.DOTALL)
 
 
 # --- 归一化去重（两级归一化策略：精确名 → 归一化名） ---
@@ -42,61 +36,84 @@ def normalize_scene_name(title: str, time_note) -> str:
     return t + "|" + tn if tn else t
 
 
-def estimate_script(text: str, *, episode_duration_target: int = DEFAULT_EPISODE_DURATION,
-                    max_episodes_per_batch: int = 10) -> dict:
-    """评估剧本可制作集数。返回评估对象（API.md §5 estimate 响应结构）。
-
-    估算模型：区分对白（引号内）与非对白（旁白/动作）时长，加场景转场开销，
-    汇总为总时长区间后按目标单集时长切分集数。字符数/语速为 fallback 输入之一。
-    """
-    char_count = len(text)
-    # 提取对白（中英文引号）
-    dialogue_chars = 0
-    for m in _DIALOGUE_RE.finditer(text):
-        seg = m.group(1) or m.group(2) or ""
-        dialogue_chars += len(seg.strip())
-    non_dialogue_chars = max(0, char_count - dialogue_chars)
-    # 时长估算：对白按对白语速，非对白（旁白/动作描述）按旁白语速 + 视觉节拍冗余
-    dialogue_seconds = dialogue_chars / DIALOGUE_CHARS_PER_SECOND
-    narration_seconds = non_dialogue_chars / NARRATION_CHARS_PER_SECOND
-    # 场景数估算（按换行分段近似），每场景加转场/停顿开销
-    scene_breaks = len([l for l in re.split(r'\n+', text) if l.strip()])
-    estimated_scenes = max(1, min(scene_breaks, char_count // 200 + 1))
-    transition_seconds = estimated_scenes * TRANSITION_OVERHEAD_PER_SCENE
-    total_seconds = dialogue_seconds + narration_seconds + transition_seconds
-    # 集数：按目标单集时长向上取整，至少 1 集
-    estimated_episodes = max(1, -(-int(total_seconds) // episode_duration_target))
-    # 每集分解
-    episode_breakdown = []
-    remaining = total_seconds
-    for ep in range(1, estimated_episodes + 1):
-        ep_duration = min(episode_duration_target, remaining)
-        remaining -= ep_duration
-        episode_breakdown.append({
-            "episode": ep,
-            "estimated_duration": round(ep_duration, 1),
-            "estimated_shots": max(1, round(ep_duration / AVG_SHOT_DURATION)),
-        })
-    exceeds = estimated_episodes > max_episodes_per_batch
-    suggestion = None
-    if exceeds:
-        suggestion = f"剧本预计 {estimated_episodes} 集，超过单次制作上限 {max_episodes_per_batch} 集，建议裁剪剧本或分批制作"
-    return {
-        "algorithm_version": ESTIMATE_ALGORITHM_VERSION,
-        "char_count": char_count,
-        "dialogue_char_estimate": dialogue_chars,
-        "estimated_total_duration": round(total_seconds, 1),
-        "estimated_episodes": estimated_episodes,
-        "episode_breakdown": episode_breakdown,
-        "exceeds_batch_limit": exceeds,
-        "suggestion": suggestion,
-    }
-
-
 # --- 剧本解析系统提示词（PROMPTS.md §2 模板浓缩，输出 §3 结构 JSON） ---
 # D-15 提示词外置：此常量为内置默认值；运行时经 prompt_store.get_prompt 动态读取，
 # workspace/prompts/parse_system.md 存在时优先生效（UI 编辑保存即生效，无需重启）。
 from app.services.prompt_store import _register_default, get_prompt
+
+# --- 剧本大纲分析系统提示词（LLM 大纲替代代码规则估算，集数一律以 LLM 分析为准） ---
+OUTLINE_SYSTEM_PROMPT = _register_default("script_outline_system", """你是专业短剧结构分析师。分析用户提供的剧本，输出分集大纲，供下游拆批解析与制作排期使用。
+输出要求：
+1. 严格输出 JSON，不要输出其他内容。
+2. 顶层字段：total_episodes（int，总集数）、estimated_total_duration（int，预估总时长秒）、dialogue_char_estimate（int，对白总字数预估）、episodes（数组）。
+3. episodes 每项含 episode（集号，从 1 开始连续）、title（该集标题，一句话）、estimated_duration（该集预估时长秒）、estimated_shots（该集预估镜头数）。
+4. 分集依据：剧本有明确分集标记（如『第X集』）时严格按标记划分；无标记时按剧情节奏与用户给出的目标单集时长划分。
+5. estimated_shots 按每镜平均 10 秒估算；时长与镜头数为预估值。
+只输出 JSON。
+""")
+
+
+def analyze_script_outline(text: str, *, episode_duration_target: int = DEFAULT_EPISODE_DURATION,
+                           max_episodes_per_batch: int = 10, client=None) -> dict:
+    """LLM 大纲分析：集数、每集时长与镜头数一律以 LLM 分析为准（代码规则估算已移除）。
+
+    返回结构与原估算对象兼容（algorithm_version/char_count/dialogue_char_estimate/
+    estimated_total_duration/estimated_episodes/episode_breakdown/exceeds_batch_limit/
+    suggestion），供评估提示词与 estimate 端点复用。
+    LLM 失败向上抛 LLMError，由调用方决定失败处理。
+    """
+    from app.integrations.llm import LLMClient, LLMError
+    if client is None:
+        client = LLMClient()
+    user = (
+        f"目标单集时长：{episode_duration_target} 秒。\n"
+        f"请分析以下剧本的分集结构：\n\n{text}"
+    )
+    result = client.chat_json(get_prompt("script_outline_system"), user)
+    try:
+        total = int(result.get("total_episodes") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total < 1:
+        raise LLMError("llm_invalid_output", "大纲分析未返回有效 total_episodes")
+    breakdown = []
+    for ep in result.get("episodes") or []:
+        try:
+            breakdown.append({
+                "episode": int(ep.get("episode") or 0),
+                "title": str(ep.get("title") or ""),
+                "estimated_duration": round(float(ep.get("estimated_duration") or episode_duration_target), 1),
+                "estimated_shots": max(1, int(ep.get("estimated_shots") or 1)),
+            })
+        except (TypeError, ValueError):
+            continue
+    if not breakdown:
+        breakdown = [{
+            "episode": i, "title": "",
+            "estimated_duration": float(episode_duration_target),
+            "estimated_shots": max(1, round(episode_duration_target / AVG_SHOT_DURATION)),
+        } for i in range(1, total + 1)]
+    total_duration = sum(e["estimated_duration"] for e in breakdown)
+    exceeds = total > max_episodes_per_batch
+    suggestion = (
+        f"剧本共 {total} 集，超过单次制作上限 {max_episodes_per_batch} 集，建议分批制作"
+        if exceeds else None
+    )
+    try:
+        dialogue_chars = int(result.get("dialogue_char_estimate") or 0)
+    except (TypeError, ValueError):
+        dialogue_chars = 0
+    return {
+        "algorithm_version": OUTLINE_ALGORITHM_VERSION,
+        "char_count": len(text),
+        "dialogue_char_estimate": dialogue_chars,
+        "estimated_total_duration": round(total_duration, 1),
+        "estimated_episodes": total,
+        "episode_breakdown": breakdown,
+        "exceeds_batch_limit": exceeds,
+        "suggestion": suggestion,
+    }
+
 
 PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编剧、商业故事策划和影视剧本顾问。将用户提供的剧本一次性解析为结构化 JSON，供后续资产生成与分镜拆解直接使用。
 
@@ -111,8 +128,8 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 8. 情绪设计：每镜情绪曲线给出起点情绪、触发事件、转折秒数、终点情绪与外化表现，不只标情绪词。
 9. 单集节奏：保住开场钩子、冲突升级、情绪释放、结尾悬念四节拍。episodes 每项含 episode、goal、rhythm_curve、cliffhanger_type（信息缺失/危机逼近/反转揭示/关系破裂）、hook_to_next、locked（默认 false）。
 10. 动作节拍：复合动作拆成可独立拍摄节拍，单镜最多 3 个，单节拍不超 2 秒。
-11. image_prompt 必须按结构化分段模板输出（PROMPTS.md §5.1），固定分段依次为：任务（任务类型，如多参考图人物一致性生成）、参考图职责（仅描述实际注入的参考图：出场角色定妆图在前、所属场景基准图在后，逐行对应；禁止描述道具参考图，道具一律写入目标画面的画面描述中）、美术风格（固定为：童话绘本写实风格，柔和饱和色彩，温暖光照，细腻质感，全图统一）、目标画面（主体、动作、构图、景别、光线、质感，一段连续描述）、必须保持（跨图一致性要求，逐项列出 3–6 项，聚焦身份与外观）、允许变化（可自由发挥项，可省略）、禁止（人物畸形、换脸、无关元素、水印等，逐项列出）、输出（产物形态与清晰度要求）。禁止输出无分段的自由文本。
-12. video_prompt 必须按状态衔接结构模板输出（PROMPTS.md §5.2），固定分段依次为：任务（生成方式 T2VA/I2VA/Ref2VA 与镜号）、参考图职责（按连线顺序以 <Picture N> 语法引用：非首镜为 <Picture 1> 上一镜头尾帧、<Picture 2> 当前镜头分镜图；每集首镜无上一镜头尾帧，仅引用 <Picture 1> 当前镜头分镜图）、美术风格（固定为：童话绘本写实风格，柔和饱和色彩，温暖光照，细腻质感，全图统一）、身份约束（同一人物面部特征、发型、服装、体型与配饰一致；道具掉落、损毁、易手等状态变化必须明确道具当前位置与时机，禁止与剧情矛盾的默认穿戴）、开场状态（六项枚举：人物位置/身体姿态/视线方向/道具状态/情绪状态/空间与机位，与 start_state 同源）、剧情与动作（本镜头剧情一句话、人物动作按 beats 逐拍、情绪触发与走向、镜头运动与 camera_movement 一致、画面衔接从 <Picture 1> 过渡到 <Picture 2>（首镜从开场状态过渡到 <Picture 1> 分镜图））、目标状态（六项枚举，与 end_state 同源）、必须保持（3–6 项，聚焦身份、服装、道具与空间关系）、允许变化（可省略）、禁止（换脸、服装跳变、道具消失、多余肢体、文字水印等）、对白与声音（台词与 dialogue 一致、环境声、动作音效、背景音乐）、输出（时长按 duration、画幅与质量要求）。禁止输出无分段的自由文本。
+11. image_prompt 必须按结构化分段模板输出（PROMPTS.md §5.1），固定分段依次为：任务（任务类型，如多参考图人物一致性生成）、参考图职责（仅描述实际注入的参考图：出场角色定妆图在前、所属场景基准图在后，逐行对应；禁止描述道具参考图，道具一律写入目标画面的画面描述中）、美术风格（固定为项目主视觉风格原文，见用户消息中的【项目创作配置】的主视觉风格，全图统一，不得改写或替换）、目标画面（主体、动作、构图、景别、光线、质感，一段连续描述）、必须保持（跨图一致性要求，逐项列出 3–6 项，聚焦身份与外观）、允许变化（可自由发挥项，可省略）、禁止（人物畸形、换脸、无关元素、水印等，逐项列出）、输出（产物形态与清晰度要求）。禁止输出无分段的自由文本。
+12. video_prompt 必须按状态衔接结构模板输出（PROMPTS.md §5.2），固定分段依次为：任务（生成方式 T2VA/I2VA/Ref2VA 与镜号）、参考图职责（按连线顺序以 <Picture N> 语法引用：非首镜为 <Picture 1> 上一镜头尾帧、<Picture 2> 当前镜头分镜图；每集首镜无上一镜头尾帧，仅引用 <Picture 1> 当前镜头分镜图）、美术风格（固定为项目主视觉风格原文，见用户消息中的【项目创作配置】的主视觉风格，全图统一，不得改写或替换）、身份约束（同一人物面部特征、发型、服装、体型与配饰一致；道具掉落、损毁、易手等状态变化必须明确道具当前位置与时机，禁止与剧情矛盾的默认穿戴）、开场状态（六项枚举：人物位置/身体姿态/视线方向/道具状态/情绪状态/空间与机位，与 start_state 同源）、剧情与动作（本镜头剧情一句话、人物动作按 beats 逐拍、情绪触发与走向、镜头运动与 camera_movement 一致、画面衔接从 <Picture 1> 过渡到 <Picture 2>（首镜从开场状态过渡到 <Picture 1> 分镜图））、目标状态（六项枚举，与 end_state 同源）、必须保持（3–6 项，聚焦身份、服装、道具与空间关系）、允许变化（可省略）、禁止（换脸、服装跳变、道具消失、多余肢体、文字水印等）、对白与声音（台词与 dialogue 一致、环境声、动作音效、背景音乐）、输出（时长按 duration、画幅与质量要求）。禁止输出无分段的自由文本。
 
 按用户指定的集范围解析，范围外的集不落库。只输出 JSON。""")
 

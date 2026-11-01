@@ -1,6 +1,13 @@
-import { get, post, patch, del } from './client'
+import { get, post, patch, put, del } from './client'
 import type { Paginated, PaginationParams } from '@/types/common'
-import type { Project, CreateProjectPayload, UpdateProjectPayload } from '@/types/project'
+import type { Project,
+  CreateProjectPayload,
+  UpdateProjectPayload,
+  StyleConfig,
+  StyleOptions,
+  ProjectStyleConfigResponse,
+  SaveStyleConfigResponse,
+} from '@/types/project'
 import type { ScriptVersion, ScriptEstimate, ParseVersion, CreateScriptVersionPayload, ParsePayload, ParseStatus } from '@/types/script'
 
 /** 项目列表（分页） */
@@ -41,6 +48,35 @@ export function archiveProject(id: string) {
 /** 恢复归档项目 */
 export function unarchiveProject(id: string) {
   return post<Project>(`/projects/${id}/unarchive`)
+}
+
+/** 剧本规范化校验结果：优化稿 + 变更清单 + 机器校验 */
+export interface ScriptNormalizeChange {
+  category: 'format' | 'clarity' | 'completion' | string
+  summary: string
+  evidence: string
+  ai_generated: boolean
+}
+
+export interface ScriptNormalizeResult {
+  normalized_text: string
+  level: number
+  changes: ScriptNormalizeChange[]
+  questions: string[]
+  checks: {
+    characters_preserved: boolean
+    dialogue_preserved: boolean
+    missing_characters: string[]
+    missing_dialogues: string[]
+    blocked: boolean
+  }
+  original_chars: number
+  normalized_chars: number
+}
+
+/** 剧本规范化校验（保存前预览）：不落库，返回优化稿与变更清单供用户确认 */
+export function normalizeScript(projectId: string, payload: { source_text: string }) {
+  return post<ScriptNormalizeResult>(`/projects/${projectId}/script-normalize`, payload, { timeout: 180000 })
 }
 
 /** 新建剧本版本（text 1–50000 字符，返回 script_version_id/version/content_hash） */
@@ -101,4 +137,20 @@ export function confirmParseVersion(projectId: string, parseVersionId: string, c
   return post<ParseVersion>(`/projects/${projectId}/parse-versions/${parseVersionId}/confirm`, {
     current_parse_version_id: currentParseVersionId ?? null,
   })
+}
+
+
+/** 风格配置可选项（展示名 / 说明 / 默认值由后端下发，前端不硬编码） */
+export function getStyleOptions() {
+  return get<StyleOptions>("/projects/style-options")
+}
+
+/** 读取项目风格配置（含规范化配置、原始取值与校验问题） */
+export function getProjectStyleConfig(projectId: string) {
+  return get<ProjectStyleConfigResponse>(`/projects/${projectId}/style-config`)
+}
+
+/** 保存项目风格配置（仅影响后续任务，不自动重生成已审核资产与已生成结果） */
+export function saveProjectStyleConfig(projectId: string, config: StyleConfig) {
+  return put<SaveStyleConfigResponse>(`/projects/${projectId}/style-config`, { config })
 }

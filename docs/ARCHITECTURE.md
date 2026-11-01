@@ -165,6 +165,18 @@ worker 启动时扫描 `running`、`submitting`、`submission_unknown` 及有远
 - 文件头校验：读取文件头验证容器格式，视频再以 ffprobe 验证编码与时长
 - 源头约束：工作流视频输出统一使用 h264-mp4 编码的保存节点，避免下游合成失败
 - 产物落盘：worker 收到产物后按 `{asset_id}_{version}.{ext}` 重命名再落盘（如 `ast_abc123_v3.png`），避免重名冲突
+### 5.6.1 提示词编译前置校验（阶段 B，D-24）
+提示词不是由解析层或执行器临时拼装，而是在任务入队前由阶段 B 编译器统一产出并校验，把一致性错误挡在消耗本地 GPU 之前。
+| 环节 | 位置 | 约束 |
+| --- | --- | --- |
+| 阶段 A 结构化分析 | `app/services/script_parse.py` | 只产出结构化事实（角色外貌、场景空间结构、道具形状材质、镜头动作与连续性字段），不产出最终生图/生视频提示词 |
+| 阶段 B 提示词编译 | `app/services/prompt_compiler.py` | 输入=结构化事实+模板+已审核参考图+工作流 `capabilities.reference_slots`；输出=`CompiledPrompt` |
+| 统一入口 | `app/api/v1/generate.py` 的 `_compile_asset_prompt` / `_compile_shot_prompt` | 角色/场景/道具/镜头生成端点与 `agent_tools.py` 共用同一入口，不存在第二套拼装逻辑 |
+| 严格校验 | `validate_compilation` | 字段缺失、重复槽位、未知字段、空正向词一律报错，禁止静默丢弃字段 |
+| 状态判定 | `CompiledPrompt.status` | `blocking_issues` 为空 → `ready` 可写入参数；否则 `needs_review`，`apply_to_params` 拒绝写入并返回 `prompt_compilation_not_ready` |
+| 追溯 | `job.input_snapshot.prompt_compilation` | 保存任务类型、模板标识与版本、正负向提示词、参考槽位、生成约束、阻断与告警 |
+编译期即阻断的典型场景：资产身份字段全空（`asset_identity_missing`）、公共资产未审核（`assets_review_pending`）、角色无定妆图/场景无基准图/道具无锚定图、参考文件不存在、槽位需求超过工作流能力（`reference_capacity_exceeded`）、视频前置分镜图未确认（`storyboard_not_approved`）、尾帧缺失（`prev_frame_missing`）。阻断项一律不提交任务，不做降级重试。
+资产图与分镜图隔离在编译期固化：角色图单主体、场景图无人物、道具图无手部；分镜图只组合镜头绑定的已审核资产，不把角色设定图或场景基准图整体当作画面内容。
 
 ### 5.7 资源消耗保护
 

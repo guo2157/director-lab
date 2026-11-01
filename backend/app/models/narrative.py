@@ -101,6 +101,11 @@ class Scene(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     time_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     baseline_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 场景板（plate）：LLM 编译器产出的空镜环境规格（P1）
+    # plate 存完整 JSON（location_id/anchors/removed 审计账本等），plate_text 存四行文本
+    # 不覆盖 description：分镜层仍需要 beat（谁做了什么）
+    plate: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plate_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SceneEpisode(Base):

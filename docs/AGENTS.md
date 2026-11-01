@@ -17,6 +17,7 @@
 | 实现/核对 HTTP 接口 | docs/API.md |
 | 工作流上传、校验、注入、H3 生成 | docs/WORKFLOW.md |
 | 剧本解析、分镜设计（LLM 层） | docs/PROMPTS.md |
+| 剧本类型、叙事/视觉风格、节奏情绪配置 | docs/STYLE_CONFIG.md |
 | 一致性度量、失效传播 | docs/CONSISTENCY.md |
 | 前端页面、样式、交互 | docs/FRONTEND.md |
 | 环境搭建、启动、测试、部署 | docs/DEVELOPMENT.md |

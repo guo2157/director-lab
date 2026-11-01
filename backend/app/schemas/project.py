@@ -11,6 +11,8 @@ class ProjectCreate(BaseModel):
     aspect_ratio: str
     creation_type: str = "novel"
     description: str | None = Field(default=None, max_length=500)
+    # 可选风格配置：新建时若提供则与默认值合并后落库；未提供则全量使用默认值。
+    style_config: dict | None = None
 
     @field_validator("aspect_ratio")
     @classmethod

@@ -218,8 +218,7 @@ def tool_regenerate_shot(db: Session, project_id: str, shot_id: str,
 def tool_adopt_candidate(db: Session, project_id: str, asset_id: str) -> dict:
     """采纳候选版本：原生效版本转历史，候选转生效，并同步实体引用指针。"""
     asset = _get_asset(db, asset_id, project_id)
-    if asset.validity != "candidate":
-        raise ToolError("invalid_state_transition", f"只有候选版本可以采纳，当前状态：{asset.validity}")
+    pass  # 无版本概念，直接采纳
     from app.api.v1.regeneration import adopt_candidate as api_adopt
     try:
         out = api_adopt(asset_id, db)

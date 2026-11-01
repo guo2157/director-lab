@@ -58,10 +58,91 @@ export interface CreateProjectPayload {
   name: string
   aspect_ratio: AspectRatio
   creation_type?: CreationType
+  /** 可选风格配置：提供时与默认值合并后落库，未提供则全量使用默认值 */
+  style_config?: Partial<StyleConfig>
 }
 
 /** 更新项目参数 */
 export interface UpdateProjectPayload {
   name?: string
   settings?: ProjectSettings
+}
+
+/** 项目风格配置（项目级唯一基线：剧本分析 / 资产 / 分镜图 / 分镜视频共用） */
+export interface StyleConfig {
+  /** 剧本类型/题材标签：多选，第一个为主类型 */
+  genre_tags: string[]
+  /** 叙事风格：多选，第一个为主风格 */
+  narrative_styles: string[]
+  /** 主视觉风格：单选，项目内唯一 */
+  visual_style: string
+  /** 剧情节奏：slow/gentle/balanced/tight/fast */
+  pacing: string
+  /** 情绪基调：多选，第一个为主情绪 */
+  emotional_tone: string[]
+  /** 冲突强度：low/moderate/high */
+  conflict_intensity: string
+  /** 反转密度：none/occasional/frequent */
+  twist_density: string
+  /** 对白风格 */
+  dialogue_style: string
+  /** 叙述方式 */
+  narration_mode: string
+  /** 目标受众 */
+  target_audience: string
+  /** 自定义风格要求（可选文本，不覆盖资产绑定等硬约束） */
+  custom_style_requirements: string
+}
+
+/** 风格配置校验问题（warning 不阻断保存，error 表示已被截断或必须处理） */
+export interface StyleIssue {
+  code: string
+  message: string
+  severity: string
+}
+
+/** 可选项条目：展示名 + 说明 */
+export interface StyleOptionItem {
+  value: string
+  label: string
+  description?: string
+}
+
+/** 风格配置可选项（由后端下发，前端不硬编码展示名） */
+export interface StyleOptions {
+  version: string
+  genre_groups: Array<{ group: string; tags: string[] }>
+  genre_tags: string[]
+  narrative_styles: StyleOptionItem[]
+  visual_styles: StyleOptionItem[]
+  pacing: StyleOptionItem[]
+  emotional_tones: string[]
+  conflict_intensity: StyleOptionItem[]
+  twist_density: StyleOptionItem[]
+  dialogue_styles: StyleOptionItem[]
+  narration_modes: StyleOptionItem[]
+  target_audiences: StyleOptionItem[]
+  max_custom_length: number
+  defaults: StyleConfig
+}
+
+/** 读取项目风格配置的响应 */
+export interface ProjectStyleConfigResponse {
+  project_id: string
+  version: string
+  config: StyleConfig
+  raw: Record<string, unknown>
+  issues: StyleIssue[]
+  visual_style_label: string
+  visual_style_prompt: string
+}
+
+/** 保存项目风格配置的响应 */
+export interface SaveStyleConfigResponse {
+  project_id: string
+  version: string
+  config: StyleConfig
+  issues: StyleIssue[]
+  saved: boolean
+  note: string
 }

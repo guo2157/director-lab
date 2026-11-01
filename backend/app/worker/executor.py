@@ -24,6 +24,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _workflow_frame_size(definition: dict | None) -> tuple[int, int] | None:
+    """从工作流定义里取 H3 视频节点的 width/height。
+
+    档位工作流（capabilities.tier 非空）自带画幅，优先于项目宽高比；
+    非档位工作流返回 None，仍按 project.aspect_ratio 注入，保持原行为。
+    """
+    if not isinstance(definition, dict):
+        return None
+    for node in definition.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") != "MiniMaxH3ReferenceToVideo":
+            continue
+        inputs = node.get("inputs") or {}
+        width = inputs.get("width")
+        height = inputs.get("height")
+        if isinstance(width, int) and isinstance(height, int):
+            return width, height
+    return None
+
+
 def _next_asset_version(
     db: Session, job: Job, asset_type: str, asset_name: str | None = None
 ) -> int:
@@ -40,6 +61,29 @@ def _next_asset_version(
             q = q.filter(Asset.name == asset_name)
     latest = q.order_by(Asset.version.desc()).first()
     return (latest.version + 1) if latest is not None else 1
+
+
+def _supersede_previous_versions(
+    db: Session, job: Job, asset_type: str, asset_name: str | None = None
+) -> int:
+    """落库新 current 版本前，将同一归属范围内的旧 current 资产转为 superseded。
+
+    质量重试（job.quality_retry）每次尝试都会生成新版本资产，若不废弃旧版本，
+    资产库会出现同一实体的多个 current 版本。归属范围与 _next_asset_version 一致；
+    无 shot 归属且无实体名时不做处理，避免误伤同类型其他资产。
+    """
+    if not job.shot_id and not asset_name:
+        return 0
+    q = db.query(Asset).filter(Asset.asset_type == asset_type, Asset.validity == "current")
+    if job.shot_id:
+        q = q.join(Job, Job.id == Asset.source_job_id).filter(Job.shot_id == job.shot_id)
+    else:
+        q = q.filter(Asset.project_id == job.project_id, Asset.name == asset_name)
+    count = 0
+    for old in q.all():
+        old.validity = "superseded"
+        count += 1
+    return count
 
 
 def _asset_regenerate_target(db: Session, job: Job) -> Asset | None:
@@ -108,6 +152,11 @@ def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
         if _shot is not None and _shot.status == "generating":
             _shot.status = "pending"
     _write_event(db, job, "job.failed", {"error_code": code, "error_msg": job.error_msg})
+    # 链式生成（chained）：前序失败后级联取消链上等待任务，避免链条永久卡死且无法重提
+    try:
+        _cancel_chained_after_failure(db, job, code)
+    except Exception as _ce:  # noqa: BLE001
+        _write_event(db, job, "chain.cancel_failed", {"error": str(_ce)[:200]})
     db.commit()
 
 
@@ -177,7 +226,17 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
     """
     if job.job_type != "generate_clip" or not job.shot_id:
         return
-    clip = next((a for a in created_assets if a.get("asset_type") == "clip"), None)
+    # 正常成功路径与对账续跑路径的 created_assets 只带 asset_id/out_name/file_path，
+    # 不带 asset_type；仅按 asset_type 判断会永远取不到 clip，导致尾帧从未落库。
+    # 这里同时兼容 out_name，保证两条成功路径都能绑定尾帧。
+    clip = next(
+        (
+            a for a in created_assets
+            if a.get("asset_type") == "clip"
+            or (not a.get("asset_type") and a.get("out_name") == "clip")
+        ),
+        None,
+    )
     if clip is None:
         return
     shot = db.get(Shot, job.shot_id)
@@ -208,6 +267,78 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
             "shot_id": shot.id,
             "error": result.get("error"),
         })
+
+
+def _release_chained_next(db: Session, job: Job) -> None:
+    """链式生成（chained）：本任务成功后释放链上下一个 chained_wait 任务。
+
+    链式关系记录在下一任务的 input_snapshot.chain.prev_job_id；
+    仅当前一任务（本任务）成功时释放，失败时链条保持暂停，
+    可重新发起批量（在途过滤含 chained_wait，不会重复提交）。
+    """
+    if job.job_type != "generate_clip":
+        return
+    next_jobs = (
+        db.query(Job)
+        .filter(
+            Job.status == "chained_wait",
+            Job.job_type == "generate_clip",
+            Job.project_id == job.project_id,
+        )
+        .all()
+    )
+    for nj in next_jobs:
+        chain = (nj.input_snapshot or {}).get("chain") or {}
+        if chain.get("prev_job_id") != job.id:
+            continue
+        nj.status = "queued"
+        _write_event(db, nj, "chain.released", {"prev_job_id": job.id})
+
+
+def _cancel_chained_after_failure(db: Session, job: Job, code: str) -> None:
+    """链式生成（chained）：前序任务失败时级联取消链上等待任务。
+
+    整改前只在成功时释放下一环，前序失败后链条永久暂停：后续任务停在
+    chained_wait，既不会自动推进，又会被 _filter_inflight 视为在途而
+    无法重新提交，前端刷新后表现为『待生成视频』的假回退。
+    这里沿 input_snapshot.chain.prev_job_id 逐环向下置 cancelled 并写事件，
+    取消后不再算在途，可直接重新发起批量提交。
+    """
+    if job.job_type != "generate_clip":
+        return
+    frontier = [job.id]
+    cancelled_total = 0
+    while frontier:
+        waiting = (
+            db.query(Job)
+            .filter(
+                Job.status == "chained_wait",
+                Job.job_type == "generate_clip",
+                Job.project_id == job.project_id,
+            )
+            .all()
+        )
+        nxt: list[str] = []
+        for nj in waiting:
+            chain = (nj.input_snapshot or {}).get("chain") or {}
+            prev_id = chain.get("prev_job_id")
+            if prev_id not in frontier:
+                continue
+            nj.status = "cancelled"
+            nj.error_code = "chain_prev_failed"
+            nj.error_msg = f"前序镜头任务失败（{code}），链式后续任务已取消"[:2000]
+            nj.finished_at = _now()
+            _write_event(db, nj, "chain.cancelled", {
+                "prev_job_id": prev_id,
+                "reason": "prev_failed",
+                "prev_error_code": code,
+            })
+            nxt.append(nj.id)
+            cancelled_total += 1
+        frontier = nxt
+    if cancelled_total:
+        print(f"[worker] 链式级联取消 {cancelled_total} 个后续任务（前序 {job.id} 失败）", flush=True)
+        print(f"[worker] 链式释放 {nj.id}（前序 {job.id} 成功）", flush=True)
 
 
 def _preferred_instance_for_shot(db: Session, job: Job, exclude_instances: list[str]) -> dict | None:
@@ -248,7 +379,8 @@ def execute_generate_job(job_id: str) -> dict:
     """执行一个生成类任务（任务级故障转移重试入口，D-21）。
 
     提交前阶段失败（实例不可达/上传失败/提交失败）在未尝试过的实例间自动换实例
-    重试；提交后阶段的错误（超时/执行错误）不换实例，保持原失败语义。
+    重试；等待阶段实例失联（被删除/连接中断，连续 3 次连不上）同样换实例重试；
+    其余提交后阶段的错误（超时/执行错误）不换实例，保持原失败语义。
     返回执行结果摘要（供 worker 记录）。"""
     exclude_instances: list[str] = []
     result = _execute_generate_job_once(job_id, exclude_instances)
@@ -382,7 +514,17 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     )
                     if _kf is not None:
                         media_files["ref_image"] = _kf.file_path
-                if "ref_prev_frame" not in media_files and _shot.last_frame_asset_id:
+                # 批量生成方式（弹窗选择）：independent 不注入上一镜尾帧；
+                # chained 在执行期解析上一镜实际尾帧（前一任务成功后已绑定 last_frame）
+                _chain_mode = (job.input_snapshot or {}).get("chain_mode")
+                if _chain_mode == "independent":
+                    media_files.pop("ref_prev_frame", None)
+                elif _chain_mode == "chained" and "ref_prev_frame" not in media_files:
+                    from app.services.shot_chain import resolve_prev_frame
+                    _pf = resolve_prev_frame(db, _shot)
+                    if _pf is not None:
+                        media_files["ref_prev_frame"] = _pf["file_path"]
+                elif "ref_prev_frame" not in media_files and _shot.last_frame_asset_id:
                     _lf = db.get(Asset, _shot.last_frame_asset_id)
                     if _lf is not None:
                         media_files["ref_prev_frame"] = _lf.file_path
@@ -407,9 +549,17 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                         pass  # 首帧注入失败不阻断生成，回退为无首帧约束
                 _project = db.get(Project, job.project_id)
                 if _project is not None and "width" not in params and "height" not in params:
-                    _h3_wh = {"9:16": (736, 1312), "16:9": (1312, 736), "1:1": (768, 768)}
-                    if _project.aspect_ratio in _h3_wh:
-                        params["width"], params["height"] = _h3_wh[_project.aspect_ratio]
+                    # 档位工作流（极速 480×864 / 标准 640×1120 / 质量 768×1344）自带画幅优先，
+                    # 否则维持原逻辑：按项目宽高比注入
+                    _tier_wh = None
+                    if (wf_record.capabilities or {}).get("tier"):
+                        _tier_wh = _workflow_frame_size(wf_record.definition)
+                    if _tier_wh is not None:
+                        params["width"], params["height"] = _tier_wh
+                    else:
+                        _h3_wh = {"9:16": (736, 1312), "16:9": (1312, 736), "1:1": (768, 768)}
+                        if _project.aspect_ratio in _h3_wh:
+                            params["width"], params["height"] = _h3_wh[_project.aspect_ratio]
                 if "length" not in params and _shot.duration:
                     _target = float(_shot.duration) * 24
                     _n = max(7, min(21, round((_target - 5) / 17)))
@@ -425,7 +575,15 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
 
         # 0. submission_unknown 续跑分支（D-23 修复）：已有 prompt_id 时跳过上传/提交，
         # 直接查远端 history 续跑下载，避免重新提交浪费算力。
-        if not settings.render_mock and job.status == "submission_unknown" and job.prompt_id:
+        # comfy_timeout 对账续跑（scheduler._reconcile_comfy_timeout_jobs）：任务重置为 queued
+        # 并打 resume_prompt 标记，进入执行器后状态已翻转为 running，因此同时识别该标记。
+        _resume_via_prompt = bool((job.input_snapshot or {}).get("resume_prompt"))
+        # submission_unknown 与 submitted 均为已提交远端的状态：前者表示提交后本地未保存确认，
+        # 后者表示已确认提交。worker 重启时 _recover_interrupted_jobs 把 running 重置为 queued，
+        # submission_state 保留 submitted，此时必须走续跑路径而非重新提交（否则同一个镜头重复入队远端）。
+        if not settings.render_mock and job.prompt_id and (
+            _resume_via_prompt or job.status == "submission_unknown" or job.submission_state == "submitted"
+        ):
             snapshot = job.input_snapshot or {}
             inst_url = snapshot.get("comfyui_instance")
             if inst_url:
@@ -500,6 +658,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                 # 版本号必须在产物类型与实体归属确定之后再计算，
                                 # 否则会用到尚未赋值的类型变量，且实体类资产无法按名称隔离版本
                                 version = _next_asset_version(db, job, asset_type, _entity_asset_name)
+                                if not _is_regen_rec:
+                                    _supersede_previous_versions(db, job, asset_type, _entity_asset_name)
                                 filename = f"{asset_id}_v{version}.{ext}"
                                 filepath = os.path.join(media_dir, filename)
                                 with open(filepath, "wb") as f_out:
@@ -563,26 +723,47 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             _probe_clip_and_update_shot(db, job, created_assets)
                             # P0：实际尾帧落库（对账续跑路径同样需要绑定尾帧）
                             _persist_shot_last_frame(db, job, created_assets)
-                            # 镜头状态派生
+                            # 镜头状态派生（统一口径：见 services/shot_state.py）
                             if job.shot_id:
                                 _shot = db.get(Shot, job.shot_id)
                                 if _shot is not None and _shot.status == "generating":
-                                    _all_jobs = db.query(Job).filter(Job.shot_id == job.shot_id).all()
-                                    _has_kf = any(j.status == "succeeded" and j.job_type == "generate_keyframe" for j in _all_jobs)
-                                    _has_clip = any(j.status == "succeeded" and j.job_type == "generate_clip" for j in _all_jobs)
-                                    _has_audio = any(j.status == "succeeded" and j.job_type in ("generate_audio", "generate_bgm", "generate_sfx") for j in _all_jobs)
-                                    if _shot.dialogue or _shot.narration:
-                                        _shot.status = "done" if (_has_kf and _has_clip and _has_audio) else "pending"
-                                    else:
-                                        _shot.status = "done" if (_has_kf and _has_clip) else "pending"
+                                    from app.services.shot_state import shot_ready
+                                    _shot.status = "done" if shot_ready(db, _shot) else "pending"
                             db.commit()
                             return {"ok": True, "reason": "reconciled"}
                         elif done and err:
                             code, _, msg = err.partition(":")
                             _fail_job(db, job, code, msg)
                             return {"ok": False, "reason": code}
+                    # history 为 None：任务尚未完成（仍在远端排队或执行中）。
+                    # 对于已提交的任务（submission_state=submitted），不能降级重新提交——
+                    # 否则同一镜头重复入队远端浪费算力。改为打 resume_prompt 标记并重入队，
+                    # 下轮调度再次尝试续跑。
+                    if job.submission_state == "submitted":
+                        _snap = dict(job.input_snapshot or {})
+                        _snap["resume_prompt"] = True
+                        job.input_snapshot = _snap
+                        job.status = "queued"
+                        _write_event(db, job, "job.resume_deferred", {
+                            "reason": "remote_still_running",
+                            "prompt_id": job.prompt_id,
+                        })
+                        db.commit()
+                        return {"ok": False, "reason": "resume_deferred", "retriable": True}
+                    # 非已提交任务（submission_unknown / resume_prompt）：降级走正常流程
                     # history 为 None 或实例不可达：降级走正常流程重新提交
                 except ComfyUIError:
+                    if job.submission_state == "submitted":
+                        _snap = dict(job.input_snapshot or {})
+                        _snap["resume_prompt"] = True
+                        job.input_snapshot = _snap
+                        job.status = "queued"
+                        _write_event(db, job, "job.resume_deferred", {
+                            "reason": "instance_unreachable",
+                            "prompt_id": job.prompt_id,
+                        })
+                        db.commit()
+                        return {"ok": False, "reason": "resume_deferred", "retriable": True}
                     pass  # 实例不可达：降级走正常流程
 
         # 0. 从实例池获取客户端（按实时负载调度 least-connections + 故障转移，D-19/D-21）；
@@ -624,6 +805,12 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             "exclude_instances": exclude_instances + [used_instance["base_url"]]}
                 _fail_job(db, job, e.code, e.message)
                 return {"ok": False, "reason": e.code}
+        else:
+            # Mock 模式跳过上传，但媒体槽位仍需回填占位值（文件名），
+            # 否则 prune_unbound_media_inputs 会剔除全部媒体槽位，
+            # 误报 missing_reference_image（mock 与 prune 门禁不兼容的根因）
+            import os as _os
+            uploaded = {name: _os.path.basename(path) for name, path in media_files.items()}
         params.update(uploaded)
 
         # 2. 注入参数（P4 整改：先剔除未注入媒体的参考图节点及连线，
@@ -631,11 +818,24 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         try:
             from app.services.workflow_inject import (
                 compact_reference_slots,
+                parse_workflow,
                 prune_unbound_media_inputs,
                 remap_picture_refs,
             )
             wf_definition, _pruned = prune_unbound_media_inputs(wf_record.definition, params)
             if _pruned:
+                # 规范：参考图槽位全空 → 阻止提交并提示缺少参考图片（不允许静默生成）。
+                # 工作流声明的媒体槽位全部被剔除时，说明未提供任何参考图。
+                _parsed_wf = parse_workflow(wf_record.definition)
+                _media_slots = sorted(
+                    name for name, binding in _parsed_wf.params.items() if binding.media
+                )
+                if _media_slots and all(name in _pruned for name in _media_slots):
+                    _fail_job(
+                        db, job, "missing_reference_image",
+                        "参考图槽位全部为空（" + ", ".join(_media_slots) + "），已阻止提交：请至少提供一张参考图片",
+                    )
+                    return {"ok": False, "reason": "missing_reference_image"}
                 _write_event(db, job, "job.media_pruned", {"pruned_slots": _pruned})
                 db.commit()
             # P0 整改：剔除槽位后 ref_images.ref_image_N 会出现断档，
@@ -750,6 +950,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 except Exception:
                     pass  # 进度事件失败不阻断任务执行
 
+            _conn_failures = 0  # 连续连接失败计数：实例被删/断连时快速失败，不再等待总超时
+            _poll_err_desc = ''  # 最近一次轮询请求异常描述（仅请求报错时赋值）
             while time.time() < deadline:
                 db.refresh(job)
                 if job.status == "cancelled":
@@ -767,14 +969,88 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 if done:
                     break
                 # WS 未确认终态（断连/超时/无事件）：HTTP 轮询兜底
+                # 关键区分：请求报错表示实例可能不可达；请求成功但无历史表示任务仍在执行。
+                # 后者不能计入失联次数，否则实例高负载时会被误判 comfy_unreachable。
+                _poll_failed = False
                 try:
                     history = client.get_history(prompt_id)
-                except ComfyUIError:
+                except ComfyUIError as _pe:
                     history = None
-                if history is not None:
-                    done, err = client.is_job_done(history)
-                    if done:
-                        break
+                    _poll_failed = True
+                    _poll_err_desc = f'{getattr(_pe, "code", "comfy_error")}: {getattr(_pe, "message", str(_pe))}'[:300]
+                if not _poll_failed:
+                    # 请求成功（实例可达）：失联计数归零；有历史再判断是否终态
+                    _conn_failures = 0
+                    if history is not None:
+                        done, err = client.is_job_done(history)
+                        if done:
+                            break
+                else:
+                    _conn_failures += 1
+                    if _conn_failures >= 5:
+                        # 实例失联快速失败（被删除/连接中断）：不再等待总超时
+                        # 阈值 5 次 + 指数退避：需持续失联约 2 分钟才判定，滤除高负载瞬时抖动
+                        _inst_url = used_instance["base_url"] if used_instance else ""
+                        _still_enabled = any(
+                            i["base_url"] == _inst_url for i in comfyui_pool.enabled_instances()
+                        )
+                        if not _still_enabled:
+                            _fail_job(db, job, "comfy_unreachable",
+                                      f"实例已从实例池移除，任务终止：{_inst_url}")
+                            return {"ok": False, "reason": "comfy_unreachable"}
+                        # 实例仍在池中但连不上：可重试故障转移（换实例重新提交）
+                        _remaining = [
+                            i for i in comfyui_pool.enabled_instances()
+                            if i["base_url"] not in exclude_instances
+                            and i["base_url"] != _inst_url
+                        ]
+                        _write_event(db, job, "job.retry", {
+                            "stage": "wait", "error_code": "comfy_unreachable",
+                            "failed_instance": _inst_url,
+                            "consecutive_failures": _conn_failures,
+                        })
+                        if _remaining:
+                            db.commit()
+                            return {"ok": False, "reason": "comfy_unreachable", "retriable": True,
+                                    "exclude_instances": exclude_instances + [_inst_url]}
+                        # 二次确认：单实例无备用时，先查远端队列与历史，核实任务是否仍在执行。
+                        # 高负载下 history 请求超时并不等于实例失联，直接判失败会产生孤儿任务白跑算力。
+                        _remote_alive = False
+                        try:
+                            _qc = client.get_queue()
+                            _q_ids = [x[1] for x in _qc.get('queue_running', [])] + [
+                                x[1] for x in _qc.get('queue_pending', [])
+                            ]
+                            if prompt_id in _q_ids:
+                                _remote_alive = True
+                            else:
+                                _hc = client.get_history(prompt_id)
+                                if _hc is None:
+                                    # 既不在队列也查不到历史：可能刚结束待写入，保守按仍存活处理
+                                    _remote_alive = True
+                                else:
+                                    history = _hc
+                        except Exception:  # noqa: BLE001
+                            _remote_alive = False
+                        if _remote_alive:
+                            _write_event(db, job, 'job.wait_extended', {
+                                'stage': 'wait',
+                                'reason': 'remote_still_alive',
+                                'consecutive_failures': _conn_failures,
+                                'last_error': _poll_err_desc,
+                            })
+                            db.commit()
+                            _conn_failures = 0
+                            time.sleep(settings.comfyui_poll_interval_seconds)
+                            continue
+                        _fail_job(db, job, "comfy_unreachable",
+                                  f"实例连接中断且无其他可用实例：{_inst_url}")
+                        return {"ok": False, "reason": "comfy_unreachable"}
+                    # 退避间隔：连续连接失败时指数退避（5s→10s→20s→40s，60s 封顶），
+                    # 给高负载实例恢复窗口，避免瞬时抖动累计过快触发误判
+                    _backoff = min(5 * (2 ** (_conn_failures - 1)), 60)
+                    time.sleep(_backoff)
+                    continue
                 time.sleep(settings.comfyui_poll_interval_seconds)
             # WS 确认完成后拉取 history 用于提取产物
             if history is None:
@@ -864,6 +1140,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 })
                 continue
             version = _next_asset_version(db, job, asset_type, _entity_asset_name)
+            if not _is_regen:
+                _supersede_previous_versions(db, job, asset_type, _entity_asset_name)
             aid = id_gen.asset_id()
             stored_name = f"{aid}_v{version}.{ext}"
             stored_path = media_dir / stored_name
@@ -977,23 +1255,18 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         # P0：从本次实际生成视频提取末帧并绑定 shot.last_frame_asset_id，
         # 供后续镜头首帧/尾帧引用；失败只记录事件，不阻断任务成功
         _persist_shot_last_frame(db, job, created_assets)
+        # 链式生成（chained）：本任务成功且尾帧已绑定后，释放链上下一个 chained_wait 任务
+        try:
+            _release_chained_next(db, job)
+        except Exception as _ce:  # noqa: BLE001
+            _write_event(db, job, "chain.release_failed", {"error": str(_ce)[:200]})
         # 7.5 镜头状态派生（§3.2/§4.2）：必需产物齐全 → done，否则回 pending（阶段内部分完成是正常状态）
+        # 口径统一在 services/shot_state.py：H3 VA 内嵌音轨即满足对白/旁白镜头的音频必需性
         if job.shot_id:
             _shot = db.get(Shot, job.shot_id)
             if _shot is not None:
-                def _shot_has(t):
-                    return (
-                        db.query(Asset)
-                        .join(Job, Job.id == Asset.source_job_id)
-                        .filter(Job.shot_id == _shot.id, Asset.asset_type == t,
-                                Asset.validity == "current", Job.status == "succeeded")
-                        .count() > 0
-                    )
-                _need_audio = _shot.shot_kind in ("dialogue", "narration")
-                if _shot_has("keyframe") and _shot_has("clip") and (not _need_audio or _shot_has("audio")):
-                    _shot.status = "done"
-                else:
-                    _shot.status = "pending"
+                from app.services.shot_state import shot_ready
+                _shot.status = "done" if shot_ready(db, _shot) else "pending"
 
                 # 跨集连续性：记录首帧使用（对应改造第五/八节）
                 if job.job_type == "generate_clip":

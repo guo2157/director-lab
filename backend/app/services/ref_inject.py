@@ -21,17 +21,33 @@ from app.services import errors
 # 不纳入会导致引用名被截断为前半段，触发 invalid_reference（2026-10-28 全流程测试实证）
 _REF_RE = re.compile(r"@([\w\u4e00-\u9fff·]+)")
 
-# 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），第 2 个 → ref_costume（服装参考）
+# 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），第 2 个 → ref_costume（服装参考），
+# 更多角色按 ref_character_N 依次填充（7 槽多参考图工作流）。
 # P0 整改：ref_image 为当前镜头分镜图专用槽位（H3 ref2va 的 ref_image_1、Qwen Edit 的 image1），
 # 此前被多角色引用占用，导致分镜图被角色定妆图覆盖而丢失；角色引用不再占用该槽位
 _CHARACTER_SLOTS = ["ref_identity", "ref_costume"]
 # 场景槽位：仅 ref_scene 一个
 _SCENE_SLOTS = ["ref_scene"]
-# 道具槽位：仅 ref_prop 一个（ref2va 工作流）
+# 道具槽位：ref_prop / ref_prop_2（多参考图工作流）
 _PROP_SLOTS = ["ref_prop"]
 
 # 系统保留槽位：由生成流程按镜头/连续性规则写入，@引用不得占用
 RESERVED_SLOTS = frozenset({"ref_image", "ref_prev_frame", "first_frame", "end_frame"})
+
+
+def is_character_slot(name: str) -> bool:
+    """按槽位名判断是否角色参考槽（工作流可声明任意多个）。"""
+    if name in RESERVED_SLOTS:
+        return False
+    return name.startswith(("ref_identity", "ref_costume", "ref_character", "ref_char"))
+
+
+def is_scene_slot(name: str) -> bool:
+    return name.startswith("ref_scene")
+
+
+def is_prop_slot(name: str) -> bool:
+    return name.startswith("ref_prop")
 
 
 def extract_refs(text: str) -> list[str]:
@@ -139,9 +155,10 @@ def build_media_params(db: Session, project_id: str, prompt: str,
             item.get("param") if isinstance(item, dict) else item
             for item in reference_slots
         ]
-        avail_char = [s for s in _CHARACTER_SLOTS if s in slot_names]
-        avail_scene = [s for s in _SCENE_SLOTS if s in slot_names]
-        avail_prop = [s for s in _PROP_SLOTS if s in slot_names]
+        # 按工作流声明顺序分类，槽位数量由工作流决定（不再写死 2 个角色槽）
+        avail_char = [s for s in slot_names if is_character_slot(s)]
+        avail_scene = [s for s in slot_names if is_scene_slot(s)]
+        avail_prop = [s for s in slot_names if is_prop_slot(s)]
     media: dict[str, str] = {}
     # 角色引用：按顺序填入可用角色槽位
     if len(char_names) > len(avail_char):

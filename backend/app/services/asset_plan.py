@@ -23,7 +23,7 @@ PLAN_EXT = {"character": ".png", "scene": ".png", "prop": ".png", "keyframe": ".
 # 分镜图槽位：角色身份 / 服装 / 场景 / 道具
 KEYFRAME_SLOTS = ("ref_identity", "ref_costume", "ref_scene", "ref_prop")
 # 分镜视频槽位：当前分镜图 / 角色 / 场景 / 上一镜末帧
-CLIP_SLOTS = ("ref_image", "ref_identity", "ref_scene", "ref_prev_frame")
+CLIP_SLOTS = ("ref_image", "ref_identity", "ref_costume", "ref_prop", "ref_prev_frame")
 
 
 def _slug(text: str) -> str:
@@ -60,13 +60,72 @@ def _character_prompt(c: Character) -> str:
     return "，".join(p for p in parts if p)
 
 
-def _scene_prompt(s: Scene) -> str:
-    parts = [s.title]
-    if s.description:
-        parts.append(s.description)
+# 场景描述清洗：剧情动作谓语命中即整句剔除（cfg=1 下负向词无效，只能靠正向改写消除主体）
+_SCENE_STORY_VERBS = (
+    "喊|叫|哭|笑|跑|奔|赶|扑|追|道歉|承认|拒绝|警告|劝|说|回答|"
+    "发呆|无聊|戏弄|恶作剧|惊|四散|旁白|总结|点明|"
+    "坐|站|走|卧|躺|跪|俯|仰|抱|握|挥|推|拉|递|拿|放|打开|关上|"
+    "吃|喝|读|看|望|听|启|服毒|自尽|杀|打|踢|唤|引|带"
+)
+
+
+def _clean_scene_desc(text: str, char_names: list[str]) -> str:
+    """清除非环境内容：角色名、动作谓语与剧情因果从句一律剔除，只留空间与光线描述。"""
+    if not text:
+        return ""
+    names = [n for n in (char_names or []) if n]
+    clauses = re.split(r"([，。；、])", text)
+    kept: list[str] = []
+    buf = ""
+    for part in clauses:
+        if part in ("，", "。", "；", "、"):
+            buf += part
+            continue
+        seg = buf + part
+        buf = ""
+        s = seg.strip()
+        if not s:
+            continue
+        if any(n in s for n in names):
+            continue
+        if re.search(_SCENE_STORY_VERBS, s):
+            continue
+        kept.append(seg)
+    out = "".join(kept)
+    out = re.sub(r"[，、；]{2,}", "，", out)
+    out = re.sub(r"^[，、。；]+|[，、。；]+$", "", out).strip()
+    return out
+
+
+def _scene_prompt(s: Scene, char_names: list[str] | None = None) -> str:
+    """场景基准图提示词：空闲场景，只描述环境。
+
+    优先使用场景板（plate_text）产出的空镜规格；没有场景板时清洗剧本描述，
+    剔除角色名、动作与剧情从句，仅保留地形、时间与光照等空间信息，不虚构内容。
+    """
+    names = [n for n in (char_names or []) if n]
+    parts: list[str] = []
+    title = s.title or ""
+    if title and not any(n in title for n in names):
+        parts.append(title)
+    plate = (getattr(s, "plate_text", None) or "").strip()
+    if plate:
+        lines = [l.strip() for l in plate.splitlines() if l.strip()][:3]
+        parts.extend(lines)
+    else:
+        cleaned = _clean_scene_desc(s.description or "", names)
+        if cleaned:
+            parts.append(cleaned)
+        elif s.description:
+            first = re.split(r"[，。；]", s.description)[0].strip()
+            if first and not any(n in first for n in names):
+                parts.append(first)
     if s.time_note:
         parts.append(s.time_note)
-    parts.append("场景基准图，无主要人物，广角全景，高清写实，保持空间结构与光线稳定")
+    parts.append(
+        "空场景基准图，广角全景，高清写实，画面只由该场景的固定环境元素与天空构成，"
+        "保持空间结构与光线稳定"
+    )
     return "，".join(p for p in parts if p)
 
 
@@ -156,7 +215,7 @@ def _bind_dep(db: Session, plan: AssetPlan, slot: str, ref_key: str, ref_plan: A
 
 
 _KEYFRAME_ALLOWED_SLOTS = ("ref_identity", "ref_costume", "ref_scene", "ref_prop")
-_CLIP_ALLOWED_SLOTS = ("ref_image", "ref_identity", "ref_scene")
+_CLIP_ALLOWED_SLOTS = ("ref_image", "ref_identity", "ref_costume", "ref_prop", "ref_prev_frame")
 
 
 def _prune_deps(db: Session, plan: AssetPlan, allowed: tuple) -> int:
@@ -242,9 +301,10 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
         p.name: prop_plans[p.id] for p in props if p.id in prop_plans and p.name
     }
     scene_plans: dict[str, AssetPlan] = {}
+    char_names = [c.name for c in chars if c.name]
     for s in scenes:
         key = make_asset_key("scene", s.title, f"{project.id}|{s.id}")
-        scene_plans[s.id] = _upsert_plan(db, project, "scene", key, _scene_prompt(s),
+        scene_plans[s.id] = _upsert_plan(db, project, "scene", key, _scene_prompt(s, char_names),
                                          "scene", s.id, s.title)
         stats["scene"] += 1
 
@@ -310,9 +370,7 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
         if char_plan:
             _bind_dep(db, clip_plan, "ref_identity", char_plan.asset_key, char_plan)
             stats["deps"] += 1
-        if scene_plan:
-            _bind_dep(db, clip_plan, "ref_scene", scene_plan.asset_key, scene_plan)
-            stats["deps"] += 1
+
         # ref_prev_frame 指向的是上一镜“末帧”而非上一镜分镜图，
         # 由执行器按 shot.last_frame_asset_id 回填，此处不做错误绑定。
         _prune_deps(db, clip_plan, _CLIP_ALLOWED_SLOTS)

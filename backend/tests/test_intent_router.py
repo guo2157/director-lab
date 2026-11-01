@@ -105,6 +105,8 @@ def test_intent_tool_mapping_readonly_whitelist():
         "asset_stats",
         "list_assets",
         "list_asset_plans",
+        # 只读风格查询：让对话能回答『当前是什么风格』，不出现在写工具中
+        "get_style_config",
     ]
     assert set(get_allowed_tools("analysis")) == set(get_allowed_tools("query"))
     for intent in ("generate_request", "ambiguous", "unsafe", "unknown"):

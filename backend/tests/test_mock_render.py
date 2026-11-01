@@ -65,7 +65,7 @@ def test_mock_generate_job_full_lifecycle(client: TestClient):
     definition = {
         "1": {
             "class_type": "EmptyLatentImage",
-            "_meta": {"title": "$~width, $~height"},
+            "_meta": {"title": "$width, $height"},
             "inputs": {"width": 512, "height": 288, "batch_size": 1},
         },
         "2": {
@@ -108,7 +108,7 @@ def test_anchor_writeback_prop_character_scene(client: TestClient):
     definition = {
         "1": {
             "class_type": "EmptyLatentImage",
-            "_meta": {"title": "$~width, $~height"},
+            "_meta": {"title": "$width, $height"},
             "inputs": {"width": 512, "height": 288, "batch_size": 1},
         },
         "2": {

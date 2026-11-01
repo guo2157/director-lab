@@ -59,12 +59,28 @@ export interface ExportRecord {
   file_name?: string
   size?: number
   status: 'exporting' | 'done' | 'failed'
+  /** 服务器落盘位置：相对 media 目录的路径（如 data/media/prj_xxx_ab12.mp4） */
+  file_path?: string
+  /** 服务器落盘位置的绝对路径，供页面直接展示“导出到哪了” */
+  abs_path?: string
   download_url: string
   created_at: string
 }
 
 /** 语言模型提供方（默认 DeepSeek） */
 export type LlmProvider = 'deepseek' | 'openai' | 'qwen' | 'ollama' | 'custom'
+
+/** LLM 实例（多模型卡片配置，同一时刻仅一个启用） */
+export interface LlmInstance {
+  id: string
+  name: string
+  provider: LlmProvider | ''
+  base_url: string
+  api_key: string
+  api_key_set?: boolean
+  model: string
+  enabled: boolean
+}
 
 /** 全局设置（密钥掩码 + api_key_set；密钥传空字符串=清除） */
 export interface AppSettings {
@@ -74,6 +90,7 @@ export interface AppSettings {
   llm_model?: string
   llm_api_key?: string
   llm_api_key_set?: boolean
+  llm_instances?: LlmInstance[]
   job_max_attempts?: number
   default_concurrency?: number
   [key: string]: unknown

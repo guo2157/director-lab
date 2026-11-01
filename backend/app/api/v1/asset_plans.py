@@ -39,7 +39,7 @@ def _resolve_dep_path(db: Session, dep: AssetPlanDependency) -> tuple[str | None
 
     优先级：定义绑定的当前有效资产 → 归属实体的当前资产指针 →
     归属镜头的当前有效资产 → 定义占位路径。
-    绑定资产被替换（validity != current）时回退到当前有效资产，
+    绑定资产被替换时回退到当前有效资产，
     避免引用过期版本（版本漂移防护）。
     """
     if dep.ref_plan_id:
@@ -47,7 +47,7 @@ def _resolve_dep_path(db: Session, dep: AssetPlanDependency) -> tuple[str | None
         if ref_plan is not None:
             if ref_plan.asset_id:
                 asset = db.get(Asset, ref_plan.asset_id)
-                if asset is not None and asset.validity == "current" and asset.file_path:
+                if asset is not None and asset.file_path:
                     return asset.file_path, asset.id, asset.version
             # 绑定资产缺失或已被替换：按归属类型回退到当前有效资产
             if ref_plan.owner_type in ("character", "scene", "prop") and ref_plan.owner_id:
@@ -69,7 +69,7 @@ def _resolve_dep_path(db: Session, dep: AssetPlanDependency) -> tuple[str | None
                     .join(Job, Job.id == Asset.source_job_id)
                     .filter(Job.shot_id == ref_plan.owner_id,
                             Asset.asset_type == ref_plan.plan_type,
-                            Asset.validity == "current",
+
                             Job.status == "succeeded")
                     .order_by(Asset.version.desc())
                     .first()
@@ -247,8 +247,13 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
         assert_assets_gate(db, project_id)
 
     from app.api.v1.generate import (  # 复用既有匹配与建任务逻辑，保证行为一致
-        _TARGET_WF_TYPE, _check_keyframe_gate, _create_job, _match_workflow,
+        _TARGET_WF_TYPE, _check_keyframe_gate, _create_job, _match_workflow, _apply_chain_mode,
+        _filter_already_generated,
     )
+    # 批量出视频方式（仅 clip）：independent 独立并行 / chained 链式串行（与项目级批量接口一致）
+    chain_mode = payload.get("chain_mode") if plan_type == "clip" else None
+    if chain_mode is not None and chain_mode not in ("independent", "chained"):
+        raise errors.AppError("invalid_request", "chain_mode 仅允许 independent/chained", 400)
 
     jobs: list[Job] = []
     skipped: list[dict] = []
@@ -261,10 +266,23 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             raise errors.AppError("invalid_request", "定义缺少镜头归属，无法生成", 400)
         if target == "clip":
             _check_keyframe_gate(db, shot_ids)
+        # 幂等过滤（P0）：同一工作流已生成过视频的镜头跳过，避免重复点击批量出视频时重复渲染；
+        # 需要重做时走分镜视频详情页的重新生成，不受此处限制
+        _shot_objs = [s for s in (db.get(Shot, sid) for sid in shot_ids) if s is not None]
+        _, _already = _filter_already_generated(db, _shot_objs, target, wf.id, wf.version)
+        already_done_ids = {d["shot_id"] for d in _already}
         for plan in plans:
             shot = db.get(Shot, plan.owner_id) if plan.owner_id else None
             if shot is None:
                 skipped.append({"plan_id": plan.id, "reason": "shot_not_found"})
+                continue
+            if shot.id in already_done_ids:
+                skipped.append({
+                    "plan_id": plan.id,
+                    "shot_id": shot.id,
+                    "reason": "already_generated",
+                    "workflow_id": wf.id,
+                })
                 continue
             # 已锁定分镜图跳过（锁定只作用于图片，不涉及分镜视频）
             if target == "keyframe":
@@ -272,7 +290,7 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
                     db.query(Asset.id)
                     .join(Job, Job.id == Asset.source_job_id)
                     .filter(Job.shot_id == shot.id, Asset.asset_type == "keyframe",
-                            Asset.validity == "current", Asset.locked.is_(True))
+ Asset.locked.is_(True))
                     .first()
                 )
                 if locked is not None:
@@ -287,6 +305,9 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             _inject_dependency_slots(db, plan, params, _wf_slots)
             job = _create_job(db, project_id, shot.id, target, wf, params)
             jobs.append(job)
+        # 生成方式标记：chained 仅首任务 queued，其余 chained_wait 等待前一任务成功后释放
+        if target == "clip" and chain_mode:
+            _apply_chain_mode(jobs, chain_mode)
     else:
         target = "keyframe"
         wf = _match_workflow(db, target, workflow_id)

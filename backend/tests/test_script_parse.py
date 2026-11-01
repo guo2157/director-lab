@@ -39,7 +39,38 @@ def _save_script(client: TestClient, pid: str, text: str = SCRIPT_TEXT) -> dict:
     return r.json()
 
 
-def _confirmed_estimate(client: TestClient, pid: str, sv: dict) -> None:
+FAKE_OUTLINE_OUTPUT = {
+    "total_episodes": 1,
+    "estimated_total_duration": 90,
+    "dialogue_char_estimate": 50,
+    "episodes": [
+        {"episode": 1, "title": "第一集", "estimated_duration": 90, "estimated_shots": 9},
+    ],
+}
+
+
+def _mock_outline(monkeypatch) -> None:
+    """mock LLM 大纲分析（estimate 端点依赖 LLM，测试用替身）。"""
+    import app.api.v1.script as script_mod
+    monkeypatch.setattr(script_mod, "analyze_script_outline", lambda *a, **kw: {
+        "algorithm_version": "llm-outline-v1.0",
+        "char_count": len(SCRIPT_TEXT),
+        "dialogue_char_estimate": FAKE_OUTLINE_OUTPUT["dialogue_char_estimate"],
+        "estimated_total_duration": FAKE_OUTLINE_OUTPUT["estimated_total_duration"],
+        "estimated_episodes": FAKE_OUTLINE_OUTPUT["total_episodes"],
+        "episode_breakdown": [
+            {"episode": e["episode"], "title": e["title"],
+             "estimated_duration": e["estimated_duration"],
+             "estimated_shots": e["estimated_shots"]}
+            for e in FAKE_OUTLINE_OUTPUT["episodes"]
+        ],
+        "exceeds_batch_limit": False,
+        "suggestion": None,
+    })
+
+
+def _confirmed_estimate(client: TestClient, pid: str, sv: dict, monkeypatch) -> None:
+    _mock_outline(monkeypatch)
     r = client.post(f"/api/projects/{pid}/estimate",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT})
     assert r.status_code == 201
@@ -79,7 +110,7 @@ def test_script_version_immutable(client):
     assert sv2["content_hash"] != sv1["content_hash"]
 
 
-def test_estimate_hash_validation(client):
+def test_estimate_hash_validation(client, monkeypatch):
     pid = _make_project(client)
     sv = _save_script(client, pid)
     # 文本与版本哈希不符 → 409 script_version_conflict
@@ -87,7 +118,8 @@ def test_estimate_hash_validation(client):
                     json={"script_version_id": sv["script_version_id"], "text": "完全不同的文本"})
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "script_version_conflict"
-    # 正常评估
+    # 正常评估（mock LLM 大纲分析）
+    _mock_outline(monkeypatch)
     r = client.post(f"/api/projects/{pid}/estimate",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT})
     assert r.status_code == 201
@@ -98,7 +130,7 @@ def test_estimate_hash_validation(client):
     assert len(body["episode_breakdown"]) == body["estimated_episodes"]
 
 
-def test_parse_allows_without_confirmed_estimate(client):
+def test_parse_allows_without_confirmed_estimate(client, monkeypatch):
     """口径变更：解析不再强制前置确认评估（集数由解析器自主分析），未评估直接解析返回 202。"""
     pid = _make_project(client)
     sv = _save_script(client, pid)
@@ -109,6 +141,7 @@ def test_parse_allows_without_confirmed_estimate(client):
     assert r.status_code == 202
     assert r.json()["status"] == "queued"
     # 评估后解析同样返回 202，不受是否确认评估影响
+    _mock_outline(monkeypatch)
     r = client.post(f"/api/projects/{pid}/estimate",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT})
     assert r.status_code == 201
@@ -121,7 +154,7 @@ def test_parse_allows_without_confirmed_estimate(client):
 def test_parse_job_lifecycle(client, monkeypatch):
     pid = _make_project(client)
     sv = _save_script(client, pid)
-    _confirmed_estimate(client, pid, sv)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
     # 提交解析 → 202 + job_id，且项目自动激活
     r = client.post(f"/api/projects/{pid}/parse",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
@@ -166,7 +199,7 @@ def test_parse_version_confirm_optimistic_lock(client, monkeypatch):
     # 走完整流程拿到 parse_version_id
     pid = _make_project(client)
     sv = _save_script(client, pid)
-    _confirmed_estimate(client, pid, sv)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
     r = client.post(f"/api/projects/{pid}/parse",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
                           "episode_start": 1, "episode_count": 1})
@@ -241,7 +274,7 @@ def _run_parse(client, monkeypatch, pid, sv, fake_output):
 def test_parse_confirm_cascades_entities(client, monkeypatch):
     pid = _make_project(client)
     sv = _save_script(client, pid)
-    _confirmed_estimate(client, pid, sv)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
     # 第一次解析并确认：实体落库
     pv1 = _run_parse(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT)
     r = client.post(f"/api/projects/{pid}/parse-versions/{pv1}/confirm",
@@ -280,7 +313,7 @@ def test_parse_confirm_cascades_entities(client, monkeypatch):
 def test_parse_llm_failure_classification(client, monkeypatch):
     pid = _make_project(client)
     sv = _save_script(client, pid)
-    _confirmed_estimate(client, pid, sv)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
     r = client.post(f"/api/projects/{pid}/parse",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
                           "episode_start": 1, "episode_count": 1})
@@ -306,3 +339,86 @@ def test_parse_llm_failure_classification(client, monkeypatch):
     # 当前分镜不受影响
     detail = client.get(f"/api/projects/{pid}").json()
     assert detail["current_parse_version_id"] is None
+
+
+# ── 剧本解析接入项目风格配置：快照与差异落库 ──────────────────
+FAKE_PARSE_OUTPUT_STYLE = {
+    **FAKE_PARSE_OUTPUT,
+    "project_analysis": {
+        **FAKE_PARSE_OUTPUT["project_analysis"],
+        "detected_genre_tags": ["古装权谋"],
+        "detected_narrative_styles": ["悬念反转型"],
+    },
+}
+
+
+def _run_parse_result(client, monkeypatch, pid, sv, fake_output) -> dict:
+    """提交解析任务并用替身执行，返回 job.result 全量内容。"""
+    r = client.post(f"/api/projects/{pid}/parse",
+                    json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
+                          "episode_start": 1, "episode_count": 1})
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    import app.worker.parse_executor as pe_mod
+
+    class _FakeLLM:
+        def __init__(self, *a, **kw):
+            pass
+
+        def chat_json(self, s, u):
+            return fake_output
+
+    monkeypatch.setattr(pe_mod, "LLMClient", _FakeLLM)
+    res = pe_mod.execute_parse_job(job_id)
+    assert res["ok"] is True
+    return client.get(f"/api/jobs/{job_id}").json()["result"]
+
+
+def test_parse_result_contains_style_snapshot_and_diffs(client, monkeypatch):
+    """项目配置了风格时，解析结果须带风格快照，并报出与配置不符的识别项。"""
+    pid = _make_project(client)
+    sv = _save_script(client, pid)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
+    r = client.put(f"/api/projects/{pid}/style-config", json={
+        "genre_tags": ["校园青春"],
+        "narrative_styles": ["温情治愈型"],
+        "visual_style": "anime_2d",
+        "pacing": "tight",
+        "emotional_tone": ["紧张", "热血"],
+    })
+    assert r.status_code == 200
+    result = _run_parse_result(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT_STYLE)
+    snap = result["style_config_snapshot"]
+    assert snap["project_id"] == pid
+    assert snap["visual_style"] == "anime_2d"
+    assert snap["visual_style_label"]
+    diffs = {d["field"]: d for d in result["style_config_diffs"]}
+    assert set(diffs) == {"genre_tags", "narrative_styles"}
+    assert diffs["genre_tags"]["detected"] == ["古装权谋"]
+    assert diffs["genre_tags"]["configured"] == ["校园青春"]
+    assert diffs["narrative_styles"]["detected"] == ["悬念反转型"]
+
+
+def test_parse_result_default_style_snapshot(client, monkeypatch):
+    """未配置风格的新项目：快照回退默认视觉风格，且无识别字段时不报差异。"""
+    pid = _make_project(client)
+    sv = _save_script(client, pid)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
+    result = _run_parse_result(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT)
+    snap = result["style_config_snapshot"]
+    assert snap["visual_style"] == "storybook_realism"
+    assert snap["version"] == "style-v1.0"
+    assert result["style_config_diffs"] == []
+
+
+def test_parse_result_no_detected_fields_no_diff(client, monkeypatch):
+    """配置了风格但 LLM 未输出 detected_* 时，不凭猜测报差异。"""
+    pid = _make_project(client)
+    sv = _save_script(client, pid)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
+    r = client.put(f"/api/projects/{pid}/style-config",
+                   json={"genre_tags": ["校园青春"], "visual_style": "chinese_ink"})
+    assert r.status_code == 200
+    result = _run_parse_result(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT)
+    assert result["style_config_snapshot"]["visual_style"] == "chinese_ink"
+    assert result["style_config_diffs"] == []

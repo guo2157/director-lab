@@ -65,7 +65,7 @@ export function listAssetPlans(
 /** 按定义批量触发生成；plan_ids 缺省取该类型全部待生成定义 */
 export function generateFromPlans(
   projectId: string,
-  payload: { plan_type: PlanType; plan_ids?: string[]; workflow_id?: string },
+  payload: { plan_type: PlanType; plan_ids?: string[]; workflow_id?: string; chain_mode?: 'independent' | 'chained' },
 ) {
   return post<GenerateFromPlansResult>(`/projects/${projectId}/asset-plans/generate`, payload)
 }

@@ -6,7 +6,7 @@
 - 参数校验：script_version_id 缺失 400、text 缺失 400、归档项目 409
 - 评估为只读操作，不修改剧本版本或项目状态
 - 提示词外置：script_evaluation_system 注册并可读取
-- 算法估算数据注入用户提示词
+- 大纲分析数据注入用户提示词
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -55,8 +55,19 @@ def test_script_evaluate_success(client: TestClient, monkeypatch):
 
     class _FakeClient:
         def chat_json(self, system, user):
+            # 大纲分析调用（script_outline_system）：返回分集结构
+            if "结构分析师" in system:
+                return {
+                    "total_episodes": 1,
+                    "estimated_total_duration": 90,
+                    "dialogue_char_estimate": 50,
+                    "episodes": [
+                        {"episode": 1, "title": "第一集", "estimated_duration": 90, "estimated_shots": 9},
+                    ],
+                }
+            # 评估调用（script_evaluation_system）
             assert "剧本" in user
-            assert "算法估算数据" in user
+            assert "大纲分析数据" in user
             assert "字数" in user
             return _MOCK_REPORT
 
@@ -74,7 +85,7 @@ def test_script_evaluate_success(client: TestClient, monkeypatch):
     data = r.json()
     assert data["script_version_id"] == sv["script_version_id"]
     assert "estimate_data" in data
-    assert data["estimate_data"]["algorithm_version"] == "est-v1.0"
+    assert data["estimate_data"]["algorithm_version"] == "llm-outline-v1.0"
     report = data["report"]
     assert "strengths" in report
     assert "issues" in report
@@ -157,7 +168,7 @@ def test_evaluation_prompts_externalized():
 
 
 def test_build_evaluation_user_prompt_estimate_injection():
-    """算法估算数据注入用户提示词；空配置不输出配置段。"""
+    """大纲分析数据注入用户提示词；空配置不输出配置段。"""
     from app.services.script_evaluation import build_evaluation_user_prompt
     estimate_data = {
         "char_count": 500,

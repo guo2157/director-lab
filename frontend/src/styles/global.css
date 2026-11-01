@@ -172,6 +172,19 @@ body {
   border-color: rgba(239, 68, 68, 0.3);
 }
 
+/* 生成中：带呼吸点，区分「排队/生成中」与普通运行态 */
+.status-tag.is-generating {
+  color: var(--brand-hover);
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.35);
+  animation: status-tag-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes status-tag-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+
 .status-tag.is-locked {
   color: var(--text-secondary);
   background: rgba(156, 163, 175, 0.12);

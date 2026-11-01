@@ -35,3 +35,6 @@ uvicorn.log
 *.tar.gz
 *.tgz
 *.zip
+
+# 编辑器临时文件
+*.orcaterm-tmp-file-change-*

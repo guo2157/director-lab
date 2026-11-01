@@ -198,7 +198,9 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 
 - 单次 H3 VA 生成按帧数制规划：fps=24，`length` 取 124–362、步长 17、offset 5（约 5.2–15.1 秒）；实际时长必须以当前工作流的帧数规则和帧率为准
 - 本期标准 H3 工作流为帧数型：`capabilities` 声明 `fps`（24）、`frame_count_param`（`length`）、`frame_count_step`（17）、`frame_count_offset`（5）与 `frame_count_range`（124–362）；根据 `shot.duration` 计算候选帧数（length = 17 × n + 5），反算预计时长并做正向校验后写入 `$length`
-- 无法满足帧数范围时（如时长低于约 5.2 秒或高于约 15.1 秒），提交前返回 `422 h3_duration_unrepresentable`，提示合并/拆镜或调整时长；实际 fps 与时长以生成后探测为准
+- 低于帧数下限（约 5.2 秒）时编译期硬阻断，接口返回 `422 prompt_validation_failed`，阻断项 code 为 `duration_below_workflow_min`（带 duration / frames / min_frames 字段），提示拆镜或延长时长
+- 高于帧数上限（约 15.1 秒）时截断到最大帧数，记 `duration_clamped_to_max` 告警后继续提交，不阻断
+- 实际 fps 与时长以生成后媒体探测为准
 - `shot.duration` 是生成目标/参考时长，不代表模型一定生成该精确时长；实际生成结果以媒体探测为准
 
 ### 8.2 生成后检查顺序
@@ -239,7 +241,8 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 角色、场景、道具等资产在上传时必须填写明确的 `name` 字段，该名称将作为提示词中的引用标识：
 - 仅允许中文、英文、数字、下划线，禁止空格和特殊字符
 - 同一项目内资产名称不可重复
-- 单镜头关联资产上限为 6 个（角色+场景+道具+分镜图），超出时提示用户精简。该上限仅约束参考图槽位（ref_identity/ref_costume/ref_scene/ref_prop/ref_prev_frame/ref_image）；@名称 引用的道具锚定图不单独计入此上限
+- 单镜头手动绑定资产上限为 6 条：`POST /api/shots/{id}/assets` 在 `asset_ref` 已有 6 条时返回 `400 invalid_request`，重复绑定同一资产返回 `409 asset_in_use`
+- 该 6 条上限针对手动绑定表，与工作流参考图槽位能力（`capabilities.max_reference_images`，H3 R2V 为 9）是两个独立概念，不要混用
 - 示例：`@小明`（角色）、`@雨夜街头`（场景）、`@魔法书`（道具）
 
 ### 9.3 系统注入规则
@@ -488,7 +491,7 @@ shot.duration    → $duration_hint（目标时长）
 | `wf_image_t2i_qwen.json` | keyframe / image | Qwen-Image + Lightning 4 步 LoRA，`$output.cover`（定妆图/场景基准图） | [] | 0 |
 | `wf_image_ref_qwen_edit.json` | keyframe / image | Qwen-Image-Edit-2511 + TextEncodeQwenImageEditPlus（3 图槽位），`$output.cover`（分镜图） | [ref_identity] | 10 |
 | `wf_video_h3_ref2va.json` | clip / video | UNETLoader + MiniMaxH3ReferenceToVideo + SaveVideo(mp4/h264)，`$output.clip`（主力 R2V，本地权重 R2VA） | [ref_image] | 10 |
-| `wf_video_h3_ref2va_turbo.json` | clip / video | UNETLoader + LoraLoader(turbo 4步) + MiniMaxH3ReferenceToVideo + SaveVideo(mp4/h264)，`$output.clip`（R2V 加速变体，4 步采样，预计 A10 约 8–12 分钟） | [ref_image] | 10 |
+| ~~`wf_video_h3_ref2va_turbo.json`~~ | clip / video | **未交付**：`backend/data/workflows/` 与 workflow 表均无此工作流（实际仅 8 个）。turbo LoRA 权重虽在模型清单中，但未配成可导入工作流；启用需先补 meta 与 capabilities 再导入 | [ref_image] | 10 |
 | `wf_video_h3_t2v.json` | clip / video | UNETLoader + MiniMaxH3ImageToVideo（纯文字降级方案，FL2VA 权重） | [] | 0 |
 | `wf_video_h3_flf2v.json` | clip / video | UNETLoader + MiniMaxH3ImageToVideo + 首尾帧 ImageScale(crop=center) 裁切；宽高由 Primitive 驱动 | [first_frame] | 5 |
 | `wf_tts_qwen3_custom_voice.json` | audio / tts | Qwen3Loader + Qwen3CustomVoice + SaveAudioMP3，`$output.voice`；预设音色 9 个（Vivian/Serena 等），不支持语速与目标时长控制，情感经 emotion_map 映射（推荐值未经验证） | [tts_text] | 0 |

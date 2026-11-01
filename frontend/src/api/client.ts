@@ -143,8 +143,8 @@ export async function get<T>(url: string, params?: Record<string, unknown>): Pro
 }
 
 /** POST 请求 */
-export async function post<T>(url: string, data?: unknown): Promise<T> {
-  const res = await apiClient.post<T>(url, data)
+export async function post<T>(url: string, data?: unknown, opts?: { timeout?: number }): Promise<T> {
+  const res = await apiClient.post<T>(url, data, opts?.timeout ? { timeout: opts.timeout } : undefined)
   return res.data
 }
 

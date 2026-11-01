@@ -15,7 +15,7 @@ from app.core.database import get_db
 from app.integrations import comfyui_pool
 from app.models import Job, Project
 from app.schemas.project import PageOut, ProjectCreate, ProjectOut, ProjectUpdate
-from app.services import errors
+from app.services import errors, style_config
 from app.services.progress import derive_progress
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -54,11 +54,20 @@ def _check_runtime_config() -> None:
 @router.post("", status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectOut:
     _check_runtime_config()
+    # 风格配置：以默认值为基线，合并用户自定义后统一规范化；未提供时保持默认。
+    settings = style_config.default_style_config()
+    if payload.style_config:
+        merged = dict(settings)
+        merged.update(payload.style_config)
+        normalized, _ = style_config.validate_style_config(merged)
+        settings.update(normalized)
+    settings["style_config_version"] = style_config.STYLE_CONFIG_VERSION
     p = Project(
         name=payload.name,
         aspect_ratio=payload.aspect_ratio,
         creation_type=payload.creation_type,
         description=payload.description,
+        settings=settings,
     )
     db.add(p)
     db.commit()
@@ -91,6 +100,20 @@ def _get_project(db: Session, project_id: str) -> Project:
     return p
 
 
+def _has_style_fields(payload: dict | None) -> bool:
+    # 判断提交的 settings 是否包含风格相关字段（含旧键名 genre/audience/requirements）
+    if not isinstance(payload, dict):
+        return False
+    keys = set(style_config.default_style_config()) | {"genre", "audience", "requirements"}
+    return bool(keys & set(payload))
+
+
+@router.get("/style-options")
+def get_style_options() -> dict:
+    # 风格配置可选项（展示名 / 说明 / 默认值），供前端渲染，避免前端硬编码
+    return style_config.options_payload()
+
+
 @router.get("/{project_id}")
 def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectOut:
     return _to_out(db, _get_project(db, project_id))
@@ -103,6 +126,10 @@ def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depend
     if "settings" in data and data["settings"] is not None:
         merged = dict(p.settings or {})
         merged.update(data["settings"])
+        if _has_style_fields(data["settings"]):
+            normalized, _ = style_config.validate_style_config(merged)
+            merged.update(normalized)
+            merged["style_config_version"] = style_config.STYLE_CONFIG_VERSION
         data["settings"] = merged
     for k, v in data.items():
         setattr(p, k, v)
@@ -181,3 +208,45 @@ def review_project_assets(project_id: str, payload: dict, db: Session = Depends(
     db.commit()
     db.refresh(p)
     return _to_out(db, p)
+
+@router.get("/{project_id}/style-config")
+def get_style_config(project_id: str, db: Session = Depends(get_db)) -> dict:
+    # 读取项目风格配置：返回规范化配置、原始取值与校验问题
+    p = _get_project(db, project_id)
+    raw = dict(p.settings or {})
+    cfg, issues = style_config.validate_style_config(raw)
+    return {
+        "project_id": p.id,
+        "version": style_config.STYLE_CONFIG_VERSION,
+        "config": cfg,
+        "raw": {k: raw.get(k) for k in style_config.STYLE_FIELDS if k in raw},
+        "issues": issues,
+        "visual_style_label": style_config.VISUAL_STYLES[cfg["visual_style"]]["label"],
+        "visual_style_prompt": style_config.VISUAL_STYLES[cfg["visual_style"]]["prompt"],
+    }
+
+
+@router.put("/{project_id}/style-config")
+def update_style_config(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    # 保存项目风格配置：校验后落库；变更只影响后续任务，不自动重生成已审核资产
+    p = _get_project(db, project_id)
+    body = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+    # 基于现有 settings 合并后再校验：未提交的风格字段沿用已保存值，
+    # 避免 validate_style_config 从默认值起算导致未提交字段被默认值覆盖。
+    merged = dict(p.settings or {})
+    merged.update(body)
+    cfg, issues = style_config.validate_style_config(merged)
+    merged.update(cfg)
+    merged["style_config_version"] = style_config.STYLE_CONFIG_VERSION
+    p.settings = merged
+    db.commit()
+    db.refresh(p)
+    return {
+        "project_id": p.id,
+        "version": style_config.STYLE_CONFIG_VERSION,
+        "config": cfg,
+        "issues": issues,
+        "saved": True,
+        "note": "配置仅影响后续任务，不会自动重生成已审核资产与已生成结果",
+    }
+

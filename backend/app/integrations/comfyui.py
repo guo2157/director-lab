@@ -158,6 +158,12 @@ class ComfyUIClient:
                         mtype = msg.get("type", "")
                         data = msg.get("data", {}) or {}
                         if mtype == "progress" and on_progress:
+                            # 同一 ComfyUI 实例上的所有任务共享同一条 /ws 事件流，
+                            # progress 事件必须按 prompt_id 过滤；否则多任务并存时
+                            # 排队任务会收到其它正在运行任务的进度，本地进度百分比失真。
+                            _evt_pid = data.get("prompt_id")
+                            if _evt_pid and _evt_pid != prompt_id:
+                                continue
                             try:
                                 on_progress({
                                     "value": data.get("value"),
