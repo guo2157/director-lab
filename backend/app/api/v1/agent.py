@@ -397,12 +397,17 @@ def _try_create_generate_approval(
             "shot_ambiguous": "『第 N 镜』在本项目内命中多个镜头，请补充场景或直接给出镜头 ID。",
         }
         reply = hints.get(reason or "shot_unspecified", "无法确定要生成的目标，请补充镜头或实体信息。")
-        # 消息未给出任何目标标识时，按项目当前制作阶段给出下一步指引
-        # （从零创作的用户不知道镜头/实体 ID，只按 ID 引导对其无帮助）
+        # 消息未给出任何目标标识时，按项目当前制作阶段给出下一步指引，
+        # 并附上可选的实体/镜头清单（既不猜测目标，也不让用户自己去数据库找 ID）
         if reason in (None, "shot_unspecified"):
             guidance = _stage_guidance(db, session.project_id)
             if guidance:
                 reply = f"{reply}\n\n{guidance}"
+            from app.services.agent_tools import entity_shot_hint
+
+            hint = entity_shot_hint(db, session.project_id)
+            if hint:
+                reply = f"{reply}\n\n{hint}"
         return reply, None
 
     target = resolve_target(text)
@@ -732,6 +737,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         # 意图-工具映射（B 档）：只执行当前意图候选的工具，降低选错/越权/Token 消耗；
         # 识别失败降级为 query 时映射到全部只读工具，行为与阶段 E 一致
         allowed_tools = get_allowed_tools(intent.intent)
+        ctx_lines: list[str] = []
         base_tools = [
             ("project_overview", {"project_id": s.project_id}),
             ("asset_stats", {"project_id": s.project_id}),
@@ -746,25 +752,30 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                     {"project_id": s.project_id, "limit": 6},
                 )
             )
+        from app.services.agent_tools import build_read_tool_calls, format_tool_context
+
         tool_calls = []
-        for tool_name, tool_args in base_tools:
+
+        def _run(tool_name: str, tool_args: dict):
+            """执行受控工具并记录（不在 allowed_tools 内的不执行）。"""
             if tool_name not in allowed_tools:
-                continue
-            tool_calls.append((tool_name, tool_args, execute_tool(db, tool_name, **tool_args)))
+                return None
+            result = execute_tool(db, tool_name, **tool_args)
+            tool_calls.append((tool_name, tool_args, result))
+            return result
+
+        for tool_name, tool_args in base_tools:
+            _run(tool_name, tool_args)
+        # 读工具调用（意图驱动）：进度快照 / 解析状态 / 实体与镜头清单 / 失败任务诊断
+        # 统一走注册表里的只读工具，保证 Agent 侧与页面接口同口径，不再重复实现统计逻辑
+        for tool_name, tool_args in build_read_tool_calls(payload.content, s.project_id):
+            result = _run(tool_name, tool_args)
+            if result is not None and result.ok and result.data:
+                ctx_lines.append(format_tool_context(tool_name, result))
         overview = next((r for n, _, r in tool_calls if n == "project_overview"), None)
         stats = next((r for n, _, r in tool_calls if n == "asset_stats"), None)
         jobs = next((r for n, _, r in tool_calls if n == "list_jobs"), None)
         assets = next((r for n, _, r in tool_calls if n == "list_assets"), None)
-        # 生成进度快照（与资产库/分镜图/分镜看板同口径）：
-        # 用户问「生成到什么进度了」时，助手必须能直接答出 X/Y、正在生成哪几个、排队多少、
-        # 最近失败多少，而不是反过来要求用户指明生成目标
-        progress_snapshot: dict = {}
-        try:
-            from app.api.v1.progress import generation_progress_snapshot
-
-            progress_snapshot = generation_progress_snapshot(db, s.project_id)
-        except Exception:  # 进度快照失败不影响主对话
-            progress_snapshot = {}
         # 工具调用审计落库（LLM 失败也不丢失审计记录，故在此即提交）
         for tool_name, tool_args, result in tool_calls:
             tool_event_seq += 1
@@ -786,7 +797,6 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 )
             )
         db.commit()
-        ctx_lines: list[str] = []
         if overview is not None and overview.ok and overview.data:
             d = overview.data
             ctx_lines.append(
@@ -796,57 +806,6 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         if stats is not None and stats.ok and stats.data:
             by_type = ", ".join(f"{k}×{v}" for k, v in stats.data["by_type"].items()) or "无"
             ctx_lines.append(f"项目资产统计：{by_type}（共 {stats.data['total']} 项）")
-        # 生成进度：直接给出可复述的数字，避免助手反问「要生成什么」
-        if progress_snapshot:
-            a = progress_snapshot.get("assets") or {}
-            if a.get("total"):
-                groups = a.get("groups") or {}
-                group_text = "、".join(
-                    f"{g.get('label', k)} {g.get('done', 0)}/{g.get('total', 0)}"
-                    for k, g in groups.items()
-                    if g.get("total")
-                )
-                ctx_lines.append(
-                    f"公共资产图进度：{a.get('done', 0)}/{a.get('total', 0)}"
-                    + (f"（{group_text}）" if group_text else "")
-                    + (f"，正在生成 {a.get('inflight_count')} 个" if a.get("inflight_count") else "")
-                    + (f"，最近失败 {a.get('failed_recent_count')} 个" if a.get("failed_recent_count") else "")
-                )
-            kf = progress_snapshot.get("keyframes") or {}
-            if kf.get("total"):
-                ctx_lines.append(
-                    f"分镜图进度：已出图 {kf.get('with_keyframe', 0)}/{kf.get('total', 0)}，"
-                    f"已人工确认 {kf.get('confirmed', 0)}"
-                    + (f"，正在生成 {kf.get('inflight_count')} 张" if kf.get("inflight_count") else "")
-                    + (f"，最近失败 {kf.get('failed_recent_count')} 张" if kf.get("failed_recent_count") else "")
-                )
-            cp = progress_snapshot.get("clips") or {}
-            if cp.get("total"):
-                clip_line = (
-                    f"分镜视频进度：已生成 {cp.get('with_clip', 0)}/{cp.get('total', 0)}"
-                    + (f"，正在渲染 {cp.get('inflight_running', 0)} 个" if cp.get("inflight_running") else "")
-                    + (
-                        f"，排队/等待前序 {cp.get('inflight_queued', 0) + cp.get('inflight_chained_wait', 0)} 个"
-                        if (cp.get("inflight_queued") or cp.get("inflight_chained_wait"))
-                        else ""
-                    )
-                    + (f"，最近失败 {cp.get('failed_recent_count')} 个" if cp.get("failed_recent_count") else "")
-                )
-                running = next(
-                    (j for j in (cp.get("inflight") or []) if j.get("status") == "running"), None
-                )
-                if running:
-                    clip_line += (
-                        f"；当前渲染：{running.get('scene_title') or '未知场景'} 镜 {running.get('shot_seq') or '—'}"
-                    )
-                ctx_lines.append(clip_line)
-                wait = cp.get("estimated_wait_seconds")
-                avg = cp.get("avg_seconds")
-                if isinstance(wait, int) and wait > 0:
-                    ctx_lines.append(
-                        f"视频剩余耗时预估：约 {max(1, round(wait / 60))} 分钟"
-                        + (f"（按近 7 日单镜平均 {avg} 秒估算）" if avg else "")
-                    )
         if jobs is not None and jobs.ok and jobs.data and jobs.data["count"] > 0:
             job_lines = ", ".join(
                 f"{j['job_type']}({j['status']}" + (f"/{j['error_code']}" if j.get("error_code") else "") + ")"

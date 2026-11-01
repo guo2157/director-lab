@@ -97,6 +97,79 @@ class GetStyleConfigInput(BaseModel):
     project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
 
 
+# --- 生成进度 / 诊断 / 实体定位类入参（全部只读） ---
+
+
+class ProjectProgressInput(BaseModel):
+    """资产图 / 分镜图 / 分镜视频进度入参（三张进度表口径一致）。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+    failed_hours: int = Field(default=24, ge=1, le=168, description="可选：最近失败统计窗口（小时），默认 24")
+
+
+class GetJobInput(BaseModel):
+    """get_job 入参。"""
+
+    job_id: str = Field(min_length=1, description="任务 ID（job_ 前缀）")
+
+
+class ListProjectEntitiesInput(BaseModel):
+    """list_project_entities 入参：按名称/ID 定位角色、场景、道具。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+    query: str | None = Field(
+        default=None,
+        description="可选：名称或 ID 关键字（模糊匹配）；不传则列出全部实体（最多 limit 条）",
+    )
+    entity_type: str | None = Field(
+        default=None,
+        description="可选：实体类型过滤（character/scene/prop）",
+    )
+    limit: int = Field(default=50, ge=1, le=200, description="可选：返回条数上限，默认 50")
+
+
+class ListProjectShotsInput(BaseModel):
+    """list_project_shots 入参：按镜号/场景定位镜头。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+    episode: int | None = Field(default=None, ge=1, description="可选：集数过滤")
+    scene_id: str | None = Field(default=None, description="可选：场景 ID（scn_ 前缀）")
+    shot_seq: int | None = Field(default=None, ge=1, description="可选：场景内镜号（『第 N 镜』）")
+    limit: int = Field(default=60, ge=1, le=200, description="可选：返回条数上限，默认 60")
+
+
+class GetParseStatusInput(BaseModel):
+    """get_parse_status 入参。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+
+
+class ListCompositionsInput(BaseModel):
+    """list_compositions 入参。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+    limit: int = Field(default=10, ge=1, le=50, description="可选：返回条数上限，默认 10")
+
+
+class ListExportsInput(BaseModel):
+    """list_exports 入参。"""
+
+    project_id: str = Field(min_length=1, description="项目 ID（prj_ 前缀）")
+
+
+class ListAssetVersionsInput(BaseModel):
+    """list_asset_versions 入参：版本历史与候选版本。"""
+
+    asset_id: str = Field(min_length=1, description="资产 ID（ast_ 前缀）")
+    limit: int = Field(default=20, ge=1, le=100, description="可选：返回条数上限，默认 20")
+
+
+class GetShotImpactInput(BaseModel):
+    """get_shot_impact 入参：改动影响面预判。"""
+
+    shot_id: str = Field(min_length=1, description="镜头 ID（sht_ 前缀）")
+
+
 class UpdateStyleConfigInput(BaseModel):
     """update_style_config 入参：只提交需要修改的字段。"""
 
@@ -315,6 +388,425 @@ def tool_list_asset_plans(
         "items": items,
         "count": len(items),
         "offset": max(0, offset),
+    }
+
+
+# --- 生成进度（只读：与资产库/分镜图/分镜看板页面同口径） ---
+
+
+def _progress_conflict(project_id: str) -> None:
+    if not project_id:
+        raise ToolError("invalid_args", "缺少项目 ID")
+
+
+def tool_get_asset_generation_progress(
+    db: Session, project_id: str, failed_hours: int = 24
+) -> dict:
+    """公共资产图进度：角色定妆图/场景基准图/道具锚定图 的分组 done/total、在途明细、最近失败。"""
+    from app.api.v1.progress import asset_generation_progress
+
+    _progress_conflict(project_id)
+    data = asset_generation_progress(project_id, failed_hours=failed_hours, db=db)
+    return {
+        "total": data["total"],
+        "done": data["done"],
+        "percent": data["percent"],
+        "all_done": data["all_done"],
+        "groups": data["groups"],
+        "inflight_count": data["inflight_count"],
+        "inflight": data["inflight"],
+        "failed_recent_count": data["failed_recent_count"],
+        "failed_recent": data["failed_recent"],
+        "has_inflight": data["has_inflight"],
+        "last_completed_at": data["last_completed_at"],
+        "assets_review_status": data.get("assets_review_status"),
+    }
+
+
+def tool_get_keyframe_generation_progress(
+    db: Session, project_id: str, failed_hours: int = 24
+) -> dict:
+    """分镜图进度：全片镜头总数、已出图、已确认、在途明细、最近失败。"""
+    from app.api.v1.progress import keyframe_generation_progress
+
+    _progress_conflict(project_id)
+    data = keyframe_generation_progress(project_id, failed_hours=failed_hours, db=db)
+    return {
+        "total": data["total"],
+        "with_keyframe": data["with_keyframe"],
+        "confirmed": data["confirmed"],
+        "percent": data["percent"],
+        "all_done": data["all_done"],
+        "all_confirmed": data["all_confirmed"],
+        "inflight_count": data["inflight_count"],
+        "inflight": data["inflight"],
+        "failed_recent_count": data["failed_recent_count"],
+        "failed_recent": data["failed_recent"],
+        "has_inflight": data["has_inflight"],
+        "last_completed_at": data["last_completed_at"],
+    }
+
+
+def tool_get_clip_generation_progress(
+    db: Session, project_id: str, failed_hours: int = 24
+) -> dict:
+    """分镜视频进度：已生成/总数、正在渲染的镜头、排队名次、剩余耗时估算、最近失败。"""
+    from app.api.v1.progress import clip_generation_progress
+
+    _progress_conflict(project_id)
+    data = clip_generation_progress(project_id, failed_hours=failed_hours, db=db)
+    return {
+        "total": data["total"],
+        "with_clip": data["with_clip"],
+        "percent": data["percent"],
+        "all_done": data["all_done"],
+        "inflight_count": data["inflight_count"],
+        "inflight_queued": data["inflight_queued"],
+        "inflight_running": data["inflight_running"],
+        "inflight_chained_wait": data["inflight_chained_wait"],
+        "inflight": data["inflight"],
+        "avg_seconds": data["avg_seconds"],
+        "estimated_wait_seconds": data["estimated_wait_seconds"],
+        "failed_recent_count": data["failed_recent_count"],
+        "failed_recent": data["failed_recent"],
+        "has_inflight": data["has_inflight"],
+        "last_completed_at": data["last_completed_at"],
+    }
+
+
+# --- 任务诊断（只读） ---
+
+
+def tool_get_job(db: Session, job_id: str) -> dict:
+    """单个任务详情：状态、错误码/原因、重试次数、可重试性、产物摘要与输入参数摘要。"""
+    job = db.get(Job, job_id)
+    if job is None:
+        raise ToolError("job_not_found", "任务不存在")
+    # 只给参数摘要：提示词截断 + 关键标记位，避免把整份工作流入参塞进对话
+    params = job.params or {}
+    param_summary = {
+        k: (str(v)[:200] if isinstance(v, str) else v)
+        for k, v in params.items()
+        if not k.startswith("__") and k not in ("prompt_compilation",)
+    }
+    for marker in ("__character_id__", "__scene_id__", "__prop_id__"):
+        if params.get(marker):
+            param_summary[marker] = params[marker]
+    result = job.result or {}
+    artifact_summary = {
+        k: result.get(k)
+        for k in ("asset_id", "asset_ids", "file_path", "duration", "count")
+        if k in result
+    }
+    return {
+        "id": job.id,
+        "project_id": job.project_id,
+        "shot_id": job.shot_id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "error_code": job.error_code,
+        "error_msg": job.error_msg,
+        "attempts": job.attempts or 0,
+        "retryable": job.status in ("failed", "lost"),
+        "workflow_id": job.workflow_id,
+        "params_summary": param_summary,
+        "result_summary": artifact_summary,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+# --- 实体与镜头定位（只读：把名称解析成 ID，避免反问用户要 ID） ---
+
+
+def tool_list_project_entities(
+    db: Session,
+    project_id: str,
+    query: str | None = None,
+    entity_type: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """列项目角色/场景/道具：ID、名称、是否已有定妆图/基准图/锚定图（支持名称模糊匹配）。"""
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    cap = min(max(1, limit), 200)
+    keyword = (query or "").strip().lower()
+    allowed = {"character", "scene", "prop"}
+    wanted = {entity_type} if entity_type in allowed else allowed
+
+    items: list[dict] = []
+    if "character" in wanted:
+        for c in db.scalars(select(Character).where(Character.project_id == project_id)).all():
+            if keyword and keyword not in c.name.lower() and keyword not in c.id.lower():
+                continue
+            items.append(
+                {
+                    "id": c.id,
+                    "type": "character",
+                    "name": c.name,
+                    "has_image": bool(c.portrait_asset_id),
+                }
+            )
+    if "scene" in wanted:
+        for s in db.scalars(
+            select(Scene).where(Scene.project_id == project_id).order_by(Scene.seq)
+        ).all():
+            if keyword and keyword not in (s.title or "").lower() and keyword not in s.id.lower():
+                continue
+            items.append(
+                {
+                    "id": s.id,
+                    "type": "scene",
+                    "name": s.title,
+                    "has_image": bool(s.baseline_asset_id),
+                }
+            )
+    if "prop" in wanted:
+        for pr in db.scalars(select(Prop).where(Prop.project_id == project_id)).all():
+            if keyword and keyword not in pr.name.lower() and keyword not in pr.id.lower():
+                continue
+            items.append(
+                {
+                    "id": pr.id,
+                    "type": "prop",
+                    "name": pr.name,
+                    "has_image": bool(pr.anchor_asset_id),
+                }
+            )
+    return {"items": items[:cap], "count": min(len(items), cap), "matched_total": len(items)}
+
+
+def tool_list_project_shots(
+    db: Session,
+    project_id: str,
+    episode: int | None = None,
+    scene_id: str | None = None,
+    shot_seq: int | None = None,
+    limit: int = 60,
+) -> dict:
+    """列项目镜头：镜号、场景、是否有分镜图/视频、分镜图是否已确认（支持定位『第 N 镜』）。"""
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    cap = min(max(1, limit), 200)
+    q = (
+        select(Shot, Scene)
+        .join(Scene, Shot.scene_id == Scene.id)
+        .where(Scene.project_id == project_id)
+    )
+    if episode is not None:
+        q = q.where(Shot.episode == episode)
+    if scene_id:
+        q = q.where(Shot.scene_id == scene_id)
+    if shot_seq is not None:
+        q = q.where(Shot.seq == shot_seq)
+    rows = db.execute(q.order_by(Shot.episode, Scene.seq, Shot.seq).limit(cap)).all()
+
+    shot_ids = [s.id for s, _ in rows]
+    has_keyframe: set[str] = set()
+    has_clip: set[str] = set()
+    if shot_ids:
+        asset_rows = (
+            db.query(Job.shot_id, Asset.asset_type)
+            .join(Asset, Asset.source_job_id == Job.id)
+            .filter(
+                Job.shot_id.in_(shot_ids),
+                Job.job_type == "generate_keyframe",
+                Job.status == "succeeded",
+                Asset.validity == "current",
+                Asset.asset_type.in_(("keyframe", "clip")),
+            )
+            .distinct()
+            .all()
+        )
+        for sid, atype in asset_rows:
+            (has_keyframe if atype == "keyframe" else has_clip).add(sid)
+
+    items = [
+        {
+            "shot_id": s.id,
+            "episode": s.episode,
+            "scene_id": sc.id,
+            "scene_title": sc.title,
+            "seq": s.seq,
+            "global_hint": f"第{s.episode}集 场景#{sc.seq} 第{s.seq}镜",
+            "has_keyframe": s.id in has_keyframe,
+            "keyframe_confirmed": bool(s.keyframe_confirmed),
+            "has_clip": s.id in has_clip,
+        }
+        for s, sc in rows
+    ]
+    return {"items": items, "count": len(items)}
+
+
+# --- 解析 / 合成 / 导出 / 资产版本（只读） ---
+
+
+def tool_get_parse_status(db: Session, project_id: str) -> dict:
+    """剧本分析状态：是否已保存剧本、当前解析版本、各集解析进度、是否已产出镜头与资产。"""
+    from app.models import Composition, EpisodeParseRecord, ParseVersion, Scene as _Scene
+    from app.models import ScriptVersion
+
+    p = db.get(Project, project_id)
+    if not p:
+        raise ToolError("project_not_found", "项目不存在")
+    sv = db.get(ScriptVersion, p.current_script_version_id) if p.current_script_version_id else None
+    pv = db.get(ParseVersion, p.current_parse_version_id) if p.current_parse_version_id else None
+    shot_count = db.scalar(
+        select(func.count(Shot.id)).join(_Scene, Shot.scene_id == _Scene.id).where(
+            _Scene.project_id == project_id
+        )
+    )
+    records = db.scalars(
+        select(EpisodeParseRecord).where(EpisodeParseRecord.project_id == project_id)
+    ).all()
+    return {
+        "has_script": sv is not None,
+        "script_version": sv.version if sv else None,
+        "script_char_count": len(sv.content_snapshot) if sv and sv.content_snapshot else 0,
+        "parse_version": pv.version if pv else None,
+        "parse_version_status": pv.status if pv else None,
+        "shot_count": int(shot_count or 0),
+        "episode_parse_records": [
+            {
+                "episode": r.episode_no,
+                "asset_type": r.asset_type,
+                "status": r.status,
+                "asset_count": r.asset_count,
+                "error_msg": r.error_msg,
+            }
+            for r in sorted(records, key=lambda x: (x.episode_no, x.asset_type))
+        ][:40],
+        "composition_count": int(
+            db.scalar(
+                select(func.count(Composition.id)).where(Composition.project_id == project_id)
+            )
+            or 0
+        ),
+    }
+
+
+def tool_list_compositions(db: Session, project_id: str, limit: int = 10) -> dict:
+    """合成记录：集数、状态、是否过期、时长、告警（供判断能否导出）。"""
+    from app.models import Composition
+
+    if db.get(Project, project_id) is None:
+        raise ToolError("project_not_found", "项目不存在")
+    rows = db.scalars(
+        select(Composition)
+        .where(Composition.project_id == project_id)
+        .order_by(Composition.created_at.desc())
+        .limit(min(max(1, limit), 50))
+    ).all()
+    return {
+        "items": [
+            {
+                "composition_id": c.id,
+                "episode": c.episode,
+                "status": c.status,
+                "stale": bool(c.stale),
+                "duration": c.duration,
+                "has_file": bool(c.file_path),
+                "warnings": (c.warnings or [])[:5],
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in rows
+        ],
+        "count": len(rows),
+    }
+
+
+def tool_list_exports(db: Session, project_id: str) -> dict:
+    """导出记录：交付档位、状态、文件大小（导出 id 可直接用于下载）。"""
+    from app.models import Export
+
+    if db.get(Project, project_id) is None:
+        raise ToolError("project_not_found", "项目不存在")
+    rows = db.scalars(
+        select(Export).where(Export.project_id == project_id).order_by(Export.created_at.desc())
+    ).all()
+    return {
+        "items": [
+            {
+                "export_id": e.id,
+                "composition_id": e.composition_id,
+                "format": e.format,
+                "delivery_profile": e.delivery_profile,
+                "status": e.status,
+                "file_name": e.file_name,
+                "size": e.size,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in rows[:20]
+        ],
+        "count": len(rows),
+    }
+
+
+def tool_list_asset_versions(db: Session, asset_id: str, limit: int = 20) -> dict:
+    """资产版本历史：版本号、有效性、是否候选版本、来源任务、创建时间（供采纳/回滚决策）。"""
+    asset = db.get(Asset, asset_id)
+    if asset is None:
+        raise ToolError("asset_not_found", "资产不存在")
+    rows = db.scalars(
+        select(Asset)
+        .where(Asset.project_id == asset.project_id, Asset.name == asset.name)
+        .order_by(Asset.version.desc())
+        .limit(min(max(1, limit), 100))
+    ).all()
+    return {
+        "asset_id": asset.id,
+        "name": asset.name,
+        "asset_type": asset.asset_type,
+        "current_version": asset.version,
+        "lock": bool(asset.locked),
+        "versions": [
+            {
+                "asset_id": a.id,
+                "version": a.version,
+                "validity": a.validity,
+                "locked": bool(a.locked),
+                "quality_status": a.quality_status,
+                "source_job_id": a.source_job_id,
+                "created_at": a.created_at.isoformat() if getattr(a, "created_at", None) else None,
+            }
+            for a in rows
+        ],
+    }
+
+
+def tool_get_shot_impact(db: Session, shot_id: str) -> dict:
+    """镜头改动影响面：该镜现有产物、生效资产是否锁定、下游是否需要重做（重生成前预判）。"""
+    shot = db.get(Shot, shot_id)
+    if shot is None:
+        raise ToolError("shot_not_found", "镜头不存在")
+    scene = db.get(Scene, shot.scene_id) if shot.scene_id else None
+    rows = (
+        db.query(Asset.asset_type, Asset.id, Asset.locked, Asset.version)
+        .join(Job, Job.id == Asset.source_job_id)
+        .filter(
+            Job.shot_id == shot.id,
+            Job.status == "succeeded",
+            Asset.validity == "current",
+        )
+        .all()
+    )
+    return {
+        "shot_id": shot.id,
+        "episode": shot.episode,
+        "scene_id": shot.scene_id,
+        "scene_title": scene.title if scene else None,
+        "seq": shot.seq,
+        "shot_status": shot.status,
+        "keyframe_confirmed": bool(shot.keyframe_confirmed),
+        "current_assets": [
+            {"asset_type": t, "asset_id": aid, "version": ver, "locked": bool(locked)}
+            for t, aid, locked, ver in rows
+        ],
+        "current_asset_types": sorted({t for t, *_ in rows}),
+        "requires_prev_frame": bool(shot.requires_prev_frame),
     }
 
 
@@ -1061,32 +1553,505 @@ TOOL_REGISTRY: dict = {
         "params": {"confirmation_id": "审批记录 ID"},
         "fn": tool_run_style_update,
     },
+    # --- 生成进度（只读：与资产库/分镜图/分镜看板页面同口径） ---
+    "get_asset_generation_progress": {
+        "description": (
+            "查询公共资产图生成进度：角色定妆图/场景基准图/道具锚定图的 done/total、"
+            "正在生成的条目与百分比、最近失败"
+        ),
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ProjectProgressInput,
+        "params": {
+            "project_id": "项目 ID",
+            "failed_hours": "可选：最近失败统计窗口（小时），默认 24",
+        },
+        "fn": tool_get_asset_generation_progress,
+    },
+    "get_keyframe_generation_progress": {
+        "description": (
+            "查询分镜图生成进度：全片镜头数、已出图、已人工确认、正在生成的镜头、最近失败"
+        ),
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ProjectProgressInput,
+        "params": {
+            "project_id": "项目 ID",
+            "failed_hours": "可选：最近失败统计窗口（小时），默认 24",
+        },
+        "fn": tool_get_keyframe_generation_progress,
+    },
+    "get_clip_generation_progress": {
+        "description": (
+            "查询分镜视频生成进度：已生成/总数、正在渲染的镜头、排队名次、"
+            "剩余耗时估算（按近 7 日平均单镜耗时）、最近失败"
+        ),
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ProjectProgressInput,
+        "params": {
+            "project_id": "项目 ID",
+            "failed_hours": "可选：最近失败统计窗口（小时），默认 24",
+        },
+        "fn": tool_get_clip_generation_progress,
+    },
+    # --- 任务诊断（只读） ---
+    "get_job": {
+        "description": "查询单个任务详情：状态、错误码与失败原因、重试次数、可重试性、产物与入参摘要",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": GetJobInput,
+        "params": {"job_id": "任务 ID（job_ 前缀）"},
+        "fn": tool_get_job,
+    },
+    # --- 实体与镜头定位（只读：把名称解析成 ID） ---
+    "list_project_entities": {
+        "description": (
+            "列出项目角色/场景/道具的 ID 与名称（支持名称模糊匹配），并标注是否已有定妆图/基准图/锚定图；"
+            "用于把用户说的名字解析成 chr_/scn_/prp_ 实体 ID，不要反问用户要 ID"
+        ),
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListProjectEntitiesInput,
+        "params": {
+            "project_id": "项目 ID",
+            "query": "可选：名称或 ID 关键字（模糊匹配）",
+            "entity_type": "可选：character / scene / prop",
+            "limit": "可选：返回条数上限，默认 50",
+        },
+        "fn": tool_list_project_entities,
+    },
+    "list_project_shots": {
+        "description": (
+            "列出项目镜头：集数、场景、镜号、是否有分镜图/视频、分镜图是否已确认；"
+            "按 episode + shot_seq 可定位『第 N 镜』，用于把镜号解析成 sht_ 镜头 ID"
+        ),
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListProjectShotsInput,
+        "params": {
+            "project_id": "项目 ID",
+            "episode": "可选：集数",
+            "scene_id": "可选：场景 ID",
+            "shot_seq": "可选：场景内镜号",
+            "limit": "可选：返回条数上限，默认 60",
+        },
+        "fn": tool_list_project_shots,
+    },
+    # --- 解析 / 合成 / 导出 / 资产版本（只读） ---
+    "get_parse_status": {
+        "description": "查询剧本分析状态：是否已保存剧本、当前解析版本、各集解析进度、镜头与资产是否已产出",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": GetParseStatusInput,
+        "params": {"project_id": "项目 ID"},
+        "fn": tool_get_parse_status,
+    },
+    "list_compositions": {
+        "description": "查询合成记录：集数、状态、是否过期、时长、告警（用于判断能否导出）",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListCompositionsInput,
+        "params": {"project_id": "项目 ID", "limit": "可选：返回条数上限，默认 10"},
+        "fn": tool_list_compositions,
+    },
+    "list_exports": {
+        "description": "查询导出记录：导出 ID、交付档位、状态、文件大小（导出 ID 可用于下载）",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListExportsInput,
+        "params": {"project_id": "项目 ID"},
+        "fn": tool_list_exports,
+    },
+    "list_asset_versions": {
+        "description": "查询资产版本历史：版本号、有效性、是否锁定、质量状态、来源任务（用于采纳候选/回滚决策）",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListAssetVersionsInput,
+        "params": {"asset_id": "资产 ID（ast_ 前缀）", "limit": "可选：返回条数上限，默认 20"},
+        "fn": tool_list_asset_versions,
+    },
+    "get_shot_impact": {
+        "description": "查询镜头改动影响面：该镜生效产物、是否锁定、是否需前序尾帧、确认状态（重生成前预判）",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": GetShotImpactInput,
+        "params": {"shot_id": "镜头 ID（sht_ 前缀）"},
+        "fn": tool_get_shot_impact,
+    },
 }
 
 # 意图 → 候选工具映射（只向模型暴露当前意图需要的工具，降低选错/越权/Token 消耗）
+# 全部为只读工具：查询/分析意图不暴露任何生成或写操作工具
+_READ_ONLY_TOOLS = [
+    "project_overview",
+    "list_jobs",
+    "get_job",
+    "asset_stats",
+    "list_assets",
+    "list_asset_versions",
+    "list_asset_plans",
+    "list_project_entities",
+    "list_project_shots",
+    "get_shot_impact",
+    "get_asset_generation_progress",
+    "get_keyframe_generation_progress",
+    "get_clip_generation_progress",
+    "get_parse_status",
+    "list_compositions",
+    "list_exports",
+    "get_style_config",
+]
+
 INTENT_TOOL_MAPPING: dict[str, list[str]] = {
-    "query": [
-        "project_overview",
-        "list_jobs",
-        "asset_stats",
-        "list_assets",
-        "list_asset_plans",
-        "get_style_config",
-    ],
-    "analysis": [
-        "project_overview",
-        "asset_stats",
-        "list_jobs",
-        "list_assets",
-        "list_asset_plans",
-        "get_style_config",
-    ],
+    "query": list(_READ_ONLY_TOOLS),
+    "analysis": list(_READ_ONLY_TOOLS),
 }
 
 
 def get_allowed_tools(intent: str) -> list[str]:
     """根据意图返回候选工具名列表（未映射意图返回空列表，由调用方决定降级策略）。"""
     return list(INTENT_TOOL_MAPPING.get(intent, []))
+
+
+# --- 对话上下文用只读工具编排（Agent chat 注入上下文时调用） ---
+
+# 进度类关键词：命中即注入三张进度表（生成进度是最高频问题）
+_PROGRESS_HINTS = (
+    "进度", "进展", "到哪", "哪一步", "还有多少", "还剩", "排队", "多久", "什么时候",
+    "生成", "出图", "渲染", "完成", "状态",
+)
+# 实体/镜头定位关键词：命中即注入角色/场景/道具与镜头清单（把名称解析成 ID，避免反问）
+# 只收领域名词+定位词，避免「哪些/哪个」这类泛化词把无关问题也拖进实体查询
+_ENTITY_HINTS = (
+    "角色", "场景", "道具", "人物", "镜头", "第几镜", "哪一镜", "第几集", "谁", "资产", "定妆",
+    "基准图", "锚定",
+)
+# 疑问词 + 实体对象才算「要列实体」：『有哪些角色』命中，『导出记录有哪些』不命中
+_ENTITY_LIST_PATTERN = __import__("re").compile(
+    r"(有哪些|哪几个|列出|所有|全部|哪些)(角色|场景|道具|人物|镜头|资产)"
+)
+# 解析与成片关键词
+_PARSE_HINTS = ("剧本", "解析", "分析", "场景", "镜头", "资产定义", "集")
+_COMPOSE_HINTS = ("合成", "导出", "成片", "交付", "视频文件", "下载", "验收")
+_JOB_HINTS = ("失败", "报错", "错误", "重试", "卡住", "超时", "失败原因")
+# 镜头序号：只认『第 N 镜 / 第 N 个镜头』，避免『第一帧』『第三集』误命中
+_SHOT_SEQ_PATTERN = __import__("re").compile(r"第\s*(\d+)\s*(?:个)?\s*镜头?")
+# 集数：『第 2 集』
+_EPISODE_PATTERN = __import__("re").compile(r"第\s*(\d+)\s*集")
+
+
+def build_read_tool_calls(text: str, project_id: str) -> list[tuple[str, dict]]:
+    """按用户消息挑选要执行的只读工具（返回 [(tool_name, args)]）。
+
+    - 进度类问题：三张进度表全部注入（回答进度必须准确到 X/Y、正在生成哪几个、排队与预计耗时）
+    - 实体/镜头类问题：注入项目实体与镜头清单，用于把名称/镜号解析成 chr_/scn_/prh_/sht_ ID
+    - 解析/合成/导出/失败诊断：按关键词补充
+    - 不做任何写操作：这里只返回只读工具
+    """
+    content = text or ""
+    calls: list[tuple[str, dict]] = []
+
+    if any(k in content for k in _PROGRESS_HINTS):
+        for tool in (
+            "get_asset_generation_progress",
+            "get_keyframe_generation_progress",
+            "get_clip_generation_progress",
+        ):
+            calls.append((tool, {"project_id": project_id, "failed_hours": 24}))
+
+    # 『第 3 镜』『第 2 集』这类明确指代也算要定位镜头/实体（否则助手答得对但说不出是哪一镜）
+    wanted_entities = (
+        any(k in content for k in _ENTITY_HINTS)
+        or bool(_ENTITY_LIST_PATTERN.search(content))
+        or bool(_SHOT_SEQ_PATTERN.search(content))
+        or bool(_EPISODE_PATTERN.search(content))
+    )
+    if wanted_entities:
+        calls.append(("list_project_entities", {"project_id": project_id, "limit": 60}))
+        shot_args: dict = {"project_id": project_id, "limit": 60}
+        seq_m = _SHOT_SEQ_PATTERN.search(content)
+        if seq_m:
+            shot_args["shot_seq"] = int(seq_m.group(1))
+        ep_m = _EPISODE_PATTERN.search(content)
+        if ep_m:
+            shot_args["episode"] = int(ep_m.group(1))
+        calls.append(("list_project_shots", shot_args))
+
+    if any(k in content for k in _PARSE_HINTS):
+        calls.append(("get_parse_status", {"project_id": project_id}))
+
+    if any(k in content for k in _COMPOSE_HINTS):
+        calls.append(("list_compositions", {"project_id": project_id, "limit": 5}))
+        calls.append(("list_exports", {"project_id": project_id}))
+
+    if any(k in content for k in _JOB_HINTS):
+        # 失败诊断：取最近失败任务再看详情，给出具体原因而不是「有失败」
+        calls.append(("list_jobs", {"project_id": project_id, "status": "failed", "limit": 5}))
+    return calls
+
+
+def entity_shot_hint(db: Session, project_id: str, *, entity_limit: int = 12) -> str:
+    """给澄清消息附上可选的实体与镜头清单，让用户（或下一轮识别）知道有哪些 ID 可选。
+
+    生成目标定位不到时使用：既不猜测目标，也不把「自己去找 ID」的负担丢给用户。
+    """
+    try:
+        entities = tool_list_project_entities(db, project_id, limit=entity_limit)
+        shots = tool_list_project_shots(db, project_id, limit=entity_limit)
+    except ToolError:
+        return ""
+    lines: list[str] = []
+    if entities.get("items"):
+        lines.append(
+            "项目内可选实体："
+            + "、".join(
+                f"{it['name']}（{it['type']} {it['id']}）" for it in entities["items"][:entity_limit]
+            )
+        )
+    if shots.get("items"):
+        lines.append(
+            "项目内可选镜头："
+            + "、".join(
+                f"第{it['episode']}集 {it['scene_title']} 镜{it['seq']}（{it['shot_id']}）"
+                for it in shots["items"][:entity_limit]
+            )
+        )
+    return "\n".join(lines)
+
+
+def _short(value, limit: int = 120) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def format_tool_context(tool_name: str, result: ToolResult) -> str:
+    """把只读工具结果压成一行提示词上下文（与页面展示口径一致，便于助手直接复述）。"""
+    if not result.ok or not result.data:
+        return ""
+    d = result.data
+
+    if tool_name == "get_asset_generation_progress":
+        groups = d.get("groups") or {}
+        group_text = "、".join(
+            f"{g.get('label', k)} {g.get('done', 0)}/{g.get('total', 0)}"
+            for k, g in groups.items()
+            if g.get("total")
+        )
+        line = f"公共资产图进度：{d.get('done', 0)}/{d.get('total', 0)}（{d.get('percent', 0)}%）"
+        if group_text:
+            line += f"；分组：{group_text}"
+        inflight = d.get("inflight") or []
+        if inflight:
+            line += "；生成中：" + "、".join(
+                f"{j.get('kind_label') or j.get('kind')}·{j.get('entity_name')}"
+                f"（{j.get('status')}{' ' + str(j.get('progress')) + '%' if j.get('progress') is not None else ''}）"
+                for j in inflight[:6]
+            )
+        if d.get("failed_recent_count"):
+            line += f"；最近失败 {d['failed_recent_count']} 个：" + "、".join(
+                f"{f.get('entity_name')}（{_short(f.get('error_msg'), 60)}）"
+                for f in (d.get("failed_recent") or [])[:3]
+            )
+        if d.get("all_done"):
+            line += "；已全部完成"
+        return line
+
+    if tool_name == "get_keyframe_generation_progress":
+        line = (
+            f"分镜图进度：已出图 {d.get('with_keyframe', 0)}/{d.get('total', 0)}"
+            f"（{d.get('percent', 0)}%），已人工确认 {d.get('confirmed', 0)}"
+        )
+        inflight = d.get("inflight") or []
+        if inflight:
+            line += "；生成中：" + "、".join(
+                f"{j.get('scene_title') or '未知场景'} 镜 {j.get('shot_seq') or '—'}"
+                f"（{j.get('status')}）"
+                for j in inflight[:6]
+            )
+        if d.get("failed_recent_count"):
+            line += f"；最近失败 {d['failed_recent_count']} 张：" + "、".join(
+                f"{f.get('scene_title') or ''} 镜 {f.get('shot_seq') or '—'}（{_short(f.get('error_msg'), 60)}）"
+                for f in (d.get("failed_recent") or [])[:3]
+            )
+        return line
+
+    if tool_name == "get_clip_generation_progress":
+        line = (
+            f"分镜视频进度：已生成 {d.get('with_clip', 0)}/{d.get('total', 0)}"
+            f"（{d.get('percent', 0)}%），渲染中 {d.get('inflight_running', 0)}"
+            f"，排队/等待前序 {(d.get('inflight_queued') or 0) + (d.get('inflight_chained_wait') or 0)}"
+        )
+        running = next(
+            (j for j in (d.get("inflight") or []) if j.get("status") == "running"), None
+        )
+        if running:
+            line += (
+                f"；当前渲染：{running.get('scene_title') or '未知场景'} 镜 {running.get('shot_seq') or '—'}"
+                + (f" {running.get('progress')}%" if running.get("progress") is not None else "")
+            )
+        wait = d.get("estimated_wait_seconds")
+        if isinstance(wait, int) and wait > 0:
+            line += f"；预计剩余约 {max(1, round(wait / 60))} 分钟"
+            if d.get("avg_seconds"):
+                line += f"（近 7 日单镜平均 {d['avg_seconds']} 秒）"
+        if d.get("failed_recent_count"):
+            line += f"；最近失败 {d['failed_recent_count']} 个"
+        if d.get("all_done"):
+            line += "；已全部完成"
+        return line
+
+    if tool_name == "list_project_entities":
+        items = d.get("items") or []
+        if not items:
+            return "项目暂无角色/场景/道具实体"
+        text = "、".join(
+            f"{it.get('name')}[{it.get('type')}:{it.get('id')}"
+            f"{'' if it.get('has_image') else ',未出图'}]"
+            for it in items[:40]
+        )
+        return f"项目实体（共 {d.get('matched_total', len(items))} 个）：{text}"
+
+    if tool_name == "list_project_shots":
+        items = d.get("items") or []
+        if not items:
+            return "未匹配到镜头"
+        text = "、".join(
+            f"第{it.get('episode')}集/{it.get('scene_title')}/镜{it.get('seq')}"
+            f"[{it.get('shot_id')}"
+            f"{',有分镜图' if it.get('has_keyframe') else ',无分镜图'}"
+            f"{',已确认' if it.get('keyframe_confirmed') else ''}"
+            f"{',有视频' if it.get('has_clip') else ''}]"
+            for it in items[:20]
+        )
+        suffix = f"（仅列前 20 条，共 {len(items)} 条）" if len(items) > 20 else ""
+        return f"镜头清单：{text}{suffix}"
+
+    if tool_name == "get_parse_status":
+        parts = [
+            f"剧本{'已保存 v' + str(d.get('script_version')) if d.get('has_script') else '未保存'}",
+            f"解析版本 {d.get('parse_version') if d.get('parse_version') else '无'}",
+            f"镜头 {d.get('shot_count', 0)} 个",
+            f"合成记录 {d.get('composition_count', 0)} 条",
+        ]
+        records = d.get("episode_parse_records") or []
+        if records:
+            bad = [r for r in records if r.get("status") not in ("succeeded", "done")]
+            if bad:
+                parts.append(
+                    "解析未完成明细："
+                    + "、".join(
+                        f"第{r['episode']}集{r['asset_type']}({r['status']})" for r in bad[:8]
+                    )
+                )
+        return "解析状态：" + "；".join(parts)
+
+    if tool_name == "list_compositions":
+        items = d.get("items") or []
+        if not items:
+            return "暂无合成记录"
+        return "合成记录（新→旧）：" + "、".join(
+            f"{c.get('composition_id')}(第{c.get('episode')}集,{c.get('status')}"
+            f"{',已过期' if c.get('stale') else ''})"
+            for c in items[:5]
+        )
+
+    if tool_name == "list_exports":
+        items = d.get("items") or []
+        if not items:
+            return "暂无导出记录"
+        return "导出记录（新→旧）：" + "、".join(
+            f"{e.get('export_id')}({e.get('delivery_profile')},{e.get('status')}"
+            f"{',' + str(e.get('size')) + 'B' if e.get('size') else ''})"
+            for e in items[:5]
+        )
+
+    if tool_name == "list_jobs":
+        items = d.get("items") or []
+        if not items:
+            return "暂无匹配任务"
+        return "任务明细：" + "、".join(
+            f"{j.get('id')}({j.get('job_type')},{j.get('status')}"
+            f"{',' + str(j.get('error_code')) if j.get('error_code') else ''})"
+            for j in items[:5]
+        )
+
+    if tool_name == "get_job":
+        return (
+            f"任务 {d.get('id')}：{d.get('job_type')} {d.get('status')}，"
+            f"错误 {_short(d.get('error_msg'), 120) if d.get('error_msg') else '无'}，"
+            f"尝试 {d.get('attempts')} 次，可重试={d.get('retryable')}"
+        )
+
+    if tool_name == "list_asset_versions":
+        versions = d.get("versions") or []
+        return f"资产 {d.get('asset_id')}（{d.get('name')}）版本：" + "、".join(
+            f"v{v.get('version')}({v.get('validity')}"
+            f"{',锁定' if v.get('locked') else ''})"
+            for v in versions[:8]
+        )
+
+    if tool_name == "get_shot_impact":
+        return (
+            f"镜头 {d.get('shot_id')}（第{d.get('episode')}集/{d.get('scene_title')}/镜{d.get('seq')}）："
+            f"确认={d.get('keyframe_confirmed')}，已有产物类型={d.get('current_asset_types') or '无'}"
+        )
+    return ""
 
 
 def tool_specs() -> list[dict]:

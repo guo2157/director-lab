@@ -274,7 +274,9 @@ def apply_fast_path_rules(user_content: str) -> IntentResult | None:
         # 完成时间预估：『还要多久』『什么时候能好』——同样是查询已发生/进行中的生成
         "多久", "多长时间", "什么时候", "几点", "几天", "几小时",
     )
-    if any(k in text for k in _PROGRESS_ONLY):
+    # 已完成状态的问句：『定妆图生成了吗』『出图好了没有』问的是结果，不是发起生成
+    _DONE_QUESTION = re.compile(r"(生成|出图|渲染)(了|好|完|过|没).{0,6}(吗|么|没|没有|？|\?)")
+    if any(k in text for k in _PROGRESS_ONLY) or _DONE_QUESTION.search(text):
         return _rule_intent("query", "规则命中进度查询模式", "low", text)
     for pattern in _GENERATE_RULES:
         if pattern.search(text):
