@@ -45,8 +45,14 @@ def test_prompt_store_fallback_and_write(tmp_path, monkeypatch):
     assert ps.get_prompt("parse_system") == PARSE_SYSTEM_PROMPT
 
 
-def test_prompts_api_endpoints(client: TestClient):
-    """提示词管理端点：列出/读取/写入/重置。"""
+def test_prompts_api_endpoints(client: TestClient, tmp_path, monkeypatch):
+    """提示词管理端点：列出/读取/写入/重置。
+
+    必须隔离 PROMPT_DIR：本用例会经 HTTP 触达写入与 reset 端点，
+    若不隔离会覆盖并删除真实的 backend/workspace/prompts/*.md。
+    """
+    import app.services.prompt_store as ps
+    monkeypatch.setattr(ps, "PROMPT_DIR", tmp_path / "prompts")
     lst = client.get("/api/settings/prompts")
     assert lst.status_code == 200
     names = [p["name"] for p in lst.json()]

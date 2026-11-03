@@ -109,6 +109,7 @@ def test_templates_render_without_residual_placeholders():
         "shot_id": "sht_0001", "characters": "小马", "scene": "马棚", "props": "无",
         "action": "低头吃草", "positions": "居中", "prop_interaction": "无",
         "emotion": "neutral", "shot_size": "中景", "camera_angle": "平视",
+        "character_count": 1, "character_count_rule": "画面中的人物总数必须严格等于 1 人（小马），不多不少；每个人只出现一次，不出现分身、镜像、重影、背影复制",
         "composition": "三分法", "camera_movement": "固定机位",
         "character_slots": "ref_identity", "scene_slot": "ref_scene", "prop_slots": "无", "scene_target": "以 <image1> 为场景编辑底图", "ref_bindings": "<image1> 为场景；<image2> 为角色「小马」",
         "duration": "5", "start_state": "站立", "main_action": "转头", "end_state": "注视",

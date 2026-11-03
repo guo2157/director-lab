@@ -422,3 +422,147 @@ def test_parse_result_no_detected_fields_no_diff(client, monkeypatch):
     result = _run_parse_result(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT)
     assert result["style_config_snapshot"]["visual_style"] == "chinese_ink"
     assert result["style_config_diffs"] == []
+
+
+# ---------- 第 2 步：解析输出可制作性硬约束 ----------
+def test_lint_shot_duration_over_limit():
+    """单镜超过 10 秒：记为审核问题，且不改写 duration 本身。"""
+    from app.services.script_parse import _lint_shot
+
+    s = {"episode": 1, "seq": 2, "duration": 15}
+    warns, issues = _lint_shot(s, [])
+    assert warns == []
+    assert any("10s 上限" in i for i in issues)
+    assert s["duration"] == 15, "检查函数不得静默改写剧情数据"
+
+
+def test_lint_shot_duration_too_short():
+    """单镜低于 3 秒：记警告（不阻断）。"""
+    from app.services.script_parse import _lint_shot
+
+    warns, issues = _lint_shot({"episode": 1, "seq": 1, "duration": 2}, [])
+    assert issues == []
+    assert any("低于 3s" in w for w in warns)
+
+
+def test_lint_shot_dialogue_over_limit():
+    """单段台词超过 40 字：记为审核问题，且不改写文本。"""
+    from app.services.script_parse import _lint_shot
+
+    long_text = "一" * 50
+    segs = [{"text": long_text}]
+    warns, issues = _lint_shot({"episode": 1, "seq": 3, "duration": 5}, segs)
+    assert any("40 字上限" in i for i in issues)
+    assert segs[0]["text"] == long_text
+
+
+def test_lint_shot_normal_passes():
+    """正常镜头不产生任何问题与警告。"""
+    from app.services.script_parse import _lint_shot
+
+    assert _lint_shot({"episode": 1, "seq": 1, "duration": 5},
+                      [{"text": "短短的台词"}]) == ([], [])
+
+
+def test_lint_name_uniqueness_alias_detected():
+    """归一化后重名（括号别名）必须被识别为未收敛。"""
+    from app.services.script_parse import _lint_name_uniqueness
+
+    issues = _lint_name_uniqueness([{"name": "小马"}, {"name": "小马（主角）"}], "角色")
+    assert len(issues) == 1
+    assert "未收敛" in issues[0]
+
+
+def test_lint_name_uniqueness_distinct_passes():
+    """不同名称不误报。"""
+    from app.services.script_parse import _lint_name_uniqueness
+
+    assert _lint_name_uniqueness([{"name": "小马"}, {"name": "老马"}], "角色") == []
+
+
+def test_normalize_parse_output_reports_unproducible_shots():
+    """归一化流程内：超长镜头与超长台词进入 review_issues。"""
+    from app.services.script_parse import normalize_parse_output
+
+    raw = {
+        "project_analysis": {},
+        "characters": [], "props": [], "episodes": [],
+        "scenes": [{
+            "episode": 1, "title": "马棚",
+            "shots": [{"episode": 1, "seq": 1, "duration": 20,
+                       "dialogue_segments": [{"speaker": "小马", "text": "喊" * 45}]}],
+        }],
+    }
+    r = normalize_parse_output(raw, episode_start=1, episode_count=1)
+    assert any("10s 上限" in i for i in r.review_issues)
+    assert any("40 字上限" in i for i in r.review_issues)
+
+
+def test_normalize_parse_output_reports_character_alias():
+    """归一化流程内：角色别名未收敛进入 review_issues。"""
+    from app.services.script_parse import normalize_parse_output
+
+    raw = {
+        "project_analysis": {},
+        "characters": [{"name": "小马"}, {"name": "小马（主角）"}],
+        "props": [], "episodes": [], "scenes": [],
+    }
+    r = normalize_parse_output(raw, episode_start=1, episode_count=1)
+    assert any("角色名称未收敛" in i for i in r.review_issues)
+
+
+def test_parse_prompt_covers_producibility_rules():
+    """解析提示词必须含可制作性硬约束，否则约束只存在于代码、LLM 不会遵守。"""
+    from app.services.prompt_store import get_prompt
+
+    p = get_prompt("parse_system")
+    for token in (
+        "appearance 是最重要的字段",  # 角色外观自包含
+        "纯环境",                    # 场景描述不含人物动作
+        "60-160 字",                 # 外观长度约束
+        "40 字",                     # 台词上限
+        "3-10 秒",                   # 镜头时长
+        "@引用规则",                 # 引用一致性
+    ):
+        assert token in p, f"解析提示词缺少约束 {token}"
+
+
+def test_scene_cross_episode_reuse_keeps_description(client, monkeypatch):
+    """同一地点跨集：复用同一条 Scene，且不覆盖首集描述。"""
+    from app.core.database import SessionLocal
+    from app.models import Scene
+
+    pid = _make_project(client)
+    sv = _save_script(client, pid)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
+
+    ep1 = {
+        "project_analysis": {},
+        "characters": [], "props": [], "episodes": [],
+        "scenes": [{"episode": 1, "title": "马棚", "description": "首集描述：木质马棚，清晨斜光。",
+                    "time_note": "清晨", "shots": [{"episode": 1, "seq": 1, "duration": 5}]}],
+    }
+    # 场景要经『确认解析版本』才落库，仅跑解析任务不会写实体表
+    pv1 = _run_parse(client, monkeypatch, pid, sv, ep1)
+    r = client.post(f"/api/projects/{pid}/parse-versions/{pv1}/confirm",
+                    json={"current_parse_version_id": None})
+    assert r.status_code == 200, r.text
+
+    ep2 = {
+        "project_analysis": {},
+        "characters": [], "props": [], "episodes": [],
+        "scenes": [{"episode": 2, "title": "马棚", "description": "第二集新描述：马棚堆满稻草。",
+                    "time_note": "清晨", "shots": [{"episode": 2, "seq": 1, "duration": 5}]}],
+    }
+    pv2 = _run_parse(client, monkeypatch, pid, sv, ep2)
+    r = client.post(f"/api/projects/{pid}/parse-versions/{pv2}/confirm",
+                    json={"current_parse_version_id": pv1})
+    assert r.status_code == 200, r.text
+
+    db = SessionLocal()
+    try:
+        rows = db.query(Scene).filter(Scene.project_id == pid).all()
+        assert len(rows) == 1, "同一地点跨集应复用一条 Scene，不应各建一份"
+        assert rows[0].description == "首集描述：木质马棚，清晨斜光。", "复用不得覆盖首集描述"
+    finally:
+        db.close()

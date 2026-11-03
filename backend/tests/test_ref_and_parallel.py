@@ -1,6 +1,6 @@
 """第四期修订测试（D-16 补充 + D-18 并行调度）。
 多角色注入：
-- 多个 @角色 按出现顺序填入 ref_identity → ref_image → ref_costume
+- 多个 @角色 按出现顺序填入 ref_identity → ref_image → ref_character_2
 - 槽位不足返回 422，不静默丢参考
 - 角色与场景同名（历史数据兜底）返回 422
 同名校验：
@@ -75,7 +75,7 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
 # ---------- 多角色槽位注入 ----------
 
 def test_multi_character_slot_priority(client: TestClient):
-    """多角色按出现顺序填入 ref_identity → ref_costume（ref_image 为分镜图保留槽位）。"""
+    """多角色按出现顺序填入 ref_identity → ref_character_2（ref_image 为分镜图保留槽位）。"""
     from app.core.database import SessionLocal
     from app.services import ref_inject
     pid, names, _ = _mk_char_scene_assets(client, n_chars=2)
@@ -85,7 +85,7 @@ def test_multi_character_slot_priority(client: TestClient):
     db.close()
     assert media == {
         "ref_identity": "/tmp/p0.png",
-        "ref_costume": "/tmp/p1.png",
+        "ref_character_2": "/tmp/p1.png",
     }
 
 
@@ -110,7 +110,7 @@ def test_character_slot_overflow_with_ref_image_declared(client: TestClient):
     db = SessionLocal()
     prompt = f"@{names[0]} 和 @{names[1]} 与 @{names[2]}"
     with pytest.raises(HTTPException) as ei:
-        ref_inject.build_media_params(db, pid, prompt, ["ref_identity", "ref_image", "ref_costume"])
+        ref_inject.build_media_params(db, pid, prompt, ["ref_identity", "ref_image", "ref_character_2"])
     assert ei.value.status_code == 422
     db.close()
 

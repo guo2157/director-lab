@@ -76,11 +76,18 @@
 | 帧数 | 按步长 × n + offset 对齐，反算时长后需正向校验一致；H3 本地节点绑定 `length`（124–362、步长 17、offset 5、fps=24，约 5.2–15.1 秒，见第 8 节） |
 | 帧率 | 只读，不允许改写 |
 | 种子 | random 策略下同一次 job 内所有种子项共用一个值，不同 job 之间互不共享；fixed 策略下由 params.seed 指定 |
-| 负向提示词 | 追加到节点原有字面值后，未绑定则丢弃 |
+| 负向提示词 | 追加到节点原有字面值后；未绑定 `$negative` 则整条丢弃，业务侧不注入该参数。图片工作流必须绑定：场景纯净度依赖的否定约束（没有任何人、没有间接人影、没有倒影与海报、没有动物与载具、没有剧情道具、没有文字与装饰）只有经该通道才到得了模型，缺失时生成会静默退化为纯正向提示词 |
 
 ### 5.1 多参考图规则
 
-出图工作流最多可绑定三个职责明确的参考图槽位，视频工作流最多可绑定六个图像参考槽位（五个职责槽位含关键道具与上一镜头末帧，外加当前镜头分镜图 `ref_image`），每个槽位承担一项约束，互不替代。出图三槽位：
+每个槽位承担一项约束，互不替代。容量以工作流 `.meta.json` 的 `reference_slots` 与 `max_reference_images` 为准，代码不写死数量；提示词中的 `<imageN>` / `<Picture N>` 序号严格对应槽位声明的 `input_key`，不按书写顺序推断。
+
+图片工作流只保留两个：多参考版 `wf_image_ref_qwen21_multi`（默认工作流，9 槽）与纯文生图 `wf_image_t2i_qwen21_turbo`（0 槽）。原单角色版 `wf_image_ref_qwen21_turbo` 已下线：multi 是它的超集，只注入 3 张参考图时多余槽位会被自动剔除，生成行为与之等价，无需再切换工作流。
+
+- 出图多参考版（`wf_image_ref_qwen21_multi`）：9 槽，`ref_scene`、`ref_identity`、`ref_costume` 三槽见下表，其后为 `ref_character_3` 至 `ref_character_6`（第 3 至第 6 个角色）与 `ref_prop`、`ref_prop_2`（两个道具）。
+- 视频（H3 ref2va 三档）：9 槽，五个职责槽位（`ref_identity`、`ref_costume`、`ref_prev_frame`、`ref_prop`、`ref_image`）之外追加 `ref_character_3` 至 `ref_character_6`。
+
+三张职责槽位（角色版与视频版通用）：
 
 | 槽位 | 负责约束 | 缺失时的处理 |
 | --- | --- | --- |

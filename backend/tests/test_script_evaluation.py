@@ -191,3 +191,66 @@ def test_build_evaluation_user_prompt_estimate_injection():
     # 空配置
     u2 = build_evaluation_user_prompt("剧本", estimate_data, {})
     assert "创作配置" not in u2
+
+
+# ---------- 第 1 步：可制作性维度 ----------
+def test_normalize_producibility_fills_missing():
+    """LLM 未按新模板输出：五个维度全部补空结构，并如实返回缺失清单。"""
+    from app.services.script_evaluation import _normalize_producibility
+
+    report = {"strengths": [], "overall_score": 6}
+    missing = _normalize_producibility(report)
+    assert set(missing) == {
+        "character_convergence", "scene_convergence", "shot_feasibility",
+        "dialogue_feasibility", "prop_risks",
+    }
+    assert report["character_convergence"]["alias_conflicts"] == []
+    assert report["character_convergence"]["total_named"] is None
+    assert report["scene_convergence"]["purity_risks"] == []
+    assert report["shot_feasibility"]["abstract_shots"] == []
+    assert report["dialogue_feasibility"]["long_lines"] == []
+    assert report["prop_risks"]["state_changing_props"] == []
+
+
+def test_normalize_producibility_preserves_existing():
+    """已给出的数据不被覆盖，仅补齐同维度缺失字段。"""
+    from app.services.script_evaluation import _normalize_producibility
+
+    report = {
+        "character_convergence": {"total_named": 3},
+        "prop_risks": {"transient_props": [{"name": "水杯"}]},
+    }
+    missing = _normalize_producibility(report)
+    assert "character_convergence" not in missing
+    assert "prop_risks" not in missing
+    assert report["character_convergence"]["total_named"] == 3
+    assert report["character_convergence"]["alias_conflicts"] == []
+    assert report["prop_risks"]["transient_props"] == [{"name": "水杯"}]
+    assert report["prop_risks"]["scene_embedded_props"] == []
+    assert len(missing) == 3
+
+
+def test_normalize_producibility_no_false_missing():
+    """五个维度都存在时缺失清单为空，不误报。"""
+    from app.services.script_evaluation import _normalize_producibility
+
+    report = {
+        "character_convergence": {}, "scene_convergence": {},
+        "shot_feasibility": {}, "dialogue_feasibility": {},
+        "prop_risks": {},
+    }
+    assert _normalize_producibility(report) == []
+
+
+def test_evaluation_prompt_covers_producibility():
+    """评估提示词必须覆盖可制作性五维度，否则资产不合规无法在上游暴露。"""
+    from app.services.prompt_store import get_prompt
+
+    p = get_prompt("script_evaluation_system")
+    for token in (
+        "character_convergence", "scene_convergence", "shot_feasibility",
+        "dialogue_feasibility", "prop_risks",
+        "alias_conflicts", "duplicate_locations", "purity_risks",
+        "long_lines", "state_changing_props",
+    ):
+        assert token in p, f"评估提示词缺少可制作性字段 {token}"

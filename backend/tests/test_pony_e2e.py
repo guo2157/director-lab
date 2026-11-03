@@ -103,7 +103,7 @@ def test_pony_crossing_river_e2e(client: TestClient):
         # 验证阶段 B 纯净化提示词已注入任务：单主体 + 禁止多视图拼图
         params = r.json()["effective_inputs"]["params"]
         assert "画面中只能有一个主体" in params["prompt"], name
-        assert "不生成角色设定表、四视图、表情合集或多角色拼图" in params["prompt"], name
+        assert ("默认输出单张正面全身定妆照" in params["prompt"] or "不做并排多视角拼图" in params["prompt"]), name
         compilation = (r.json()["effective_inputs"].get("prompt_compilation") or {})
         if compilation:
             assert compilation["generation_constraints"]["isolation_rule"] == "single_character_only"
@@ -126,7 +126,9 @@ def test_pony_crossing_river_e2e(client: TestClient):
         r = client.post(f"/api/scenes/{sc['id']}/generate-baseline", json={"workflow_id": wf_id})
         assert r.status_code == 202, r.text
         params = r.json()["effective_inputs"]["params"]
-        assert "只表现环境本身，不出现任何角色、人物、动物" in params["prompt"], title
+        # 场景纯净度：对齐当前 SCENE_TEMPLATE 的稳定措辞（不再使用旧版『只表现环境本身』表述）
+        assert "整个画面只由环境本身与天空构成" in params["prompt"], title
+        assert "没有任何人" in params["prompt"], title
         result = execute_generate_job(r.json()["id"])
         assert result["ok"], result
         baselines[title] = result["assets"][0]["asset_id"]

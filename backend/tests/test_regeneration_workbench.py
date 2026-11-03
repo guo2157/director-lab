@@ -88,10 +88,10 @@ def _seed(client, tmp_path, slots_meta: dict, refs_files: list[str]):
         db.add(base)
 
         ref_ids = []
-        for idx, (slot, path) in enumerate(zip(["ref_identity", "ref_costume", "ref_scene"], refs_files)):
+        for idx, (slot, path) in enumerate(zip(["ref_identity", "ref_character_2", "ref_prop"], refs_files)):
             aid = f"ast_ref_{idx:03d}"
             db.add(Asset(
-                id=aid, project_id=pid, asset_type="character" if slot != "ref_scene" else "scene",
+                id=aid, project_id=pid, asset_type="character" if slot != "ref_prop" else "prop",
                 name=f"参考{idx}", version=2, file_path=path, validity="current",
             ))
             ref_ids.append(aid)
@@ -102,15 +102,20 @@ def _seed(client, tmp_path, slots_meta: dict, refs_files: list[str]):
     return {"project_id": pid, "shot_id": shot["id"], "ref_ids": ref_ids}
 
 
-H3_SLOTS = json.loads((WORKFLOW_DIR / "wf_video_h3_ref2va.meta.json").read_text("utf-8"))["capabilities"]
+H3_SLOTS = json.loads((WORKFLOW_DIR / "wf_video_h3_ref2va_std_5s.meta.json").read_text("utf-8"))["capabilities"]
 
 
 def test_real_workflow_slots_are_authoritative():
-    """以真实工作流元信息为准：H3 ref2va 六槽位映射与帧约束语义。"""
+    """以真实工作流元信息为准：H3 std_5s 九槽位映射与帧约束语义。
+
+    槽位扩至 9 与 model_max_reference_images 对齐：
+    ref_image_0=上一镜末帧、1=分镜图、2=身份、3=服装、4=道具、5-8=多角色多视角。
+    """
     slots = regen.normalize_reference_slots(H3_SLOTS)
     by_param = {s["param"]: s for s in slots}
     assert set(by_param) == {
-        "ref_prev_frame", "ref_image", "ref_identity", "ref_costume", "ref_scene", "ref_prop",
+        "ref_prev_frame", "ref_image", "ref_identity", "ref_character_2", "ref_prop",
+        "ref_character_3", "ref_character_4", "ref_character_5", "ref_character_6",
     }
     assert by_param["ref_prev_frame"]["input_key"] == "ref_images.ref_image_0"
     assert by_param["ref_image"]["input_key"] == "ref_images.ref_image_1"
@@ -126,10 +131,15 @@ def test_t2i_workflow_has_no_reference_slots():
     assert regen.normalize_reference_slots(caps) == []
 
 
-def test_qwen_edit_supports_three_slots():
-    caps = json.loads((WORKFLOW_DIR / "wf_image_ref_qwen21_turbo.meta.json").read_text("utf-8"))["capabilities"]
+def test_qwen_multi_supports_nine_slots():
+    """多参考图版声明 9 槽（单角色版 wf_image_ref_qwen21_turbo 已下线，由 multi 覆盖）。"""
+    caps = json.loads((WORKFLOW_DIR / "wf_image_ref_qwen21_multi.meta.json").read_text("utf-8"))["capabilities"]
     slots = regen.normalize_reference_slots(caps)
-    assert [s["param"] for s in slots] == ["ref_identity", "ref_costume", "ref_scene"]
+    assert [s["param"] for s in slots] == [
+        "ref_scene", "ref_identity", "ref_character_2",
+        "ref_character_3", "ref_character_4", "ref_prop", "ref_prop_2",
+        "ref_character_5", "ref_character_6",
+    ]
 
 
 def test_inherit_prompt_only_keeps_refs(client, tmp_path):
@@ -148,8 +158,8 @@ def test_inherit_prompt_only_keeps_refs(client, tmp_path):
 
         base_refs = [
             {"slot_param": "ref_identity", "asset_id": ctx["ref_ids"][0]},
-            {"slot_param": "ref_costume", "asset_id": ctx["ref_ids"][1]},
-            {"slot_param": "ref_scene", "asset_id": ctx["ref_ids"][2]},
+            {"slot_param": "ref_character_2", "asset_id": ctx["ref_ids"][1]},
+            {"slot_param": "ref_prop", "asset_id": ctx["ref_ids"][2]},
         ]
         config["refs"] = base_refs
         snap = regen.assemble_snapshot(
@@ -158,7 +168,7 @@ def test_inherit_prompt_only_keeps_refs(client, tmp_path):
         )
         # 提示词变化，参考图与参数不变
         assert snap["prompt"]["rendered"] == "新提示词"
-        assert [r["slot_param"] for r in snap["refs"]] == ["ref_identity", "ref_costume", "ref_scene"]
+        assert [r["slot_param"] for r in snap["refs"]] == ["ref_identity", "ref_character_2", "ref_prop"]
         assert snap["model_params"]["width"] == 736
         assert snap["model_params"]["length"] == 192
         assert snap["inherited"]["refs_locked"] is True
@@ -185,8 +195,8 @@ def test_replace_character_ref_only_changes_that_slot(client, tmp_path):
         config = regen.build_base_config(db, base)
         refs = [
             {"slot_param": "ref_identity", "asset_id": "ast_new_identity"},
-            {"slot_param": "ref_costume", "asset_id": ctx["ref_ids"][1]},
-            {"slot_param": "ref_scene", "asset_id": ctx["ref_ids"][2]},
+            {"slot_param": "ref_character_2", "asset_id": ctx["ref_ids"][1]},
+            {"slot_param": "ref_prop", "asset_id": ctx["ref_ids"][2]},
         ]
         snap = regen.assemble_snapshot(
             db, mode=regen.MODE_MODIFY_REFS, base_config=config,
@@ -195,7 +205,7 @@ def test_replace_character_ref_only_changes_that_slot(client, tmp_path):
         by_slot = {r["slot_param"]: r for r in snap["refs"]}
         assert by_slot["ref_identity"]["asset_id"] == "ast_new_identity"
         assert by_slot["ref_identity"]["asset_version"] == 5
-        assert by_slot["ref_costume"]["asset_id"] == ctx["ref_ids"][1]
+        assert by_slot["ref_character_2"]["asset_id"] == ctx["ref_ids"][1]
         assert snap["inherited"]["params_locked"] is True
     finally:
         db.close()
@@ -213,14 +223,14 @@ def test_remove_optional_slot_is_allowed(client, tmp_path):
         config = regen.build_base_config(db, base)
         refs = [
             {"slot_param": "ref_identity", "asset_id": ctx["ref_ids"][0]},
-            {"slot_param": "ref_costume", "asset_id": ctx["ref_ids"][1], "enabled": False},
+            {"slot_param": "ref_character_2", "asset_id": ctx["ref_ids"][1], "enabled": False},
         ]
         snap = regen.assemble_snapshot(
             db, mode=regen.MODE_MODIFY_REFS, base_config=config,
             prompt="原提示词", negative_prompt="", refs=refs,
         )
         assert [r["slot_param"] for r in snap["refs"]] == ["ref_identity"]
-        assert "ref_costume" not in regen.snapshot_to_media(snap)
+        assert "ref_character_2" not in regen.snapshot_to_media(snap)
     finally:
         db.close()
 
@@ -258,7 +268,7 @@ def test_missing_file_returns_explicit_error(client, tmp_path):
         with pytest.raises(Exception) as exc:
             regen.validate_refs(db, slots, [
                 {"slot_param": "ref_identity", "asset_id": ctx["ref_ids"][0]},
-                {"slot_param": "ref_costume", "asset_id": ctx["ref_ids"][1]},
+                {"slot_param": "ref_character_2", "asset_id": ctx["ref_ids"][1]},
             ])
         assert "reference_file_missing" in str(exc.value)
     finally:
@@ -325,7 +335,7 @@ def test_snapshot_hash_is_stable_and_frozen(client, tmp_path):
         config = regen.build_base_config(db, base)
         config["refs"] = [
             {"slot_param": "ref_identity", "asset_id": ctx["ref_ids"][0]},
-            {"slot_param": "ref_costume", "asset_id": ctx["ref_ids"][1]},
+            {"slot_param": "ref_character_2", "asset_id": ctx["ref_ids"][1]},
         ]
         snap1 = regen.assemble_snapshot(
             db, mode=regen.MODE_INHERIT_PROMPT_ONLY, base_config=config,

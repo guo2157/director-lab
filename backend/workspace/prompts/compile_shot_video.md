@@ -1,5 +1,6 @@
 integrated_multimodal_description:
 Scene: {scene}, with characters {characters} and props {props}. Overall style: {style}. This video must continue the approved storyboard reference image: keep character identity, face, body, costume, colors, props and scene structure exactly consistent in every frame.
+Reference bindings: {ref_bindings}. Strictly follow each reference image's designated role; do not alter locked attributes or spatial layout.
 
 [Shot 1] {main_action}. Start state: {start_state}. End state: {end_state}. Shot size: {shot_size}. Camera: {camera_angle}. Movement: {camera_movement}. Pacing: {pacing}. Environment changes: {environment_changes}. Continuity in: {continuity_in_type}; source shot: {source_shot_id}; source frame: {source_frame_file_id}. Continuity out: {continuity_out_state}. Dialogue or narration: {dialogue}.
 

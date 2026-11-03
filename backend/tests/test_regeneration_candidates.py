@@ -19,7 +19,7 @@ from app.services import regeneration as regen
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 H3_CAPS = json.loads(
-    (BACKEND_DIR / "data" / "workflows" / "wf_video_h3_ref2va.meta.json").read_text("utf-8")
+    (BACKEND_DIR / "data" / "workflows" / "wf_video_h3_ref2va_std_5s.meta.json").read_text("utf-8")
 )["capabilities"]
 
 
@@ -54,7 +54,7 @@ def _setup(client, tmp_path):
     db = db_mod.SessionLocal()
     try:
         wf = Workflow(
-            id="wf_h3", name="wf_video_h3_ref2va", workflow_type="video",
+            id="wf_h3", name="wf_video_h3_ref2va_std_5s", workflow_type="video",
             definition={"1": {"class_type": "X", "inputs": {}, "_meta": {"title": "$output.clip"}}},
             capabilities=H3_CAPS, version=3, is_builtin=True,
         )
