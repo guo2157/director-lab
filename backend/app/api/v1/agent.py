@@ -403,7 +403,7 @@ def _try_create_generate_approval(
             guidance = _stage_guidance(db, session.project_id)
             if guidance:
                 reply = f"{reply}\n\n{guidance}"
-            from app.services.agent_tools import entity_shot_hint
+            from app.services.agent_context_tools import entity_shot_hint
 
             hint = entity_shot_hint(db, session.project_id)
             if hint:
@@ -656,6 +656,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         classify_intent,
         route_action,
     )
+    from app.services.agent_governance import NextAction
 
     # 加载近期对话（当前消息之前，旧→新），供意图识别消解『它』『上一个』等指代
     recent = (
@@ -679,18 +680,18 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     action = route_action(intent.intent)
     # 结构化意图（B 档）：ambiguous 且带缺失信息时向用户澄清，不进入主对话（不虚构目标）
     if intent.intent == "ambiguous" and intent.missing_information:
-        action = "clarify"
-    if action in ("reject", "guide", "clarify", "pipeline"):
+        action = NextAction.CLARIFY
+    if action in (NextAction.REJECT, NextAction.GUIDE, NextAction.CLARIFY, NextAction.PIPELINE):
         # unsafe：直接拒绝；generate_request：不执行生成，引导到对应页面（P0：生成不在 Agent 直接执行范围）；
         # pipeline：流程节点操作，经状态机门禁执行流程工具（高风险操作只建审批申请）；
         # clarify：信息不足，向用户澄清缺失信息（确定性拼接，不调用模型）
         approval_info: dict | None = None
-        if action == "reject":
+        if action == NextAction.REJECT:
             reply = UNSAFE_REJECT_MESSAGE
-        elif action == "guide":
+        elif action == NextAction.GUIDE:
             # 生成请求：能唯一定位到镜头则落地为审批申请，否则澄清洗明（不猜测目标）
             reply, approval_info = _try_create_generate_approval(db, s, session_id, payload.content)
-        elif action == "pipeline":
+        elif action == NextAction.PIPELINE:
             # 流程操作：意图识别流程节点，经状态机门禁执行（审核闸口/审批纪律不跳过）
             reply, approval_info = _handle_pipeline_action(db, s, session_id, intent, payload.content)
         else:
@@ -752,15 +753,25 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                     {"project_id": s.project_id, "limit": 6},
                 )
             )
-        from app.services.agent_tools import build_read_tool_calls, format_tool_context
+        from app.services.agent_context_tools import build_read_tool_calls, format_tool_context
 
         tool_calls = []
+        # 硬性预算（agent_governance）：单轮工具调用数/总耗时/上下文字符数上限，
+        # 超限安全降级（跳过后续工具调用），违规记录进 violations 供审计
+        from app.services.agent_governance import ToolBudget
+
+        budget = ToolBudget()
 
         def _run(tool_name: str, tool_args: dict):
-            """执行受控工具并记录（不在 allowed_tools 内的不执行）。"""
+            """执行受控工具并记录（不在 allowed_tools 内或预算超限的不执行）。"""
             if tool_name not in allowed_tools:
                 return None
+            violation = budget.check_before(tool_name)
+            if violation:
+                budget.violations.append(violation)
+                return None
             result = execute_tool(db, tool_name, **tool_args)
+            budget.record(result.duration_ms)
             tool_calls.append((tool_name, tool_args, result))
             return result
 
@@ -831,9 +842,19 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 f"最近生成的资产（新→旧，本次展示 {assets.data['count']} 项）：{asset_lines}"
             )
         if ctx_lines:
-            system_prompt += "\n以下是当前关联项目的真实状态（由系统查询提供，回答项目相关问题以此为准）：\n" + "\n".join(
-                ctx_lines
-            )
+            # 上下文预算：工具上下文总字符数超限时从尾部丢弃（保留高优先级的概览/统计），
+            # 违规记录进 budget.violations 供审计
+            kept: list[str] = []
+            for line in ctx_lines:
+                if budget.context_allowed(len(line) + 1):
+                    kept.append(line)
+                    budget.record_context(len(line) + 1)
+                else:
+                    budget.violations.append(f"context_overflow:dropped_line_chars={len(line)}")
+            if kept:
+                system_prompt += "\n以下是当前关联项目的真实状态（由系统查询提供，回答项目相关问题以此为准）：\n" + "\n".join(
+                    kept
+                )
 
     # 2. 加载历史窗口（仅 user/assistant 参与对话上下文）
     history = (
@@ -895,6 +916,8 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             "confidence": intent.confidence,
             # 资产引用：前端据此渲染缩略图（assistant 气泡内）
             "asset_refs": asset_refs,
+            # 预算审计（agent_governance）：本轮工具调用数/耗时/上下文字符数与违规记录
+            "tool_budget": budget.audit_payload() if s.project_id else None,
         },
         seq=tool_event_seq + 1,
         created_at=datetime.now(),

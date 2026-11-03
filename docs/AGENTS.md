@@ -20,6 +20,7 @@
 | 剧本类型、叙事/视觉风格、节奏情绪配置 | docs/STYLE_CONFIG.md |
 | 一致性度量、失效传播 | docs/CONSISTENCY.md |
 | 前端页面、样式、交互 | docs/FRONTEND.md |
+| Agent 工具注册表、治理模块、意图路由 | docs/API.md §12 + docs/agent/ |
 | 环境搭建、启动、测试、部署 | docs/DEVELOPMENT.md |
 | 验收、测试用例、冒烟 | docs/ACCEPTANCE.md |
 
@@ -48,4 +49,4 @@
 
 ## 5. 当前阶段
 
-项目处于开发中期（2026-10-24）：阶段 1–3 已验证，阶段 4（任务编排与 ComfyUI 集成）代码已提交、待真实链路验证，阶段 5（前端联调）开发中；阶段 6–7 待开始。进度权威记录见 docs/IMPLEMENTATION_PLAN.md 第 2 节，决策与实证记录见 docs/DECISIONS.md。MVP 验收范围：单项目、单集、3–5 个镜头主链路（见 docs/ACCEPTANCE.md MVP 节）。
+项目处于开发中期（2026-11-03）：阶段 1–3 已验证，阶段 4（任务编排与 ComfyUI 集成）代码已提交、待真实链路验证，阶段 5（前端联调）开发中；阶段 6–7 待开始。Agent 优化（对照《通用 Agent 开发指南》）已完成：工具注册表 Schema 化（24 个工具）、意图路由结构化（NextAction 枚举）、治理模块（PolicyEngine + ToolBudget 预算控制 + TerminalStatus 终态枚举）、视频生成速度参数（speed: fast/std/quality）。测试基线 137 passed。进度权威记录见 docs/IMPLEMENTATION_PLAN.md 第 2 节，决策与实证记录见 docs/DECISIONS.md。MVP 验收范围：单项目、单集、3–5 个镜头主链路（见 docs/ACCEPTANCE.md MVP 节）。

@@ -309,14 +309,19 @@ def test_e2e_entity_flow(client, project_env):
 
 def test_e2e_stage_gate_blocks_early_generate(client, project_env):
     """状态机门禁：项目处于 estimate 阶段（无剧本）时，生成申请被拦截且不建审批记录。"""
-    from app.models import Project
+    from app.models import Project, Scene
     import app.core.database as db_mod
 
-    # 将项目回退到 estimate 阶段：清空剧本版本与评估哈希
+    # 将项目回退到早于 assets_review 的阶段：清空剧本版本与场景基准图。
+    # 注意不能删镜头——derive_progress 规则 1 把『已解析出镜头』视为剧本已可用，
+    # 而删掉镜头后『第 1 镜』无法解析，请求会走引导分支而非阶段闸口，断言拿不到 approval。
+    # 改为清空场景基准图，让阶段回落到 scenes（早于 keyframe 要求的 assets_review）。
     session = db_mod.SessionLocal()
     project = session.get(Project, project_env["project_id"])
     project.current_script_version_id = None
     project.estimated_text_hash = None
+    for sc in session.query(Scene).filter(Scene.project_id == project.id).all():
+        sc.baseline_asset_id = None
     session.commit()
     session.close()
 

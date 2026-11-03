@@ -8,6 +8,7 @@
 """
 import pytest
 
+from app.services.agent_governance import NextAction
 from app.services.agent_tools import get_allowed_tools
 from app.services.intent_router import (
     INTENT_CATEGORIES,
@@ -58,7 +59,7 @@ def test_fast_path_generate(text: str):
     r = apply_fast_path_rules(text)
     assert r is not None
     assert r.intent == "generate_request"
-    assert route_action(r.intent) == "guide"
+    assert route_action(r.intent) == NextAction.GUIDE
 
 
 @pytest.mark.parametrize(
@@ -75,14 +76,14 @@ def test_fast_path_unsafe(text: str):
     assert r is not None
     assert r.intent == "unsafe"
     assert r.risk_level == "high"
-    assert route_action(r.intent) == "reject"
+    assert route_action(r.intent) == NextAction.REJECT
 
 
 def test_descriptive_generation_is_not_generate_request():
     """『最近生成的角色图』是描述已有产物（查询），不能被当成生成请求。"""
     r = apply_fast_path_rules("最近生成的角色图长什么样")
     assert r is not None and r.intent == "query"
-    assert route_action(r.intent) == "chat"
+    assert route_action(r.intent) == NextAction.CHAT
 
 
 def test_ambiguous_text_falls_through_to_llm():
@@ -98,17 +99,34 @@ def test_high_risk_keyword_raises_risk_level():
 
 
 def test_intent_tool_mapping_readonly_whitelist():
-    """query/analysis 只授予只读工具，其余意图不授予任何工具。"""
-    assert get_allowed_tools("query") == [
-        "project_overview",
-        "list_jobs",
-        "asset_stats",
-        "list_assets",
-        "list_asset_plans",
-        # 只读风格查询：让对话能回答『当前是什么风格』，不出现在写工具中
-        "get_style_config",
-    ]
-    assert set(get_allowed_tools("analysis")) == set(get_allowed_tools("query"))
+    """query/analysis 只授予只读工具，其余意图不授予任何工具。
+
+    断言用『只读命名前缀 + 关键能力在册 + 写工具排除』三条契约，
+    而不是硬编码完整列表：只读白名单历史上从 6 项扩到 17 项，
+    硬编码会把每次合理扩容都误报成回归。
+    """
+    query_tools = get_allowed_tools("query")
+    assert query_tools, "query 必须授予只读工具"
+    # 1) 全部命中只读命名约定（script_normalize/script_evaluate 为剧本只读校验/评估工具）
+    assert all(
+        t.startswith(
+            ("get_", "list_", "project_overview", "asset_stats", "script_normalize", "script_evaluate")
+        )
+        for t in query_tools
+    ), f"只读白名单混入了非只读工具: {query_tools}"
+    # 2) 关键只读能力必须在册
+    for must in (
+        "project_overview", "list_jobs", "asset_stats", "list_assets",
+        "list_asset_plans", "get_style_config",
+    ):
+        assert must in query_tools, must
+    # 3) 写工具绝不能出现在只读白名单中
+    for forbidden in (
+        "generate_keyframe", "generate_clip", "create_project",
+        "delete_asset", "apply_prompt", "update_shot",
+    ):
+        assert forbidden not in query_tools, forbidden
+    assert set(get_allowed_tools("analysis")) == set(query_tools)
     for intent in ("generate_request", "ambiguous", "unsafe", "unknown"):
         assert get_allowed_tools(intent) == []
 
@@ -116,7 +134,7 @@ def test_intent_tool_mapping_readonly_whitelist():
 def test_route_action_covers_all_categories():
     """所有意图类别都能映射到确定的动作，不出现未定义分支。"""
     for intent in INTENT_CATEGORIES:
-        assert route_action(intent) in {"chat", "reject", "guide", "pipeline"}
+        assert route_action(intent) in {NextAction.CHAT, NextAction.REJECT, NextAction.GUIDE, NextAction.PIPELINE}
 
 
 def test_clarification_question_lists_missing_information():

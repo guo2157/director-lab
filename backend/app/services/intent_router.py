@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError
 from typing import Any
 
 from app.integrations.llm import LLMClient, LLMError
+from app.services.agent_governance import NextAction
 
 # 意图类别白名单
 INTENT_CATEGORIES = {"query", "analysis", "generate_request", "pipeline_action", "ambiguous", "unsafe"}
@@ -384,21 +385,22 @@ def classify_intent(user_content: str, *, recent_messages: list[dict] | None = N
 # --- 确定性路由策略（业务代码执行，模型不参与） ---
 
 
-def route_action(intent: str) -> str:
-    """意图 → 路由动作。
+def route_action(intent: str) -> NextAction:
+    """意图 → 路由动作（返回 NextAction 枚举，编排层不解析裸字符串）。
 
-    - chat：正常进入主对话流程（query/analysis/ambiguous）
-    - clarify：信息不足，向用户澄清（ambiguous 且带缺失信息时由调用方细化）
-    - reject：直接拒绝并说明（unsafe）
-    - guide：不执行生成，返回引导信息（generate_request）
+    - CHAT：正常进入主对话流程（query/analysis/ambiguous）
+    - CLARIFY：信息不足，向用户澄清（ambiguous 且带缺失信息时由调用方细化）
+    - REJECT：直接拒绝并说明（unsafe）
+    - GUIDE：不执行生成，返回引导信息（generate_request）
+    - PIPELINE：流程节点操作（pipeline_action）
     """
     if intent == "unsafe":
-        return "reject"
+        return NextAction.REJECT
     if intent == "generate_request":
-        return "guide"
+        return NextAction.GUIDE
     if intent == "pipeline_action":
-        return "pipeline"
-    return "chat"
+        return NextAction.PIPELINE
+    return NextAction.CHAT
 
 
 def build_clarification_question(missing_information: list[str]) -> str:

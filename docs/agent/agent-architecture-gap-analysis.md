@@ -274,7 +274,83 @@
   - 「资产统计，顺便看看最近生成的角色图长什么样」→ intent=query / route=chat / risk=low / asset_refs=6，回复真实引用资产统计（角色 5、场景等）；
   - 「项目进展如何」→ intent=query / asset_refs=0（不注入缩略图）。
 
-### 11.7 仍未处理
+### 11.7 仍未处理（截至 B 档后续修复）
 - 规则快路径的 `risk_level` 提级与 `intent_goal` 仍只在 LLM 路径生效：规则命中 query 时 `risk_level` 恒为 low、`goal` 为空（「含删除的查询」仍可能被判 low）。
 - 生成类能力（文生图/参考图生图/视频）仍未注册为 Agent 工具（需审批门禁 + 幂等键 + 成本闸口）。
 - C 档（记忆层、Token/成本采集、评估集）未启动。
+
+
+## 12. Agent 优化记录（2026-11-03，对照《通用 Agent 开发指南》）
+
+本轮基于代码走查识别的优化方向，补齐工具覆盖、增加视频生成速度参数、落地 NextAction 枚举，并确认治理模块已就位。
+
+### 12.1 新增 4 个 Agent 工具
+
+| 工具 | 权限 | 风险 | 用途 |
+| --- | --- | --- | --- |
+| `get_shot_prompt` | read | low | 分镜图入参展示，返回提示词/确认状态/编译预览 |
+| `script_normalize` | read | low | 剧本校验优化，复用 script_writing.normalize_script |
+| `script_evaluate` | read | low | 剧本质量评估，复用 script_evaluation.evaluate_script |
+| `batch_request_generate` | write | medium | 批量生成资产图，最多 20 个 entity_ids，全量校验后逐条建审批 |
+
+- 修复 TOOL_REGISTRY 中 4 个工具的 fn 引用名（tool_ 前缀）
+- 更新 test_intent_router.py 只读命名约定（纳入 script_normalize/script_evaluate）
+
+### 12.2 视频生成速度参数（speed）
+
+`_match_generate_workflow` 增加 `speed: str | None` 参数，仅对 clip 生效：
+- speed 枚举：`fast` / `std` / `quality`
+- 通过 `Workflow.capabilities.tier` 匹配档位工作流
+- 未指定 speed 时保持原行为（默认 → 内置 → 任意）
+
+联动改动（`agent_tool_impls.py`）：
+- `RequestGenerateInput` / `BatchRequestGenerateInput` 增加 `speed` 字段
+- `tool_request_generate` / `tool_batch_request_generate` 签名增加 `speed` 参数
+- 两处 `_match_generate_workflow` 调用传入 `speed=speed`
+- 两处 confirmation args 增加 `"speed": speed`
+
+### 12.3 NextAction 枚举落地
+
+- `agent_governance.py`：`NextAction` 枚举扩展 5 个导演台专用值（`CHAT`/`REJECT`/`GUIDE`/`PIPELINE`/`CLARIFY`）
+- `intent_router.py`：`route_action` 返回类型从 `str` 改为 `NextAction`，返回枚举值而非裸字符串
+- `agent.py`：导入 `NextAction`，所有 action 比较改用枚举值
+- `test_intent_router.py`：断言同步改用 `NextAction` 枚举值
+
+### 12.4 治理模块确认（agent_governance.py，已存在无需新增）
+
+| 组件 | 状态 | 说明 |
+| --- | --- | --- |
+| PolicyEngine | ✅ 已就位 | `evaluate_tool_policy` 确定性判定，不依赖模型置信度 |
+| ToolBudget | ✅ 已就位 | max_calls=12 / max_total_duration_ms=30000 / max_context_chars=24000 |
+| TerminalStatus | ✅ 已就位 | COMPLETED/WAITING_FOR_USER/WAITING_FOR_HUMAN/DENIED_BY_POLICY/FAILED_SAFE |
+| PolicyDecision | ✅ 已就位 | ALLOW/DENY/REQUIRE_CONFIRMATION |
+
+### 12.5 agent_tools.py 拆分确认（已完成）
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `agent_tools.py` | 592 | TOOL_REGISTRY + execute_tool + 路由函数 |
+| `agent_tool_impls.py` | 1617 | 所有 tool_* 函数实现 + Input Schema |
+| `agent_governance.py` | ~130 | NextAction / TerminalStatus / PolicyDecision / ToolBudget / evaluate_tool_policy |
+| `agent_context_tools.py` | 300 | build_read_tool_calls / format_tool_context |
+
+### 12.6 验证证据
+
+- 回归测试：**137 passed**（10 个测试文件）
+- 备份目录：`backend/.bak_agent_opt_20261103/`
+
+### 12.7 差距状态更新（截至 2026-11-03）
+
+- 差距 1（工具调用零审计）：✅ 已消除（A 档）
+- 差距 2（注册表缺 Schema）：✅ 已消除（B 档 + 本轮新增 4 个工具）
+- 差距 3（意图识别）：✅ 已消除（B 档 + 本轮 NextAction 枚举落地）
+- 差距 4（结果验证器）：部分缓解（success_criteria 字段已落库，验证器逻辑未实施）
+- 差距 5（记忆层）：保持缺失（C 档范围）
+- 新增：agent_tools.py 拆分 ✅、独立 PolicyEngine ✅、NextAction 枚举 ✅、预算控制模块 ✅
+
+### 12.8 仍未处理
+- 规则快路径 risk_level 提级与 intent_goal 仅 LLM 路径生效
+- 结果验证器运行时逻辑未实施
+- 工具调用重试（max_retries 字段已声明，运行时未执行）
+- 流式输出（FLOW-001 既有遗留）
+- C 档（记忆层、Token/成本采集、评估集）未启动

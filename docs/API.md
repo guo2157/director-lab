@@ -582,13 +582,13 @@
 ### 聊天流程（POST /chat）
 1. 持久化 user 消息。
 2. **意图识别**（B 档）：先走确定性**规则快路径**（`apply_fast_path_rules`，结果 `source=rules`），未命中再调用 LLM 结构化识别（`source=llm`）。规则优先级 unsafe > generate_request > query，命中即返回（confidence=1.0，省一次 LLM 往返）：unsafe 拦索要密钥/凭据、删除或清空全部数据、绕过规则或审批；generate_request 要求生成动作 + 产物词（生成/出图/渲染 + 关键帧/分镜/视频/角色图等），并带负向断言排除描述性表述（『最近生成的角色图长什么样』是在查看已有产物，判为 query 而不是生成请求）；query 覆盖进展/进度/状态/概览、失败原因、任务列表、资产统计，以及查看类表述（看看/看一下/给我看看/长什么样 + 图/视频/片段/素材/角色/场景/道具/关键帧/分镜/资产）。未命中规则的模糊消息交由 LLM 输出经 Pydantic Schema 校验，提取 intent/goal/entities/missing_information/risk_level/confidence；规则兜底高风险关键词；置信度 < 0.7 或信息缺失时返回澄清问题（route_action=clarify），不进入主对话。
-3. **确定性路由**：unsafe → 拒绝（reject）；generate_request → 落地为审批申请（guide 分支内 `_try_create_generate_approval`，只建申请绝不执行生成）；识别失败降级 query 继续主对话。
+3. **确定性路由**（`route_action` 返回 `NextAction` 枚举，编排层不解析裸字符串）：unsafe → `REJECT`（拒绝）；generate_request → `GUIDE`（落地为审批申请，guide 分支内 `_try_create_generate_approval`，只建申请绝不执行生成）；pipeline_action → `PIPELINE`（流程节点操作，经状态机门禁）；ambiguous 且带缺失信息 → `CLARIFY`（向用户澄清）；其余 → `CHAT`（识别失败降级 query 继续主对话）。
    生成申请的目标定位（不猜用户意图对象）：镜头目标须消息明确给出镜头标识（`sht_` ID 或『第 N 镜』且项目内唯一命中）；实体目标（角色/场景/道具公共资产）须明确给出实体 ID（`chr_`/`scn_`/`prp_` 前缀），不按名称猜测；定位不到时返回澄清提示。生成目标由关键词判定：音频（配音/语音/台词/朗读/TTS/旁白）→ audio，视频（视频/片段/动态）→ clip，图片类 → keyframe，判定不出默认 keyframe（成本最低）。
 4. **工具调用审计**：会话关联项目时按意图-工具映射执行只读工具（query/analysis → project_overview、asset_stats、list_jobs、list_asset_plans、get_style_config；其余意图不授予任何工具），每次调用落一条 `role=tool_event` 消息（payload：tool_name/args/ok/error_code/duration_ms），在 LLM 调用前提交（LLM 失败不丢审计）；tool_event 不进入对话上下文。
 
    `list_assets` 为**条件注入**：仅当用户消息命中资产类关键词（图/视频/片段/素材/缩略/画面/看看/长什么样）时，才以 `validity=current, limit=6` 追加查询。既避免每条回复都附带缩略图（UI 噪音与无谓带宽），也只展示仍然有效的资产。
 5. **LLM 回复**：历史窗口最近 40 条 user/assistant 消息；瞬态错误指数退避重试最多 3 次；`llm_unconfigured` → 409，其余失败 → 502（用户消息已持久化，可重试）。
-6. assistant 消息 payload 记录：`intent` / `intent_reason` / `intent_classified` / `route_action` / `intent_goal` / `risk_level` / `confidence`。
+6. assistant 消息 payload 记录：`intent` / `intent_reason` / `intent_classified` / `route_action` / `intent_goal` / `risk_level` / `confidence` / `asset_refs` / `tool_budget`（预算审计：本轮工具调用数/耗时/上下文字符数与违规记录，仅关联项目时携带）。
 
 ### 工具注册表（TOOL_REGISTRY）
 | 工具 | 权限 | 风险 | 副作用 | 审批 |
@@ -598,7 +598,22 @@
 | asset_stats | read | low | 无 | 否 |
 | list_assets | read | low | 无 | 否 |
 | list_asset_plans | read | low | 无 | 否 |
+| get_shot_prompt | read | low | 无 | 否 |
+| script_normalize | read | low | 无 | 否 |
+| script_evaluate | read | low | 无 | 否 |
+| get_asset_generation_progress | read | low | 无 | 否 |
+| get_keyframe_generation_progress | read | low | 无 | 否 |
+| get_clip_generation_progress | read | low | 无 | 否 |
+| get_job | read | low | 无 | 否 |
+| list_project_entities | read | low | 无 | 否 |
+| list_project_shots | read | low | 无 | 否 |
+| get_shot_impact | read | low | 无 | 否 |
+| get_parse_status | read | low | 无 | 否 |
+| list_compositions | read | low | 无 | 否 |
+| list_exports | read | low | 无 | 否 |
+| list_asset_versions | read | low | 无 | 否 |
 | request_generate | generate | medium | 有 | 否（只建审批记录，不建任务） |
+| batch_request_generate | write | medium | 有 | 否（只建审批记录，不建任务） |
 | run_generate | generate | high | 有 | 是（须先人工批准） |
 | get_style_config | read | low | 无 | 否 |
 | request_style_update | write | medium | 无 | 否（只建审批记录，不改配置） |
@@ -613,7 +628,8 @@
 - **run_style_update**：执行已批准的变更，合并现有 settings 后规范化落库并写 style_config_version，返回 changed_fields 与 issues。双重门禁：requires_approval 的 approved 放行标志与审批记录状态必须为 approved，缺一不可。非法取值按规范化规则回退默认并回传问题码，不写入脏值。
 
 ### 生成申请与审批（申请-审批-执行三段分离）
-- **request_generate**：提交生成申请，只创建审批记录（agent_confirmation），不建任务、不消耗算力。镜头目标（keyframe/clip/audio/bgm/sfx）须给 `shot_id`；实体目标（character/scene/prop 公共资产）须给 `entity_id`。同会话同入参重复申请复用同一条待审记录（幂等）；同镜头/同实体已有在途任务时拒绝（`job_in_flight`）。
+- **request_generate**：提交生成申请，只创建审批记录（agent_confirmation），不建任务、不消耗算力。镜头目标（keyframe/clip/audio/bgm/sfx）须给 `shot_id`；实体目标（character/scene/prop 公共资产）须给 `entity_id`。可选 `speed` 参数（`fast`/`std`/`quality`，仅对 clip 生效，按 `Workflow.capabilities.tier` 匹配档位工作流；未指定时保持默认匹配顺序）。同会话同入参重复申请复用同一条待审记录（幂等）；同镜头/同实体已有在途任务时拒绝（`job_in_flight`）。
+- **batch_request_generate**：批量提交公共资产生成审批申请（最多 20 个 `entity_ids`）。逐实体校验（存在/归属/阶段门禁/在途去重），任一失败整体失败，不产生部分审批；每个实体各建一条审批记录，批准后逐条经 execute 接口执行。可选 `speed` 参数，透传至各 `request_generate` 调用。
 - **制作阶段状态机门禁**：生成目标不得早于其所属制作阶段，阶段判定以 `derive_progress`（ARCHITECTURE.md §4.1 的 12 阶段）为唯一权威。申请侧（request_generate）阶段不足时快速失败（`stage_gate_blocked`），不建审批记录；执行侧（run_generate）纵深防御再次校验，防止审批通过后项目阶段回退（如剧本变更回到 estimate）仍执行生成。阈值与 API 通道同等强度：keyframe 须公共资产齐全（assets_review 阶段起，审核未通过/资产缺失/版本无效等细粒度阻断由 D-23 统一资产就绪门禁给出精确错误码）；clip/audio 须公共资产审核通过（keyframes 阶段起，单镜细粒度由 D-13 逐镜校验）；character/prop 须 characters 阶段起，scene 须 scenes 阶段起。bgm/sfx 不在 12 阶段状态机内，不做阶段门禁。D-13/D-23 人工审核闸口保持不变，不可跳过。
 - **run_generate**：执行已批准的申请，创建生成任务入队。幂等键 `agc:{confirmation_id}`，重复执行复用同一任务。门禁与 API 通道同等校验，不可绕过：
   - keyframe：D-23 统一资产就绪门禁（必需资产齐全/有效/审核通过）；
@@ -636,6 +652,14 @@ assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用�
 
 - 入参经 Pydantic Schema 校验（model_validate），校验失败返回 `tool_invalid_args`。
 - `requires_approval=true` 的工具未获批时返回 `approval_required`，不产生副作用（当前仅 run_generate 需审批，经审批面板批准后由 execute 接口以 approved=True 调用）。
+
+### Agent 治理模块（agent_governance）
+
+- **NextAction 枚举**：`route_action` 返回类型安全枚举（`CHAT`/`REJECT`/`GUIDE`/`PIPELINE`/`CLARIFY`），编排层不解析裸字符串。通用动作（`ANSWER`/`RETRIEVE`/`CALL_TOOL`/`ASK_USER`/`COMPLETE`/`FAIL_SAFE`）对齐 Agent 开发指南。
+- **TerminalStatus 枚举**：显式终态（`COMPLETED`/`WAITING_FOR_USER`/`WAITING_FOR_HUMAN`/`DENIED_BY_POLICY`/`FAILED_SAFE`），API 响应与审计统一携带。
+- **PolicyDecision 枚举**：策略引擎判定结果（`ALLOW`/`DENY`/`REQUIRE_CONFIRMATION`），确定性代码执行，不依赖模型置信度。
+- **ToolBudget 预算控制**：单轮工具调用上限 `max_calls=12`、`max_total_duration_ms=30000`、`max_context_chars=24000`；超限安全降级（跳过后续工具调用），违规记录进 `violations` 供审计；上下文超限时从尾部丢弃低优先级行。
+- **evaluate_tool_policy 策略引擎**：`requires_approval=True` 且未获批 → `REQUIRE_CONFIRMATION`；`risk_level=high` 且未获批 → `REQUIRE_CONFIRMATION`；其余 → `ALLOW`。
 
 ### Agent 任务/计划/审批表（B 档）
 - `agent_task`：结构化意图识别结果落库（intent/intent_goal/risk_level/confidence/success_criteria/status）。

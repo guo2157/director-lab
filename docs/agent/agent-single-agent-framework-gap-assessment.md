@@ -1,46 +1,52 @@
 # Director-Lab Agent 对照《单 Agent 核心流程》框架差距评估报告
 
-- 日期：2026-10-27 13:51 (UTC+8)
-- 评估对象：导演台 Agent（backend/app/api/v1/agent.py + backend/app/services/agent_tools.py）
-- 参照框架：单 Agent 核心流程（理解目标 → 组装上下文 → 制定计划 → 调用工具 → 验证结果 → 重新规划或结束）
-- 证据来源：代码实证（agent.py / agent_tools.py 全文阅读）+ E2E 验证报告（agent-end-to-end-validation-report.md）
+- 日期：2026-10-27 初版 / 2026-11-03 更新
+- 评估对象：导演台 Agent（backend/app/api/v1/agent.py + backend/app/services/agent_tools.py + agent_tool_impls.py + agent_governance.py + intent_router.py）
+- 参照框架：单 Agent 核心流程（理解目标 → 组装上下文 → 制定计划 → 调用工具 → 验证结果 → 重新规划或结束）+ 通用 Agent 开发指南
+- 证据来源：代码实证 + E2E 验证报告 + 回归测试 137 passed
 
 ## 1. 总体结论
 
-Director-Lab Agent 当前处于框架定义的**第一阶段（基本执行闭环）中后段**：意图识别、上下文组装、受控工具调用、结果验证已具备且经 E2E 验证；任务规划与状态管理、重新规划、长期记忆尚未建设。整体评级：**第一阶段部分达成，第二/三阶段未启动**。
+Director-Lab Agent 当前处于框架定义的**第一阶段（基本执行闭环）完成并进入第二阶段初期**：意图识别结构化（规则快路径 + LLM + NextAction 枚举路由）、上下文组装（20 个只读工具 + ToolBudget 预算控制 + 40 条历史窗口）、受控工具调用（24 个工具 + 权限分级 + PolicyEngine 策略引擎 + 审批门禁）、结果验证已具备且经 E2E 验证与 137 passed 回归测试；任务规划与状态管理（AgentTask/AgentPlanStep 表已落库）、重新规划、长期记忆尚未建设。整体评级：**第一阶段达成，第二阶段部分启动，第三阶段未启动**。
 
 | 框架能力 | 现状 | 评级 |
 | --- | --- | --- |
-| 1. 目标与意图识别 | 依赖 LLM 系统提示词约束，E2E 验证通过（INT-01/06/07） | 基本具备 |
-| 2. 上下文组装 | 项目上下文注入（3 只读工具）+ 40 条历史窗口 | 基本具备 |
-| 3. 任务规划与状态管理 | 无任务状态机，单轮请求-响应 | 缺失 |
-| 4. 工具调用与权限控制 | 受控注册表 + 错误分类，但无权限分级/用户确认机制 | 部分具备 |
-| 5. 结果验证 | E2E 层面已验证；运行时无自动结果校验 | 部分具备 |
-| 6. 重新规划与结束判断 | LLM 失败仅分类返回（409/502），无重试/重规划 | 缺失 |
+| 1. 目标与意图识别 | 规则快路径 + LLM 结构化识别 + NextAction 枚举路由 + 置信度阈值 + 澄清机制 | ✅ 已具备 |
+| 2. 上下文组装 | 20 个只读工具按意图动态注入 + ToolBudget 预算控制 + 40 条历史窗口 | ✅ 已具备 |
+| 3. 任务规划与状态管理 | AgentTask/AgentPlanStep 表已落库，运行时规划逻辑未实施 | 部分具备 |
+| 4. 工具调用与权限控制 | 24 个工具 + 权限分级(read/write/generate) + PolicyEngine + 审批门禁 + ToolBudget | ✅ 已具备 |
+| 5. 结果验证 | E2E + 回归测试 137 passed；success_criteria 字段已落库，运行时验证逻辑未实施 | 部分具备 |
+| 6. 重新规划与结束判断 | LLM 瞬态错误指数退避重试 3 次；TerminalStatus 终态枚举已定义；多步重规划未实施 | 部分具备 |
 | 7. 记忆更新 | 仅会话内消息持久化（seq 自增），无长期记忆 | 缺失 |
 
 ## 2. 逐维度评估
 
-### 2.1 目标与意图识别 —— 基本具备
+### 2.1 目标与意图识别 —— ✅ 已具备
 
 **已具备（代码+验证实证）：**
 - 系统提示词 `_DIRECTOR_SYSTEM_PROMPT` 明确角色边界：制作阶段链路、不虚构资产/任务、生成类操作不虚构已执行
-- E2E 实证：剧本分析不触发生成（INT-01）、普通问答不建任务（INT-06）、含糊请求主动澄清（INT-07），job 总数 231 前后不变
+- **结构化意图识别（B 档已落地）**：规则快路径（`apply_fast_path_rules`，unsafe > generate_request > query 优先级）+ LLM 结构化识别（Pydantic Schema 校验，json_mode）+ 高风险关键词规则兜底 + 置信度阈值 0.7
+- **NextAction 枚举路由**：`route_action` 返回类型安全枚举（CHAT/REJECT/GUIDE/PIPELINE/CLARIFY），编排层不解析裸字符串
+- **风险等级标注**：IntentResult 携带 risk_level（low/medium/high），高风险关键词规则兜底提级
+- **澄清机制**：ambiguous 且带缺失信息时 `build_clarification_question` 确定性拼接，不进入主对话
+- E2E 实证：剧本分析不触发生成（INT-01）、普通问答不建任务（INT-06）、含糊请求主动澄清（INT-07）
 
 **差距：**
-- 意图识别完全依赖提示词软约束，无结构化意图分类/路由层（阶段 E『意图路由工具化』未实现）
-- 无风险等级标注：无法区分低风险查询与高风险生成触发，当前以『全部只读工具』一刀切规避
+- 规则快路径 risk_level 恒 low（仅 LLM 路径产出 risk_level）
+- intent_goal 仅 LLM 路径生效
 
-### 2.2 上下文组装 —— 基本具备
+### 2.2 上下文组装 —— ✅ 已具备
 
 **已具备：**
-- 动态注入：关联项目时通过 execute_tool 注入 project_overview / asset_stats / list_jobs(limit=5) 真实数据库结果
+- 动态注入：关联项目时通过 execute_tool 注入 project_overview / asset_stats / list_jobs 真实数据库结果
+- **意图驱动工具选择**：`build_read_tool_calls` 按用户消息内容动态选择只读工具（20 个只读工具按意图-工具映射过滤）
+- **条件注入**：`list_assets` 仅当用户消息命中资产类关键词时追加查询
+- **ToolBudget 预算控制**：max_calls=12 / max_total_duration_ms=30000 / max_context_chars=24000，超限安全降级，违规记录进 violations 供审计
 - 历史窗口：最近 40 条 user/assistant 消息（seq 升序），控制 Token 消耗
-- CTX-001 缺陷已修复并复测（助手可准确列出失败任务及错误码）
+- CTX-001 缺陷已修复并复测
 
 **差距：**
 - 无用户偏好/长期记忆注入通道
-- 上下文注入为固定三件套，未按用户消息内容动态选择（如问任务才注入 list_jobs）
 - 无知识库（docs/）检索注入
 
 ### 2.3 任务规划与状态管理 —— 缺失
@@ -52,20 +58,23 @@ Director-Lab Agent 当前处于框架定义的**第一阶段（基本执行闭�
 - 无步骤级输入输出/前置依赖/成功条件定义
 - 长耗时操作遵循项目 P0 约束走 202+job+SSE 通道，但该通道与 Agent 对话层未打通（Agent 不能创建/跟踪 job）
 
-### 2.4 工具调用与权限控制 —— 部分具备
+### 2.4 工具调用与权限控制 —— ✅ 已具备
 
-**已具备（agent_tools.py 代码实证）：**
-- 工具注册表：名称/用途描述/参数说明/实现函数，结构清晰
-- 标准化结果：ToolResult(ok/data/error_code/error_message)
+**已具备（agent_tools.py + agent_governance.py 代码实证）：**
+- **24 个工具注册**：20 个只读 + 4 个写/生成（request_generate / batch_request_generate / run_generate / request_style_update / run_style_update）
+- **权限分级**：read / write / generate 三级，TOOL_REGISTRY 每个工具声明 permission / risk_level / side_effect / idempotent / requires_approval
+- **PolicyEngine 策略引擎**：`evaluate_tool_policy` 确定性判定（requires_approval 且未获批 → REQUIRE_CONFIRMATION；risk_level=high 且未获批 → REQUIRE_CONFIRMATION；其余 ALLOW）
+- **审批门禁**：request_generate / batch_request_generate 只建审批记录不执行；run_generate / run_style_update 须 confirmation_id + approved=True
+- **视频速度参数**：request_generate / batch_request_generate 支持 speed（fast/std/quality），按 Workflow.capabilities.tier 匹配档位工作流
+- 标准化结果：ToolResult(ok/data/error_code/error_message/duration_ms)
 - 错误分类：tool_not_found / tool_invalid_args / tool_internal_error / 业务错误码
-- 安全设计：首批仅只读工具，模型只负责选择与解释，执行由确定性业务代码完成（符合 AGENTS.md P0）
-- 参数校验：limit 钳制 1~50，未知工具拒绝
+- 参数校验：Pydantic Schema model_validate，limit 钳制
+- **ToolBudget 预算控制**：调用数/耗时/上下文字符数上限，超限安全降级
+- 安全设计：模型只负责选择与解释，执行由确定性业务代码完成（符合 AGENTS.md P0）
 
 **差距：**
-- 无权限等级定义（当前靠『全部只读』隐式保证安全，一旦引入写工具即暴露）
-- 无用户确认机制：框架要求不可逆操作（生成触发/删除/发布）执行前确认——项目规划中审批事件属阶段 E 未实现
-- 无超时时间/重试策略/幂等规则声明
-- 工具由后端固定注入，模型不能自主选择调用工具（无 function calling 循环）
+- 工具由后端按意图固定注入，模型不能自主选择调用工具（无 function calling 循环）
+- 无超时时间/重试策略的运行时执行（Schema 中已声明 timeout_seconds/max_retries 字段）
 
 ### 2.5 结果验证 —— 部分具备
 
@@ -77,14 +86,17 @@ Director-Lab Agent 当前处于框架定义的**第一阶段（基本执行闭�
 - 运行时无自动结果校验（如助手回复中的数字与工具数据二次核对）
 - 无任务成功标准的机器可读定义
 
-### 2.6 重新规划与结束判断 —— 缺失
+### 2.6 重新规划与结束判断 —— 部分具备
 
-**现状：** LLMError 分类返回（llm_unconfigured→409，其他→502），用户消息已持久化可重试。
+**已具备：**
+- **LLM 瞬态错误重试**：unreachable/timeout/llm_error 指数退避重试最多 3 次；llm_unconfigured 等配置类错误不重试
+- **TerminalStatus 终态枚举**：COMPLETED / WAITING_FOR_USER / WAITING_FOR_HUMAN / DENIED_BY_POLICY / FAILED_SAFE，API 响应与审计统一携带
+- 用户消息已持久化，重试幂等安全
 
 **差距：**
-- 无自动重试、无参数修正重试、无更换工具策略
-- 无多步任务的重新规划能力（依赖 2.3 缺失）
-- 失败恢复完全交给前端用户手动重发
+- 无参数修正重试、无更换工具策略
+- 无多步任务的重新规划能力（依赖 2.3 任务规划未实施）
+- 工具调用失败后无自动重试（Schema 中已声明 max_retries 字段，运行时未执行）
 
 ### 2.7 记忆更新 —— 缺失
 
@@ -111,13 +123,15 @@ Director-Lab Agent 当前处于框架定义的**第一阶段（基本执行闭�
 
 ## 5. 建议路线（按框架优先级与项目约束排序）
 
-1. **P1｜工具权限分级与确认机制**：为 TOOL_REGISTRY 增加权限等级（read/write/generate）与副作用声明；写/生成类工具执行前走审批事件（对齐阶段 E 规划与 P0『失效传播只标记不触发』约束）
-2. **P1｜意图路由工具化**：将提示词软约束升级为结构化意图分类，高风险意图强制走确认（对齐阶段 E）
-3. **P2｜LLM 调用重试策略**：对瞬态 LLMError 增加有限次退避重试，保持用户消息幂等（已持久化）
+1. ~~**P1｜工具权限分级与确认机制**~~ ✅ 已完成：TOOL_REGISTRY 24 个工具权限分级 + PolicyEngine 策略引擎 + 审批门禁
+2. ~~**P1｜意图路由工具化**~~ ✅ 已完成：结构化意图识别 + NextAction 枚举路由 + 置信度阈值 + 澄清机制
+3. ~~**P2｜LLM 调用重试策略**~~ ✅ 已完成：瞬态错误指数退避重试 3 次
 4. **P2｜流式输出**（FLOW-001 既有遗留）：SSE 输出助手回复，与项目 SSE 基建复用
-5. **P3｜任务状态机**：多步任务（分析→生成→跟踪）状态管理，与 job 通道打通
-6. **P3｜长期记忆**：跨会话项目事实/用户偏好沉淀，需先解决 SEC-001（全站无鉴权）前提
+5. **P2｜结果验证器**：success_criteria 字段已落库，待补确定性验证规则
+6. **P3｜任务状态机**：多步任务（分析→生成→跟踪）状态管理，与 job 通道打通；AgentTask/AgentPlanStep 表已就位
+7. **P3｜长期记忆**：跨会话项目事实/用户偏好沉淀，需先解决 SEC-001（全站无鉴权）前提
+8. **P3｜工具调用重试**：Schema 中 max_retries 字段已声明，运行时执行逻辑待实施
 
 ## 6. 结论
 
-Director-Lab Agent 的设计哲学与框架高度一致：『模型负责推理、业务代码负责确定性控制』即框架『工具由确定性代码执行』的落地；只读工具注册表 + 错误分类 + 真实数据注入已构成可靠的第一阶段闭环，且经 E2E 真实验证。主要差距集中在第二阶段（任务规划/状态管理/重试重规划）与第三阶段（长期记忆），以及第一阶段中权限分级确认机制的缺位——该缺位在引入写操作工具前必须补齐。
+Director-Lab Agent 的设计哲学与框架高度一致：『模型负责推理、业务代码负责确定性控制』即框架『工具由确定性代码执行』的落地。第一阶段（基本执行闭环）已全面达成：24 个工具注册（20 只读 + 4 写/生成）、权限分级 + PolicyEngine 策略引擎 + 审批门禁、结构化意图识别 + NextAction 枚举路由、ToolBudget 预算控制、LLM 瞬态错误重试、TerminalStatus 终态枚举，经 E2E 验证与 137 passed 回归测试。主要差距集中在第二阶段（任务规划运行时逻辑/结果验证器/工具调用重试/流式输出）与第三阶段（长期记忆）。
