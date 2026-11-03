@@ -27,7 +27,7 @@ ENTITY_PLAN_MODEL = {"character": Character, "scene": Scene, "prop": Prop}
 
 
 # 可注入的参考槽位（ref_prev_frame/first_frame/end_frame 由执行器按镜头实际产物回填）
-_REF_SLOTS = ("ref_identity", "ref_costume", "ref_scene", "ref_prop", "ref_image")
+_REF_SLOTS = ("ref_identity", "ref_character_2", "ref_scene", "ref_prop", "ref_image")
 
 
 def _now() -> datetime:
@@ -88,7 +88,7 @@ def _inject_dependency_slots(db: Session, plan: AssetPlan, params: dict,
     - 槽位由定义绑定决定，不依赖提示词文本的书写顺序，从根本上避免槽位错位
     - allowed_slots 为工作流声明的参考槽位（capabilities.reference_slots）：
       未声明的槽位不注入，避免无效上传与工作流不支持的输入
-    - 同一路径只占一个槽位（角色暂无独立服装资产时，ref_costume 与 ref_identity
+    - 同一路径只占一个槽位（角色暂无独立服装资产时，ref_character_2 与 ref_identity
       指向同一张定妆图，避免被工作流误判为两个不同角色）
     - 绑定快照（槽位/资产ID/版本/路径/状态）随 params 持久化到任务，
       重试复用快照，不重新解析（版本漂移防护）
@@ -248,7 +248,7 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
 
     from app.api.v1.generate import (  # 复用既有匹配与建任务逻辑，保证行为一致
         _TARGET_WF_TYPE, _check_keyframe_gate, _create_job, _match_workflow, _apply_chain_mode,
-        _filter_already_generated,
+        _filter_already_generated, _workflow_binds_param,
     )
     # 批量出视频方式（仅 clip）：independent 独立并行 / chained 链式串行（与项目级批量接口一致）
     chain_mode = payload.get("chain_mode") if plan_type == "clip" else None
@@ -299,6 +299,11 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             params: dict = {}
             if plan.prompt:
                 params["prompt"] = plan.prompt
+            # 负向提示词：仅在当前工作流真实绑定 $negative 时注入，否则不假装生效
+            # （场景纯净度依赖此处的否定约束，缺了它五类污染否定词到不了模型）
+            if _workflow_binds_param(wf, "negative"):
+                from app.services.prompt_compiler import negative_for
+                params["negative"] = negative_for(target)
             # 参考图按定义绑定注入（与提示词书写顺序无关，不会错槽）；
             # 仅注入当前工作流声明的槽位，绑定快照随任务持久化供追溯与重试复用
             _wf_slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
@@ -321,6 +326,10 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             params = {owner_key: entity.id}
             if plan.prompt:
                 params["prompt"] = plan.prompt
+            # 实体资产负向约束：同样只在工作流绑定 $negative 时注入
+            if _workflow_binds_param(wf, "negative"):
+                from app.services.asset_prompts import negative_for_asset_type
+                params["negative"] = negative_for_asset_type(plan_type)
             job = _create_job(db, project_id, None, target, wf, params)
             job.params = {**(job.params or {}), owner_key: entity.id}
             jobs.append(job)

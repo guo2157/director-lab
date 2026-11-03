@@ -221,6 +221,19 @@ def execute_compose_job(job_id: str) -> dict:
             with open(final, "rb") as src, open(final_path, "wb") as dst:
                 dst.write(src.read())
             duration = cs.probe_duration(str(final_path))
+            # 渲染后自检（post-render check）：时长一致 / 文件非空 / 音轨存在性；
+            # 校验失败不标记 succeeded，避免交付坏成片（验证独立于合成动作）
+            if final_path.stat().st_size <= 0:
+                raise RuntimeError("成片文件为空")
+            if duration <= 0:
+                raise RuntimeError("成片时长探测无效")
+            if abs(duration - timeline.total_duration) > max(tolerance, 1.0):
+                raise RuntimeError(
+                    f"成片时长 {duration:.2f}s 与时间轴 {timeline.total_duration:.2f}s 偏差超限"
+                )
+            if any(item.shot.audio_asset_id for item in timeline.items):
+                if not cs.probe_has_audio(str(final_path)):
+                    raise RuntimeError("镜头含配音但成片无音轨")
         except Exception as e:
             _fail_job(db, job, "comfy_execution_error", f"FFmpeg 合成失败: {e}")
             return {"ok": False, "reason": "ffmpeg_error"}

@@ -33,7 +33,7 @@ FRAME_CONSTRAINT_SLOTS = ("first_frame", "end_frame", "ref_prev_frame")
 
 ROLE_BY_SLOT = {
     "ref_identity": "character",
-    "ref_costume": "character",
+    "ref_character_2": "character",
     "ref_scene": "scene",
     "ref_prop": "prop",
     "ref_image": "keyframe",
@@ -59,7 +59,7 @@ def normalize_reference_slots(capabilities: dict | None) -> list[dict]:
     """归一化工作流 capabilities.reference_slots。
 
     兼容两种真实声明格式：
-    - 字符串数组：["ref_identity", "ref_costume"]
+    - 字符串数组：["ref_identity", "ref_character_2"]
     - 对象数组：[{"param": "ref_identity", "input_key": "...", "optional": true}]
     仅以工作流真实声明为准，不补造槽位。
     """

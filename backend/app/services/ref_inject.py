@@ -4,7 +4,7 @@
 - 引用语法：@名称（与剧本解析的 @名称 引用规则一致，角色改名时同步改写）
 - 映射规则：@角色名 → 角色 portrait_asset_id 对应文件；@场景名 → 场景 baseline_asset_id 对应文件；
   @道具名 → 道具 anchor_asset_id 对应文件
-- 多角色支持：多个 @角色 按出现顺序依次填入角色槽位（优先级 ref_identity → ref_image → ref_costume），
+- 多角色支持：多个 @角色 按出现顺序依次填入角色槽位（优先级 ref_identity → ref_image → ref_character_2），
   槽位不足时返回 422 提示引用过多，不静默丢参考
 - 同名兜底：角色与场景同名时（仅可能来自历史数据，创建/改名入口已拦截）返回 422
 - 未匹配的引用明确报错（invalid_reference），不静默忽略
@@ -21,11 +21,11 @@ from app.services import errors
 # 不纳入会导致引用名被截断为前半段，触发 invalid_reference（2026-10-28 全流程测试实证）
 _REF_RE = re.compile(r"@([\w\u4e00-\u9fff·]+)")
 
-# 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），第 2 个 → ref_costume（服装参考），
+# 角色槽位优先级：第 1 个 @角色 → ref_identity（身份参考），第 2 个 → ref_character_2（角色参考），
 # 更多角色按 ref_character_N 依次填充（7 槽多参考图工作流）。
 # P0 整改：ref_image 为当前镜头分镜图专用槽位（H3 ref2va 的 ref_image_1、Qwen Edit 的 image1），
 # 此前被多角色引用占用，导致分镜图被角色定妆图覆盖而丢失；角色引用不再占用该槽位
-_CHARACTER_SLOTS = ["ref_identity", "ref_costume"]
+_CHARACTER_SLOTS = ["ref_identity", "ref_character_2"]
 # 场景槽位：仅 ref_scene 一个
 _SCENE_SLOTS = ["ref_scene"]
 # 道具槽位：ref_prop / ref_prop_2（多参考图工作流）
@@ -36,10 +36,13 @@ RESERVED_SLOTS = frozenset({"ref_image", "ref_prev_frame", "first_frame", "end_f
 
 
 def is_character_slot(name: str) -> bool:
-    """按槽位名判断是否角色参考槽（工作流可声明任意多个）。"""
+    """按槽位名判断是否角色参考槽（工作流可声明任意多个）。
+
+    ref_character_2 是第二个角色身份槽位，与 ref_identity 同类。
+    """
     if name in RESERVED_SLOTS:
         return False
-    return name.startswith(("ref_identity", "ref_costume", "ref_character", "ref_char"))
+    return name.startswith(("ref_identity", "ref_character", "ref_char"))
 
 
 def is_scene_slot(name: str) -> bool:
@@ -135,7 +138,7 @@ def build_media_params(db: Session, project_id: str, prompt: str,
     """将 @引用解析为工作流媒体参数 {param_name: local_file_path}。
     reference_slots 为工作流 capabilities.reference_slots；
     仅注入工作流声明的槽位，未声明的槽位不注入。
-    多角色：按出现顺序依次填入可用角色槽位（ref_identity → ref_image → ref_costume），
+    多角色：按出现顺序依次填入可用角色槽位（ref_identity → ref_image → ref_character_2），
     槽位不足时返回 422，不静默丢参考。
     """
     refs = resolve_refs(db, project_id, prompt)

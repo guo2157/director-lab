@@ -8,6 +8,7 @@
 - 状态：pending 待生成，成功产出后由生成环节回写 generated 与 asset_id。
 """
 import hashlib
+import logging
 import re
 from pathlib import Path
 
@@ -18,12 +19,14 @@ from app.models import ids
 from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.models.narrative import Character, Prop, Scene, Shot
 
+logger = logging.getLogger(__name__)
+
 PLAN_PREFIX = {"character": "chr", "scene": "scn", "prop": "prp", "keyframe": "kf", "clip": "clip"}
 PLAN_EXT = {"character": ".png", "scene": ".png", "prop": ".png", "keyframe": ".png", "clip": ".mp4"}
 # 分镜图槽位：角色身份 / 服装 / 场景 / 道具
-KEYFRAME_SLOTS = ("ref_identity", "ref_costume", "ref_scene", "ref_prop")
+KEYFRAME_SLOTS = ("ref_identity", "ref_character_2", "ref_scene", "ref_prop", "ref_character_3", "ref_character_4", "ref_character_5", "ref_character_6")
 # 分镜视频槽位：当前分镜图 / 角色 / 场景 / 上一镜末帧
-CLIP_SLOTS = ("ref_image", "ref_identity", "ref_costume", "ref_prop", "ref_prev_frame")
+CLIP_SLOTS = ("ref_image", "ref_identity", "ref_character_2", "ref_prop", "ref_prev_frame", "ref_character_3", "ref_character_4", "ref_character_5", "ref_character_6")
 
 
 def _slug(text: str) -> str:
@@ -110,7 +113,12 @@ def _scene_prompt(s: Scene, char_names: list[str] | None = None) -> str:
         parts.append(title)
     plate = (getattr(s, "plate_text", None) or "").strip()
     if plate:
-        lines = [l.strip() for l in plate.splitlines() if l.strip()][:3]
+        # 只取前 3 行：第四行是风格，模板已通过 {style} 单独注入，重复会打架。
+        # 各行自带句号，而下方以「，」连接，故先剥掉行尾标点，避免拼出「。，」。
+        lines = [
+            l.strip().rstrip("。.；;，,")
+            for l in plate.splitlines() if l.strip()
+        ][:3]
         parts.extend(lines)
     else:
         cleaned = _clean_scene_desc(s.description or "", names)
@@ -146,13 +154,15 @@ def _ref_line(label: str, key: str, name: str) -> str:
 def _keyframe_prompt(shot: Shot, char_key: str | None, char_name: str | None,
                      scene_key: str, scene_title: str) -> str:
     # 引用统一用 @名称 书写，生成环节的 @引用解析才能携带对应参考图；
-    # 槽位顺序由引用类型分组决定（角色 ref_identity→ref_costume，场景 ref_scene，
+    # 槽位顺序由引用类型分组决定（角色 ref_identity→ref_character_2，场景 ref_scene，
     # 道具 ref_prop），与文本先后无关，此处先场景后角色仅为可读性。
     refs = [f"参考场景 @{scene_title}"] if scene_title else []
     if char_name:
         refs.append(f"参考角色 @{char_name}")
     head = "；".join(refs)
-    body = shot.image_prompt or shot.description or ""
+    # Shot 模型没有 description 字段（原写法会抛 AttributeError，image_prompt 一为空就整条链路中断）。
+    # 兜底改用 shot_purpose：它是镜头目的描述，比空串更有信息量；仍为空时留空，不虚构画面内容。
+    body = shot.image_prompt or shot.shot_purpose or ""
     return f"{head}。画面内容：{body}" if body else head
 
 
@@ -167,6 +177,28 @@ def _clip_prompt(shot: Shot, kf_key: str, char_key: str | None, char_name: str |
     head = "；".join(refs)
     body = shot.video_prompt or shot.image_prompt or ""
     return f"{head}。动作与运镜：{body}" if body else head
+
+
+def _compiled_asset_prompt(db: Session, asset_type: str, entity_id: str) -> str | None:
+    """优先使用统一硬化模板（compile_asset_image）生成资产提示词。
+
+    历史问题：批量出图曾用本模块内的极简拼接（角色仅『定妆图，正面全身，纯色背景』，
+    82-172 字），而重新生成走 prompt_compiler 的硬化模板（568-893 字，含纯净度分层、
+    视图规范、一致性约束），两条链路提示词不一致——模板硬化只对重新生成生效，
+    批量出的资产完全没有约束，这是『资产图不合要求』的直接原因。
+    现统一收敛到同一模板；编译异常或产物为空时回退极简版，保证批量出图不中断。
+    """
+    try:
+        from app.services.prompt_compiler import compile_asset_image
+
+        compiled = compile_asset_image(db, asset_type, entity_id)
+        prompt = (compiled.positive_prompt or "").strip()
+        if prompt:
+            return prompt
+        logger.warning("资产提示词编译为空 asset_type=%s entity=%s，回退极简版", asset_type, entity_id)
+    except Exception as _ce:  # noqa: BLE001 - 编译失败不阻断批量出图
+        logger.warning("资产提示词编译失败 asset_type=%s entity=%s: %s", asset_type, entity_id, _ce)
+    return None
 
 
 def _upsert_plan(db: Session, project, plan_type: str, asset_key: str, prompt: str,
@@ -214,8 +246,8 @@ def _bind_dep(db: Session, plan: AssetPlan, slot: str, ref_key: str, ref_plan: A
         dep.ref_path = ref_plan.media_path if ref_plan else None
 
 
-_KEYFRAME_ALLOWED_SLOTS = ("ref_identity", "ref_costume", "ref_scene", "ref_prop")
-_CLIP_ALLOWED_SLOTS = ("ref_image", "ref_identity", "ref_costume", "ref_prop", "ref_prev_frame")
+_KEYFRAME_ALLOWED_SLOTS = ("ref_identity", "ref_character_2", "ref_scene", "ref_prop", "ref_character_3", "ref_character_4", "ref_character_5", "ref_character_6")
+_CLIP_ALLOWED_SLOTS = ("ref_image", "ref_identity", "ref_character_2", "ref_prop", "ref_prev_frame", "ref_character_3", "ref_character_4", "ref_character_5", "ref_character_6")
 
 
 def _prune_deps(db: Session, plan: AssetPlan, allowed: tuple) -> int:
@@ -285,14 +317,16 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
     char_plans: dict[str, AssetPlan] = {}
     for c in chars:
         key = make_asset_key("character", c.name, f"{project.id}|{c.id}")
-        char_plans[c.id] = _upsert_plan(db, project, "character", key, _character_prompt(c),
+        _ch_prompt = _compiled_asset_prompt(db, "character", c.id) or _character_prompt(c)
+        char_plans[c.id] = _upsert_plan(db, project, "character", key, _ch_prompt,
                                         "character", c.id, c.name)
         stats["character"] += 1
 
     prop_plans: dict[str, AssetPlan] = {}
     for p in props:
         key = make_asset_key("prop", p.name, f"{project.id}|{p.id}")
-        prop_plans[p.id] = _upsert_plan(db, project, "prop", key, _prop_prompt(p),
+        _pp_prompt = _compiled_asset_prompt(db, "prop", p.id) or _prop_prompt(p)
+        prop_plans[p.id] = _upsert_plan(db, project, "prop", key, _pp_prompt,
                                         "prop", p.id, p.name)
         stats["prop"] += 1
 
@@ -302,9 +336,26 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
     }
     scene_plans: dict[str, AssetPlan] = {}
     char_names = [c.name for c in chars if c.name]
+    # 场景板编译（P1）：此前 compile_scene_plate 全仓无调用方，空镜规格校验全部空转。
+    # 放在 _scene_prompt 之前，使后者能读到 plate_text；
+    # persist_fallback=False 保证无 LLM 配置时不把粗清洗结果固化成正式场景板
+    # （否则 plate_text 非空即缓存命中，日后配好 LLM 也不会重新编译）。
+    from app.services.scene_plate import compile_scene_plate
+    _plate_stats = {"cached": 0, "llm": 0, "rules": 0, "rules_transient": 0, "error": 0}
+    for s in scenes:
+        try:
+            _r = compile_scene_plate(db, s, persist_fallback=False)
+            _plate_stats[_r.get("source") or "rules"] = (
+                _plate_stats.get(_r.get("source") or "rules", 0) + 1
+            )
+        except Exception as _pe:  # noqa: BLE001 - 场景板失败不阻断资产定义，仅记录
+            _plate_stats["error"] += 1
+            logger.warning("场景板编译失败 scene=%s: %s", s.id, _pe)
+    stats["scene_plate"] = _plate_stats
     for s in scenes:
         key = make_asset_key("scene", s.title, f"{project.id}|{s.id}")
-        scene_plans[s.id] = _upsert_plan(db, project, "scene", key, _scene_prompt(s, char_names),
+        _sc_prompt = _compiled_asset_prompt(db, "scene", s.id) or _scene_prompt(s, char_names)
+        scene_plans[s.id] = _upsert_plan(db, project, "scene", key, _sc_prompt,
                                          "scene", s.id, s.title)
         stats["scene"] += 1
 
@@ -340,7 +391,7 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
 
         if char_plan:
             _bind_dep(db, kf_plan, "ref_identity", char_plan.asset_key, char_plan)
-            _bind_dep(db, kf_plan, "ref_costume", char_plan.asset_key, char_plan)
+            _bind_dep(db, kf_plan, "ref_character_2", char_plan.asset_key, char_plan)
             stats["deps"] += 2
         if scene_plan:
             _bind_dep(db, kf_plan, "ref_scene", scene_plan.asset_key, scene_plan)

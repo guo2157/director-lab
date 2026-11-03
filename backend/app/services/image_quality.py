@@ -6,7 +6,11 @@
   * 纯色占比（近单色画面 → 疑似空白/失败产物）
   * 边框/裁切检测：四条边内侧条带自身均匀、且与相邻内侧区域亮度明显突变，
     或条带几乎全是纯黑/纯白像素 → 疑似边框、拼贴或主体被裁切
-  其余语义级检查（多人/额外肢体/混入角色等）超出本地启发式能力，
+  * 人物存在性检测（2026-11-02 新增）：场景基准图/道具锚定图要求画面中没有人。
+    项目无图生图（edit/inpaint）能力，人物混入场景只能整图重采样，故必须在
+    生成后前移拦截。实现为 YCbCr 肤色掩码在 16x16 网格上的聚集块判定，
+    并对整体暖色调画面（沙地/木墙/夕阳）做防误报保护，属启发式筛查而非视觉模型。
+  其余语义级检查（畸形肢体、错误道具等）超出本地启发式能力，
   记为 not_applicable，不伪造通过结论。
 
 按资产类型差异化（2026-10-29 修订）：
@@ -41,7 +45,20 @@ _BAND_EXTREME_LIGHT = 250
 _BAND_SOLID_DARK_MAX = 40
 _BAND_SOLID_LIGHT_MIN = 245
 # 不参与边框裁切判定的资产类型（满画面构图，边缘自然离散）
-_NO_BORDER_CHECK_TYPES = {"scene", "keyframe", "clip", "video"}
+_NO_BORDER_CHECK_TYPES = {"clip", "video"}
+
+# --- 人物存在性判定参数（仅场景/道具：要求画面中没有人）---
+# 必须在生成后拦截：项目无 edit/inpaint 图生图能力，人物混入后只能整图重采样。
+# 判定依据放在『肤色聚集块』而非『全图肤色占比』：暖色地面、木墙、夕阳会让
+# 全图肤色占比整体偏高，属背景色调；人物则表现为局部密集聚集。
+_SKIN_GRID = 16
+_SKIN_CELL_PX = 8
+_SKIN_CELL_RATIO = 0.35        # 单格肤色像素占比达到此值记为肤色格
+_SKIN_MIN_BLOCK = 4            # 相邻肤色格连通块不小于此值才判为人物
+_SKIN_FULL_FRAME_RATIO = 0.55  # 全图肤色占比超过此值视为整体暖色调背景，不报
+_SKIN_LUMA_MIN = 40            # 过暗区域（阴影/黑色物体）不计入肤色
+_SKIN_LUMA_MAX = 235
+_NO_PERSON_CHECK_TYPES = {"scene", "prop"}
 
 
 def _detect_border(gray) -> str | None:
@@ -78,6 +95,72 @@ def _detect_border(gray) -> str | None:
                 f"{name}存在均匀边框条带（条带标准差 {b_std:.1f}，与内侧均值差 "
                 f"{abs(b_mean - i_mean):.1f}），疑似边框、拼贴或主体被裁切"
             )
+    return None
+
+
+def _detect_person(rgb) -> str | None:
+    """启发式检测画面中是否存在人物（肤色聚集块）。
+
+    返回问题描述，未命中返回 None。
+    这是启发式筛查而非视觉模型：命中后由执行器换 seed 重新采样，
+    不宣称已精确识别『几个人』或『是谁』。
+    """
+    size = _SKIN_GRID * _SKIN_CELL_PX
+    small = rgb.resize((size, size))
+    ycbcr = small.convert('YCbCr')
+    y_data = ycbcr.getchannel('Y').tobytes()
+    cb_data = ycbcr.getchannel('Cb').tobytes()
+    cr_data = ycbcr.getchannel('Cr').tobytes()
+
+    cells = [0] * (_SKIN_GRID * _SKIN_GRID)
+    skin_total = 0
+    for idx in range(size * size):
+        y = y_data[idx]
+        if y < _SKIN_LUMA_MIN or y > _SKIN_LUMA_MAX:
+            continue
+        if 77 <= cb_data[idx] <= 127 and 133 <= cr_data[idx] <= 173:
+            skin_total += 1
+            row = idx // size // _SKIN_CELL_PX
+            col = idx % size // _SKIN_CELL_PX
+            cells[row * _SKIN_GRID + col] += 1
+
+    if skin_total == 0:
+        return None
+    skin_ratio = skin_total / (size * size)
+    if skin_ratio >= _SKIN_FULL_FRAME_RATIO:
+        # 整体暖色调画面（沙地、木墙、夕照），不是局部人物
+        return None
+
+    per_cell = _SKIN_CELL_PX * _SKIN_CELL_PX
+    hot = {i for i, n in enumerate(cells) if n / per_cell >= _SKIN_CELL_RATIO}
+    if len(hot) < _SKIN_MIN_BLOCK:
+        return None
+
+    seen: set[int] = set()
+    largest = 0
+    for start in hot:
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        block = 0
+        while stack:
+            cur = stack.pop()
+            block += 1
+            r, c = divmod(cur, _SKIN_GRID)
+            for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if 0 <= nr < _SKIN_GRID and 0 <= nc < _SKIN_GRID:
+                    nxt = nr * _SKIN_GRID + nc
+                    if nxt in hot and nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+        largest = max(largest, block)
+
+    if largest >= _SKIN_MIN_BLOCK:
+        return (
+            f'疑似混入人物（肤色聚集块 {largest} 格，全图肤色 {skin_ratio:.1%}），'
+            '场景/道具图应为空场，需重采样'
+        )
     return None
 
 
@@ -134,9 +217,19 @@ def check_image_quality(file_path: str, *, asset_type: str | None = None) -> dic
             if flat_ratio >= _FLAT_COLOR_RATIO:
                 issues.append(f"画面接近纯色（占比 {flat_ratio:.1%}），疑似空白或失败产物")
 
-            # 边框/裁切检测（按资产类型选择是否启用）
             atype = (asset_type or "").strip().lower()
             checks["asset_type"] = atype or None
+
+            # 人物存在性检测（场景/道具要求画面中没有人；无 edit 能力只能前移拦截）
+            if atype in _NO_PERSON_CHECK_TYPES:
+                person_hit = _detect_person(rgb)
+                checks["person_check"] = person_hit or "ok"
+                if person_hit:
+                    issues.append(person_hit)
+            else:
+                checks["person_check"] = "not_applicable"
+
+            # 边框/裁切检测（按资产类型选择是否启用）
             if atype in _NO_BORDER_CHECK_TYPES:
                 checks["border_check"] = "skipped_full_frame_asset"
             else:

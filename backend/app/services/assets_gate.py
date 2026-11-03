@@ -121,6 +121,12 @@ def _check_entity_assets(
                 GateItem(c.portrait_asset_id, c.name, "character", "asset_invalid", "定妆图已失效")
             )
             continue
+        # 版本有效性：superseded 资产（已被重生成替换）不得放行审核与分镜生成
+        if a.validity != "current":
+            blockers.append(
+                GateItem(a.id, c.name, "character", "asset_invalid", f"定妆图版本已失效（{a.validity}）")
+            )
+            continue
         if not _media_file_exists(a.file_path):
             blockers.append(
                 GateItem(a.id, c.name, "character", "asset_file_missing", f"定妆图文件缺失：{a.file_path}")
@@ -137,6 +143,11 @@ def _check_entity_assets(
                 GateItem(sc.baseline_asset_id, sc.title or sc.id, "scene", "asset_invalid", "基准图已失效")
             )
             continue
+        if a.validity != "current":
+            blockers.append(
+                GateItem(a.id, sc.title or sc.id, "scene", "asset_invalid", f"基准图版本已失效（{a.validity}）")
+            )
+            continue
         if not _media_file_exists(a.file_path):
             blockers.append(
                 GateItem(a.id, sc.title or sc.id, "scene", "asset_file_missing", f"基准图文件缺失：{a.file_path}")
@@ -150,6 +161,11 @@ def _check_entity_assets(
         a = db.get(Asset, p.anchor_asset_id)
         if a is None:
             blockers.append(GateItem(p.anchor_asset_id, p.name, "prop", "asset_invalid", "锚定图已失效"))
+            continue
+        if a.validity != "current":
+            blockers.append(
+                GateItem(a.id, p.name, "prop", "asset_invalid", f"锚定图版本已失效（{a.validity}）")
+            )
             continue
         if not _media_file_exists(a.file_path):
             blockers.append(

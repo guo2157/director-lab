@@ -60,9 +60,14 @@ def validate_plate(p: dict) -> list[str]:
     return errs
 
 
-def _location_bible(db: Session, project_id: str, location_id: str | None) -> str:
-    """基础版地点圣经：取同项目内同 location_id 已落库场景的 anchors 复用。"""
-    if not location_id:
+def _location_bible(db: Session, project_id: str, place_key: str | None) -> str:
+    """基础版地点圣经：同项目内同一地点的 anchors 复用。
+
+    place_key 取 Scene.normalized_name（地点+时段复合键）。Scene 表本身没有
+    location_id 列，地点标识只存在于 plate JSON 内，因此匹配时同时兼容
+    plate.location_id 与 normalized_name。修复前调用点恒传 None，地点圣经从未生效。
+    """
+    if not place_key:
         return "（无，请在本条内首次定义锚点）"
     rows = (
         db.query(Scene)
@@ -74,8 +79,13 @@ def _location_bible(db: Session, project_id: str, location_id: str | None) -> st
             plate = json.loads(s.plate) if isinstance(s.plate, str) else (s.plate or {})
         except (json.JSONDecodeError, TypeError):
             continue
-        if isinstance(plate, dict) and plate.get("location_id") == location_id and plate.get("anchors"):
-            return json.dumps({location_id: {
+        if not isinstance(plate, dict) or not plate.get("anchors"):
+            continue
+        same_place = plate.get("location_id") == place_key or (
+            s.normalized_name and s.normalized_name == place_key
+        )
+        if same_place:
+            return json.dumps({place_key: {
                 "location_name": plate.get("location_name", ""),
                 "anchors": plate.get("anchors", []),
             }}, ensure_ascii=False)
@@ -105,11 +115,15 @@ def _call_llm(title: str, description: str, style: str, location_bible: str, asp
 
 
 def compile_scene_plate(db: Session, scene: Scene, *, style: str | None = None,
-                        aspect: str = "9:16") -> dict:
+                        aspect: str = "9:16", persist_fallback: bool = True) -> dict:
     """编译场景板：plate_text 已有则直接复用（懒编译 + 落库缓存）。
 
-    返回 {"plate": dict|None, "plate_text": str, "source": "cached|llm|rules"}。
+    返回 {"plate": dict|None, "plate_text": str, "source": "cached|llm|rules|rules_transient"}。
     LLM 失败时回退规则清洗（_strip_story_content），保证生成链路不阻塞。
+
+    persist_fallback=False 时规则兜底不写库（source=rules_transient）：
+    供自动化入口使用，避免无 LLM 配置时把粗清洗的 description 固化成 plate_text，
+    从而在不经意间改变既有场景提示词的走向。
     """
     # 1) 缓存命中
     if scene.plate_text:
@@ -142,6 +156,11 @@ def compile_scene_plate(db: Session, scene: Scene, *, style: str | None = None,
     # 3) 规则兜底：_strip_story_content 清洗后的 description 作为 plate_text
     from app.services.prompt_compiler import _strip_story_content
     fallback = _strip_story_content(description) or "室外自然环境"
+    if not persist_fallback:
+        # 不落库：只把兜底文本返回给调用方判断，不改变 Scene 与 AssetPlan 的持久状态。
+        # 无 LLM 配置时这条路径会被反复走到，落库会让 description 的粗清洗结果
+        # 固化成正式场景板，后续即使配好 LLM 也不会再重新编译（plate_text 非空即缓存命中）。
+        return {"plate": None, "plate_text": fallback, "source": "rules_transient"}
     scene.plate_text = fallback
     db.commit()
     # 回写 asset_plan.prompt，使 UI 显示与实际生成使用的提示词一致

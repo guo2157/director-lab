@@ -29,6 +29,49 @@ SCRIPT_EVALUATION_SYSTEM_PROMPT = _register_default("script_evaluation_system", 
 """)
 
 
+# 可制作性维度（第 1 步新增）：按 AI 生成能力评估剧本能否稳定产出合格资产。
+# 缺失时补空结构，保证下游可安全索引而不抛错。
+_PRODUCIBILITY_DEFAULTS: dict[str, dict] = {
+    "character_convergence": {
+        "total_named": None, "alias_conflicts": [], "walk_on_risks": [],
+        "appearance_volatility": [],
+    },
+    "scene_convergence": {
+        "total_locations": None, "duplicate_locations": [], "reuse_ratio": None,
+        "purity_risks": [],
+    },
+    "shot_feasibility": {
+        "oversize_duration": [], "compound_actions": [], "abstract_shots": [],
+        "crowd_or_complex": [],
+    },
+    "dialogue_feasibility": {
+        "long_lines": [], "rapid_turns": [], "narration_ratio": None,
+    },
+    "prop_risks": {
+        "transient_props": [], "state_changing_props": [], "scene_embedded_props": [],
+    },
+}
+
+
+def _normalize_producibility(result: dict) -> list[str]:
+    """把可制作性维度补齐为固定结构，返回实际缺失的维度名。
+
+    LLM 未按新模板输出时不让整次评估失败：补空结构后下游仍可安全读取，
+    但缺失项要返回给调用方留痕，避免出现『看起来评估过』的假象。
+    """
+    missing: list[str] = []
+    for key, defaults in _PRODUCIBILITY_DEFAULTS.items():
+        block = result.get(key)
+        if not isinstance(block, dict):
+            result[key] = {k: (list(v) if isinstance(v, list) else v) for k, v in defaults.items()}
+            missing.append(key)
+            continue
+        for field, default in defaults.items():
+            if field not in block:
+                block[field] = list(default) if isinstance(default, list) else default
+    return missing
+
+
 def build_evaluation_user_prompt(script_text: str, estimate_data: dict, config: dict) -> str:
     """组装评估用户提示词：剧本正文 + 算法估算数据 + 创作配置。"""
     parts = ["请对以下剧本进行全面质量评估："]
@@ -113,6 +156,9 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
     missing = required_keys - set(result.keys())
     if missing:
         raise ValueError(f"评估报告缺少必需字段: {missing}")
+
+    # 可制作性维度：缺失不阻断（软闸口语义），补空结构并留痕，避免下游索引异常
+    result["producibility_missing"] = _normalize_producibility(result)
 
     # 校验 overall_score 范围
     score = result.get("overall_score")

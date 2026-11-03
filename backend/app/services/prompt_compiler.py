@@ -40,7 +40,7 @@ TEMPLATE_STORYBOARD = "storyboard_image_prompt"
 TEMPLATE_VIDEO = "shot_video_prompt"
 
 TEMPLATE_REGISTRY: dict[str, dict] = {
-    TEMPLATE_CHARACTER: {"version": 1, "task_type": TASK_ASSET_IMAGE, "asset_type": "character",
+    TEMPLATE_CHARACTER: {"version": 2, "task_type": TASK_ASSET_IMAGE, "asset_type": "character",
                          "prompt_name": "compile_character_asset"},
     TEMPLATE_SCENE: {"version": 2, "task_type": TASK_ASSET_IMAGE, "asset_type": "scene",
                      "prompt_name": "compile_scene_asset"},
@@ -72,7 +72,7 @@ CHARACTER_NEGATIVE = (
     "复杂场景背景，室内布景，室外风景，家具堆叠，背景故事元素，角色被裁切，缺失头部，"
     "缺失脚部，只显示半身，极端透视，遮挡主体，身体结构错误，额外手臂，额外腿，手指畸形，"
     "面部错位，五官重复，肢体融合，服装颜色错误，服装款式改变，头发颜色改变，比例漂移，"
-    "角色设定表，多视图合集，身份漂移，面孔不一致，服装配饰不一致，年龄感不一致，"
+    "多角色拼图，不同角色同框，身份漂移，面孔不一致，服装配饰不一致，年龄感不一致，"
     "配饰缺失或新增"
 )
 SCENE_NEGATIVE = (
@@ -132,7 +132,15 @@ CHARACTER_TEMPLATE = """生成一张独立的角色设定参考图，画面中�
 构图要求：单角色、全身完整入画、自然稳定站姿、正面或轻微四分之三角度、头部到脚部均清晰可见、主体居中、轮廓清楚，可直接作为后续分镜的角色参考图。
 背景要求：干净统一的纯色或低干扰背景，不展示故事发生的场景。
 一致性要求：不自行改变上述外观，不增加剧本未定义的服装、配件、图案或身体特征；除明确列出的固定配件外，角色不手持道具。
-画面限制：不生成角色设定表、四视图、表情合集或多角色拼图。
+视图规范（单视图为默认交付，直接作为分镜身份参考）：
+- 默认只输出一张正面全身定妆照：画面中只有这一个角色、只有一个视角、正面朝向镜头
+- 全身完整入画，头顶到脚底全部可见，主体居中，身形比例真实自然
+- 不做并排多视角拼图：三视图会让模型同时接收到三张人脸，作为身份参考注入分镜时会诱发角色分身与多人同框
+- 如确需三视图（正面/侧面/背面）作角色设定交付，必须在提示词中显式单独要求；该交付物不得作为分镜身份参考图使用
+
+纯净度要求：画面中只有这一个角色，不出现第二个人物、人物剪影、镜中人物、背景人物、路人、动物；不出现文字、标签、编号、尺寸标线、水印、边框、拼贴或分格线。
+
+画面限制：默认输出单张正面全身定妆照；不生成表情合集、多角色拼图、不同角色同框、并排多视角拼图；不生成半身像或只有头部的特写替代全身视图。
 画面风格：{style}"""
 
 SCENE_TEMPLATE = """场景板（空镜）：{name}，{time_and_weather}，{empty_expr}，只有景色与建筑。
@@ -143,7 +151,13 @@ SCENE_TEMPLATE = """场景板（空镜）：{name}，{time_and_weather}，{empty
 镜头：{camera_shot}，前中后景层次清晰。
 质感：{texture}，主色调与材质：{palette}。
 环境定义：{identity}。允许出现的固定环境元素：{fixed_elements}。不得出现的剧情道具、车辆与可移动杂物：{excluded_props}。
-不出现人物、行人、车辆或动物；不出现任何文字、招牌、路牌、海报或价目表（需要门头时写纯色无字招牌）；整个画面只由环境本身与天空构成。
+纯净度要求（硬性，逐条核对）：
+- 没有任何人：不出现人物、行人、群众、角色剪影、人体局部、背影，也不出现远景中的小黑人形
+- 没有间接人影：不出现角色倒影、水面人形倒影、墙上海报人物、雕像、人形立牌、照片中的人
+- 没有动物与载具：不出现动物、车辆、飞行器
+- 没有剧情道具：不出现剧本中可移动的物品，只保留属于环境本身的固定构造
+- 没有文字与装饰：不出现文字、招牌、路牌、海报、价目表、门牌号、Logo、水印、边框、分格线（需要门头时写纯色无字招牌）
+整个画面只由环境本身与天空构成。
 画面风格：{style}"""
 
 PROP_TEMPLATE = """生成一张独立的道具参考图，画面中只能有一件道具：{name}。
@@ -154,23 +168,44 @@ PROP_TEMPLATE = """生成一张独立的道具参考图，画面中只能有一�
 相对尺寸与比例：{relative_scale}
 必须保留的关键细节：{distinctive_features}
 构图要求：整件道具完整入画、主体居中、轮廓清晰、形状容易辨认，采用干净统一的纯色或低干扰背景；以独立物品展示，不放进故事场景，不表现使用过程。
-一致性要求：不增加数量、装饰、图案、附件或包装；同一件道具的多部件结构整体展示，不拆成多件独立物品。
+视图规范：
+- 单件道具为主视图，结构复杂时在同一画面内并排展示正视与侧视两个角度，两个角度是同一件道具
+- 多角度共用同一套光照与背景，尺寸比例完全一致
+- 材质必须可辨识：金属有反光与高光、木质有纹理、布料有织物结构、玻璃有透光与折射
+
+一致性要求：不增加数量、装饰、图案、附件或包装；同一件道具的多部件结构整体展示，不拆成多件独立物品；不凭空添加磨损、划痕、锈迹等剧本未描述的痕迹。
+
+纯净度要求（硬性，逐条核对）：
+- 没有任何人：不出现角色、手部、手指、手臂、人体局部、人物剪影
+- 没有使用场景：不放进故事发生的环境，不表现被使用、被握持、被放置的瞬间
+- 没有其他物品：不出现第二个道具、道具堆叠、桌面杂物、背景摆件、包装盒
+- 没有文字与装饰：不出现标签、说明文字、尺寸标线、价格牌、Logo、水印、边框、分格线
+背景为干净统一的纯色或低干扰背景，画面只由这一件道具构成。
+
 画面风格：{style}"""
 
 STORYBOARD_TEMPLATE = """生成镜头 {shot_id} 的单帧分镜参考图，表现当前镜头的具体瞬间，不是角色设定图、场景设定图或多格分镜表。
 编辑目标：{scene_target}。构图、透视与光线方向必须与编辑底图严格一致。
 画面主体：只出现本镜头绑定的角色 {characters}；场景为 {scene}；允许出现的道具 {props}。
+纯净度要求（硬性，逐条核对）：
+- 人物数量精确：{character_count_rule}
+- 没有未绑定人物：不出现旁白人物、路人、群众、背景人群、剪影、人体局部、照片或海报中的人
+- 没有未绑定道具：只出现 {props} 列出的道具，不出现其他可移动物品、车辆、杂物或包装
+- 场景元素只用底图：背景、建筑结构、地形、植被全部取自场景参考图，不新增剧本未定义的建筑、招牌、家具或装饰，不改动空间结构
+- 没有文字与装饰：不出现文字、对白气泡、字幕、标签、编号、水印、Logo、边框、分格线、漫画格
+- 画面连续：地面接触阴影真实，人物有立足点，不悬浮、不穿模、不与道具或环境融合
 参考绑定：{ref_bindings}。角色身份只由对应参考图锁定，提示词不重复描述五官细节；所有出现的人脸、体型、服装、配色保持与对应参考图完全一致，各角色独立保持身份。
 动作与叙事瞬间：{action}。
 角色相对位置与视线：{positions}。
 道具与角色或环境的关系：{prop_interaction}。
-画面情绪：{emotion}。
+画面情绪：{emotion}——通过面部表情、眼神方向与身体姿态外化呈现，不使用抽象情绪词。
 镜头语言：景别 {shot_size}；机位与角度 {camera_angle}；构图 {composition}；运动暗示 {camera_movement}；光线与色彩 {lighting}。
-画面限制：只生成一张完整单帧画面，参考图仅作为身份与结构来源。
+画面限制：只生成一张完整单帧画面，不拼贴、不分屏、不做多格分镜表；参考图仅作为身份与结构来源，不在画面中复现参考图缩略图。
 画面风格：{style}"""
 
 VIDEO_TEMPLATE = """integrated_multimodal_description:
 Scene: {scene}, with characters {characters} and props {props}. Overall style: {style}. This video must continue the approved storyboard reference image: keep character identity, face, body, costume, colors, props and scene structure exactly consistent in every frame.
+Reference bindings: {ref_bindings}. Character identity is locked by reference images — do not alter face, body type, costume, color palette or proportions. The storyboard reference image defines scene structure, character positions and composition; do not change spatial layout or camera framing.
 
 [Shot 1] {main_action}. Start state: {start_state}. End state: {end_state}. Shot size: {shot_size}. Camera: {camera_angle}. Movement: {camera_movement}. Pacing: {pacing}. Environment changes: {environment_changes}. Continuity in: {continuity_in_type}; source shot: {source_shot_id}; source frame: {source_frame_file_id}. Continuity out: {continuity_out_state}. Dialogue or narration: {dialogue}.
 
@@ -286,6 +321,28 @@ def merge_negative(*parts: str) -> str:
             if item and item not in seen:
                 seen.append(item)
     return "，".join(seen)
+
+
+def effective_cfg(definition: dict | None) -> float | None:
+    """读取工作流中 CFGGuider 的 cfg 实际取值。
+
+    classifier-free guidance 的采样公式为 neg + cfg * (pos - neg)：
+    当 cfg=1 时该式退化为 pos，负向分支被数学抵消，写入 negative 参数不会影响出图。
+    返回 None 表示工作流没有 CFGGuider（例如 BasicGuider），无法判定。
+    """
+    if not isinstance(definition, dict):
+        return None
+    for node in definition.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") != "CFGGuider":
+            continue
+        value = (node.get("inputs") or {}).get("cfg")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def negative_for(asset_or_task_type: str) -> str:
@@ -407,6 +464,18 @@ def _approved_asset(db: Session, asset_id: str | None, project_id: str,
     if not _media_file_exists(asset.file_path):
         return None, _issue("reference_asset_file_missing", "参考图文件不存在或不可读",
                             asset_id=asset_id, file_path=asset.file_path)
+    # 底图卫兵：质检未通过的资产不得被下游引用。
+    # 场景基准图一旦混入人物或被裁切，会污染所有引用它的分镜图与镜头，
+    # 在引用边界拦住的成本远低于事后逐镜重生成。
+    # 只拦 failed：pending 表示尚未质检（历史资产或 mock 模式），不能当作不合格，
+    # 否则存量项目会整体无法出图。
+    if (getattr(asset, "quality_status", None) or "") == "failed":
+        return None, _issue(
+            "reference_asset_quality_failed",
+            "参考图质量检查未通过，不能作为生成参考",
+            asset_id=asset_id,
+            quality_issues=asset.quality_issues,
+        )
     return asset, None
 
 
@@ -613,6 +682,14 @@ def compile_asset_image(db: Session, asset_type: str, entity_id: str, *,
             warnings.append(
                 "negative_prompt_unsupported: 当前工作流未绑定 negative 参数，负向提示词仅存档"
             )
+        else:
+            _cfg = effective_cfg(getattr(workflow, "definition", None))
+            if _cfg is not None and _cfg <= 1.05:
+                warnings.append(
+                    f"negative_prompt_ineffective: 当前工作流 CFGGuider.cfg={_cfg}，"
+                    "负向分支在 cfg=1 时被数学抵消，负向提示词不会生效；"
+                    "约束请改写为正向肯定句，或改用非蒸馏（cfg 4-7）工作流"
+                )
 
     constraints = {
         "isolation_rule": {
@@ -788,7 +865,7 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
             _append_slot(slots, declared_map, "ref_scene", entity_id=scene.id, entity_type="scene",
                          asset=scene_asset, role="scene_layout_reference",
                          blocking=blocking, asset_label="场景")
-    # 角色槽位：按工作流声明顺序取所有角色槽（ref_identity/ref_costume/ref_character_N…），
+    # 角色槽位：按工作流声明顺序取所有角色槽（ref_identity/ref_character_2/ref_character_N…），
     # 槽位数量完全由工作流决定，不再写死两个名字
     from app.services.ref_inject import is_character_slot
     character_slot_pool = [item["param"] for item in declared if is_character_slot(item["param"])]
@@ -886,6 +963,14 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
     mapping = {
         "shot_id": shot.id,
         "characters": "、".join(c.name for c in characters) or "无（空镜）",
+        "character_count": len(characters),
+        # 人数约束必须是可判定的自然语句：直接拼角色名会渲染成『等于 无（空镜） 的人数』这种病句
+        "character_count_rule": (
+            "画面中不得出现任何人物，也不出现人物剪影、背影、人体局部或人群中的人"
+            if not characters else
+            f"画面中的人物总数必须严格等于 {len(characters)} 人（{'、'.join(c.name for c in characters)}）"
+            "，不多不少；每个人只出现一次，不出现分身、镜像、重影、背影复制"
+        ),
         "scene": scene.title if scene is not None and scene.title else "未指定场景",
         "props": "、".join(p.name for p in prop_rows) or "无",
         "action": action,
@@ -894,9 +979,12 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         "emotion": shot.emotion or "neutral",
         "shot_size": _text(shot.shot_type),
         "camera_angle": _text(shot.camera_angle),
-        "composition": "主体清晰、空间关系合理",
+        "composition": "主体清晰、空间关系合理，前景中景背景层次分明",
         "camera_movement": _text(shot.camera_movement, "固定机位"),
-        "lighting": "光从左上方照下，投影落向右下，与场景板主光方向一致",
+        "lighting": (
+            "光从左上方照下，投影落向右下，与场景板主光方向一致；"
+            "高光柔和不过曝，阴影保留细节不死黑，对比适中，色彩饱和度与场景板一致"
+        ),
         "character_slots": ", ".join(s["slot_key"] for s in slots
                                      if s["role"].startswith("character")) or "无",
         "scene_slot": next((s["slot_key"] for s in slots if s["role"] == "scene_layout_reference"), "无"),
@@ -1060,6 +1148,95 @@ def compile_shot_video(db: Session, shot_id: str, *,
     style = _style_for(db, project, "shot_video")
     style_snap = style_config.style_snapshot((project.settings if project else {}) or {},
                                              project_id=project.id if project else None)
+
+    # --- 参考图槽位注入：角色一致性 + 分镜图底图 + 道具 ---
+    # ref2va 工作流支持 ref_identity/ref_character_2/ref_character_N/ref_image/ref_prop，
+    # 但此前 compile_shot_video 只接了 ref_prev_frame，角色/场景/道具/分镜图全部未注入，
+    # 导致 H3 生成视频时角色身份仅靠文字描述，一致性无法保证。
+    from app.services.ref_inject import is_character_slot
+    _declared = _declared_slots(caps)
+    character_slot_pool = [item["param"] for item in _declared
+                           if is_character_slot(item["param"])]
+    if characters and not character_slot_pool:
+        warnings.append(
+            "character_reference_unsupported: 当前视频工作流无角色参考槽位，角色仅以文字描述呈现"
+        )
+    for index, character in enumerate(characters):
+        asset, issue = _approved_asset(db, character.portrait_asset_id, project_id, ("character",))
+        if issue:
+            blocking.append({**issue, "entity_id": character.id, "entity_type": "character"})
+            continue
+        if asset is None:
+            blocking.append(_issue("character_portrait_missing",
+                                    "角色缺少已审核的定妆图，无法作为视频参考图",
+                                    entity_id=character.id))
+            continue
+        if character_slot_pool and index >= len(character_slot_pool):
+            blocking.append(_issue(
+                "reference_capacity_exceeded",
+                "镜头角色数量超过当前视频工作流参考图槽位能力",
+                capacity=len(character_slot_pool),
+            ))
+            continue
+        if not character_slot_pool:
+            continue
+        _append_slot(slots, declared_map, character_slot_pool[index], entity_id=character.id,
+                     entity_type="character", asset=asset, role="character_identity_reference",
+                     blocking=blocking, asset_label="角色")
+
+    # 分镜图作为 ref_image 注入（场景结构 + 角色位置 + 构图的权威来源）
+    if storyboard is not None and _media_file_exists(storyboard.file_path):
+        if "ref_image" not in declared_map:
+            warnings.append("storyboard_reference_unsupported: 当前视频工作流无 ref_image 槽位，分镜图仅作为文字参考")
+        else:
+            _append_slot(slots, declared_map, "ref_image", entity_id=shot.id,
+                         entity_type="keyframe", asset=storyboard, role="storyboard_reference",
+                         blocking=blocking, asset_label="分镜图")
+
+    # 道具槽位
+    for prop in prop_rows:
+        asset, issue = _approved_asset(db, prop.anchor_asset_id, project_id, ("prop",))
+        if issue:
+            blocking.append({**issue, "entity_id": prop.id, "entity_type": "prop"})
+            continue
+        if asset is None:
+            warnings.append(f"prop_asset_missing: 道具 {prop.name} 无审核通过锚定图，仅以文字描述")
+            continue
+        if "ref_prop" not in declared_map:
+            warnings.append(f"prop_reference_unsupported: 当前视频工作流无 ref_prop 槽位，道具 {prop.name} 仅文字描述")
+            continue
+        _append_slot(slots, declared_map, "ref_prop", entity_id=prop.id, entity_type="prop",
+                     asset=asset, role="prop_identity_reference", blocking=blocking,
+                     asset_label="道具")
+
+    video_limit = _slot_limit(caps, _declared)
+    if video_limit and len(slots) > video_limit:
+        blocking.append(_issue("reference_capacity_exceeded",
+                                "视频参考图数量超过工作流上限",
+                                count=len(slots), limit=video_limit))
+    _assert_unique_slots(slots, blocking)
+
+    # 构建参考绑定文字描述（注入提示词，让 H3 知道每张参考图的用途）
+    ref_parts: list[str] = []
+    for s in slots:
+        if s["role"] == "character_identity_reference":
+            ref_parts.append(
+                "Character identity locked by reference image: face, body, costume and colors must match exactly"
+            )
+        elif s["role"] == "storyboard_reference":
+            ref_parts.append(
+                "Storyboard reference image defines scene structure, character positions and composition"
+            )
+        elif s["role"] == "prop_identity_reference":
+            ref_parts.append(
+                "Prop reference image defines shape, color and material"
+            )
+        elif s["role"] == "previous_shot_last_frame":
+            ref_parts.append(
+                "Previous shot last frame provides continuity: match lighting, position and state"
+            )
+    ref_bindings = "; ".join(ref_parts) or "No reference images bound, generate from text description only"
+
     mapping = {
         "shot_id": shot.id,
         "duration": f"{duration:g}",
@@ -1083,6 +1260,7 @@ def compile_shot_video(db: Session, shot_id: str, *,
         "soundscape": _text(shot.soundscape, "N/A"),
         "music": "N/A",
         "style": style,
+        "ref_bindings": ref_bindings,
     }
 
     meta = TEMPLATE_REGISTRY[TEMPLATE_VIDEO]

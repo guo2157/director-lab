@@ -184,3 +184,68 @@ def test_clip_blocked_without_keyframe_confirm(client, monkeypatch):
                     json={"plan_type": "clip", "workflow_id": wf})
     assert r.status_code == 409, r.text
     assert r.json()["detail"]["code"] == "keyframe_not_confirmed"
+
+
+NEGATIVE_WF = {
+    "1": {"class_type": "EmptyLatentImage", "_meta": {"title": "$~width, $~height"},
+          "inputs": {"width": 512, "height": 288, "batch_size": 1}},
+    "2": {"class_type": "CLIPTextEncode",
+          "_meta": {"title": "文本编码, $prompt.prompt!, $negative.negative_prompt"},
+          "inputs": {"prompt": "占位", "negative_prompt": ""}},
+    "3": {"class_type": "SaveImage", "_meta": {"title": "$output.cover"},
+          "inputs": {"images": ["1", 0]}},
+}
+
+
+def test_entity_generate_injects_negative(client, monkeypatch):
+    """工作流绑定 $negative 时，批量生成必须把资产负向提示词写入任务参数。
+
+    场景纯净度依赖这条链路：五类污染否定词（没有人/没有倒影海报/没有动物载具/
+    没有剧情道具/没有文字装饰）只有在 negative 真正进入 params 时才可能送达模型。
+    """
+    from app.core.database import SessionLocal
+    from app.models import Job
+    from app.services.asset_prompts import negative_for_asset_type
+
+    pid, _ = _prepare(client, monkeypatch)
+    wf = client.post("/api/workflows", data={"name": "plan-image-negative", "workflow_type": "image"},
+                     files={"file": ("n.json", json.dumps(NEGATIVE_WF), "application/json")})
+    assert wf.status_code == 201, wf.text
+    wf_id = wf.json()["id"]
+
+    r = client.post(f"/api/projects/{pid}/asset-plans/generate",
+                    json={"plan_type": "character", "workflow_id": wf_id})
+    assert r.status_code == 200, r.text
+    job_ids = [j["job_id"] for j in r.json()["jobs"]]
+    assert job_ids
+
+    db = SessionLocal()
+    try:
+        for jid in job_ids:
+            job = db.get(Job, jid)
+            assert job is not None
+            assert (job.params or {}).get("negative") == negative_for_asset_type("character")
+    finally:
+        db.close()
+
+
+def test_entity_generate_skips_negative_when_workflow_unbound(client, monkeypatch):
+    """工作流未绑定 $negative 时不写该参数，避免制造『已生效』的假象。"""
+    from app.core.database import SessionLocal
+    from app.models import Job
+
+    pid, wf_id = _prepare(client, monkeypatch)
+    r = client.post(f"/api/projects/{pid}/asset-plans/generate",
+                    json={"plan_type": "character", "workflow_id": wf_id})
+    assert r.status_code == 200, r.text
+    job_ids = [j["job_id"] for j in r.json()["jobs"]]
+    assert job_ids
+
+    db = SessionLocal()
+    try:
+        for jid in job_ids:
+            job = db.get(Job, jid)
+            assert job is not None
+            assert "negative" not in (job.params or {})
+    finally:
+        db.close()

@@ -58,7 +58,7 @@ class AssetPlanDependency(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.asset_plan_dep_id)
     plan_id: Mapped[str] = mapped_column(String(32), ForeignKey("asset_plan.id"), nullable=False, index=True)
-    # 槽位：ref_identity/ref_costume/ref_scene/ref_prop/ref_image/ref_prev_frame
+    # 槽位：ref_identity/ref_character_2/ref_scene/ref_prop/ref_image/ref_prev_frame
     slot: Mapped[str] = mapped_column(String(32), nullable=False)
     # 被依赖定义的 ID 与固定名称（名称冗余存储，便于校验断链）
     ref_plan_id: Mapped[str | None] = mapped_column(String(32), nullable=True)

@@ -76,7 +76,7 @@ def _match_workflow_exact(db: Session, target: str, workflow_id: str | None) -> 
     return wf
 
 
-_REF_CHAR_SLOTS = ("ref_identity", "ref_costume", "ref_image")
+_REF_CHAR_SLOTS = ("ref_identity", "ref_character_2", "ref_image")
 
 
 def _find_ref_capable_image_workflow(db: Session) -> Workflow | None:

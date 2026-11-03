@@ -31,6 +31,11 @@ _MARK_RE = re.compile(r"\$(~?)([A-Za-z0-9_]+)(?:\.(~?)([A-Za-z0-9_.]+))?(!?)")
 # 画布专用残留键（WORKFLOW.md §1 防复发规则）
 CANVAS_ONLY_KEYS = {"control_after_generate", "widgets_values"}
 
+# 永不是媒体的参数名：尺寸/时长/种子即使写成 $~name 也只注入数值，
+# 否则 prune_unbound_media_inputs 会把它们当参考图槽位剔除，
+# 进而误判『媒体槽位全部为空』并抛 missing_reference_image。
+NON_MEDIA_PARAMS = frozenset({"width", "height", "length", "seed", "workflow_id"})
+
 
 def parse_workflow(wf: dict) -> ParsedWorkflow:
     """解析 API Format 工作流定义中的标记。"""
@@ -60,8 +65,10 @@ def parse_workflow(wf: dict) -> ParsedWorkflow:
             if not m:
                 result.errors.append(f"节点 {nid} 标记非法 {frag}")
                 continue
-            media = bool(m.group(1) or m.group(3))
             name = m.group(2).lower()
+            # 尺寸/时长/种子永不是媒体：即使误标 $~name 也按数值注入，
+            # 否则会被 prune_unbound_media_inputs 剔除并误报 missing_reference_image
+            media = bool(m.group(1) or m.group(3)) and name not in NON_MEDIA_PARAMS
             field_name = m.group(4) or name
             required = bool(m.group(5))
             if field_name not in node["inputs"]:
