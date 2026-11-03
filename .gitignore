@@ -38,3 +38,5 @@ uvicorn.log
 
 # 编辑器临时文件
 *.orcaterm-tmp-file-change-*
+.bak_*/
+backend/.bak_*/
