@@ -26,13 +26,24 @@ from app.models.production import (
 )
 from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.models.continuity import EpisodeContinuity
+from app.models.prop_lifecycle import PropEpisodeSnapshot, PropLifecycleEvent, PropShotState
+from app.models.prop_binding import CharacterPropBinding
 from app.models.agent import (
     AgentConfirmation,
+    AgentMemory,
     AgentMessage,
     AgentPlanStep,
     AgentSession,
     AgentTask,
 )
+from app.models.task import (
+    Task,
+    TaskEvent,
+    TaskResult,
+    TaskStage,
+)
+from app.models.search import SearchRun, SearchResult
+from app.models.audio import AudioReview, AudioSegment, VoiceProfile
 
 __all__ = [
     "Base",
@@ -60,9 +71,23 @@ __all__ = [
     "EpisodeContinuity",
     "AssetPlan",
     "AssetPlanDependency",
+    "PropLifecycleEvent",
+    "PropShotState",
+    "PropEpisodeSnapshot",
+    "CharacterPropBinding",
     "AgentSession",
     "AgentMessage",
     "AgentTask",
     "AgentPlanStep",
+    "SearchRun",
+    "SearchResult",
+    "VoiceProfile",
+    "AudioSegment",
+    "AudioReview",
     "AgentConfirmation",
+    "AgentMemory",
+    "Task",
+    "TaskStage",
+    "TaskEvent",
+    "TaskResult",
 ]

@@ -10,13 +10,18 @@ import {
   executeApproval,
   listApprovals,
   listMessages,
+  listReviews,
   listSessions,
   resolveApproval,
   updateSession,
 } from '@/api/agent'
+import type { ReviewCard } from '@/api/agent'
 import type { AgentApproval, AgentMessage, AgentSession } from '@/api/agent'
 import { getProjectStyleConfig, getStyleOptions } from '@/api/projects'
 import type { StyleConfig, StyleOptions } from '@/types/project'
+import TaskCard from '@/components/TaskCard.vue'
+import { useTaskEvents } from '@/composables/useTaskEvents'
+import type { TaskCardData } from '@/api/tasks'
 
 const message = useMessage()
 const router = useRouter()
@@ -120,6 +125,43 @@ async function removeSession(s: AgentSession) {
 // --- 中栏：对话与执行主区 ---
 const messages = ref<AgentMessage[]>([])
 
+// --- 统一任务卡片：消费 assistant payload.task_card + /api/tasks/events SSE（单卡片动态更新，不刷屏） ---
+const { taskSnapshots, registerCard, connect: connectTaskEvents } = useTaskEvents()
+/** 消息 payload 中的任务卡片（覆盖 parse/generate/compose/export） */
+function taskCardOf(m: AgentMessage): TaskCardData | null {
+  if (m.role !== 'assistant') return null
+  const p = m.payload as { task_card?: TaskCardData } | null
+  return p?.task_card ?? null
+}
+/** 搜索卡片的实时任务快照（payload.search.task_id → SSE 快照，进行中实时更新） */
+const SEARCH_PHASE_TEXT: Record<string, string> = {
+  searching: '搜索中',
+  validating: '验证结果',
+  fetching: '读取正文',
+  summarizing: '汇总结果',
+}
+function searchSnapshotOf(m: AgentMessage): { status?: string; progress?: number; phase?: string } | null {
+  const rec = searchRecordOf(m)
+  const tid = (rec as unknown as { task_id?: string } | null)?.task_id
+  if (!tid) return null
+  const snap = taskSnapshots[tid] as { status?: string; progress?: number; phase?: string } | undefined
+  return snap ?? null
+}
+/** 消息加载/新消息到达时注册卡片初始快照（SSE 事件在其上动态更新） */
+watch(
+  messages,
+  () => {
+    for (const m of messages.value) {
+      const card = taskCardOf(m)
+      if (card) registerCard(card)
+    }
+  },
+  { deep: true },
+)
+onMounted(() => {
+  connectTaskEvents()
+})
+
 /** 气泡内可展示的资产引用（由后端 assistant payload.asset_refs 提供） */
 interface AssetRef {
   asset_id: string
@@ -145,6 +187,29 @@ function onThumbError(assetId: string): void {
 }
 function visibleAssetRefs(m: AgentMessage): AssetRef[] {
   return assetRefsOf(m).filter((a) => !failedAssetIds.value.has(a.asset_id))
+}
+
+/** 联网搜索执行记录（由后端 assistant payload.search 提供，真实执行数据非 LLM 生成） */
+interface SearchRecord {
+  search_run_id: string
+  status: string
+  query: string
+  provider: string | null
+  result_count: number
+  valid_result_count: number
+  attempt_count: number
+  duration_ms: number | null
+  error: string | null
+}
+function searchRecordOf(m: AgentMessage): SearchRecord | null {
+  const p = m.payload as { search?: SearchRecord } | null
+  return p?.search ?? null
+}
+const SEARCH_STATUS_TEXT: Record<string, string> = {
+  success: '搜索完成',
+  partial: '部分成功（部分来源读取失败）',
+  empty: '无有效结果',
+  failed: '搜索失败',
 }
 const messagesLoading = ref(false)
 const inputText = ref('')
@@ -252,6 +317,7 @@ async function send() {
     }
     await loadSessions()
     await loadContext()
+    void loadReviewCards()
   } catch (e) {
     stopThinking()
     // 失败回滚：移除乐观消息并恢复输入
@@ -334,6 +400,65 @@ const projects = ref<ProjectBrief[]>([])
 const approvals = ref<AgentApproval[]>([])
 const approvalLoading = ref(false)
 const approvingId = ref<string | null>(null)
+
+// ── 统一审核卡片（剧本草稿/驳回/修改/通过，按版本分组） ──
+const reviewCards = ref<ReviewCard[]>([])
+const reviewCardsLoading = ref(false)
+
+/** 审核状态中文标签 */
+const REVIEW_STATUS_LABEL: Record<string, string> = {
+  pending: '待审核',
+  approved: '已通过',
+  rejected: '已驳回',
+  revision_requested: '修改中',
+  cancelled: '已取消',
+  deferred: '已暂缓',
+  expired: '已过期',
+}
+
+/** 审核状态标签色（匹配 NTag type） */
+const REVIEW_STATUS_TYPE: Record<string, 'default' | 'success' | 'warning' | 'error' | 'info'> = {
+  pending: 'warning',
+  approved: 'success',
+  rejected: 'error',
+  revision_requested: 'info',
+  cancelled: 'default',
+  deferred: 'default',
+  expired: 'default',
+}
+
+/** 审核对象中文名称 */
+function reviewTargetLabel(r: ReviewCard): string {
+  const base = r.target_type === 'script' ? '剧本' : r.target_type ?? '对象'
+  const v = r.target_version
+  if (!v) return `${base}草稿`
+  return `${base}第 ${v} 版`
+}
+
+async function loadReviewCards() {
+  const sid = activeSessionId.value
+  reviewCards.value = []
+  if (!sid) return
+  reviewCardsLoading.value = true
+  try {
+    const res = await listReviews(sid)
+    reviewCards.value = res.items ?? []
+  } catch {
+    reviewCards.value = []
+  } finally {
+    reviewCardsLoading.value = false
+  }
+}
+
+/** 审核卡片：按版本排序（最新在前），同一版本内按轮次排序 */
+const sortedReviewCards = computed(() =>
+  [...reviewCards.value].sort((a, b) => {
+    const va = a.target_version ?? -1
+    const vb = b.target_version ?? -1
+    if (va !== vb) return vb - va
+    return (b.round ?? 0) - (a.round ?? 0)
+  }),
+)
 const linkingMode = ref(false)
 const linkTarget = ref<string | null>(null)
 
@@ -446,7 +571,10 @@ watch(
   () => activeSession.value?.project_id,
   () => void loadContext(),
 )
-watch(activeSessionId, () => void loadApprovals())
+watch(activeSessionId, () => {
+  void loadApprovals()
+  void loadReviewCards()
+})
 
 async function linkProject(pid: string | null) {
   // 未选中会话时无法关联：给出明确提示，避免点击后毫无反馈被误认为报错
@@ -612,6 +740,50 @@ onMounted(() => {
                   </a>
                 </template>
               </div>
+              <!-- 联网搜索执行卡片：展示真实搜索执行记录（来自后端 payload.search，非 LLM 生成） -->
+              <div
+                v-if="m.role === 'assistant' && searchRecordOf(m)"
+                class="search-card"
+              >
+                <div class="search-card-header">
+                  <span class="search-card-icon">🔍</span>
+                  <span class="search-card-title">联网搜索</span>
+                  <span class="search-card-status" :data-status="searchRecordOf(m)!.status">
+                    {{ SEARCH_STATUS_TEXT[searchRecordOf(m)!.status] || searchRecordOf(m)!.status }}
+                  </span>
+                </div>
+                <!-- 搜索进行中：SSE 快照实时展示阶段与进度（终态后隐藏，回落到最终记录） -->
+                <div
+                  v-if="searchSnapshotOf(m) && searchSnapshotOf(m)!.status === 'running'"
+                  class="search-card-live"
+                >
+                  <span class="search-card-live-phase">{{
+                    SEARCH_PHASE_TEXT[searchSnapshotOf(m)!.phase ?? ''] || '执行中'
+                  }}</span>
+                  <div class="search-card-live-bar">
+                    <div
+                      class="search-card-live-fill"
+                      :style="{ width: `${Math.max(0, Math.min(100, searchSnapshotOf(m)!.progress ?? 0))}%` }"
+                    />
+                  </div>
+                  <span class="search-card-live-pct">{{ Math.max(0, Math.min(100, searchSnapshotOf(m)!.progress ?? 0)) }}%</span>
+                </div>
+                <div class="search-card-meta">
+                  <span>关键词：{{ searchRecordOf(m)!.query }}</span>
+                  <span v-if="searchRecordOf(m)!.provider">引擎：{{ searchRecordOf(m)!.provider }}</span>
+                  <span>有效结果：{{ searchRecordOf(m)!.valid_result_count }}/{{ searchRecordOf(m)!.result_count }}</span>
+                  <span v-if="searchRecordOf(m)!.duration_ms != null">耗时：{{ searchRecordOf(m)!.duration_ms }}ms</span>
+                </div>
+                <div v-if="searchRecordOf(m)!.error" class="search-card-error">
+                  {{ searchRecordOf(m)!.error }}
+                </div>
+              </div>
+              <!-- 任务卡片：消费 payload.task_card，SSE 事件驱动单卡片动态更新 -->
+              <TaskCard
+                v-if="m.role === 'assistant' && taskCardOf(m)"
+                :card="taskCardOf(m)!"
+                :snapshot="taskSnapshots[taskCardOf(m)!.task_id] ?? null"
+              />
             </div>
           </div>
           <!-- 思考过程气泡：等待响应期间分阶段展示，响应到达后由最终回复替换 -->
@@ -624,6 +796,32 @@ onMounted(() => {
             </div>
           </div>
         </div>
+      </div>
+      <!-- 审核卡片区：按版本分组，与消息流混合展示，最新在前 -->
+      <div v-if="sortedReviewCards.length" class="review-cards-section">
+        <div class="review-cards-label">📋 审核记录</div>
+        <NSpin :show="reviewCardsLoading" size="small">
+          <div v-for="r in sortedReviewCards" :key="r.confirmation_id" class="review-card">
+            <div class="review-card-header">
+              <span class="review-card-target">{{ reviewTargetLabel(r) }}</span>
+              <NTag :type="REVIEW_STATUS_TYPE[r.status] || 'default'" size="small">
+                {{ REVIEW_STATUS_LABEL[r.status] || r.status }}
+              </NTag>
+            </div>
+            <div v-if="r.question" class="review-card-question">{{ r.question }}</div>
+            <div class="review-card-meta">
+              <span v-if="r.round != null">第 {{ r.round }} 轮审核</span>
+              <span v-if="r.created_at">{{ fmtTime(r.created_at) }}</span>
+              <span v-if="r.resolved_at">裁决于 {{ fmtTime(r.resolved_at) }}</span>
+            </div>
+            <div v-if="r.user_response" class="review-card-response">
+              用户回复：{{ r.user_response }}
+            </div>
+            <div v-if="r.comment" class="review-card-comment">
+              备注：{{ r.comment }}
+            </div>
+          </div>
+        </NSpin>
       </div>
       <div class="chat-input">
         <div class="composer">
@@ -1077,6 +1275,78 @@ onMounted(() => {
   gap: 8px;
   margin-top: 10px;
 }
+
+/* 联网搜索执行卡片（agent web_search payload.search） */
+.search-card {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.06);
+  font-size: 12px;
+}
+.search-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.search-card-status {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  font-size: 11px;
+  background: rgba(24, 160, 88, 0.15);
+  color: #18a058;
+}
+.search-card-status[data-status='partial'] {
+  background: rgba(240, 160, 32, 0.15);
+  color: #f0a020;
+}
+.search-card-status[data-status='failed'],
+.search-card-status[data-status='empty'] {
+  background: rgba(208, 48, 80, 0.12);
+  color: #d03050;
+}
+.search-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  opacity: 0.85;
+}
+.search-card-error {
+  margin-top: 6px;
+  color: #d03050;
+}
+.search-card-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #2080f0;
+}
+.search-card-live-phase {
+  min-width: 56px;
+}
+.search-card-live-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: #e8e8ee;
+  overflow: hidden;
+}
+.search-card-live-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: #2080f0;
+  transition: width 0.3s ease;
+}
+.search-card-live-pct {
+  font-variant-numeric: tabular-nums;
+}
 .asset-thumb {
   position: relative;
   display: block;
@@ -1147,6 +1417,68 @@ onMounted(() => {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+}
+
+/* ── 审核卡片区（剧本/资产草案审核记录，按版本分组，聊天区底部） ── */
+.review-cards-section {
+  margin: 0 24px 16px;
+  padding: 14px 18px;
+  background: rgba(99, 102, 241, 0.04);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: 12px;
+}
+.review-cards-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-primary, #6366f1);
+  margin-bottom: 10px;
+}
+.review-card {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-panel, #fff);
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.review-card:last-child {
+  margin-bottom: 0;
+}
+.review-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.review-card-target {
+  font-weight: 600;
+  color: var(--text-primary, #111);
+}
+.review-card-question {
+  margin-top: 6px;
+  color: var(--text-secondary, #666);
+  line-height: 1.6;
+}
+.review-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary, #999);
+}
+.review-card-response {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-primary, #111);
+  background: rgba(99, 102, 241, 0.06);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.review-card-comment {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary, #666);
 }
 
 .chat-input {

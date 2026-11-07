@@ -66,3 +66,18 @@ COMPOSITION_STATUS = _values("composing", "succeeded", "failed")
 EXPORT_STATUS = _values("exporting", "succeeded", "failed")
 EXPORT_FORMAT = _values("mp4",)
 DELIVERY_PROFILE = _values("standard", "high_quality")
+# ============ 音频模块（音频模块与 H3 VA 工作流改造，2026-11-06） ============
+# 音频轨道类型（audio_segment.track_type）：六轨独立控制
+TRACK_TYPE = _values("dialogue", "narration", "bgm", "sfx", "ambient", "native_audio")
+# 片段细分类型（audio_segment.segment_type）
+SEGMENT_TYPE = _values(
+    "character_dialogue", "voiceover", "music", "effect", "ambience", "h3_native",
+)
+# 音频片段生成状态（与 JOB_STATUS 分开：片段级状态，pending 为规划未生成）
+AUDIO_GENERATION_STATUS = _values(
+    "pending", "queued", "processing", "completed", "failed", "cancelled",
+)
+# 音频审核状态（生成成功不等于审核通过，分开存储）
+AUDIO_REVIEW_STATUS = _values("not_required", "pending", "approved", "rejected")
+# H3 原生音频策略（先检测再决定，不允许 LLM 宣称）
+NATIVE_AUDIO_POLICY = _values("pending_detection", "keep", "mute", "manual_confirm")

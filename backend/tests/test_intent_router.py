@@ -52,14 +52,14 @@ def test_fast_path_query(text: str):
     ],
 )
 def test_fast_path_generate(text: str):
-    """真实生成请求仍判定为 generate_request（引导到对应页面，不在对话内执行）。
-    注：『重新生成关键帧』类表述现识别为返工操作（regenerate_shot），
-    由 test_regen_intent_routing 覆盖。
+    """生成请求不再走规则快路径（规则误判会导致专业术语引导）：
+    - 『生成XX视频』类消息由前置视频生成工作流接管；
+    - 其余生成请求交由 LLM 结构化识别判定 generate_request；
+    - 『重新生成关键帧』类表述仍识别为返工操作（regenerate_shot），
+      由 test_regen_intent_routing 覆盖。
     """
     r = apply_fast_path_rules(text)
-    assert r is not None
-    assert r.intent == "generate_request"
-    assert route_action(r.intent) == NextAction.GUIDE
+    assert r is None, f"{text} 不应命中规则快路径，应交由 LLM 结构化识别"
 
 
 @pytest.mark.parametrize(
@@ -127,7 +127,9 @@ def test_intent_tool_mapping_readonly_whitelist():
     ):
         assert forbidden not in query_tools, forbidden
     assert set(get_allowed_tools("analysis")) == set(query_tools)
-    for intent in ("generate_request", "ambiguous", "unsafe", "unknown"):
+    # 生成请求定位不到目标时回落主对话：放开只读工具供大模型结合上下文兜底（规则不兜底）
+    assert set(get_allowed_tools("generate_request")) == set(query_tools)
+    for intent in ("ambiguous", "unsafe", "unknown"):
         assert get_allowed_tools(intent) == []
 
 

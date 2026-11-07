@@ -136,6 +136,10 @@ class Prop(TimestampMixin, Base):
     is_key_prop: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     anchor_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     anchor_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 道具分类：handheld/carried/scene_fixed/shared/key_prop/background（生命周期管理用，通用枚举）
+    category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 结构化外观属性：{material, color, shape, size, unique_features, ...} 与自由文本 appearance 并存
+    appearance_attrs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class Shot(TimestampMixin, Base):
@@ -151,6 +155,8 @@ class Shot(TimestampMixin, Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     dialogue: Mapped[str | None] = mapped_column(Text, nullable=True)
     dialogue_segments: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 本镜涉及道具名数组（剧本解析 LLM 输出，落库保留；生命周期状态推导的输入之一）
+    props: Mapped[list | None] = mapped_column(JSON, nullable=True)
     shot_kind: Mapped[str] = mapped_column(String(16), nullable=False)
     image_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)

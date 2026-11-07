@@ -134,3 +134,44 @@ export function executeApproval(sessionId: string, confirmationId: string) {
     `/agent/sessions/${sessionId}/approvals/${confirmationId}/execute`,
   )
 }
+
+// ── 剧本/资产生成审核卡片（统一确认事项） ──
+
+/** 审核卡片数据结构（对应后端 review_confirmation.to_card 返回值） */
+export interface ReviewCard {
+  confirmation_id: string
+  kind: string
+  confirmation_type: string
+  target_type: string
+  target_id: string | null
+  target_version: number | null
+  round: number | null
+  status: string
+  question: string | null
+  allowed_responses: string[] | null
+  user_response: string | null
+  comment: string | null
+  resolution: string | null
+  created_at: string | null
+  resolved_at: string | null
+}
+
+/** 审核卡片列表结果 */
+export interface ReviewListResult {
+  items: ReviewCard[]
+  count: number
+}
+
+/** 列出会话内所有审核卡片（含待审核、已通过、已驳回、修改中、已取消、已过期） */
+export function listReviews(sessionId: string) {
+  return get<ReviewListResult>(`/agent/sessions/${sessionId}/reviews`)
+}
+
+/** 裁决审核（通过 / 修改 / 驳回） */
+export function resolveReview(
+  sessionId: string,
+  confirmationId: string,
+  payload: { resolution: string; comment?: string | null },
+) {
+  return post<ReviewCard>(`/agent/sessions/${sessionId}/reviews/${confirmationId}/resolve`, payload)
+}

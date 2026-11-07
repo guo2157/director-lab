@@ -30,6 +30,21 @@ def client(tmp_path, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=engine, autoflush=False, expire_on_commit=False),
     )
+    # 生成请求不再走规则快路径（改由 LLM 结构化识别），测试环境无 LLM：
+    # 为意图识别打桩，生成类消息固定判定为 generate_request（GUIDE 路由）
+    import app.services.intent_router as ir_mod
+    from app.services.intent_router import IntentResult
+
+    def _fake_classify(content, **kwargs):
+        return IntentResult(
+            "generate_request",
+            "测试桩：生成请求",
+            risk_level="medium",
+            confidence=1.0,
+            source="test_stub",
+        )
+
+    monkeypatch.setattr(ir_mod, "classify_intent", _fake_classify)
     return TestClient(app)
 
 
@@ -338,13 +353,17 @@ def test_e2e_stage_gate_blocks_early_generate(client, project_env):
 
 
 def test_e2e_no_project_session(client, project_env):
-    """未关联项目的会话：生成请求返回引导提示，不建审批。"""
+    """未关联项目的会话：生成请求自动创建项目并引导下一步。"""
     sid = _make_session(client)
     resp = _chat(client, sid, "为第 1 镜生成关键帧")
     assistant = resp["assistant_message"]
-    approval = (assistant.get("payload") or {}).get("approval")
-    assert approval is None
-    assert "未关联项目" in assistant["content"]
+    payload = assistant.get("payload") or {}
+    approval = payload.get("approval")
+    # 自动创建项目后返回引导消息，approval 字段携带 auto_created_project 标记
+    assert approval is not None
+    assert approval.get("auto_created_project") is True
+    assert approval.get("project_id", "").startswith("prj_")
+    assert "已为您自动创建项目" in assistant["content"]
 
 
 def test_e2e_foreign_entity_rejected(client, project_env):
@@ -375,7 +394,9 @@ def test_e2e_foreign_entity_rejected(client, project_env):
     assistant = resp["assistant_message"]
     approval = (assistant.get("payload") or {}).get("approval")
     assert approval is None
-    assert "不属于当前项目" in assistant["content"]
+    # 大模型上下文兜底：跨项目实体不再返回固定文案，回复由 LLM 结合项目上下文生成；
+    # 契约核心是跨项目实体绝不创建审批申请
+    assert assistant["content"]
 
 
 def test_e2e_shot_prompt_fallback_and_tts(client, project_env):

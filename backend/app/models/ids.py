@@ -97,6 +97,12 @@ def agent_plan_step_id() -> str:
 
 def agent_confirmation_id() -> str:
     return new_id("agc")
+def task_id() -> str:
+    return new_id("tsk")
+def task_stage_id() -> str:
+    return new_id("tst")
+def task_result_id() -> str:
+    return new_id("tsr")
 
 
 def agent_message_id() -> str:
@@ -113,3 +119,15 @@ def asset_plan_id() -> str:
 
 def asset_plan_dep_id() -> str:
     return new_id("apd")
+def search_run_id() -> str:
+    return new_id("srh")
+def agent_memory_id() -> str:
+    return new_id("amr")
+def search_result_id() -> str:
+    return new_id("srs")
+def voice_profile_id() -> str:
+    return new_id("vp")
+def audio_segment_id() -> str:
+    return new_id("aseg")
+def audio_review_id() -> str:
+    return new_id("arev")

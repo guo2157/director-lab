@@ -11,9 +11,29 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.v1 import (
+    bindings,
+    audio,
+    agent,
+    asset_plans,
+    assets,
+    characters,
+    compose,
+    events,
+    generate,
+    jobs,
+    progress,
+    projects,
+    props,
+    regeneration,
+    scenes,
+    script,
+    settings,
+    shots,
+    tasks,
+    workflows,
+)
 from app.core.config import get_settings
-
-from app.api.v1 import agent, asset_plans, assets, characters, compose, events, generate, jobs, progress, projects, props, regeneration, scenes, script, settings, shots, workflows
 
 
 def _startup_selfcheck() -> dict:
@@ -27,8 +47,9 @@ def _startup_selfcheck() -> dict:
 
     # 1. 自动执行 alembic 迁移（幂等；单机单进程定位下无并发风险，见 DECISIONS.md D-12）
     try:
-        from alembic import command
         from alembic.config import Config
+
+        from alembic import command
 
         alembic_ini = Path(__file__).resolve().parents[1] / "alembic.ini"
         if alembic_ini.exists():
@@ -79,12 +100,15 @@ def create_app() -> FastAPI:
     app.include_router(props.router)
     app.include_router(scenes.router)
     app.include_router(shots.router)
+    app.include_router(bindings.router)
     app.include_router(script.router)
     app.include_router(jobs.router)
     app.include_router(progress.router)
     app.include_router(events.router)
+    app.include_router(tasks.router)
     app.include_router(compose.router)
     app.include_router(workflows.router)
+    app.include_router(audio.router)
     app.include_router(settings.router)
     app.include_router(settings.health_router)
 

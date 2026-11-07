@@ -12,7 +12,10 @@
 """
 import hashlib
 import json
+import logging
 from datetime import datetime
+
+_log = logging.getLogger(__name__)
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -113,6 +116,7 @@ def find_approved(
             AgentTask.session_id == session_id,
             AgentConfirmation.tool_name == tool_name,
             AgentConfirmation.status == "approved",
+            AgentTask.status != "completed",  # 已执行完毕的不再匹配，防止重复消费
         )
         .order_by(AgentConfirmation.created_at.asc())
     ).all()
@@ -177,8 +181,17 @@ def resolve_confirmation(
 
     task = db.get(AgentTask, confirmation.task_id)
     if task is not None:
-        task.status = "running" if approve else "cancelled"
-        task.result_summary = comment or ("已批准，待执行" if approve else "已拒绝，未执行")
+        from app.services.parent_agent import transition_task as _tt
+
+        new_ts = "running" if approve else "cancelled"
+        summary = comment or ("已批准，待执行" if approve else "已拒绝，未执行")
+        ok = _tt(db, task, new_ts, result_summary=summary)
+        if not ok:
+            _log.warning(
+                "resolve_confirmation: transition_task(%s→%s) 被门禁拒绝，"
+                "当前 task.status=%s 可能已进入终态",
+                task.id, new_ts, task.status,
+            )
         db.add(
             AgentMessage(
                 id=agent_message_id(),
@@ -195,6 +208,17 @@ def resolve_confirmation(
                 seq=_next_seq(db, task.session_id),
                 created_at=datetime.now(),
             )
+        )
+    # 统一任务编排层桥接（Phase 5）：审批裁决同步写 task.approval_resolved 事件
+    try:
+        from app.services.task_orchestrator import bridge_approval_resolved
+        bridge_approval_resolved(
+            db, confirmation_id=confirmation_id, approve=approve, comment=comment,
+        )
+    except Exception:
+        _log.warning(
+            "bridge_approval_resolved 调用失败 (confirmation_id=%s, approve=%s): %s",
+            confirmation_id, approve, __import__("traceback").format_exc(),
         )
     db.commit()
     db.refresh(confirmation)

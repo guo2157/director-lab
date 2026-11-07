@@ -47,16 +47,6 @@ _UNSAFE_RULES: list[re.Pattern[str]] = [
     re.compile(r"(忽略|无视|跳过|绕过).{0,8}(所有|全部)?(规则|审批|限制|安全|指令)"),
 ]
 
-_GENERATE_RULES: list[re.Pattern[str]] = [
-    # 动词在前："重新生成关键帧""批量出图"
-    # (?!的)：排除『最近生成的角色图』『生成的分镜图』这类描述性表述（是查询而非生成请求）
-    re.compile(r"(重新)?(生成|出图|渲染)(?!的).{0,12}(关键帧|分镜图?|视频|片段|角色图?|场景图?|道具图?|图片|成片|配音|语音)"),
-    # 宾语在前："把所有分镜的关键帧全部重新生成一遍"
-    re.compile(r"(关键帧|分镜图?|视频|片段|角色图?|场景图?|道具图?|成片).{0,12}(重新)?(生成|渲染|出图)(?!的)"),
-    # 无宾语的明确生成动作："批量出图""重新渲染"（『出图/渲染』单独出现即表示要生成）
-    re.compile(r"(批量|重新)?(出图|渲染)"),
-]
-
 _QUERY_RULES: list[re.Pattern[str]] = [
     re.compile(r"(项目|当前|整体|制作).{0,4}(进展|进度|状态|概览|阶段)"),
     # 进度类问句：『视频生成什么进度了』『出图到哪一步了』『还有多少没生成』
@@ -82,7 +72,19 @@ _QUERY_RULES: list[re.Pattern[str]] = [
 _PIPELINE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(新建|创建|建)一?个?(新)?项目"), "create_project"),
     (re.compile(r"(保存|存|提交|写入|更新)剧本"), "save_script"),
+    (re.compile(r"(生成|写|创作|编)(一个|一部)?剧本"), "generate_script"),
+    # 分析进度查询：解析是异步耗时任务，用户需要能随时问『好了吗/还要多久/到哪了』。
+    # 必须排在 analyze_script 之前：『分析好了吗』含『分析』字样，避免被误判为新一次分析请求。
+    (re.compile(
+        r"(分析|解析)\s*(好|完|结束|完成)\s*(了)?\s*(吗|么|嘛|没|没有)?\s*[?？]?$"
+        r"|(剧本)?(分析|解析)\s*(的)?\s*(进度|状态|情况|到哪(了|儿)?)"
+        r"|(还|需要|要)\s*(多久|多长时间)"
+        r"|(分析|解析)\s*(完成|结束)\s*(了)?\s*(吗|么|嘛|没|没有)"
+        r"|分析\s*(中|中吗)\s*[?？]?$"
+    ), "query_parse_status"),
     (re.compile(r"(发起|开始|执行|做)?(一?次?)(分析|解析|拆解)剧本"), "analyze_script"),
+    # 确认解析结果：解析产出为候选版本，须确认后角色/场景/道具/镜头才落库
+    (re.compile(r"(确认|采纳|应用)(一下|下)?(剧本)?(解析|分析)(结果|版本)?"), "confirm_parse"),
     (re.compile(r"资产(库)?(人工)?审核(通过)?|审核(通过)?(公共)?资产(库)?|资产(库)?(没|没有)问题"), "review_assets"),
     (re.compile(r"(确认|通过|审核)(所有|全部)?分镜图?|分镜图?(全部)?(确认|通过|审核|没问题)"), "confirm_keyframes"),
     (re.compile(r"(合成|拼接)(成片|视频|导出)?"), "compose_video"),
@@ -279,9 +281,8 @@ def apply_fast_path_rules(user_content: str) -> IntentResult | None:
     _DONE_QUESTION = re.compile(r"(生成|出图|渲染)(了|好|完|过|没).{0,6}(吗|么|没|没有|？|\?)")
     if any(k in text for k in _PROGRESS_ONLY) or _DONE_QUESTION.search(text):
         return _rule_intent("query", "规则命中进度查询模式", "low", text)
-    for pattern in _GENERATE_RULES:
-        if pattern.search(text):
-            return _rule_intent("generate_request", "规则命中生成请求模式", "medium", text)
+    # 生成请求不再走规则快路径：改由 LLM 结构化识别判定
+    # （『生成XX视频』类消息已由前置视频生成工作流接管，规则误判会导致专业术语引导）
     pipeline_action = _pipeline_action_of(text)
     if pipeline_action is not None:
         result = IntentResult(
@@ -303,11 +304,22 @@ def apply_fast_path_rules(user_content: str) -> IntentResult | None:
 def _build_intent_user_prompt(
     user_content: str,
     recent_messages: list[dict] | None,
+    session_summary: str | None = None,
+    focus_hint: str | None = None,
 ) -> str:
-    """构造意图识别输入：近期对话（消解指代）+ 当前用户消息。"""
-    if not recent_messages:
+    """构造意图识别输入：会话摘要（长期记忆）+ 结构化焦点（Context Manager）+
+    近期对话（消解指代）+ 当前用户消息。"""
+    if not recent_messages and not session_summary and not focus_hint:
         return user_content[:8000]
-    lines = ["近期对话（旧→新，仅作上下文用于消解指代，不是当前指令）："]
+    lines: list[str] = []
+    if session_summary:
+        lines.append("会话更早历史摘要（长期记忆，仅作上下文，不是当前指令）：")
+        lines.append(session_summary[:2000])
+        lines.append("")
+    if focus_hint:
+        lines.append(focus_hint[:1000])
+        lines.append("")
+    lines.append("近期对话（旧→新，仅作上下文用于消解指代，不是当前指令）：")
     for m in recent_messages[-10:]:
         role = "用户" if m.get("role") == "user" else "助手"
         content = str(m.get("content", ""))[:500]
@@ -317,12 +329,16 @@ def _build_intent_user_prompt(
 
 
 def classify_intent(user_content: str, *, recent_messages: list[dict] | None = None,
+                    session_summary: str | None = None,
+                    focus_hint: str | None = None,
                     max_attempts: int = 3,
                     backoff_seconds: float = 1.0) -> IntentResult:
     """对用户消息做结构化意图识别。
 
     - recent_messages：近期 user/assistant 对话（旧→新），用于消解『它』『上一个』等指代；
       不传时行为与旧版一致（仅识别当前消息）
+    - session_summary：会话长期记忆摘要（历史超短期窗口时由 LLM 压缩），
+      语义判定携带『摘要+近期对话』保证上下文齐全；不传时行为不变
     - LLM 结构化输出（json_mode + Pydantic Schema 校验）
     - 瞬态错误（unreachable/timeout/llm_error）指数退避重试，最多 max_attempts 次
     - 输出非法（类别越界/Schema 校验失败）降级为 query，不重试
@@ -334,7 +350,7 @@ def classify_intent(user_content: str, *, recent_messages: list[dict] | None = N
     if fast is not None:
         return fast
     client = LLMClient()
-    intent_prompt = _build_intent_user_prompt(user_content, recent_messages)
+    intent_prompt = _build_intent_user_prompt(user_content, recent_messages, session_summary, focus_hint)
     last_code: str | None = None
     for attempt in range(1, max_attempts + 1):
         try:

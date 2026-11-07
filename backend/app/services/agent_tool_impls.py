@@ -1263,6 +1263,30 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
         created_at=datetime.now(),
     )
     db.add(job)
+    # 统一任务编排层（Phase 4）：生成任务同步创建统一 Task + generate 阶段（关联 job_id），
+    # Job 事件经 bridge_job_event 自动桥接为 task 事件，完成后自动闭环写结果卡片
+    try:
+        from app.models.agent import AgentTask
+        from app.services import task_orchestrator
+        _stage_name = {
+            'keyframe': '分镜图生成', 'clip': '分镜视频生成', 'audio': '音频生成',
+            'character': '角色形象生成', 'scene': '场景基准图生成', 'prop': '道具锚定图生成',
+        }.get(target, '资产生成')
+        # 会话归属：审批记录关联的 AgentTask（agt_）携带 session_id
+        _session_id = None
+        _agent_task = db.get(AgentTask, confirmation.task_id)
+        if _agent_task is not None:
+            _session_id = _agent_task.session_id
+        _task = task_orchestrator.create_task(
+            db, session_id=_session_id, task_type='generate',
+            title=_stage_name, project_id=project_id,
+        )
+        task_orchestrator.start_task(db, _task)
+        task_orchestrator.add_stage(
+            db, _task, stage_key=f'generate_{target}', stage_name=_stage_name, job_id=job.id,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # 编排层失败不影响既有生成链路
     if owner_key is not None:
         # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
         # 与 API 通道（generate.py 实体生成端点）行为一致
@@ -1612,6 +1636,114 @@ def tool_batch_request_generate(
         "count": len(confirmations),
         "confirmations": confirmations,
         "next_step": "每条申请需人工审批通过后点执行，任务才会真正创建；不会在对话中直接触发生成",
+    }
+
+
+# --- 记忆工具（记忆系统迭代一）---
+
+class ListMemoriesInput(BaseModel):
+    """list_memories 入参。"""
+
+    project_id: str | None = Field(
+        default=None, description="可选：项目 ID（prj_ 前缀）；不传时查全局偏好记忆"
+    )
+    memory_type: str | None = Field(
+        default=None,
+        description="可选：记忆类型过滤（project/preference/experience）",
+    )
+    limit: int = Field(default=20, ge=1, le=50, description="返回条数上限，默认 20")
+
+
+class AddMemoryInput(BaseModel):
+    """add_memory 入参。"""
+
+    content: str = Field(min_length=1, max_length=500, description="记忆内容（简洁条目式，500 字内）")
+    memory_type: str = Field(
+        default="project",
+        description="记忆类型：project（项目规范）/ preference（用户偏好）/ experience（经验规则）",
+    )
+    project_id: str | None = Field(
+        default=None, description="可选：关联项目 ID（preference 全局偏好可不传）"
+    )
+
+
+class SupersedeMemoryInput(BaseModel):
+    """supersede_memory 入参。"""
+
+    memory_id: str = Field(min_length=1, description="待替代的记忆 ID（amr_ 前缀）")
+    new_content: str | None = Field(
+        default=None, max_length=500, description="新记忆内容；不传时仅作废旧记忆"
+    )
+
+
+def tool_list_memories(
+    db: Session,
+    project_id: str | None = None,
+    memory_type: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """查询长期记忆列表（默认仅 active）。"""
+    from app.services import agent_memory as memory_svc
+
+    if memory_type is not None and memory_type not in memory_svc._MEMORY_TYPE_LABELS:
+        raise ToolError("tool_invalid_args", f"非法记忆类型：{memory_type}")
+    memories = memory_svc.list_memories(
+        db, project_id=project_id, memory_type=memory_type, limit=limit
+    )
+    return {
+        "count": len(memories),
+        "memories": [
+            {
+                "id": m.id,
+                "memory_type": m.memory_type,
+                "project_id": m.project_id,
+                "content": m.content,
+                "source": m.source,
+                "status": m.status,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in memories
+        ],
+    }
+
+
+def tool_add_memory(
+    db: Session,
+    content: str,
+    memory_type: str = "project",
+    project_id: str | None = None,
+) -> dict:
+    """写入一条长期记忆（用户明确要求记住，或从对话提炼的规范/偏好/经验）。"""
+    from app.services import agent_memory as memory_svc
+
+    try:
+        mem = memory_svc.add_memory(
+            db, content=content, memory_type=memory_type, project_id=project_id, source="user"
+        )
+    except ValueError as e:
+        raise ToolError("tool_invalid_args", str(e))
+    return {
+        "memory_id": mem.id,
+        "memory_type": mem.memory_type,
+        "content": mem.content,
+        "note": "记忆已保存，后续对话将作为背景参考；不会覆盖用户当前指令",
+    }
+
+
+def tool_supersede_memory(
+    db: Session, memory_id: str, new_content: str | None = None
+) -> dict:
+    """替代一条旧记忆：旧记忆置 superseded，可同时写入新记忆。"""
+    from app.services import agent_memory as memory_svc
+
+    try:
+        new_mem = memory_svc.supersede_memory(db, memory_id, new_content=new_content)
+    except ValueError as e:
+        raise ToolError("tool_invalid_args", str(e))
+    return {
+        "superseded_id": memory_id,
+        "new_memory_id": new_mem.id if new_mem else None,
+        "note": "旧记忆已作废（保留记录可追溯）；新记忆已生效" if new_mem else "旧记忆已作废",
     }
 
 

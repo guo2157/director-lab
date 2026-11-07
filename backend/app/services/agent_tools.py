@@ -57,15 +57,19 @@ from app.services.agent_tool_impls import (  # noqa: F401 向后兼容再导出
     ListExportsInput,
     ListJobsInput,
     ListProjectEntitiesInput,
+    AddMemoryInput,
+    ListMemoriesInput,
     ListProjectShotsInput,
     ProjectOverviewInput,
     ProjectProgressInput,
     RequestGenerateInput,
     RunGenerateInput,
     RunStyleUpdateInput,
+    SupersedeMemoryInput,
     ToolError,
     ToolResult,
     UpdateStyleConfigInput,
+    tool_add_memory,
     tool_asset_stats,
     tool_get_asset_generation_progress,
     tool_get_clip_generation_progress,
@@ -80,6 +84,7 @@ from app.services.agent_tool_impls import (  # noqa: F401 向后兼容再导出
     tool_list_compositions,
     tool_list_exports,
     tool_list_jobs,
+    tool_list_memories,
     tool_list_project_entities,
     tool_list_project_shots,
     tool_project_overview,
@@ -87,6 +92,7 @@ from app.services.agent_tool_impls import (  # noqa: F401 向后兼容再导出
     tool_request_style_update,
     tool_run_generate,
     tool_run_style_update,
+    tool_supersede_memory,
 )
 
 
@@ -468,6 +474,56 @@ TOOL_REGISTRY: dict = {
         "params": {"project_id": "项目 ID"},
         "fn": tool_list_exports,
     },
+    "list_memories": {
+        "description": "查询长期记忆：项目规范、用户偏好、历史经验（默认仅有效记忆）",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": ListMemoriesInput,
+        "params": {
+            "project_id": "可选：项目 ID（prj_ 前缀）；不传时查全局偏好记忆",
+            "memory_type": "可选：记忆类型过滤（project/preference/experience）",
+            "limit": "可选：返回条数上限，默认 20",
+        },
+        "fn": tool_list_memories,
+    },
+    "add_memory": {
+        "description": "写入一条长期记忆：用户明确要求记住的规范、偏好或经验（500 字内）",
+        "permission": "write",
+        "risk_level": "low",
+        "side_effect": True,
+        "idempotent": False,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": AddMemoryInput,
+        "params": {
+            "content": "记忆内容（简洁条目式，500 字内）",
+            "memory_type": "记忆类型：project（项目规范）/ preference（用户偏好）/ experience（经验规则）",
+            "project_id": "可选：关联项目 ID（preference 全局偏好可不传）",
+        },
+        "fn": tool_add_memory,
+    },
+    "supersede_memory": {
+        "description": "替代一条旧记忆：旧记忆作废（保留可追溯），可同时写入新记忆",
+        "permission": "write",
+        "risk_level": "low",
+        "side_effect": True,
+        "idempotent": False,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": SupersedeMemoryInput,
+        "params": {
+            "memory_id": "待替代的记忆 ID（amr_ 前缀）",
+            "new_content": "可选：新记忆内容；不传时仅作废旧记忆",
+        },
+        "fn": tool_supersede_memory,
+    },
     "list_asset_versions": {
         "description": "查询资产版本历史：版本号、有效性、是否锁定、质量状态、来源任务（用于采纳候选/回滚决策）",
         "permission": "read",
@@ -524,6 +580,9 @@ _READ_ONLY_TOOLS = [
 INTENT_TOOL_MAPPING: dict[str, list[str]] = {
     "query": list(_READ_ONLY_TOOLS),
     "analysis": list(_READ_ONLY_TOOLS),
+    # 生成请求定位不到目标时回落主对话：放开只读工具，
+    # 让大模型兜底时能拿到实体/镜头清单作为可选项（规则不兜底）
+    "generate_request": list(_READ_ONLY_TOOLS),
 }
 
 
