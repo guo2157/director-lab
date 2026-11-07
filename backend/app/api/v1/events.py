@@ -90,3 +90,75 @@ def events_backfill(updated_since_seq: int = Query(..., ge=0),
         job = db.get(Job, ev.job_id)
         items.append(_event_payload(ev, job))
     return {"total": len(items), "items": items}
+
+
+# ---------- 统一任务事件流（Phase 2）：task_event outbox → SSE ----------
+
+
+def _task_event_payload(ev, task) -> dict:
+    data = {
+        "seq": ev.event_seq,
+        "event_type": ev.event_type,
+        "task_id": ev.task_id,
+        "status": (task.status if task else None),
+        "progress": (task.progress if task else None),
+        "updated_at": ev.created_at.isoformat() if ev.created_at else None,
+    }
+    if ev.payload:
+        data.update({k: v for k, v in ev.payload.items() if k not in data})
+    return data
+
+
+@router.get("/tasks/events")
+async def task_event_stream(last_seq: int = Query(0, ge=0)) -> StreamingResponse:
+    """统一任务事件流：task_event outbox 增量推送，语义与 /api/events 一致（seq 严格大于判定）。"""
+    from app.models.task import Task, TaskEvent
+
+    async def gen():
+        seq = last_seq
+        elapsed = 0.0
+        while elapsed < _MAX_STREAM_SECONDS:
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(TaskEvent)
+                    .filter(TaskEvent.event_seq > seq)
+                    .order_by(TaskEvent.event_seq)
+                    .limit(200)
+                    .all()
+                )
+                for ev in rows:
+                    task = db.get(Task, ev.task_id)
+                    data = _task_event_payload(ev, task)
+                    seq = max(seq, ev.event_seq)
+                    yield f"id: {ev.event_seq}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+            finally:
+                db.close()
+            yield ": ping\n\n"
+            await asyncio.sleep(_POLL_INTERVAL)
+            elapsed += _POLL_INTERVAL
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/tasks/events/backfill")
+def task_events_backfill(updated_since_seq: int = Query(..., ge=0),
+                          db: Session = Depends(get_db)) -> dict:
+    """任务事件断线补齐：seq 严格大于给定值，按 seq 升序。"""
+    from app.models.task import Task, TaskEvent
+
+    rows = (
+        db.query(TaskEvent)
+        .filter(TaskEvent.event_seq > updated_since_seq)
+        .order_by(TaskEvent.event_seq)
+        .limit(1000)
+        .all()
+    )
+    items = []
+    for ev in rows:
+        task = db.get(Task, ev.task_id)
+        items.append(_task_event_payload(ev, task))
+    return {"total": len(items), "items": items}

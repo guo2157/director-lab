@@ -79,7 +79,9 @@ def _reconcile_submission_unknown(db: Session) -> int:
 def _reconcile_comfy_timeout_jobs(db: Session) -> int:
     """comfy_timeout/comfy_unreachable 任务对账：本地等待超时或实例失联判失败，
     但远端 ComfyUI 并不会停止渲染（失联多为瞬时网络抖动/实例过载）。
-    对 failed 且 error_code in (comfy_timeout, comfy_unreachable)、带 prompt_id 的任务，
+    对 failed 且 error_code in (comfy_timeout, comfy_unreachable, comfy_execution_error)、
+    带 prompt_id 的任务（comfy_execution_error 纳入：本地执行器异常会把已提交、
+    远端已渲染成功的任务误判为失败，必须以远端 history 为准纠正），
     按提交时绑定的实例（input_snapshot.comfyui_instance）查远端 history；
     发现已成功完成则重置为 queued 并打 resume_prompt 标记，由 executor 续跑分支
     直接下载产物（不重复提交、不浪费算力）。
@@ -88,7 +90,7 @@ def _reconcile_comfy_timeout_jobs(db: Session) -> int:
     reconciled = 0
     timeout_jobs = db.query(Job).filter(
         Job.status == "failed",
-        Job.error_code.in_(("comfy_timeout", "comfy_unreachable")),
+        Job.error_code.in_(("comfy_timeout", "comfy_unreachable", "comfy_execution_error")),
         Job.prompt_id.isnot(None),
     ).all()
     for job in timeout_jobs:
@@ -250,6 +252,14 @@ def run_worker(once: bool = False) -> None:
     resumed = _reconcile_comfy_timeout_jobs(db)
     if resumed:
         print(f"[worker] 对账取回 {resumed} 个远端已完成的 comfy_timeout 任务")
+    # 统一任务编排层恢复对账（Phase 7）：闭环桥接丢失的孤儿 Task
+    try:
+        from app.services.task_orchestrator import reconcile_orphan_tasks
+        closed_tasks = reconcile_orphan_tasks(db)
+        if closed_tasks:
+            print(f"[worker] 对账闭环 {closed_tasks} 个孤儿统一任务")
+    except Exception as e:  # noqa: BLE001
+        print(f"[worker] 统一任务对账失败（不影响主循环）: {e}")
     db.close()
     # 启动 ComfyUI 实例健康心跳（熔断机制后台探测，幂等）
     comfyui_pool.start_heartbeat()
