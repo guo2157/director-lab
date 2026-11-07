@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
@@ -22,6 +22,8 @@ import { generateCharacterPortrait, generatePropAnchor, generateSceneBaseline } 
 import { getAssetGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { AssetGenerationJob, AssetGenerationProgress } from '@/types/generation'
+import VoiceConfigDrawer from '@/components/VoiceConfigDrawer.vue'
+import { listCharacterVoices } from '@/api/audio'
 
 const route = useRoute()
 const router = useRouter()
@@ -452,8 +454,23 @@ const assetGridStyle = computed(() => {
 })
 
 /** 资产分组展示：「全部」时按角色/场景/道具分组一次展示，具体分类时单组展示，不使用下拉切换 */
+/** 按实体名去重：同一实体只保留版本最新的一条，避免历史版本/重复行在同一分类里出现两张卡 */
+function dedupeAssetsByName(items: Asset[]) {
+  const seen = new Map<string, Asset>()
+  for (const a of items) {
+    const key = `${a.asset_type}::${a.name || a.id}`
+    const prev = seen.get(key)
+    if (!prev) {
+      seen.set(key, a)
+      continue
+    }
+    // 保留 version 更大者；version 相同时保留 id 字典序更大者（id 后缀单调递增）
+    if (a.version > prev.version || (a.version === prev.version && a.id > prev.id)) seen.set(key, a)
+  }
+  return Array.from(seen.values())
+}
 const assetGroups = computed(() => {
-  const items = assetsQuery.data.value?.items || []
+  const items = dedupeAssetsByName(assetsQuery.data.value?.items || [])
   const defs = [
     { type: 'character', label: '角色' },
     { type: 'scene', label: '场景' },
@@ -520,6 +537,69 @@ interface SubmittedAsset {
   unit: string
 }
 const submittedAssets = ref<SubmittedAsset[]>([])
+// --- 音色配置抽屉（音频模块改造：角色资产增加音色配置入口） ---
+const voiceDrawerShow = ref(false)
+const voiceDrawerCharacterId = ref<string | null>(null)
+const voiceDrawerCharacterName = ref('')
+function openVoiceConfig(it: { id: string; name: string }) {
+  voiceDrawerCharacterId.value = it.id
+  voiceDrawerCharacterName.value = it.name
+  voiceDrawerShow.value = true
+}
+/** 资产库卡片按实体名称匹配角色实体（资产表不存 entity_id，name 即实体名） */
+function characterOfAsset(asset: { name?: string }) {
+  if (!asset.name) return null
+  const cs = (charsData.value?.items ?? []) as Array<{ id: string; name: string }>
+  return cs.find((c) => c.name === asset.name) ?? null
+}
+
+function openVoiceConfigOfAsset(asset: { name?: string }) {
+  const ch = characterOfAsset(asset)
+  if (!ch) {
+    message.warning('未匹配到对应角色实体，请在制作资产区该角色卡片上配置音色')
+    return
+  }
+  openVoiceConfig({ id: ch.id, name: ch.name })
+}
+/** 音色变更后递增，用于触发卡片音色名重新拉取 */
+const voiceQuerySeed = ref(0)
+/** 角色音色名映射：按角色实体 ID 聚合，供卡片底部音色条展示当前音色 */
+const voiceNameQuery = useQuery({
+  queryKey: computed(() => ['character-voices', projectId.value, voiceQuerySeed.value]),
+  queryFn: async () => {
+    const cs = (charsData.value?.items ?? []) as Array<{ id: string }>
+    const map: Record<string, string> = {}
+    await Promise.all(
+      cs.map(async (c) => {
+        try {
+          const res = await listCharacterVoices(c.id)
+          const voices = res?.voices ?? []
+          const picked =
+            voices.find((v) => v.is_default && v.enabled) ??
+            voices.find((v) => v.is_default) ??
+            voices.find((v) => v.enabled) ??
+            voices[0]
+          if (picked) map[c.id] = picked.voice_name || picked.voice_id
+        } catch {
+          /* 单个角色查询失败不影响其它卡片展示 */
+        }
+      }),
+    )
+    return map
+  },
+  enabled: computed(() => !!projectId.value && (charsData.value?.items ?? []).length > 0),
+})
+function voiceNameOfAsset(asset: { name?: string }) {
+  const ch = characterOfAsset(asset)
+  if (!ch) return ''
+  return voiceNameQuery.data.value?.[ch.id] || ''
+}
+/** 音色抽屉关闭后刷新卡片音色名 */
+watch(voiceDrawerShow, (show) => {
+  if (show) return
+  voiceQuerySeed.value += 1
+  queryClient.invalidateQueries({ queryKey: ['character-voices', projectId.value] })
+})
 const submittedJobIds = ref<string[]>([])
 
 const assetProgress = useGenerationProgress<AssetGenerationProgress>({
@@ -1074,6 +1154,14 @@ function clearBatch() {
                     :disabled="!!inflightById.get(it.id)"
                     @click="handleCraft(it)"
                   >生成{{ grp.unit }}</n-button>
+                  <!-- 音色配置入口：仅角色卡片显示（音频模块改造） -->
+                  <n-button
+                    v-if="it.kind === 'character'"
+                    size="tiny"
+                    quaternary
+                    title="音色配置"
+                    @click.stop="openVoiceConfig(it)"
+                  >音色</n-button>
                 </div>
                 <p class="craft-card-prompt" :title="it.prompt">{{ it.prompt || '暂无提示词描述' }}</p>
               </div>
@@ -1121,11 +1209,23 @@ function clearBatch() {
                 <div class="status-dot" :class="statusDotClass(asset.status)" :title="statusLabel(asset.status)"></div>
               </div>
               <div class="asset-info">
-                <div class="asset-name">{{ asset.id.split('_').slice(1).join('_') || asset.id }}</div>
+                <div class="asset-name" :title="asset.name || asset.id">{{ asset.name || asset.id.split('_').slice(1).join('_') || asset.id }}</div>
                 <div class="asset-meta">
                   <n-tag size="tiny" round>{{ assetTypeLabels[asset.asset_type] || asset.asset_type }}</n-tag>
                 </div>
               </div>
+              <!-- 音色入口（角色专属）：独立成行独占卡片底部，避免与右上小图标挤在一起 -->
+              <button
+                v-if="asset.asset_type === 'character'"
+                type="button"
+                class="asset-voice-bar"
+                @click.stop="openVoiceConfigOfAsset(asset)"
+              >
+                <span class="avb-icon">🎙</span>
+                <span class="avb-label">音色配置</span>
+                <span class="avb-value">{{ voiceNameOfAsset(asset) || '未设置' }}</span>
+                <span class="avb-arrow">›</span>
+              </button>
               <div class="asset-actions" @click.stop>
                 <n-tooltip>
                   <template #trigger>
@@ -1241,6 +1341,12 @@ function clearBatch() {
       </template>
     </n-modal>
 
+    <!-- 音色配置抽屉（音频模块改造） -->
+    <VoiceConfigDrawer
+      v-model:show="voiceDrawerShow"
+      :character-id="voiceDrawerCharacterId"
+      :character-name="voiceDrawerCharacterName"
+    />
     <!-- 重新生成抽屉：可编辑提示词 + 候选采纳 -->
     <n-drawer v-model:show="regenVisible" :width="'min(560px, 100vw)'" @after-leave="stopRegenPoll">
       <n-drawer-content title="重新生成资产图" closable>
@@ -1508,7 +1614,8 @@ function clearBatch() {
   to { opacity: 1; transform: translateY(0); }
 }
 /* 角色卡片横向布局：缩略图左 + 信息右 */
-.asset-card.is-portrait { display: flex; align-items: stretch; }
+/* 角色卡片：网格三列（缩略图/信息/操作），底部音色条横跨整行 */
+.asset-card.is-portrait { display: grid; grid-template-columns: var(--asset-portrait-thumb-width) minmax(0, 1fr) auto; align-items: stretch; }
 .asset-card.is-portrait .asset-thumb { width: var(--asset-portrait-thumb-width); height: auto; flex-shrink: 0; }
 .asset-card.is-portrait .asset-thumb img { object-fit: cover; }
 .asset-card.is-portrait .asset-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
@@ -1527,6 +1634,27 @@ function clearBatch() {
 .asset-name { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-meta { display: flex; align-items: center; gap: 8px; }
 .asset-actions { position: absolute; bottom: 6px; right: 6px; display: flex; gap: 4px; }
+/* 卡片底部音色入口：整行独占，作为角色卡片的次级操作条 */
+.asset-voice-bar {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; margin: 0; padding: 8px 10px;
+  border: none; border-top: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 0 0 var(--asset-card-radius) var(--asset-card-radius);
+  background: var(--bg-elevated); color: var(--text-secondary);
+  font-size: 12px; line-height: 1; text-align: left; cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.asset-voice-bar:hover { background: var(--brand-primary, #6366f1); color: #fff; }
+.asset-voice-bar:hover .avb-value { color: rgba(255, 255, 255, 0.85); }
+.avb-icon { font-size: 13px; }
+.avb-label { font-weight: 600; flex-shrink: 0; }
+.avb-value {
+  flex: 1; min-width: 0; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-tertiary, #94a3b8);
+}
+.avb-arrow { font-size: 14px; opacity: 0.6; flex-shrink: 0; }
+.asset-card.is-portrait .asset-voice-bar { grid-column: 1 / -1; }
 .drawer-preview { margin-bottom: 16px; }
 .preview-img { width: 100%; border-radius: 8px; }
 .preview-placeholder { width: 100%; height: 200px; background: var(--bg-elevated); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }

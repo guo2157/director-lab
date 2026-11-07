@@ -234,7 +234,7 @@
 | --- | --- | --- |
 | id | string | 主键 |
 | plan_id | string | 定义 ID（外键 asset_plan.id） |
-| slot | string | ref_identity / ref_costume / ref_scene / ref_prop / ref_image；按 (plan_id, slot) 唯一 |
+| slot | string | ref_identity / ref_character_2 / ref_scene / ref_prop / ref_image；按 (plan_id, slot) 唯一 |
 | ref_plan_id | string | 被依赖定义 ID，可空 |
 | ref_key | string | 被依赖定义的固定名称（冗余存储，便于校验断链） |
 | ref_path | string | 被依赖定义的占位路径，可空 |

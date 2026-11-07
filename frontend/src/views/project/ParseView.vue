@@ -17,6 +17,7 @@ import { getJob } from '@/api/jobs'
 import type { EpisodeParseStatusItem, Scene, Shot } from '@/types/script'
 import { useScriptFlowStore } from '@/stores/scriptFlow'
 import FlowNav from '@/components/FlowNav.vue'
+import AudioPlanPanel from '@/components/AudioPlanPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -722,6 +723,11 @@ const props = computed(() => propsData.value?.items ?? [])
           </div>
         </div>
 
+        <!-- 音频分析结果（音频模块改造：解析完成后可从解析结果生成音频规划） -->
+        <AudioPlanPanel
+          v-if="projectId && !parseJobRunning && (parseDone || statusSummary.succeeded > 0)"
+          :project-id="projectId"
+        />
         <NEmpty v-if="flow.parseJobId || parseDone" description="" />
         <NEmpty v-else-if="flow.selectedEpisodes.length" description="请点击『解析选中』提交任务" />
         <NEmpty v-else description="Agent 将自动完成评估与解析，请稍候" />

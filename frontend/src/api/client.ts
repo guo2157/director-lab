@@ -116,6 +116,17 @@ function httpStatusMessage(status: number): string {
 }
 
 /**
+ * 生成带部署基路径的 API 地址，供 audio/img/a 标签等非 axios 场景使用。
+ * 硬编码 /api 在子路径部署下会 404，这里统一按 import.meta.env.BASE_URL 拼接。
+ */
+export function apiUrl(path: string): string {
+  const base = import.meta.env.BASE_URL || '/'
+  const prefix = base.endsWith('/') ? base.slice(0, -1) : base
+  const suffix = path.startsWith('/') ? path : `/${path}`
+  return `${prefix}/api${suffix}`
+}
+
+/**
  * axios 实例：baseURL /api，统一错误处理
  * 本期内网不鉴权，预留 Authorization: Bearer <token>
  */

@@ -407,8 +407,8 @@
 
 ### 8.5 参考槽位与容量
 - 槽位只能来自工作流 `capabilities.reference_slots`，超出能力即 `reference_capacity_exceeded` 阻断，不静默丢图；
-- `wf_image_ref_qwen_edit`：`ref_identity` / `ref_costume` / `ref_scene`，上限 3 图；
-- `wf_video_h3_ref2va`：`ref_prev_frame→ref_image_0`、`ref_image→1`、`ref_identity→2`、`ref_costume→3`、`ref_scene→4`、`ref_prop→5`；上限 9 图 / 3 视频 / 3 音频；
+- `wf_image_ref_qwen_edit`：`ref_identity` / `ref_character_2` / `ref_scene`，上限 3 图；
+- `wf_video_h3_ref2va`：`ref_prev_frame→ref_image_0`、`ref_image→1`、`ref_identity→2`、`ref_character_2→3`、`ref_scene→4`、`ref_prop→5`；上限 9 图 / 3 视频 / 3 音频；
 - 未注入槽位必须剔除对应 `image{n}` 连线，提示词中 `<Picture N>` 按连线顺序重编号；
 - `wf_image_t2i_qwen` 无参考槽位，仅可编译正向/负向提示词。
 

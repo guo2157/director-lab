@@ -45,11 +45,11 @@
 | height | 高度 | $height（字段同名）；Primitive 节点写 $height.value | 视工作流 |
 | seed | 随机种子 | $seed | 否 |
 | ref_identity | 人物身份参考图，优先保持面部与五官 | $ref_identity.~image | 否 |
-| ref_costume | 服装与全身比例参考图 | $ref_costume.~image | 否 |
+| ref_character_2 | 服装与全身比例参考图 | $ref_character_2.~image | 否 |
 | ref_scene | 场景与光线参考图 | $ref_scene.~image | 否 |
 | ref_prop | 关键道具参考图，约束道具形制、颜色与持握关系 | $ref_prop.~image | 否 |
 | ref_prev_frame | 上一镜头末帧，用于画面连续衔接；首镜或前镜末帧缺失时不注入 | $ref_prev_frame.~image | 否 |
-| ref_image | 通用参考图。出图工作流中与 ref_identity/ref_costume/ref_scene 互斥；H3 视频工作流中表示『当前镜头分镜图』，与其余五个槽位并存 | $ref_image.~image | 否 |
+| ref_image | 通用参考图。出图工作流中与 ref_identity/ref_character_2/ref_scene 互斥；H3 视频工作流中表示『当前镜头分镜图』，与其余五个槽位并存 | $ref_image.~image | 否 |
 | first_frame | 首帧 | $first_frame.~image | 否 |
 | end_frame | 尾帧 | $end_frame.~image | 否 |
 | frames | 帧数 | $frames | 否 |
@@ -84,15 +84,15 @@
 
 图片工作流只保留两个：多参考版 `wf_image_ref_qwen21_multi`（默认工作流，9 槽）与纯文生图 `wf_image_t2i_qwen21_turbo`（0 槽）。原单角色版 `wf_image_ref_qwen21_turbo` 已下线：multi 是它的超集，只注入 3 张参考图时多余槽位会被自动剔除，生成行为与之等价，无需再切换工作流。
 
-- 出图多参考版（`wf_image_ref_qwen21_multi`）：9 槽，`ref_scene`、`ref_identity`、`ref_costume` 三槽见下表，其后为 `ref_character_3` 至 `ref_character_6`（第 3 至第 6 个角色）与 `ref_prop`、`ref_prop_2`（两个道具）。
-- 视频（H3 ref2va 三档）：9 槽，五个职责槽位（`ref_identity`、`ref_costume`、`ref_prev_frame`、`ref_prop`、`ref_image`）之外追加 `ref_character_3` 至 `ref_character_6`。
+- 出图多参考版（`wf_image_ref_qwen21_multi`）：9 槽，`ref_scene`、`ref_identity`、`ref_character_2` 三槽见下表，其后为 `ref_character_3` 至 `ref_character_6`（第 3 至第 6 个角色）与 `ref_prop`、`ref_prop_2`（两个道具）。
+- 视频（H3 ref2va 三档）：9 槽，五个职责槽位（`ref_identity`、`ref_character_2`、`ref_prev_frame`、`ref_prop`、`ref_image`）之外追加 `ref_character_3` 至 `ref_character_6`。
 
 三张职责槽位（角色版与视频版通用）：
 
 | 槽位 | 负责约束 | 缺失时的处理 |
 | --- | --- | --- |
 | ref_identity | 人物身份、脸型、五官、发型 | 该槽位不注入，仅按其余槽位与提示词生成 |
-| ref_costume | 服装颜色、配饰、全身比例 | 同上 |
+| ref_character_2 | 服装颜色、配饰、全身比例 | 同上 |
 | ref_scene | 场景与光线 | 同上 |
 
 ### 5.2 分辨率来源
@@ -289,7 +289,7 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 | 槽位 | 取值来源 |
 | --- | --- |
 | ref_identity | 该镜头主说话角色的 portrait_asset_id（定妆图） |
-| ref_costume | 同上，暂由角色定妆图兼任 |
+| ref_character_2 | 同上，暂由角色定妆图兼任 |
 | ref_scene | 该镜头所属场景的 baseline_asset_id（场景基准图） |
 
 填充约束：
@@ -308,7 +308,7 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 | 槽位 | 负责约束 | 自动取值来源 |
 | --- | --- | --- |
 | ref_identity | 人物身份、脸型、五官、发型 | 主说话角色的 `portrait_asset_id` |
-| ref_costume | 服装颜色、配饰、全身比例 | 暂由角色定妆图兼任 |
+| ref_character_2 | 服装颜色、配饰、全身比例 | 暂由角色定妆图兼任 |
 | ref_scene | 场景、光线与空间陈设 | 场景 `baseline_asset_id` |
 | ref_prop | 关键道具的形制、颜色与持握关系 | 提示词中 `@道具名` 引用道具的 `anchor_asset_id`，多道具时按出现顺序取用 |
 | ref_prev_frame | 与上一镜头的画面连续性 | 同场景同集内 `seq - 1` 镜头的末帧资产 |
@@ -319,7 +319,7 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 - 同一镜头绑定的参考素材总数不超过 6 个，含分镜图在内
 - 任一来源资产未锁定时不填充该槽位，记 warning，不阻断生成
 - `ref_prev_frame` 在首镜（seq=1）或上一镜头末帧缺失时不注入，此时仅靠 `start_state` 枚举值衔接
-- 分组注入：`ref_prev_frame` 单独作为参考图1；`ref_image` 作为参考图2；`ref_identity`、`ref_costume`、`ref_scene`、`ref_prop` 作为参考图2 的细化来源追加注入，不单独成段；提交 H3 时提示词编译器按实际连线顺序把『参考图1/2』与 `@名称` 统一编译为 `<Picture N>`（槽位映射键 `ref_images.ref_image_N`，见第 13.1 节）
+- 分组注入：`ref_prev_frame` 单独作为参考图1；`ref_image` 作为参考图2；`ref_identity`、`ref_character_2`、`ref_scene`、`ref_prop` 作为参考图2 的细化来源追加注入，不单独成段；提交 H3 时提示词编译器按实际连线顺序把『参考图1/2』与 `@名称` 统一编译为 `<Picture N>`（槽位映射键 `ref_images.ref_image_N`，见第 13.1 节）
 - 六个槽位全部无法填充时需降级为 T2VA；H3 参考生视频要求至少一张参考图或参考视频，降级须改用 T2V 工作流（`wf_video_h3_t2v`），否则返回 422 `h3_reference_required`
 
 #### 约束冲突处理
@@ -481,7 +481,7 @@ shot.duration    → $duration_hint（目标时长）
 
 按定义批量生成（`POST /projects/{id}/asset-plans/generate`）的参考图注入规则：
 
-1. **槽位由定义绑定决定**：`asset_plan_dependency` 按 (plan_id, slot) 记录依赖（ref_identity/ref_costume/ref_scene/ref_prop/ref_image），注入不依赖提示词文本书写顺序，从根本上避免槽位错位。
+1. **槽位由定义绑定决定**：`asset_plan_dependency` 按 (plan_id, slot) 记录依赖（ref_identity/ref_character_2/ref_scene/ref_prop/ref_image），注入不依赖提示词文本书写顺序，从根本上避免槽位错位。
 2. **仅注入工作流声明的槽位**：以 `capabilities.reference_slots` 为准（字符串数组或 `{param, input_key, optional}` 对象数组），未声明的槽位不注入，避免无效上传与工作流不支持的输入。
 3. **版本锁定**：解析优先取定义绑定的当前有效资产（`validity == 'current'`）；绑定资产被替换时回退到归属实体/镜头的当前有效资产，不引用过期版本。
 4. **绑定快照**：每个槽位固化 `slot/ref_key/asset_id/version/file_path/status` 随任务参数 `__binding_snapshot__` 持久化；重试复用快照，不重新解析（版本漂移防护）。
@@ -508,7 +508,7 @@ shot.duration    → $duration_hint（目标时长）
 
 ### 13.1 H3 六参考槽位映射（`ref_images.ref_image_N`）
 
-0=ref_prev_frame（上镜末帧）、1=ref_image（当前分镜图）、2=ref_identity、3=ref_costume、4=ref_scene、5=ref_prop（官方 autogrow 命名从 0 起）；`prompt`/`length`/`seed` 由 Primitive 节点连线驱动；`width`/`height` 由执行器按第 5.2 节分辨率约束注入；提示词以 `<Picture N>` 按连线顺序引用，剔除槽位后重新编号。
+0=ref_prev_frame（上镜末帧）、1=ref_image（当前分镜图）、2=ref_identity、3=ref_character_2、4=ref_scene、5=ref_prop（官方 autogrow 命名从 0 起）；`prompt`/`length`/`seed` 由 Primitive 节点连线驱动；`width`/`height` 由执行器按第 5.2 节分辨率约束注入；提示词以 `<Picture N>` 按连线顺序引用，剔除槽位后重新编号。
 
 ### 13.2 H3 约束
 

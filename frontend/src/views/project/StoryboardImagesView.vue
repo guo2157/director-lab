@@ -393,12 +393,12 @@ async function handleBatchConfirm() {
 // 生图工作流 wf_image_ref_qwen_edit（Qwen-Image-Edit）只声明 3 个参考图槽位，
 // 与视频工作流完全不同：没有「本镜分镜图」槽位，也没有道具槽位。
 //   ref_identity → image1（角色身份参考，唯一必填）
-//   ref_costume  → image2（角色服装参考）
+//   ref_character_2  → image2（角色服装参考）
 //   ref_scene    → image3（场景基准图）
 // 提交前未注入媒体的槽位会被剔除对应 image{n} 连线，占位图不会参与生成。
 const IMG_SLOT_META: Record<string, { label: string; inputKey: string }> = {
   ref_identity: { label: '角色身份参考', inputKey: 'image1' },
-  ref_costume: { label: '角色服装参考', inputKey: 'image2' },
+  ref_character_2: { label: '角色服装参考', inputKey: 'image2' },
   ref_scene: { label: '场景基准图', inputKey: 'image3' },
 }
 const IMG_MAX_REFS = 3
@@ -551,8 +551,8 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
     atIdx = promptText.indexOf('@', atIdx + 1)
   }
 
-  // 二、角色：本镜主角色 + @引用角色，主角色优先占 ref_identity，其次 ref_costume
-  const charSlots = ['ref_identity', 'ref_costume']
+  // 二、角色：本镜主角色 + @引用角色，主角色优先占 ref_identity，其次 ref_character_2
+  const charSlots = ['ref_identity', 'ref_character_2']
   const relatedChars = chars
     .filter((c) => shot.character_id === c.id || atNames.has(c.name))
     .sort((a, b) => (a.id === shot.character_id ? -1 : b.id === shot.character_id ? 1 : 0))

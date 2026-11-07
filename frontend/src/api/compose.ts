@@ -1,4 +1,4 @@
-import { get, post } from './client'
+import { apiUrl, get, post } from './client'
 import type { ComposePayload, Composition, ExportPayload, ExportRecord } from '@/types/compose'
 
 /** 发起合成（返回 202；校验失败 422：output_missing / duration_mismatch_review_required / speaker_mapping_required） */
@@ -28,5 +28,6 @@ export function listExports(projectId: string) {
 
 /** 下载导出文件（流式，Content-Disposition: attachment，不存在 404） */
 export function downloadExportUrl(exportId: string) {
-  return `/api/exports/${exportId}/download`
+  // 问题16 同类修复：不再硬编码 /api 前缀，按部署基路径拼接
+  return apiUrl(`/exports/${exportId}/download`)
 }

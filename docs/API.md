@@ -465,7 +465,7 @@
 
 - 选中镜头数少于 3 个时返回 400，提示改用单镜生成接口
 - 执行顺序固定为集数升序 → 场景在该集的出场顺序 → 镜头 `seq` 升序；入队后由 worker 按并发 = 可用 ComfyUI 实例数执行（单实例串行，D-18）
-- @引用注入（D-16）：keyframe/clip 生成时逐镜头解析提示词中的 @角色/@场景 自动携带参考图，与单镜生成行为一致；多角色按出现顺序填入角色槽位（ref_identity → ref_image → ref_costume），槽位不足返回 422
+- @引用注入（D-16）：keyframe/clip 生成时逐镜头解析提示词中的 @角色/@场景 自动携带参考图，与单镜生成行为一致；多角色按出现顺序填入角色槽位（ref_identity → ref_image → ref_character_2），槽位不足返回 422
 - 末帧衔接只在同场景同集内成立：跨场景或跨集时不注入 `ref_prev_frame`，改由 `start_state` 文字衔接；系统在生成确认弹窗中提示这一降级
 - 任一镜头失败时仅暂停依赖该镜头视频或末帧的后续镜头；独立场景/集继续执行。用户可选择『重试失败项』『从失败点继续』或『忽略失败强制继续』；强制继续需提示可能损失连续性，并在 job 的 warnings 中记录 `prev_frame_skipped`，产物仍标记 succeeded 但 consistency verdict 降级为 review
 - 已存在的 keyframe/clip 产物按状态跳过，不重复生成

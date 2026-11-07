@@ -17,6 +17,7 @@ import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Scene, Shot, ShotKind } from '@/types/script'
 import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
+import ShotAudioPanel from '@/components/ShotAudioPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -549,14 +550,14 @@ const readiness = computed(() => {
 //   ref_prev_frame → ref_images.ref_image_0（上一镜尾帧，帧约束）
 //   ref_image      → ref_images.ref_image_1（本镜分镜图，首帧参考）
 //   ref_identity   → ref_images.ref_image_2（角色身份参考）
-//   ref_costume    → ref_images.ref_image_3（角色服装参考）
+//   ref_character_2    → ref_images.ref_image_3（角色服装参考）
 //   ref_scene      → ref_images.ref_image_4（场景基准图）
 //   ref_prop       → ref_images.ref_image_5（道具锚定图）
 const SLOT_META: Record<string, { label: string; inputKey: string }> = {
   ref_prev_frame: { label: '上一镜尾帧', inputKey: 'ref_images.ref_image_0' },
   ref_image: { label: '本镜分镜图', inputKey: 'ref_images.ref_image_1' },
   ref_identity: { label: '角色身份参考', inputKey: 'ref_images.ref_image_2' },
-  ref_costume: { label: '角色服装参考', inputKey: 'ref_images.ref_image_3' },
+  ref_character_2: { label: '角色服装参考', inputKey: 'ref_images.ref_image_3' },
   ref_scene: { label: '场景基准图', inputKey: 'ref_images.ref_image_4' },
   ref_prop: { label: '道具锚定图', inputKey: 'ref_images.ref_image_5' },
 }
@@ -631,7 +632,7 @@ const shotRefList = computed<ShotRefItem[]>(() => {
     if (s) return s.title
     const p = props.find((x) => x.anchor_asset_id === assetId)
     if (p) return p.name
-    if (slot === 'ref_identity' || slot === 'ref_costume') {
+    if (slot === 'ref_identity' || slot === 'ref_character_2') {
       return primary ? primary.name : SLOT_META[slot]?.label ?? slot
     }
     return SLOT_META[slot]?.label ?? slot
@@ -685,7 +686,7 @@ const shotRefList = computed<ShotRefItem[]>(() => {
   }
 
   // 三、角色：本镜主角色 + @引用的角色全部列出（缺定妆图、超槽位也照列）
-  const charSlots = ['ref_identity', 'ref_costume']
+  const charSlots = ['ref_identity', 'ref_character_2']
   const relatedChars = chars
     .filter((c) => shot.character_id === c.id || atNames.has(c.name))
     .sort((a, b) => (a.id === shot.character_id ? -1 : b.id === shot.character_id ? 1 : 0))
@@ -1311,6 +1312,18 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                 当前阶段：分镜图已确认。可调整上方视频提示词与参考图后提交视频生成。
               </template>
             </div>
+          </section>
+          <!-- 分区四：音频（音频模块改造：镜头详情音频面板） -->
+          <section class="drawer-section">
+            <div class="section-head">
+              <span class="section-index">4</span>
+              <span class="section-name">音频</span>
+            </div>
+            <ShotAudioPanel
+              :project-id="projectId"
+              :shot-id="activeShot.id"
+              :episode="activeShot.episode"
+            />
           </section>
         </template>
       </n-drawer-content>

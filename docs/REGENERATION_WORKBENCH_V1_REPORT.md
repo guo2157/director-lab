@@ -16,14 +16,14 @@
 | 工作流 | 类型 | 参考槽位 | 数量上限 | 关键约束 |
 |---|---|---|---|---|
 | wf_image_t2i_qwen | image / keyframe | 无 | 0 | 不支持任何参考图；steps/cfg/sampler 为结构参数，不可运行时改写 |
-| wf_image_ref_qwen_edit | image / keyframe | ref_identity、ref_costume、ref_scene | 3 | TextEncodeQwenImageEditPlus(image1..3)；未注入槽位须在提交前剔除 image{n} 连线 |
-| wf_video_h3_ref2va | video / clip | ref_prev_frame、ref_image、ref_identity、ref_costume、ref_scene、ref_prop | 9 | 分别映射 ref_image_0..5；first_frame 与 end_frame 均为 false；prev_frame 为 true；提示词用 `<Picture N>` 引用 |
+| wf_image_ref_qwen_edit | image / keyframe | ref_identity、ref_character_2、ref_scene | 3 | TextEncodeQwenImageEditPlus(image1..3)；未注入槽位须在提交前剔除 image{n} 连线 |
+| wf_video_h3_ref2va | video / clip | ref_prev_frame、ref_image、ref_identity、ref_character_2、ref_scene、ref_prop | 9 | 分别映射 ref_image_0..5；first_frame 与 end_frame 均为 false；prev_frame 为 true；提示词用 `<Picture N>` 引用 |
 
 对照工作流：`wf_video_h3_flf2v` 支持首帧 + 可选尾帧，是真正的首帧约束能力；`wf_video_h3_t2v` 无参考槽位。
 
 ### 1.3 参考图进入模型的真实路径
 
-`ref_inject.build_media_params` 按提示词中的 `@名称` 解析实体，再按工作流 `capabilities.reference_slots` 声明的槽位依次填充：角色 → ref_identity、ref_costume（按出现顺序，最多 2 个）；场景 → ref_scene；道具 → ref_prop。
+`ref_inject.build_media_params` 按提示词中的 `@名称` 解析实体，再按工作流 `capabilities.reference_slots` 声明的槽位依次填充：角色 → ref_identity、ref_character_2（按出现顺序，最多 2 个）；场景 → ref_scene；道具 → ref_prop。
 
 `RESERVED_SLOTS` 包含 ref_image、ref_prev_frame、first_frame、end_frame，@引用不得占用。引用超出槽位返回 422，未匹配引用返回 invalid_reference，资产缺失返回 reference_asset_missing（409）。参考图确实通过工作流媒体参数进入模型，不存在仅写入提示词文本的情况。
 

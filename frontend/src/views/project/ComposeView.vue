@@ -12,6 +12,8 @@ import {
 import { getJob, listJobs } from '@/api/jobs'
 import { getProject } from '@/api/projects'
 import type { Composition, ComposePayload, ExportPayload } from '@/types/compose'
+import AudioPolicyPanel from '@/components/AudioPolicyPanel.vue'
+import AudioTracksPanel from '@/components/AudioTracksPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -524,6 +526,15 @@ function statusTagClass(status: string) {
             <span v-if="composeJobError">（{{ composeJobError }}）</span>
           </n-alert>
         </n-card>
+
+        <!-- 音频策略（项目级：TTS / H3 原生音轨 / BGM / SFX） -->
+        <AudioPolicyPanel :project-id="projectId" />
+
+        <!-- 音频轨道（音频模块改造：合成前检查各轨就绪状态与原生音频策略） -->
+        <AudioTracksPanel
+          :project-id="projectId"
+          :episode="composeEpisode || 1"
+        />
 
         <n-card size="small" title="导出" class="panel-card">
           <div class="form-grid">
