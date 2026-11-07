@@ -839,6 +839,26 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
                 _existing = params.get("__media__", {})
                 _existing.update(media)
                 params["__media__"] = _existing
+                # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
+                from app.services.ref_inject import rewrite_picture_refs
+                params["prompt"] = rewrite_picture_refs(
+                    db, scene.project_id, params.get("prompt") or "",
+                    params["__media__"], slots)
+    # Reference Resolver（PROP_BINDING_PLAN P0）：keyframe 提交前解析参考图清单，
+    # 组合图优先（character_prop_binding）→ 独立图回退 → offscreen/absent 保护；
+    # 语义槽位输出与 build_media_params 兼容格式合并（Resolver 结果优先），
+    # 完整 Manifest 写入 job.input_snapshot 供追溯（验收第 9 条）。
+    _reference_manifest = None
+    if target == "keyframe":
+        from app.services.reference_resolver import resolve_shot_references
+        _reference_manifest = resolve_shot_references(db, shot.id, scene.project_id)
+        _resolver_media = {
+            s.slot: s.file_path for s in _reference_manifest.slots if s.file_path
+        }
+        if _resolver_media:
+            _existing = params.get("__media__", {})
+            _existing.update(_resolver_media)
+            params["__media__"] = _existing
     # 阶段 B：分镜图/分镜视频提示词编译——只组合镜头绑定且审核通过的资产，
     # 结构性错误（槽位超限、参考文件缺失、槽位重复）硬阻断，不静默丢图。
     compilation = None
@@ -851,6 +871,10 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
                       generation_mode=payload.get("generation_mode"))
     _attach_compilation(job, compilation)
+    if _reference_manifest is not None:
+        _snap = dict(job.input_snapshot or {})
+        _snap["reference_manifest"] = _reference_manifest.to_dict()
+        job.input_snapshot = _snap
     if target == "clip":
         # 无论是否注入成功都记录判定依据，便于事后追溯串图与缺帧问题
         _snap = dict(job.input_snapshot or {})
@@ -925,15 +949,36 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
                 _existing = params.get("__media__", {})
                 _existing.update(media)
                 params["__media__"] = _existing
+                # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
+                from app.services.ref_inject import rewrite_picture_refs
+                params["prompt"] = rewrite_picture_refs(
+                    db, scene.project_id, params.get("prompt") or "",
+                    params["__media__"], slots)
+    # Reference Resolver（PROP_BINDING_PLAN P0）：重做与单镜生成行为一致，
+    # 组合图优先（character_prop_binding）→ 独立图回退 → offscreen/absent 保护；
+    # Resolver 结果覆盖同名语义槽位，完整 Manifest 写入 input_snapshot 供追溯。
+    _reference_manifest = None
+    if target == "keyframe":
+        from app.services.reference_resolver import resolve_shot_references
+        _reference_manifest = resolve_shot_references(db, shot.id, scene.project_id)
+        _resolver_media = {
+            s.slot: s.file_path for s in _reference_manifest.slots if s.file_path
+        }
+        if _resolver_media:
+            _existing = params.get("__media__", {})
+            _existing.update(_resolver_media)
+            params["__media__"] = _existing
     # 镜间尾帧依赖（P0）：重做与单镜生成行为一致
     prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
     job = _create_job(db, scene.project_id, shot.id, target, wf, params)
-    if target == "clip" or chain_info:
+    if target == "clip" or chain_info or _reference_manifest is not None:
         _snap = dict(job.input_snapshot or {})
         if target == "clip":
             _snap["prev_frame"] = prev_frame_info
         if chain_info:
             _snap["chain_invalidation"] = chain_info
+        if _reference_manifest is not None:
+            _snap["reference_manifest"] = _reference_manifest.to_dict()
         job.input_snapshot = _snap
     db.commit()
     return _job_out(job)
@@ -985,6 +1030,11 @@ def regenerate_shot_clip(shot_id: str, payload: dict | None = None,
             _existing = params.get("__media__", {})
             _existing.update(media)
             params["__media__"] = _existing
+            # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
+            from app.services.ref_inject import rewrite_picture_refs
+            params["prompt"] = rewrite_picture_refs(
+                db, scene.project_id, params.get("prompt") or "",
+                params["__media__"], slots)
     # 阶段 B：提示词编译（槽位超限/参考图缺失硬阻断）
     _fallback = params.get("prompt") or shot.image_prompt or ""
     params, compilation = _compile_shot_prompt(db, shot, wf, params, target, _fallback)
@@ -1168,6 +1218,11 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
                     _existing = params.get("__media__", {})
                     _existing.update(media)
                     params["__media__"] = _existing
+                    # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
+                    from app.services.ref_inject import rewrite_picture_refs
+                    params["prompt"] = rewrite_picture_refs(
+                        db, sc.project_id, params.get("prompt") or "",
+                        params["__media__"], slots)
         # 镜间尾帧依赖（P0）：批量与单镜生成行为一致
         prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
         _job = _create_job(db, sc.project_id, shot.id, target, shot_wf, params)
@@ -1268,6 +1323,11 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
                     _existing = params.get("__media__", {})
                     _existing.update(media)
                     params["__media__"] = _existing
+                    # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
+                    from app.services.ref_inject import rewrite_picture_refs
+                    params["prompt"] = rewrite_picture_refs(
+                        db, project_id, params.get("prompt") or "",
+                        params["__media__"], slots)
         # 镜间尾帧依赖（P0）：仅传统模式在提交时注入；
         # independent 不注入；chained 由执行期 ref_prev_frame 注入逻辑解析上一镜尾帧
         prev_frame_info = None

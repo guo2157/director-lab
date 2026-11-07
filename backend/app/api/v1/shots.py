@@ -16,6 +16,7 @@ from app.models import Asset, AssetRef, Character, DependencyRef, Job, Project, 
 from app.models import ids
 from app.schemas.storyboard import ShotCreate, ShotOrderUpdate, ShotOut, ShotUpdate
 from app.services import errors
+from app.services.shot_refs import build_shot_asset_manifest, inject_asset_refs
 
 router = APIRouter(prefix="/api", tags=["shots"])
 
@@ -115,10 +116,18 @@ def get_shot(shot_id: str, db: Session = Depends(get_db)) -> dict:
     s = _get_shot(db, shot_id)
     scene = db.get(Scene, s.scene_id)
     character = db.get(Character, s.character_id) if s.character_id else None
+    # 道具按镜头资产清单过滤：只返回该镜头实际涉及的道具（提示词提及或显式 @引用），
+    # 避免项目全量道具灌入详情页
+    manifest = build_shot_asset_manifest(db, s)
+    manifest_props = set(manifest.get("props") or [])
     props = (
-        db.query(Prop)
-        .filter(Prop.project_id == scene.project_id, Prop.anchor_asset_id.isnot(None))
-        .all()
+        [
+            p
+            for p in db.query(Prop)
+            .filter(Prop.project_id == scene.project_id, Prop.anchor_asset_id.isnot(None))
+            .all()
+            if p.name in manifest_props
+        ]
         if scene
         else []
     )
@@ -131,6 +140,10 @@ def get_shot(shot_id: str, db: Session = Depends(get_db)) -> dict:
         if character else None
     )
     out["props"] = [{"id": p.id, "name": p.name, "anchor_asset_id": p.anchor_asset_id} for p in props]
+    # 实际生成用提示词：注入 @引用（含道具）后的增强版本，与任务提交链路一致
+    out["effective_image_prompt"] = (
+        inject_asset_refs(db, s, s.image_prompt) if s.image_prompt else None
+    )
     out["current_assets"] = {
         "keyframe": _current_asset_info(db, shot_id, "keyframe"),
         "clip": _current_asset_info(db, shot_id, "clip"),
@@ -314,3 +327,23 @@ def reorder_shots(scene_id: str, payload: ShotOrderUpdate, db: Session = Depends
         shot_map[sid].seq = idx
     db.commit()
     return {"reordered": len(payload.shot_ids)}
+
+
+@router.get("/shots/{shot_id}/reference-preview")
+def get_shot_reference_preview(shot_id: str, db: Session = Depends(get_db)) -> dict:
+    """分镜生成前的参考图预览（PROP_BINDING_PLAN P0）。
+
+    调用 Reference Resolver（dry-run，不创建任务不写库），返回：
+    - slots：本次将使用的参考图清单（语义槽位、asset_id、asset_type、来源、选择原因）
+    - fallbacks：回退记录（无组合图/画外/不存在等场景的原因码）
+    前端据此展示参考图与人工替换入口；不影响资产库原始图片。
+    """
+    shot = db.get(Shot, shot_id)
+    if shot is None:
+        raise errors.shot_not_found()
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        raise errors.scene_not_found()
+    from app.services.reference_resolver import resolve_shot_references
+    manifest = resolve_shot_references(db, shot.id, scene.project_id)
+    return manifest.to_dict()

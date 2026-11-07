@@ -23,7 +23,7 @@ import hashlib
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from app.models import Composition, Job, Project, ScriptVersion, Shot, Scene, ids
+from app.models import Composition, Job, ParseVersion, Project, ScriptVersion, Shot, Scene, ids
 from app.models.enums import ASPECT_RATIO, CREATION_TYPE
 from app.services.agent_tools import ToolError, ToolResult
 from app.services.pipeline_state import (
@@ -80,6 +80,8 @@ class AnalyzeScriptInput(BaseModel):
     episode_start: int = Field(default=1, ge=1)
     episode_count: int | None = Field(default=None, ge=1)
     episode_end: int | None = Field(default=None, ge=1)
+    # 发起方会话：解析为异步任务，完成后据此把结果回推到对应对话框
+    session_id: str | None = None
 
 
 class ReviewAssetsInput(BaseModel):
@@ -105,11 +107,181 @@ class ExportVideoInput(BaseModel):
     delivery_profile: str = Field(default="standard", pattern="^(standard|high_quality)$")
 
 
+class ConfirmParseInput(BaseModel):
+    project_id: str
+    parse_version_id: str | None = None  # 缺省为项目最新候选解析版本
+
+
+class QueryParseStatusInput(BaseModel):
+    project_id: str
+
+
 class PipelineStatusInput(BaseModel):
     project_id: str
 
 
 # --- 工具实现 ---
+
+def tool_confirm_parse(db: Session, project_id: str, parse_version_id: str | None = None) -> dict:
+    """确认候选解析版本（人工审核闸口）：把解析结果落库为角色/场景/道具/镜头，
+    并切换为项目当前解析版本；须已完成剧本分析。
+
+    确认前叙事实体表为空、资产库无输入，后续生成无法推进，故该步骤必须显式确认。
+    落库复用 script_parse.apply_parse_result，与 REST 确认接口同一套逻辑。
+    """
+    try:
+        assert_action_allowed(db, project_id, "confirm_parse")
+    except PipelineStateError as e:
+        raise ToolError("pipeline_gate_blocked", e.message)
+    p = db.get(Project, project_id)
+    if p is None or p.deleted_at is not None:
+        raise ToolError("project_not_found", "项目不存在")
+    q = db.query(ParseVersion).filter(ParseVersion.project_id == project_id)
+    if parse_version_id:
+        pv = q.filter(ParseVersion.id == parse_version_id).first()
+    else:
+        pv = q.filter(ParseVersion.status == "candidate").order_by(
+            ParseVersion.version.desc()).first()
+    if pv is None:
+        raise ToolError("parse_version_not_found", "未找到待确认的解析版本，请先发起剧本分析")
+    if pv.status != "candidate":
+        raise ToolError("parse_version_conflict", "仅候选状态的解析版本可确认")
+    parse_jobs = (
+        db.query(Job)
+        .filter(Job.project_id == project_id,
+                Job.job_type.in_(["parse", "script_agent"]),
+                Job.status == "succeeded")
+        .order_by(Job.finished_at.desc())
+        .all()
+    )
+    target_results = [
+        (j.result, j.finished_at.isoformat() if j.finished_at else "")
+        for j in parse_jobs if (j.result or {}).get("parse_version_id") == pv.id
+    ]
+    target_results.sort(key=lambda t: (int(t[0].get("episode_start") or 1), t[1]))
+    target_results = [t[0] for t in target_results]
+    stats: dict = {}
+    if target_results:
+        from app.models import Scene as SceneModel
+        from app.services.script_parse import apply_parse_result
+        current_scene_ids = [
+            row[0] for row in db.query(SceneModel.id).filter(
+                SceneModel.project_id == project_id).all()
+        ]
+        for tr in target_results:
+            stats = apply_parse_result(
+                db, p, tr,
+                episode_start=int(tr.get("episode_start") or 1),
+                episode_count=int(tr.get("episode_count") or 1),
+                current_scene_ids=current_scene_ids,
+            )
+    old_id = p.current_parse_version_id
+    if old_id:
+        old = db.get(ParseVersion, old_id)
+        if old is not None and old.status == "current":
+            old.status = "superseded"
+    pv.status = "current"
+    pv.confirmed_at = _now()
+    p.current_parse_version_id = pv.id
+    db.commit()
+    # 统计口径：直接查库统计落库后的实际实体数（apply_parse_result 的 stats 字段
+    # 与增量 upsert 语义不完全对应，直接计数才能反映用户看到的真实资产规模）
+    from app.models import Character as CharacterModel
+    from app.models import Prop as PropModel
+    from app.models import Scene as SceneModel
+    from app.models import Shot as ShotModel
+    scene_ids = [
+        row[0] for row in db.query(SceneModel.id).filter(
+            SceneModel.project_id == project_id).all()
+    ]
+    counts = {
+        "characters": db.query(CharacterModel).filter(
+            CharacterModel.project_id == project_id).count(),
+        "scenes": len(scene_ids),
+        "props": db.query(PropModel).filter(
+            PropModel.project_id == project_id).count(),
+        "shots": db.query(ShotModel).filter(
+            ShotModel.scene_id.in_(scene_ids)).count() if scene_ids else 0,
+    }
+    return {
+        "parse_version_id": pv.id,
+        "version": pv.version,
+        "status": pv.status,
+        "counts": counts,
+        "parse_stats": stats,
+        **_pipeline_ctx(db, project_id),
+    }
+
+
+def tool_query_parse_status(db: Session, project_id: str) -> dict:
+    """查询剧本分析（解析）进度（只读）：任务状态、已用时、结果摘要。
+
+    解析是异步耗时任务，用户提交后需要能主动问『分析好了吗』并看到进展，
+    否则对话只能停在受理话术上。耗时取任务开始时间与当前时间的差值。
+    """
+    p = db.get(Project, project_id)
+    if p is None or p.deleted_at is not None:
+        raise ToolError("project_not_found", "项目不存在")
+    job = (
+        db.query(Job)
+        .filter(Job.project_id == project_id,
+                Job.job_type.in_(["parse", "script_agent"]))
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+    if job is None:
+        return {
+            "has_job": False,
+            "status": "none",
+            "message": "尚未发起剧本分析，可以直接对我说『开始分析剧本』。",
+            **_pipeline_ctx(db, project_id),
+        }
+    base = job.started_at or job.created_at
+    # 数据库读出的时间可能是 naive，统一去掉时区后再与当前时间相减，避免比较报错
+    if base is not None and base.tzinfo is not None:
+        base = base.replace(tzinfo=None)
+    elapsed = int((_now() - base).total_seconds()) if base is not None else 0
+    pv = None
+    pv_id = (job.result or {}).get("parse_version_id")
+    if pv_id:
+        pv = db.get(ParseVersion, pv_id)
+    data = {
+        "has_job": True,
+        "job_id": job.id,
+        "status": job.status,
+        "elapsed_seconds": elapsed,
+        "started_at": base.isoformat() if base is not None else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "error_code": job.error_code,
+        "error_msg": (job.error_msg or "")[:300] or None,
+        "parse_version_id": pv.id if pv is not None else None,
+        "parse_version_status": pv.status if pv is not None else None,
+        **_pipeline_ctx(db, project_id),
+    }
+    if job.status in ("queued", "running"):
+        data["message"] = (
+            f"剧本仍在分析中，已用时 {elapsed} 秒（任务 {job.id}）。\n"
+            "分析完成后我会把结果直接发到这里，也可以随时问我进度。"
+        )
+    elif job.status == "succeeded":
+        if pv is not None and pv.status == "candidate":
+            data["message"] = (
+                f"剧本分析已完成（用时 {elapsed} 秒），解析版本 v{pv.version} 待确认。\n"
+                "回复『确认解析结果』即可把角色/场景/道具/镜头落库，并继续生成资产。"
+            )
+        else:
+            data["message"] = (
+                f"剧本分析已完成（用时 {elapsed} 秒），解析结果已确认落库，可以继续生成资产。"
+            )
+    elif job.status == "failed":
+        data["message"] = (
+            f"剧本分析失败（{job.error_code or 'unknown'}）：{(job.error_msg or '')[:200]}\n"
+            "可以修正后重新对我说『开始分析剧本』。"
+        )
+    else:
+        data["message"] = f"剧本分析任务状态：{job.status}（已用时 {elapsed} 秒）。"
+    return data
+
 
 def tool_create_project(db: Session, name: str, aspect_ratio: str,
                          creation_type: str = "novel", description: str | None = None) -> dict:
@@ -177,7 +349,8 @@ def tool_save_script(db: Session, project_id: str, text: str) -> dict:
 
 def tool_analyze_script(db: Session, project_id: str, episode_start: int = 1,
                          episode_count: int | None = None,
-                         episode_end: int | None = None) -> dict:
+                         episode_end: int | None = None,
+                         session_id: str | None = None) -> dict:
     """分析剧本：创建解析任务（异步），返回任务 ID 与流程状态。"""
     try:
         assert_action_allowed(db, project_id, "analyze_script")
@@ -208,10 +381,26 @@ def tool_analyze_script(db: Session, project_id: str, episode_start: int = 1,
             "script_version_id": sv.id,
             "episode_start": episode_start,
             "episode_count": episode_count,
+            # 发起方会话：解析为异步任务，执行器完成后据此把结果回推到该对话
+            "session_id": session_id,
         },
         status="queued", created_at=_now(),
     )
     db.add(job)
+    # 统一任务编排层（Phase 3）：解析任务同步创建统一 Task + parse 阶段（关联 job_id），
+    # Job 事件经 bridge_job_event 自动桥接为 task 事件，驱动前端任务卡片动态更新
+    try:
+        from app.services import task_orchestrator
+        _task = task_orchestrator.create_task(
+            db, session_id=session_id, task_type="parse", title="剧本解析",
+            project_id=project_id,
+        )
+        task_orchestrator.start_task(db, _task)
+        task_orchestrator.add_stage(
+            db, _task, stage_key="parse", stage_name="剧本解析", job_id=job.id,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # 编排层失败不影响既有解析链路
     # 同步完成评估标记（与 API 流程的 estimate 步骤对齐）：
     # 未标记时阶段停留在 estimate，保存剧本→分析剧本的流程衔接会断裂
     if not p.estimated_text_hash or p.estimated_text_hash != sv.content_hash:
@@ -324,6 +513,19 @@ def tool_compose_video(db: Session, project_id: str, episode: int | None = None,
         status="queued", created_at=_now(),
     )
     db.add(job)
+    # 统一任务编排层（Phase 6）：合成任务同步创建统一 Task + compose 阶段（关联 job_id）
+    try:
+        from app.services import task_orchestrator
+        _task = task_orchestrator.create_task(
+            db, session_id=None, task_type='compose', title='成片合成',
+            project_id=project_id,
+        )
+        task_orchestrator.start_task(db, _task)
+        task_orchestrator.add_stage(
+            db, _task, stage_key='compose', stage_name='成片合成', job_id=job.id,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # 编排层失败不影响既有合成链路
     if p.status == "draft":
         p.status = "active"
     db.commit()
@@ -363,6 +565,19 @@ def tool_export_video(db: Session, project_id: str, composition_id: str,
         status="queued", created_at=_now(),
     )
     db.add(job)
+    # 统一任务编排层（Phase 6）：导出任务同步创建统一 Task + export 阶段（关联 job_id）
+    try:
+        from app.services import task_orchestrator
+        _task = task_orchestrator.create_task(
+            db, session_id=None, task_type='export', title='成片导出',
+            project_id=project_id,
+        )
+        task_orchestrator.start_task(db, _task)
+        task_orchestrator.add_stage(
+            db, _task, stage_key='export', stage_name='成片导出', job_id=job.id,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # 编排层失败不影响既有导出链路
     db.commit()
     return {
         "job_id": job.id,
@@ -509,6 +724,35 @@ PIPELINE_TOOL_REGISTRY: dict = {
             "delivery_profile": "交付档位：standard / high_quality（默认 standard）",
         },
         "fn": tool_export_video,
+    },
+    "confirm_parse": {
+        "description": "确认剧本解析结果（人工审核闸口）：把候选解析版本落库为角色/场景/道具/镜头并切换为当前版本；须已完成剧本分析",
+        "permission": "write",
+        "risk_level": "medium",
+        "side_effect": True,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 60,
+        "max_retries": 0,
+        "input_model": ConfirmParseInput,
+        "params": {
+            "project_id": "项目 ID",
+            "parse_version_id": "可选：解析版本 ID（缺省为最新候选版本）",
+        },
+        "fn": tool_confirm_parse,
+    },
+    "query_parse_status": {
+        "description": "查询剧本分析进度（只读）：任务状态、已用时、解析版本与结果摘要；用于分析中询问进度或确认是否已完成",
+        "permission": "read",
+        "risk_level": "low",
+        "side_effect": False,
+        "idempotent": True,
+        "requires_approval": False,
+        "timeout_seconds": 30,
+        "max_retries": 0,
+        "input_model": QueryParseStatusInput,
+        "params": {"project_id": "项目 ID"},
+        "fn": tool_query_parse_status,
     },
     "get_pipeline_status": {
         "description": "查询项目当前流程节点与状态（只读）：节点、制作阶段、审核闸口、镜头进度、下一步指引",

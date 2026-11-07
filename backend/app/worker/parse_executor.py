@@ -13,11 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.integrations.llm import LLMClient, LLMError
-from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion
-from app.models import ids
-from app.services.script_parse import normalize_parse_output
-from app.services.prompt_store import get_prompt
+from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion, ids
 from app.services import style_config
+from app.services.prompt_store import get_prompt
+from app.services.script_parse import normalize_parse_output
 
 
 def _now() -> datetime:
@@ -30,6 +29,12 @@ def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = 
     db.add(ev)
     db.flush()
     job.event_seq = ev.event_seq
+    # 统一任务编排层桥接：job_event → task_event（Job 归属任务时同步任务阶段状态）
+    try:
+        from app.services.task_orchestrator import bridge_job_event
+        bridge_job_event(db, job_id=job.id, event_type=event_type, payload=payload or {})
+    except Exception:  # noqa: BLE001
+        pass  # 桥接失败不影响既有执行链路
 
 
 def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
@@ -39,6 +44,67 @@ def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
     job.finished_at = _now()
     _write_event(db, job, "job.failed", {"error_code": code, "error_msg": job.error_msg})
     db.commit()
+
+
+def _push_result_to_session(db: Session, job: Job, pv: ParseVersion,
+                            data: dict, shot_total: int) -> None:
+    """解析完成后把结果摘要回推到发起会话（job.params.session_id）。
+
+    解析是异步耗时任务，用户是在对话框发起它的；若不回推，对话只能停在
+    『正在分析』，用户还得自己去页面找结果。这里把集数/场景/镜头/角色/道具
+    摘要写回会话，并给出可在对话框继续的下一步。失败不阻断解析主链路。
+    """
+    session_id = (job.params or {}).get("session_id")
+    if not session_id:
+        return
+    try:
+        from sqlalchemy import func, select
+
+        from app.models.agent import AgentMessage, AgentSession
+        from app.models.ids import agent_message_id
+
+        session = db.get(AgentSession, session_id)
+        if session is None:
+            return
+        chars = [c.get("name") for c in (data.get("characters") or []) if c.get("name")]
+        props = [p.get("name") for p in (data.get("props") or []) if p.get("name")]
+        scenes = data.get("scenes") or []
+        episodes = data.get("episodes") or []
+        content = (
+            "剧本分析已完成。\n"
+            f"- 解析版本：v{pv.version}（{pv.id}，待确认）\n"
+            f"- 集数：{len(episodes) or 1} 集\n"
+            f"- 场景：{len(scenes)} 个\n"
+            f"- 镜头：{shot_total} 个\n"
+            f"- 角色（{len(chars)}）：{'、'.join(chars) if chars else '无'}\n"
+            f"- 道具（{len(props)}）：{'、'.join(props) if props else '无'}\n"
+            "回复『确认解析结果』即可把解析结果落库，并继续生成角色图/场景图/道具图。"
+        )
+        current = db.scalar(
+            select(func.max(AgentMessage.seq)).where(AgentMessage.session_id == session_id)
+        )
+        db.add(
+            AgentMessage(
+                id=agent_message_id(),
+                session_id=session_id,
+                role="assistant",
+                content=content,
+                payload={
+                    "route_action": "pipeline",
+                    "tool": "analyze_script",
+                    "async": False,
+                    "phase": "analyzed",
+                    "job_id": job.id,
+                    "parse_version_id": pv.id,
+                    "parse_version": pv.version,
+                },
+                seq=int(current or 0) + 1,
+                created_at=_now().replace(tzinfo=None),
+            )
+        )
+        session.updated_at = _now().replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        pass  # 回推失败不影响解析结果落库
 
 
 def _upsert_records(db: Session, project_id: str, episode_start: int, episode_count: int,
@@ -87,6 +153,29 @@ def _upsert_records(db: Session, project_id: str, episode_start: int, episode_co
     return records
 
 
+def _task_progress(db: Session, job_id: str, progress: int) -> None:
+    """统一任务编排层：按 job_id 更新关联任务阶段进度（里程碑推进，异常隔离）。"""
+    try:
+        from app.services.task_orchestrator import update_stage_progress_by_job
+        update_stage_progress_by_job(db, job_id, progress)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _task_step(db: Session, job_id: str, step: str, message: str, progress: int) -> None:
+    """写入任务当前步骤与文案（真实里程碑，异常隔离）。
+
+    与 _task_progress 并存：阶段进度用于任务卡片进度条，步骤文案用于对话展示
+    『正在做什么』。两者都由确定性代码在真实边界写入，不做模拟推进。
+    """
+    _task_progress(db, job_id, progress)
+    try:
+        from app.services.task_orchestrator import set_task_step_by_job
+        set_task_step_by_job(db, job_id, step=step, message=message, progress=progress)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def execute_parse_job(job_id: str) -> dict:
     """执行一个剧本解析任务。返回执行结果摘要。"""
     db: Session = SessionLocal()
@@ -115,6 +204,7 @@ def execute_parse_job(job_id: str) -> dict:
 
         # 集级解析记录置 running（pending/failed 可进入，succeeded/running 跳过）
         _upsert_records(db, job.project_id, episode_start, episode_count, "running")
+        _task_step(db, job.id, "reading_script", "正在读取剧本内容", 10)
         db.commit()
 
         # 项目内已有角色名→ID 映射（供 speaker_id 归一化）
@@ -144,6 +234,7 @@ def execute_parse_job(job_id: str) -> dict:
             _fail_job(db, job, e.code, e.message)
             return {"ok": False, "reason": e.code}
 
+        _task_step(db, job.id, "llm_analysis", "正在解析角色、场景、道具与分镜", 50)
         # 归一化（P0 强约束）
         norm = normalize_parse_output(
             raw, episode_start=episode_start, episode_count=episode_count,
@@ -163,6 +254,7 @@ def execute_parse_job(job_id: str) -> dict:
             "episode_count": episode_count,
         }
 
+        _task_step(db, job.id, "normalize", "正在归一化与校验解析结果", 70)
         # 创建 candidate 解析版本（版本号取项目内最大 +1）
         max_ver = (
             db.query(ParseVersion.version)
@@ -204,11 +296,14 @@ def execute_parse_job(job_id: str) -> dict:
             db, job.project_id, episode_start, episode_count, "succeeded",
             asset_counts=per_episode_shots, parse_version_id=pv.id,
         )
+        _task_step(db, job.id, "saving_result", "正在保存解析结果", 90)
 
         job.status = "succeeded"
         job.result = {**parse_result, "parse_version_id": pv.id}
         job.finished_at = _now()
         _write_event(db, job, "job.finished", {"status": "succeeded", "result": {"parse_version_id": pv.id, "shots": shot_total}})
+        # 回推结果摘要到发起会话：对话内即可看到分析结果并继续下一步
+        _push_result_to_session(db, job, pv, norm.data, shot_total)
         db.commit()
         return {"ok": True, "parse_version_id": pv.id, "shots": shot_total}
     except Exception as e:  # 兜底：未预期异常按执行错误记录

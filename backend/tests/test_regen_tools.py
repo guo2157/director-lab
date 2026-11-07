@@ -161,8 +161,8 @@ def test_regen_intent_routing():
         assert r is not None, f"{text} 未命中规则"
         assert r.intent == "pipeline_action"
         assert r.entities.get("pipeline_action") == action
-    # 首次生成请求不应误判为返工
+    # 首次生成请求不再走规则快路径（改由 LLM 结构化识别判定 generate_request），
+    # 但也不应误判为返工操作
     for text in ("生成角色图", "为第3镜生成关键帧"):
         r = apply_fast_path_rules(text)
-        assert r is not None
-        assert r.intent == "generate_request"
+        assert r is None or r.intent != "pipeline_action", f"{text} 不应误判为返工操作"

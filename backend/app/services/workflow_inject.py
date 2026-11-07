@@ -228,6 +228,76 @@ def remap_picture_refs(prompt: str, mappings: dict) -> tuple[str, list[int], int
     return "\n".join(kept_lines), dropped, removed_lines
 
 
+# Qwen 多参考图工作流的图片组键：images.image_N（autogrow，1 起连续）
+_IMAGE_KEY_RE = re.compile(r"^(images\.image_)(\d+)$")
+# Qwen 提示词中的图片引用语法："<imageN>" 直接对应 images.image_N
+_IMAGE_TAG_RE = re.compile(r"<image(\d+)>")
+
+def compact_qwen_image_slots(wf: dict) -> tuple[dict, dict]:
+    """把 images.image_N 压缩为连续编号（Qwen 多参考图工作流 P0 修复）。
+
+    剔除未注入的参考图槽位后，images 组出现断档（如只剩 image_1、image_2、image_6）。
+    autogrow 槽位要求从 1 起连续编号，下游按连线顺序解释图片身份：
+    断档不压缩会让 image_6（道具）被当成第 3 张图（次角色槽）解释，
+    导致道具被当作角色参考、角色身份错乱。
+    返回 (压缩后的工作流, {节点ID: {旧序号: 新序号}})。
+    """
+    out = copy.deepcopy(wf)
+    mappings: dict = {}
+    for nid, node in out.items():
+        if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict):
+            continue
+        inputs = node["inputs"]
+        keys = []
+        for key, val in inputs.items():
+            m = _IMAGE_KEY_RE.match(key)
+            if m and isinstance(val, list) and val:
+                keys.append((int(m.group(2)), key))
+        if not keys:
+            continue
+        keys.sort()
+        remap = {old: new for new, (old, _k) in enumerate(keys, start=1)}
+        values = {old: inputs[k] for old, k in keys}
+        for _old, key in keys:
+            del inputs[key]
+        for old, _k in keys:
+            inputs[f"images.image_{remap[old]}"] = values[old]
+        mappings[nid] = remap
+    return out, mappings
+
+def remap_image_tags(prompt: str, mappings: dict) -> tuple[str, list[int]]:
+    """按 images.image_N 压缩结果重写提示词中的 <imageN> 引用。
+
+    <imageN> 直接对应 images.image_N（1-based 一致）。
+    引用已剔除槽位（旧序号不在映射中）的行整行移除，
+    避免提示词描述一张模型实际并未收到的图片。
+    返回 (重写后的提示词, 被移除的引用编号列表)。
+    """
+    if not prompt or not mappings:
+        return prompt, []
+    remap: dict = {}
+    for m in mappings.values():
+        remap.update(m)
+    if not remap:
+        return prompt, []
+    dropped: list[int] = []
+    kept_lines: list[str] = []
+    def _repl(match: re.Match) -> str:
+        n = int(match.group(1))
+        if n not in remap:
+            return match.group(0)
+        return f"<image{remap[n]}>"
+    for line in prompt.split("\n"):
+        nums = [int(x) for x in _IMAGE_TAG_RE.findall(line)]
+        missing = [n for n in nums if n not in remap]
+        if missing:
+            for n in missing:
+                if n not in dropped:
+                    dropped.append(n)
+            continue
+        kept_lines.append(_IMAGE_TAG_RE.sub(_repl, line))
+    return "\n".join(kept_lines), dropped
+
 def find_output_nodes(wf: dict) -> dict:
     """返回输出名 → 节点 ID 的映射，用于产物提取。"""
     mapping = {}

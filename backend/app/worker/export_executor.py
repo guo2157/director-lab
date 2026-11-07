@@ -28,6 +28,14 @@ def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = 
     db.add(ev)
     db.flush()
     job.event_seq = ev.event_seq
+    # 统一任务编排层桥接：job_event → task_event（Job 归属任务时同步任务阶段状态）
+    try:
+        from app.services.task_orchestrator import bridge_job_event
+        bridge_job_event(db, job_id=job.id, event_type=event_type, payload=payload or {})
+    except Exception:  # noqa: BLE001
+        pass  # 桥接失败不影响既有执行链路
+
+
 
 
 def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
@@ -37,6 +45,15 @@ def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
     job.finished_at = _now()
     _write_event(db, job, "job.failed", {"error_code": code, "error_msg": job.error_msg})
     db.commit()
+
+
+def _task_progress(db: Session, job_id: str, progress: int) -> None:
+    """统一任务编排层：按 job_id 更新关联任务阶段进度（里程碑推进，异常隔离）。"""
+    try:
+        from app.services.task_orchestrator import update_stage_progress_by_job
+        update_stage_progress_by_job(db, job_id, progress)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def execute_export_job(job_id: str) -> dict:
@@ -107,6 +124,7 @@ def execute_export_job(job_id: str) -> dict:
         job.status = "succeeded"
         job.result = {"export_id": export_id, "file_name": file_name, "size": size,
                       "download_url": f"/api/exports/{export_id}/download"}
+        _task_progress(db, job.id, 60)
         job.finished_at = _now()
         _write_event(db, job, "job.finished", {"status": "succeeded",
                                                "result": {"export_id": export_id}})

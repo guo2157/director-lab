@@ -6,10 +6,11 @@
 - 分镜图生成不能只依赖提示词中恰好写了 @名称：清单内未在提示词出现的角色/场景，
   以『参考资产』段自动补入提示词头部，使 @引用解析（ref_inject）能携带参考图
 - 不相关的资产不传入：只注入镜头实际出场实体，不把项目全部资产灌入
-- 道具不自动注入：道具是否入画由提示词显式 @引用决定，避免无关道具混入分镜
+- 道具半自动注入：提示词正文明确提到道具名称且该道具已有定妆图资产时，
+  自动补入 @引用以携带道具参考图；提示词未提到的道具不注入，避免无关道具混入分镜
 """
 from sqlalchemy.orm import Session
-from app.models import Character, Scene, Shot
+from app.models import Character, Prop, Scene, Shot
 
 
 def collect_shot_characters(db: Session, shot: Shot) -> list[str]:
@@ -29,7 +30,7 @@ def collect_shot_characters(db: Session, shot: Shot) -> list[str]:
 
 
 def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:
-    """生成镜头资产清单：出场角色名列表 + 场景标题 + 提示词中已 @引用 的道具名。
+    """生成镜头资产清单：出场角色名列表 + 场景标题 + 道具名（显式 @引用 或提示词正文提及）。
 
     返回 {"characters": [名...], "scene": 标题或 None, "props": [名...]}，
     供任务快照与前端展示使用（镜头-资产可追踪引用关系）。
@@ -52,6 +53,15 @@ def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:
             )
             if prop is not None:
                 prop_names.append(ref)
+        # 与 inject_asset_refs 口径对齐：提示词正文明确提到（未显式 @引用）的道具也纳入清单
+        for prop in db.query(Prop).filter(Prop.project_id == scene.project_id).all():
+            if (
+                prop.name
+                and prop.name not in prop_names
+                and prop.name != scene_title
+                and prop.name in prompt_text
+            ):
+                prop_names.append(prop.name)
     return {
         "characters": collect_shot_characters(db, shot),
         "scene": scene.title if scene is not None else None,
@@ -60,7 +70,7 @@ def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:
 
 
 def inject_asset_refs(db: Session, shot: Shot, prompt: str) -> str:
-    """把镜头资产清单中未在提示词出现的角色/场景以 @引用 补入提示词头部。
+    """把镜头资产清单中未在提示词出现的角色/场景/道具以 @引用 补入提示词头部。
 
     - 已显式 @引用 的实体不重复注入
 - 实体尚无正式资产图（定妆图/基准图缺失）时不注入该 @引用，
@@ -89,7 +99,79 @@ def inject_asset_refs(db: Session, shot: Shot, prompt: str) -> str:
     # 所属场景
     if scene is not None and scene.title and scene.title not in existing_refs and scene.baseline_asset_id:
         inject_names.append(scene.title)
-    if not inject_names:
+    # 道具注入：优先由生命周期状态（prop_shot_state）驱动，状态缺失时降级启发式
+    # - visible 且 reference_required → 注入 @引用 + 位置/交互/外观锁定约束
+    #   （规格：道具可见必须传参考图 + 位置 + 交互 + 外观锁定）
+    # - not_introduced/destroyed/consumed 且正文提及 → 写禁止生成约束（不传参考图）
+    # - offscreen/occluded → 不注入参考图也不禁止（画外不等于消失、遮挡不等于毁坏）
+    constraint_lines: list[str] = []
+    negative_names: list[str] = []
+    visible_props: list[str] = []  # 本镜可见道具（用于单/多道具约束）
+    # 交互状态 → 通用位置描述（纯代码通用规则，不写死任何故事特定元素）
+    _INTERACTION_DESC = {
+        "held": "被角色握在手中",
+        "carried": "由角色背负/携带在身上",
+        "worn": "佩戴在角色身上",
+    }
+    if scene is not None:
+        from app.models import PropShotState
+
+        state_map = {
+            st.prop_id: st
+            for st in db.query(PropShotState)
+            .filter(
+                PropShotState.project_id == scene.project_id,
+                PropShotState.shot_id == shot.id,
+            )
+            .all()
+        }
+        for prop in db.query(Prop).filter(Prop.project_id == scene.project_id).all():
+            if not prop.name or not prop.anchor_asset_id:
+                continue
+            st = state_map.get(prop.id)
+            if st is not None:
+                if st.existence_state in ("not_introduced", "destroyed", "consumed") \
+                        and prop.name in prompt:
+                    negative_names.append(prop.name)
+                    continue
+                if st.reference_required and prop.name not in existing_refs:
+                    inject_names.append(prop.name)
+                if st.visibility == "visible":
+                    visible_props.append(prop.name)
+                    if prop.name in existing_refs:
+                        continue
+                    # 位置：优先显式 position，其次按交互状态通用推导
+                    desc = st.position or _INTERACTION_DESC.get(st.interaction_state)
+                    seg = f"@{prop.name} 外观须与其参考图一致"
+                    if desc:
+                        seg += f"，{desc}"
+                    if st.appearance_constraint:
+                        seg += f"，{st.appearance_constraint}"
+                    constraint_lines.append(seg)
+            elif prop.name in prompt and prop.name not in existing_refs:
+                # 降级路径：该道具尚无生命周期状态快照，维持正文提及启发式
+                inject_names.append(prop.name)
+        # 多道具独立身份约束（规格：每道具独立身份约束，禁用拼图）
+        if len(visible_props) >= 2:
+            constraint_lines.append(
+                "多个参考道具各自独立呈现，保持各自形状与颜色特征，禁止拼合为组合体或互相融合"
+            )
+        # 单 visible 道具（规格：道具可见时禁止添加其他道具）
+        # 注意：@引用 后必须加空格，否则紧随的汉字会被 @引用正则并入引用名
+        # （如『@麦袋外』触发 invalid_reference，2026-11-06 实测）
+        elif len(visible_props) == 1:
+            constraint_lines.append(
+                f"除@{visible_props[0]} 之外，画面中不得额外添加其他道具"
+            )
+    if not inject_names and not constraint_lines and not negative_names:
         return prompt
-    ref_line = "参考资产：" + " ".join(f"@{n}" for n in inject_names)
-    return f"{ref_line}\n{prompt}"
+    parts: list[str] = []
+    if inject_names:
+        parts.append("参考资产：" + " ".join(f"@{n}" for n in inject_names))
+    if constraint_lines:
+        parts.append("道具状态约束：" + "；".join(constraint_lines) + "。")
+    body = "\n".join(parts) + "\n" + prompt
+    if negative_names:
+        # 负向约束不带 @ 前缀，避免被 @引用解析误判为需要参考图
+        body += "\n禁止：画面中出现" + "、".join(negative_names) + "（剧情依据：该道具此时不存在）。"
+    return body

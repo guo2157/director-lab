@@ -62,7 +62,7 @@ PIPELINE_NODES: list[PipelineNode] = [
         name="分析剧本",
         description="剧本一体化分析：解析场景、镜头与资产定义",
         stages=("select_range", "parse"),
-        next_hint="剧本分析完成，请到资产库生成角色图/场景图/道具图",
+        next_hint="剧本分析完成，请回复『确认解析结果』，确认后即可开始生成角色图/场景图/道具图",
     ),
     PipelineNode(
         key="generate_assets",
@@ -127,6 +127,8 @@ ACTION_NODE_MAP: dict[str, str] = {
     "save_script": "save_script",
     # 分析剧本的前置是剧本已保存（保存后阶段仍为 estimate，评估标记在分析时同步完成）
     "analyze_script": "save_script",
+    # 确认解析：解析产出为候选版本，须确认后实体才落库；前置同样只要求剧本已保存
+    "confirm_parse": "save_script",
     "generate_character": "generate_assets",
     "generate_scene": "generate_assets",
     "generate_prop": "generate_assets",
@@ -221,13 +223,61 @@ def _node_index(key: str) -> int:
     return 0
 
 
+# 依赖『剧本审核通过』的后续动作：剧本被拒 / 待修改时必须全部阻断。
+# 门禁在后端执行，不能只依赖 Prompt（LLM 无权决定能否继续生成）。
+SCRIPT_REVIEW_GATED_ACTIONS: frozenset[str] = frozenset(
+    {
+        "analyze_script",
+        "generate_character",
+        "generate_scene",
+        "generate_prop",
+        "review_assets",
+        "generate_keyframe",
+        "confirm_keyframe",
+        "generate_clip",
+        "generate_audio",
+        "compose_video",
+        "export_video",
+    }
+)
+
+
+def _assert_script_review_passed(db: Session, project_id: str, action: str) -> None:
+    """剧本审核门禁：审核被拒 / 待修改时阻断后续依赖任务。
+
+    只认业务数据（Project.settings.script_review），不认聊天上下文推断；
+    pending / 未记录时放行由既有节点门禁判定，避免影响未启用审核的项目。
+    """
+    if action not in SCRIPT_REVIEW_GATED_ACTIONS:
+        return
+    from app.services import review_confirmation as rc
+
+    project = db.get(Project, project_id)
+    state = rc.script_review_state(project)
+    if not rc.is_downstream_blocked(state):
+        return
+    status_text = state.get("review_status") or state.get("status") or ""
+    version = state.get("reviewed_version")
+    version_part = f"第 {version} 版" if version is not None else "当前版本"
+    raise PipelineStateError(
+        current_node="review_script",
+        required_node="review_script",
+        message=(
+            f"剧本{version_part}审核未通过（{status_text}），不能执行『{action}』。"
+            "请先完成剧本修改并重新提交审核，审核通过后再继续后续制作。"
+        ),
+    )
+
+
 def assert_action_allowed(db: Session, project_id: str, action: str) -> PipelineStatus:
-    """操作门禁：action 不得早于其所属流程节点。
+    """操作门禁：action 不得早于其所属流程节点，且剧本审核未通过时阻断后续任务。
 
     返回当前 PipelineStatus（供调用方附带状态信息）；
     阶段不足时抛 PipelineStateError，不猜测、不降级、不跳过审核闸口。
     """
     status = get_pipeline_status(db, project_id)
+    # 业务门禁优先：剧本审核被拒 / 待修改时，后续依赖任务一律阻断
+    _assert_script_review_passed(db, project_id, action)
     required_key = ACTION_NODE_MAP.get(action)
     if required_key is None:
         return status  # 未映射的操作不做节点门禁（细粒度校验由业务闸口负责）

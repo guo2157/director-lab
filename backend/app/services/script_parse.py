@@ -489,7 +489,8 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     分集规划按锁定集规则合并：locked=true 保留原规划，locked=false 用新解析覆盖。
     返回落库统计。调用方负责事务提交。
     """
-    from app.models import AssetRef, Character, Job, Prop, Scene, SceneEpisode, Shot
+    from app.models import AssetRef, Character, Job, Prop, PropShotState, Scene, SceneEpisode, Shot
+    from app.models.audio import AudioSegment
     from app.models import ids as id_gen
     from datetime import datetime, timezone
 
@@ -578,15 +579,29 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
         scene_norm_global.setdefault(_s_norm, s)
     current_ids = set(current_scene_ids or [])
     touched_shot_keys = set()  # (scene_id, episode, seq) 本次解析覆盖的镜头
+    # 本次解析中已登记过的镜头键。Session 为 autoflush=False，
+    # 本次新 add 的 Shot 在 flush 前查不到，同一 Scene 内若出现重复 seq
+    # 会重复插入并触发 uq(scene_id, episode, seq) 冲突。
+    _shot_seen = set()
+    # 本次解析中已登记过的场景-集关联。Session 为 autoflush=False：
+    # 新 add 的 SceneEpisode 在没有 flush 前查不到，若同一地点在同一集出现多次
+    # （如『马家小院·清晨』与『马家小院·上午』命中同一个 Scene），
+    # 仅靠 db.query 判空会重复插入，触发 uq(scene_id, episode) 唯一约束冲突。
+    _link_seen = set()
     _seen_episodes = set()  # 已出现镜头的集号，用于判定每集首镜（无上一镜头尾帧）
 
     for sc in parse_result.get("scenes") or []:
         ep = sc.get("episode")
         title = (sc.get("title") or "").strip() or f"场景{sc.get('episode')}"
         _reused_cross_ep = False  # 本场景是否为跨集复用（复用时不覆盖既有描述）
+        _expect_norm = normalize_scene_name(title, sc.get("time_note"))
         scene = scene_title_map.get((title, ep))
+        if scene is not None and (scene.normalized_name or "") != _expect_norm:
+            # 标题相同但时段不同（如『马家小院·清晨』与『马家小院·上午』）
+            # 属于不同场景，不能复用同一条 Scene，否则镜头序号会互相冲突。
+            scene = None
         if scene is None:
-            _norm_key = (normalize_scene_name(title, sc.get("time_note")), int(ep or 1))
+            _norm_key = (_expect_norm, int(ep or 1))
             scene = scene_norm_map.get(_norm_key)
         if scene is None:
             # 跨集复用：同一地点在其他集已建过 Scene 时复用同一条记录。
@@ -616,16 +631,20 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             # timestamp 相同说明 normalized_name 已一致，time_note 也无需改动。
             scene.description = sc.get("description") or scene.description
             scene.time_note = sc.get("time_note") or scene.time_note
-        # scene_episode 关联（幂等）
-        link = (db.query(SceneEpisode)
-                .filter_by(scene_id=scene.id, episode=int(ep or 1)).first())
-        if link is None:
-            max_se = (db.query(SceneEpisode.seq_in_episode)
-                      .filter(SceneEpisode.scene_id == scene.id)
-                      .order_by(SceneEpisode.seq_in_episode.desc()).first())
-            db.add(SceneEpisode(id=id_gen.scene_episode_id(), scene_id=scene.id,
-                                episode=int(ep or 1),
-                                seq_in_episode=(max_se[0] if max_se else 0) + 1))
+        # scene_episode 关联（幂等）：先查本次解析的内存登记，再查库
+        _link_key = (scene.id, int(ep or 1))
+        if _link_key not in _link_seen:
+            link = (db.query(SceneEpisode)
+                    .filter_by(scene_id=scene.id, episode=int(ep or 1)).first())
+            if link is None:
+                max_se = (db.query(SceneEpisode.seq_in_episode)
+                          .filter(SceneEpisode.scene_id == scene.id)
+                          .order_by(SceneEpisode.seq_in_episode.desc()).first())
+                db.add(SceneEpisode(id=id_gen.scene_episode_id(), scene_id=scene.id,
+                                    episode=int(ep or 1),
+                                    seq_in_episode=(max_se[0] if max_se else 0) + 1))
+                db.flush()
+            _link_seen.add(_link_key)
 
         # 镜头 upsert
         for sh in sc.get("shots") or []:
@@ -636,6 +655,10 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             _is_first_shot = ep_i not in _seen_episodes  # 每集首镜：仅引用 <Picture 1> 分镜图
             _seen_episodes.add(ep_i)
             key = (scene.id, ep_i, int(seq))
+            if key in _shot_seen:
+                # 同一次解析内重复出现的同一镜头：以首次为准，避免唯一约束冲突
+                continue
+            _shot_seen.add(key)
             touched_shot_keys.add(key)
             # character_id 名称 → 实体 ID 二次映射
             char_id = None
@@ -666,6 +689,7 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             else:
                 db.add(Shot(id=id_gen.shot_id(), scene_id=scene.id, episode=ep_i,
                             seq=int(seq), status="pending", **fields))
+                db.flush()
                 stats["shots_created"] += 1
 
     # 5. 删除本次解析范围内、但新解析不再包含的旧镜头（仅限当前生效版本的场景）
@@ -681,9 +705,16 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
         for s in stale_shots:
             if (s.scene_id, s.episode, s.seq) not in touched_shot_keys:
                 # 解除引用：Job.shot_id 置 NULL 保留任务审计记录；
-                # AssetRef.shot_id 不可空，随旧镜头一并删除
+                # AssetRef.shot_id 不可空，随旧镜头一并删除；
+                # prop_shot_state 是可重建的派生状态（prop_lifecycle 先清后写），随镜头删除；
+                # audio_segment 是绑定该镜头的时间轴规划，镜头已不存在则规划失效，随镜头删除
+                #（音频 Asset 与媒体文件保留，不丢素材）
                 db.query(Job).filter(Job.shot_id == s.id).update({"shot_id": None})
                 db.query(AssetRef).filter(AssetRef.shot_id == s.id).delete()
+                db.query(PropShotState).filter(PropShotState.shot_id == s.id).delete(
+                    synchronize_session=False)
+                db.query(AudioSegment).filter(AudioSegment.shot_id == s.id).delete(
+                    synchronize_session=False)
                 db.delete(s)
                 stats["shots_deleted"] += 1
 
@@ -693,4 +724,19 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     plan_stats = build_asset_plans(db, project, episode_start=episode_start,
                                    episode_count=episode_count)
     stats["asset_plans"] = plan_stats
+
+    # 7. 道具生命周期状态推导（P0 自动接入）：基于已确认生命周期事件
+    #    重算本批次集数内每镜状态（prop_shot_state）并写集末快照（prop_episode_snapshot）。
+    #    推导可重建（先清后写），事件表为唯一事实来源；无事件的道具也会得到
+    #    not_introduced 基线状态，供提示词组装/Resolver 状态驱动分支消费。
+    from app.models import Prop as _Prop
+    from app.services.prop_lifecycle import derive_shot_states, write_episode_snapshot
+    episodes = list(range(episode_start, episode_start + episode_count))
+    derived_props = 0
+    for p in db.query(_Prop).filter(_Prop.project_id == project.id).all():
+        if derive_shot_states(db, project.id, p.id, episodes=episodes):
+            derived_props += 1
+        for ep in episodes:
+            write_episode_snapshot(db, project.id, p.id, ep)
+    stats["prop_lifecycle_props"] = derived_props
     return stats

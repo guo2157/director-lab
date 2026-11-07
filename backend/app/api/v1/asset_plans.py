@@ -30,6 +30,26 @@ ENTITY_PLAN_MODEL = {"character": Character, "scene": Scene, "prop": Prop}
 _REF_SLOTS = ("ref_identity", "ref_character_2", "ref_scene", "ref_prop", "ref_image")
 
 
+def _find_plain_image_workflow(db: Session):
+    """找无参考槽位的纯文生图工作流（角色定妆图/场景基准图/道具锚定图专用）。
+
+    实体公共资产提示词里没有参考图依赖可注入，若落到带参考槽位的工作流，
+    执行期会因为媒体槽位全空被 prune 门禁拦截并报 missing_reference_image。
+    """
+    from app.models import Workflow
+
+    rows = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "image")
+        .order_by(Workflow.is_default.desc())
+        .all()
+    )
+    for wf in rows:
+        if not ((wf.capabilities or {}).get("reference_slots") or []):
+            return wf
+    return None
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -247,7 +267,8 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
         assert_assets_gate(db, project_id)
 
     from app.api.v1.generate import (  # 复用既有匹配与建任务逻辑，保证行为一致
-        _TARGET_WF_TYPE, _check_keyframe_gate, _create_job, _match_workflow, _apply_chain_mode,
+        _TARGET_WF_TYPE, _check_keyframe_gate, _create_job, _match_workflow,
+        _match_workflow_exact, _apply_chain_mode,
         _filter_already_generated, _workflow_binds_param,
     )
     # 批量出视频方式（仅 clip）：independent 独立并行 / chained 链式串行（与项目级批量接口一致）
@@ -307,7 +328,14 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             # 参考图按定义绑定注入（与提示词书写顺序无关，不会错槽）；
             # 仅注入当前工作流声明的槽位，绑定快照随任务持久化供追溯与重试复用
             _wf_slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
-            _inject_dependency_slots(db, plan, params, _wf_slots)
+            _injected = _inject_dependency_slots(db, plan, params, _wf_slots)
+            # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
+            # （提示词中的 <Picture N> 由 LLM 按文本顺序书写，与槽位注入顺序无关）
+            if _injected and params.get("prompt"):
+                from app.services.ref_inject import rewrite_picture_refs
+                params["prompt"] = rewrite_picture_refs(
+                    db, project_id, params["prompt"],
+                    params.get("__media__") or {}, _wf_slots)
             job = _create_job(db, project_id, shot.id, target, wf, params)
             jobs.append(job)
         # 生成方式标记：chained 仅首任务 queued，其余 chained_wait 等待前一任务成功后释放
@@ -315,7 +343,17 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             _apply_chain_mode(jobs, chain_mode)
     else:
         target = "keyframe"
-        wf = _match_workflow(db, target, workflow_id)
+        # 实体公共资产（角色定妆图 / 场景基准图 / 道具锚定图）属于无参考的纯文生图，
+        # 不能走 _match_workflow：它在默认 image 工作流无参考槽位时会自动改用带参考
+        # 槽位的工作流，而实体资产没有参考依赖可注入，执行期必然报 missing_reference_image。
+        wf = _match_workflow_exact(db, target, workflow_id)
+        if workflow_id is None and (
+            (wf.capabilities or {}).get("reference_slots") or []
+        ):
+            # 兜底匹配可能落到带参考槽位的工作流，实体资产必须换成 0 槽位纯文生图
+            _plain_wf = _find_plain_image_workflow(db)
+            if _plain_wf is not None:
+                wf = _plain_wf
         model = ENTITY_PLAN_MODEL[plan_type]
         owner_key = {"character": "__character_id__", "scene": "__scene_id__", "prop": "__prop_id__"}[plan_type]
         for plan in plans:

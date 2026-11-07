@@ -141,6 +141,8 @@ def test_pipeline_tool_specs_metadata():
     assert set(specs) == {
         "create_project", "save_script", "analyze_script", "review_assets",
         "confirm_keyframes", "compose_video", "export_video", "get_pipeline_status",
+        # 异步解析链路：候选解析版本落库闸口 + 解析进度查询（只读）
+        "confirm_parse", "query_parse_status",
     }
     for _name, s in specs.items():
         assert s["permission"] in {"read", "write", "generate"}

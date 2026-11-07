@@ -160,10 +160,26 @@ def _keyframe_prompt(shot: Shot, char_key: str | None, char_name: str | None,
     if char_name:
         refs.append(f"参考角色 @{char_name}")
     head = "；".join(refs)
+    # 角色身份绑定与隔离规则（P1）：明确每个 @角色 的身份参考来源与禁止特征继承，
+    # 降低多角色分镜中第二角色继承第一角色面部/服装特征的概率
+    identity_rules: list[str] = []
+    if char_name:
+        identity_rules.append(
+            f"角色身份绑定：@{char_name} 的定妆图是其唯一身份参考依据，"
+            f"画面中该角色必须严格保持定妆图中的面部、毛色/发型、体型与服装特征，"
+            "不得继承或混入其他角色的外观特征"
+        )
+    if scene_title:
+        identity_rules.append(
+            f"场景一致性：@{scene_title} 的基准图是环境唯一参考依据，"
+            "画面中的空间结构、建筑布局与光线氛围须与基准图保持一致"
+        )
+    rules = "\n".join(identity_rules)
     # Shot 模型没有 description 字段（原写法会抛 AttributeError，image_prompt 一为空就整条链路中断）。
     # 兜底改用 shot_purpose：它是镜头目的描述，比空串更有信息量；仍为空时留空，不虚构画面内容。
     body = shot.image_prompt or shot.shot_purpose or ""
-    return f"{head}。画面内容：{body}" if body else head
+    parts = [p for p in (head, rules, f"画面内容：{body}" if body else "") if p]
+    return "\n".join(parts)
 
 
 def _clip_prompt(shot: Shot, kf_key: str, char_key: str | None, char_name: str | None,
@@ -390,9 +406,11 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
         stats["keyframe"] += 1
 
         if char_plan:
+            # 单角色只占 ref_identity 一个槽位：此前同一角色同时绑定 ref_identity 与
+            # ref_character_2，注入时同一路径只占一个槽位（_inject_dependency_slots
+            # 按 used_paths 去重），ref_character_2 实际从未生效，徒增误导性绑定记录
             _bind_dep(db, kf_plan, "ref_identity", char_plan.asset_key, char_plan)
-            _bind_dep(db, kf_plan, "ref_character_2", char_plan.asset_key, char_plan)
-            stats["deps"] += 2
+            stats["deps"] += 1
         if scene_plan:
             _bind_dep(db, kf_plan, "ref_scene", scene_plan.asset_key, scene_plan)
             stats["deps"] += 1

@@ -197,3 +197,91 @@ def build_media_params(db: Session, project_id: str, prompt: str,
     for name, slot in zip(prop_names, avail_prop):
         media[slot] = refs[name]["file_path"]
     return media
+
+
+# ---------- 图片引用编号重写（P0 错位修复） ----------
+# 提示词中的图片引用编号由 LLM 按文本顺序书写，与实际注入槽位顺序无关；
+# 生成前必须按『@名称 → 资产 → 实际槽位 → input_key 序号』重写，
+# 保证提示词描述与模型实际收到的图片严格一致。
+_IMAGE_KEY_RE = re.compile(r"^images\.image_(\d+)$")
+_REFIMG_KEY_RE = re.compile(r"^ref_images\.ref_image_(\d+)$")
+_REF_TAG_RE = re.compile(r"<(?:Picture|picture|image|Image)\s*(\d+)>")
+
+
+def slot_image_index(slot: str, reference_slots: list | None) -> int | None:
+    """返回槽位在工作流中的图片序号（1-based）。
+    - images.image_N（Qwen-Image-2.1 TextEncodeQwenImage21）→ N
+    - ref_images.ref_image_N（H3 ref2va autogrow，0-based）→ N+1
+    """
+    for item in reference_slots or []:
+        if not isinstance(item, dict) or item.get("param") != slot:
+            continue
+        key = str(item.get("input_key") or "")
+        m = _IMAGE_KEY_RE.match(key)
+        if m:
+            return int(m.group(1))
+        m = _REFIMG_KEY_RE.match(key)
+        if m:
+            return int(m.group(1)) + 1
+    return None
+
+
+def workflow_ref_syntax(reference_slots: list | None) -> str | None:
+    """判断工作流提示词图片引用语法：image（<imageN>）或 picture（<Picture N>）。"""
+    for item in reference_slots or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("input_key") or "")
+        if key.startswith("images.image_"):
+            return "image"
+        if key.startswith("ref_images.ref_image_"):
+            return "picture"
+    return None
+
+
+def rewrite_picture_refs(db: Session, project_id: str, prompt: str,
+                         media: dict[str, str] | None,
+                         reference_slots: list | None) -> str:
+    """按实际注入槽位重写提示词中的图片引用编号并统一为目标工作流语法。
+
+    - media 为实际注入的 {槽位: 文件路径}（build_media_params 或 _inject_dependency_slots 产物）
+    - 逐段（按；。切分）处理：段内恰有可解析 @名称 且含图片引用时，
+      按该名称实际槽位的 input_key 序号改号
+    - @名称解析失败或未注入时保持原样，不阻断生成（由既有门禁负责报错）
+    - 幂等：重复调用结果一致
+    """
+    if not prompt or not media:
+        return prompt
+    syntax = workflow_ref_syntax(reference_slots)
+    if syntax is None:
+        return prompt
+    path_to_slot = {path: slot for slot, path in media.items()}
+    try:
+        refs = resolve_refs(db, project_id, prompt)
+    except Exception:  # noqa: BLE001 - 引用解析失败保持原样，不阻断生成
+        return prompt
+    name_to_index: dict[str, int] = {}
+    for name, info in refs.items():
+        slot = path_to_slot.get(info.get("file_path"))
+        if slot is None:
+            continue
+        idx = slot_image_index(slot, reference_slots)
+        if idx is not None:
+            name_to_index[name] = idx
+    if not name_to_index:
+        return prompt
+    out_lines: list[str] = []
+    for line in prompt.split("\n"):
+        if not _REF_TAG_RE.search(line):
+            out_lines.append(line)
+            continue
+        rebuilt: list[str] = []
+        for seg in re.split(r"([；;。])", line):
+            names = [n for n in extract_refs(seg) if n in name_to_index]
+            if names and _REF_TAG_RE.search(seg):
+                idx = name_to_index[names[0]]
+                tag = f"<image{idx}>" if syntax == "image" else f"<Picture {idx}>"
+                seg = _REF_TAG_RE.sub(tag, seg)
+            rebuilt.append(seg)
+        out_lines.append("".join(rebuilt))
+    return "\n".join(out_lines)
