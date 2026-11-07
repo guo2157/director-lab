@@ -158,7 +158,23 @@ function adoptNormalized() {
     message.error('优化稿缺失原文人物或台词，不能采用')
     return
   }
-  text.value = res.normalized_text
+  applyNormalized(res.normalized_text)
+}
+/**
+ * 强行采用：守恒校验未通过时仍允许替换正文。
+ * 校验基准已改为正则从原文抽取 + 标点归一，仍报阻断说明确实有内容缺失，
+ * 因此保留二次确认语义，但不再把按钮彻底禁用——用户可能就是要删掉某句台词。
+ */
+function forceAdoptNormalized() {
+  const res = normalizeResult.value
+  if (!res) return
+  applyNormalized(res.normalized_text)
+  const n =
+    (res.checks.missing_characters?.length ?? 0) + (res.checks.missing_dialogues?.length ?? 0)
+  message.warning(`已强行采用，忽略 ${n} 处差异，请仔细核对后再保存`)
+}
+function applyNormalized(next: string) {
+  text.value = next
   stage.value = 'checked'
   compareVisible.value = false
   message.success('已采用优化稿，请确认后保存版本')
@@ -334,13 +350,19 @@ watch(
         </div>
 
         <div v-if="normalizeResult.checks.blocked" class="blocked-tip">
-          <div v-if="normalizeResult.checks.missing_characters.length">
+          <div v-if="normalizeResult.checks.missing_characters?.length">
             丢失人物：{{ normalizeResult.checks.missing_characters.join('、') }}
           </div>
-          <div v-if="normalizeResult.checks.missing_dialogues.length">
+          <div v-if="normalizeResult.checks.missing_dialogues?.length">
             丢失台词：{{ normalizeResult.checks.missing_dialogues.join(' / ') }}
           </div>
-          <div>优化稿改动了原文人物或台词，已阻断采用，请保留原文或补充后重新校验。</div>
+          <div>
+            优化稿缺失了上述人物或台词。若这是你想要的删改，可点右下角「仍然采用」强制替换。
+          </div>
+        </div>
+        <div v-else-if="normalizeResult.checks.punct_warnings?.length" class="punct-tip">
+          <div>以下台词仅有标点或空白差异，不影响采用：</div>
+          <div class="punct-list">{{ normalizeResult.checks.punct_warnings.join(' / ') }}</div>
         </div>
 
         <div class="compare-body">
@@ -378,11 +400,15 @@ watch(
           <NButton @click="compareVisible = false">稍后处理</NButton>
           <NButton @click="keepOriginal">保留原文</NButton>
           <NButton
+            v-if="!normalizeResult?.checks.blocked"
             type="primary"
-            :disabled="normalizeResult?.checks.blocked"
+            :disabled="!normalizeResult"
             @click="adoptNormalized"
           >
             采用优化稿
+          </NButton>
+          <NButton v-else type="warning" secondary @click="forceAdoptNormalized">
+            仍然采用
           </NButton>
         </div>
       </template>
@@ -475,6 +501,9 @@ watch(
 .compare { display: flex; flex-direction: column; gap: 12px; max-height: 64vh; overflow-y: auto; }
 .compare-summary { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary, #64748b); flex-wrap: wrap; }
 .blocked-tip { padding: 8px 10px; border-radius: 8px; background: rgba(208, 48, 80, 0.08); color: #d03050; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+/* 标点/空白差异提示：不阻断采用，用琥珀色与红色阻断区分 */
+.punct-tip { padding: 8px 10px; border-radius: 8px; background: rgba(240, 160, 32, 0.1); color: #b06a00; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.punct-list { color: var(--text-secondary, #64748b); word-break: break-all; }
 .compare-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .compare-pane { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 8px; overflow: hidden; }
 .pane-title { padding: 6px 10px; font-size: 12px; font-weight: 600; background: var(--bg-elevated, #f8fafc); border-bottom: 1px solid var(--border-subtle, #e5e7eb); }

@@ -289,6 +289,23 @@ def _sync_audio_segment_after_generate(db: Session, job: Job, created_assets: li
                 "signature": _vp.preview_signature,
             })
         return
+    # 系统音色试听任务：回写 voice_library 试听缓存（音色智能匹配，2026-11-07）
+    if _snap_preview.get("voice_preview") and _snap_preview.get("system_voice_code"):
+        from sqlalchemy import select as _sel
+        from app.models.audio import VoiceLibrary as _VoiceLibrary
+        _vl = db.execute(
+            _sel(_VoiceLibrary).where(
+                _VoiceLibrary.voice_code == _snap_preview["system_voice_code"]
+            )
+        ).scalars().first()
+        if _vl is not None:
+            _vl.preview_asset_id = audio_asset["asset_id"]
+            _write_event(db, job, "audio.system_voice_preview_cached", {
+                "voice_code": _vl.voice_code,
+                "asset_id": audio_asset["asset_id"],
+                "signature": _snap_preview.get("preview_signature"),
+            })
+        return
     from app.models.audio import AudioSegment
     seg = None
     seg_id = (job.input_snapshot or {}).get("audio_segment_id")
@@ -1183,15 +1200,15 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                         _shot.status = "pending"
                         db.commit()
                     return {"ok": False, "reason": "cancelled"}
-                # WS 等待窗口：取消检查间隔与总截止的较小值
+                # HTTP 轮询等待窗口（替代 WebSocket，不受 WS 断连影响）：取消检查间隔与总截止的较小值
                 window_end = min(deadline, time.time() + 15.0)
                 try:
-                    done, err = client.wait_for_job_ws(prompt_id, on_progress=_on_progress, poll_deadline=window_end)
+                    done, err = client.wait_for_job_http(prompt_id, on_progress=_on_progress, poll_deadline=window_end)
                 except ComfyUIError:
                     done, err = False, None
                 if done:
                     break
-                # WS 未确认终态（断连/超时/无事件）：HTTP 轮询兜底
+                # HTTP 轮询未确认终态：检查实例可达性并兜底确认
                 # 关键区分：请求报错表示实例可能不可达；请求成功但无历史表示任务仍在执行。
                 # 后者不能计入失联次数，否则实例高负载时会被误判 comfy_unreachable。
                 _poll_failed = False
@@ -1269,9 +1286,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                         _fail_job(db, job, "comfy_unreachable",
                                   f"实例连接中断且无其他可用实例：{_inst_url}")
                         return {"ok": False, "reason": "comfy_unreachable"}
-                    # 退避间隔：连续连接失败时指数退避（5s→10s→20s→40s，60s 封顶），
+                    # 退避间隔：连续连接失败时指数退避（5s→10s→20s→30s，30s 封顶），
                     # 给高负载实例恢复窗口，避免瞬时抖动累计过快触发误判
-                    _backoff = min(5 * (2 ** (_conn_failures - 1)), 60)
+                    _backoff = min(5 * (2 ** (_conn_failures - 1)), 30)
                     time.sleep(_backoff)
                     continue
                 time.sleep(settings.comfyui_poll_interval_seconds)
@@ -1538,7 +1555,6 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 if (
                     job.prompt_id
                     and job.submission_state == "submitted"
-                    and (job.attempts or 0) < 3
                 ):
                     _snap = dict(job.input_snapshot or {})
                     _snap["resume_prompt"] = True

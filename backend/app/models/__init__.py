@@ -43,7 +43,7 @@ from app.models.task import (
     TaskStage,
 )
 from app.models.search import SearchRun, SearchResult
-from app.models.audio import AudioReview, AudioSegment, VoiceProfile
+from app.models.audio import AudioReview, AudioSegment, VoiceLibrary, VoiceProfile
 
 __all__ = [
     "Base",
@@ -82,6 +82,7 @@ __all__ = [
     "SearchRun",
     "SearchResult",
     "VoiceProfile",
+    "VoiceLibrary",
     "AudioSegment",
     "AudioReview",
     "AgentConfirmation",

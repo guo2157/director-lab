@@ -9,7 +9,54 @@
 - LLM 调用为同步短事务外调用（与 estimate 同模式）；失败按 llm_* 错误码分类，不落库半成品
 - 生成结果作为新剧本版本保存（ScriptVersion 版本号+1），原文与生成稿均保留可追溯
 """
+import re
+
 from app.services.prompt_store import _register_default
+
+# 「人物名：台词」行，说话人限 1-10 字，避免把「第1集」误判为人物
+_DIALOGUE_RE = re.compile(r"^\s*([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_·]{0,9})\s*[:：]\s*(.+?)\s*$", re.M)
+# 场次标题行（第X集 / 场次N），用于排除非人物行
+_SECTION_RE = re.compile(r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*集|场次\s*[0-9一二三四五六七八九十]+)")
+# 比对时需忽略的字符：全部标点与空白。只做等价剔除，不改动任何文字内容。
+# 注意必须是剔除而不是全半角转换——『！』本身就是全角，转换不会让它消失，
+# 会导致有标点与无标点的同一句台词得到两个不同指纹，去重失效。
+_COMPARE_DROP_RE = re.compile(r"[\s，。？！：；、,。?!:;\"'“”‘’「」『』（）()《》〈〉\[\]【】\-—_…·~`|/\\*#@&%\$\^\+=<>]+")
+
+
+def _strip_punct(text: str) -> str:
+    """归一化用于宽松比对：去全部空白、统一全半角标点、剥离引号。
+
+    只做等价变换，不改变语义词序，因此「张三：你好」与「张三： 你好！」
+    在归一后都能互相包含，避免格式微调导致守恒校验误判。
+    """
+    return _COMPARE_DROP_RE.sub("", text)
+
+
+def _regex_dialogues(source_text: str) -> list:
+    """正则从原文抽取台词正文（不含说话人），作为守恒校验的可信基准。"""
+    out = []
+    for m in _DIALOGUE_RE.finditer(source_text or ""):
+        line = m.group(2).strip()
+        if not line:
+            continue
+        # 场次标题与「第X集」不是台词
+        if _SECTION_RE.match(m.group(0)):
+            continue
+        if line not in out:
+            out.append(line)
+    return out
+
+
+def _regex_characters(source_text: str) -> list:
+    """正则从原文抽取说话人（即登场人物），作为人物守恒的可信基准。"""
+    out = []
+    for m in _DIALOGUE_RE.finditer(source_text or ""):
+        name = m.group(1).strip()
+        if not name or _SECTION_RE.match(name):
+            continue
+        if name not in out:
+            out.append(name)
+    return out
 
 SCRIPT_CREATE_SYSTEM_PROMPT = _register_default("script_create_system", """你是专业短剧编剧。根据用户提供的创意或故事设定，创作一部完整的短剧剧本。
 创作规则：
@@ -140,15 +187,61 @@ def build_normalize_user_prompt(source_text: str, config: dict) -> str:
 
 
 def verify_normalize_output(raw: dict, source_text: str) -> dict:
-    """机器校验规范化结果：人物集合守恒 + 原台词保真，任一不通过则 blocked。"""
+    """机器校验规范化结果：人物集合守恒 + 原台词保真。
+
+    2026-11-07 修复「采用优化稿」按钮恒灰：
+    原实现把基准完全交给模型自报的 original_characters / original_dialogues，
+    再用裸子串匹配判定，导致两类必然误判：
+      ① 模型摘录台词时补了说话人或改了标点，d not in text 直接成立；
+      ② 模型少报时基准本身不完整，校验形同虚设。
+    现改为正则从原文抽取为主基准（不依赖模型）、模型自报为补充，
+    比对前双方都做标点与空白归一，仅格式微调降级为提示，不再阻断采用。
+    """
     text = str(raw.get("normalized_text") or "").strip()
     if not text:
         raise ValueError('规范化结果为空')
-    orig_chars = [str(x).strip() for x in (raw.get("original_characters") or []) if str(x).strip()]
+    # 基准一：正则从原文实际抽取（可信来源）
+    regex_chars = _regex_characters(source_text)
+    regex_dialogues = _regex_dialogues(source_text)
+    # 基准二：模型自报（补充，按出现顺序去重合并）
+    llm_chars = [str(x).strip() for x in (raw.get("original_characters") or []) if str(x).strip()]
+    llm_dialogues = [str(x).strip() for x in (raw.get("original_dialogues") or []) if str(x).strip()]
+    orig_chars = list(dict.fromkeys(regex_chars + llm_chars))
+    orig_dialogues = list(dict.fromkeys(regex_dialogues + llm_dialogues))
     norm_chars = [str(x).strip() for x in (raw.get("normalized_characters") or []) if str(x).strip()]
-    orig_dialogues = [str(x).strip() for x in (raw.get("original_dialogues") or []) if str(x).strip()]
-    missing_chars = [c for c in orig_chars if c not in norm_chars]
-    missing_dialogues = [d for d in orig_dialogues if d not in text]
+    norm_chars_norm = {_strip_punct(c) for c in norm_chars if _strip_punct(c)}
+    # 优化稿正文同样参与人物判定：模型漏填 normalized_characters 时不误判为丢失
+    text_norm = _strip_punct(text)
+    missing_chars = []
+    for c in orig_chars:
+        key = _strip_punct(c)
+        if not key:
+            continue
+        if key in norm_chars_norm or key in text_norm:
+            continue
+        missing_chars.append(c)
+    missing_dialogues = []
+    punct_warnings = []
+    # 按归一化指纹去重：正则与模型两个来源可能给出同一句的不同写法（有无标点、
+    # 有无说话人前缀），不去重会把同一句台词报成两条缺失
+    seen_missing = set()
+    seen_warn = set()
+    for d in orig_dialogues:
+        # 模型自报条目可能带「人物：」前缀，比对时剥离后再匹配
+        body = re.sub(r"^[^：:]{1,10}[：:]", "", d).strip()
+        key = _strip_punct(body) or _strip_punct(d)
+        if not key:
+            continue
+        if key in text_norm or _strip_punct(d) in text_norm:
+            # 归一后才匹配上，说明存在标点/空白差异：提示但不阻断
+            if d not in text and body not in text and key not in seen_warn:
+                seen_warn.add(key)
+                punct_warnings.append(d[:40])
+            continue
+        if key in seen_missing:
+            continue
+        seen_missing.add(key)
+        missing_dialogues.append(d)
     changes = []
     for c in (raw.get("changes") or []):
         if not isinstance(c, dict):
@@ -174,7 +267,15 @@ def verify_normalize_output(raw: dict, source_text: str) -> dict:
             "dialogue_preserved": not missing_dialogues,
             "missing_characters": missing_chars,
             "missing_dialogues": missing_dialogues,
+            # 仅标点/空白差异的台词：仅提示，不阻断采用
+            "punct_warnings": punct_warnings,
             "blocked": bool(missing_chars or missing_dialogues),
+            # 基准来源计数，便于排查「模型漏报」与「正则漏抽」
+            "baseline": {
+                "regex_characters": len(regex_chars),
+                "regex_dialogues": len(regex_dialogues),
+                "llm_dialogues": len(llm_dialogues),
+            },
         },
         "original_chars": len(source_text),
         "normalized_chars": len(text),

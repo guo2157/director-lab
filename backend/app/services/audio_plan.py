@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ids
-from app.models.audio import AudioSegment
+from app.models.audio import AudioSegment, VoiceProfile
 from app.models.narrative import Character, Scene, Shot
 
 
@@ -53,6 +53,20 @@ def build_audio_plan(db: Session, project_id: str, episode: int) -> dict:
                 "sfx": 0, "ambient": 0, "total": 0, "note": "该集无镜头数据"}
 
     name_map = _char_name_map(db, project_id)
+    # 角色音色确认状态预取（音色确认调度闸口，2026-11-07）：
+    # 角色 exists 默认音色且 approved → 对白可直接生成（pending）；
+    # 否则 → waiting_voice_confirmation，音色确认后由 confirm 接口批量放行
+    from sqlalchemy import select as _select
+    _approved_chars: set[str] = {
+        vp.character_id
+        for vp in db.execute(
+            _select(VoiceProfile).where(
+                VoiceProfile.project_id == project_id,
+                VoiceProfile.is_default == True,  # noqa: E712
+                VoiceProfile.approved == True,  # noqa: E712
+            )
+        ).scalars().all()
+    }
 
     # 幂等清理：仅清非 native_audio 的规划片段
     old = db.execute(
@@ -78,6 +92,12 @@ def build_audio_plan(db: Session, project_id: str, episode: int) -> dict:
                 continue
             speaker = seg.get("speaker") or ""
             char_id = name_map.get(speaker) or (shot.character_id if speaker == shot.character_id else None)
+            # 音色确认闸口：有角色的对白必须音色已确认才能进入生成队列；
+            # 旁白/无角色片段不受此闸口限制（走项目级 narrator_voice 配置）
+            if char_id and char_id not in _approved_chars:
+                _seg_status = "waiting_voice_confirmation"
+            else:
+                _seg_status = "pending"
             db.add(AudioSegment(
                 id=ids.audio_segment_id(),
                 project_id=project_id, episode=episode, shot_id=shot.id,
@@ -85,7 +105,7 @@ def build_audio_plan(db: Session, project_id: str, episode: int) -> dict:
                 character_id=char_id, text=seg.get("text", ""),
                 emotion=seg.get("emotion") or shot.emotion,
                 sequence=int(seg.get("order") or 0) or None,
-                generation_status="pending", review_status="pending",
+                generation_status=_seg_status, review_status="pending",
                 version=1,
             ))
             counts["dialogue"] += 1

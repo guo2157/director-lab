@@ -1126,7 +1126,7 @@ def generate_scene_baseline(scene_id: str, payload: dict | None = None, db: Sess
                 422,
             )
     else:
-        wf = db.get(Workflow, "wf_2babab605508")
+        wf = db.query(Workflow).filter(Workflow.name == "wf_image_t2i_qwen21_turbo").first()
         if wf is None or wf.workflow_type != "image":
             raise errors.AppError("workflow_not_found", "纯文生图工作流 wf_image_t2i_qwen21_turbo 不存在", 404)
     params = dict(payload.get("params") or {})

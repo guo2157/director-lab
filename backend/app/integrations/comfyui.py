@@ -209,3 +209,80 @@ class ComfyUIClient:
             detail = json.dumps(messages, ensure_ascii=False)[:300] if messages else "未知错误"
             return True, f"comfy_execution_error:{detail}"
         return False, None
+
+    def wait_for_job_http(
+        self,
+        prompt_id: str,
+        on_progress=None,
+        poll_interval: float = 3.0,
+        poll_deadline: float | None = None,
+    ) -> tuple[bool, str | None]:
+        """纯 HTTP 轮询等待任务完成（不依赖 WebSocket），返回 (是否完成, 失败错误码或 None)。
+
+        与 wait_for_job_ws 的区别：
+        - 不使用 websockets 连接 /ws 事件流
+        - 通过 GET /queue 获取队列中任务的实时进度（替代 WS progress 事件）
+        - 通过 GET /history/{prompt_id} 轮询判断终态
+        - 进度回调 on_progress(payload) 从 /queue 的 running 队列中提取
+
+        Args:
+            prompt_id: ComfyUI 任务 ID
+            on_progress: 进度回调，payload 格式 {"value": int, "max": int, "node": str}
+            poll_interval: 轮询间隔（秒），默认 3.0
+            poll_deadline: Unix 时间戳截止时刻；None 表示不设截止（由调用方控制）
+
+        Returns:
+            (done: bool, error_code: str | None)
+            - (True, None) 任务成功完成
+            - (True, "comfy_execution_error:...") 任务失败
+            - (False, None) 超时未完成（poll_deadline 到达）
+        """
+        import time as _time
+
+        while True:
+            if poll_deadline is not None and _time.time() >= poll_deadline:
+                return False, None
+
+            # 1. 轮询队列获取进度（HTTP GET /queue）
+            if on_progress:
+                try:
+                    queue_data = self._request("GET", "/queue")
+                    running_list = (queue_data or {}).get("queue_running", [])
+                    for entry in running_list:
+                        if not isinstance(entry, list) or len(entry) < 3:
+                            continue
+                        pid, _, task_info = entry[0], entry[1], entry[2]
+                        if pid != prompt_id:
+                            continue
+                        if isinstance(task_info, dict):
+                            step = task_info.get("step")
+                            total = task_info.get("total")
+                            if step is not None and total is not None:
+                                try:
+                                    on_progress({
+                                        "value": int(step),
+                                        "max": int(total),
+                                        "node": "queue",
+                                    })
+                                except Exception:
+                                    pass
+                except ComfyUIError:
+                    pass  # /queue 不可用不影响终态判断
+
+            # 2. 轮询 history 判断终态
+            try:
+                history = self.get_history(prompt_id)
+            except ComfyUIError:
+                # 网络错误：等待重试
+                _time.sleep(min(poll_interval, 2.0))
+                continue
+
+            if history is not None:
+                done, err = self.is_job_done(history)
+                if done:
+                    return done, err
+                # history 存在但未完成：退出信号（任务仍在执行）
+                # 继续轮询
+
+            # 未完成：等待后重试
+            _time.sleep(poll_interval)

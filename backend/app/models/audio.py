@@ -7,7 +7,7 @@
 - 旁白/BGM 可跨镜头：shot_id 可空 + cross_shot 标记
 - H3 原生音频作为独立轨道管理（track_type=native_audio），不覆盖对白轨道
 """
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -60,6 +60,21 @@ class VoiceProfile(TimestampMixin, Base):
     preview_text: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 试听缓存：speaker+语言+instruct+文本 的指纹，任一项变化即视为缓存失效
     preview_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ===== 角色音色智能匹配扩展（2026-11-07）=====
+    # 系统音色库 ID（VoiceLibrary.voice_code 或 id，绑定真实存在的音色）
+    voice_library_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # 程序计算的匹配评分（0-100，LLM 不决定分数）
+    match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 匹配原因说明
+    match_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 其他候选音色（JSON 数组：[{voice_library_id, speaker_id, match_score, match_reason}]）
+    alternatives: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 是否人工锁定（锁定后自动匹配不可覆盖）
+    is_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 绑定来源：ai（自动匹配）/ manual（人工指定）/ inherited（续集继承）
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    # 角色声音画像（LLM 产出的结构化 JSON：gender/age/pitch/timbre/personality/style 等）
+    voice_profile_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 Index("ix_voice_profile_character", VoiceProfile.__table__.c.character_id, VoiceProfile.__table__.c.is_default)
@@ -121,6 +136,57 @@ class AudioSegment(TimestampMixin, Base):
 Index("ix_audio_segment_project_episode_track", AudioSegment.__table__.c.project_id,
       AudioSegment.__table__.c.episode, AudioSegment.__table__.c.track_type)
 Index("ix_audio_segment_shot", AudioSegment.__table__.c.shot_id)
+
+
+class VoiceLibrary(TimestampMixin, Base):
+    """系统默认音色库（全局级，不隶属项目；角色音色智能匹配，2026-11-07）。
+
+    - speaker_id 必须来自实际部署的 TTS workflow meta（voice_values），禁止虚构
+    - 描述类字段（听感年龄/音调/音色特点/性格标签/说话风格）从 workflow meta
+      voice_descriptions 推导初始化，缺项留空，不凭空填写
+    - 关闭音色后新匹配不可选用；历史绑定不受影响
+    """
+    __tablename__ = "voice_library"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.voice_library_id)
+    # 系统音色编码（如 male_a / female_f，稳定标识，跨部署不变）
+    voice_code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # 显示名称（如 男性音色 A）
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Qwen3-TTS 实际 speaker_id（来自 workflow meta voice_values）
+    speaker_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # workflow meta 展示名（如 Vivian → 薇薇安）
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    # 性别呈现：male / female
+    gender_presentation: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 听感年龄（young / mature / child / unknown）
+    perceived_age: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    # 音调（high / medium_high / medium / medium_low / low / unknown）
+    pitch: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    # 音色特征标签（JSON 数组，如 ["bright", "clear"]）
+    timbre: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 性格标签（JSON 数组）
+    personality_tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 说话风格（JSON 数组）
+    speaking_styles: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 语言（中文/英文/日语/韩语等）
+    language: Mapped[str] = mapped_column(String(64), nullable=False, default="中文")
+    # workflow meta 原始描述
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 音源 workflow 标识（数据溯源：wf_tts_qwen3_custom_voice）
+    source_workflow: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 试听音频 Asset（asset_type=audio），缺失时通过 TTS 生成并缓存
+    preview_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 是否启用（禁用后新匹配不可选，历史绑定不受影响）
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 排序（男 1-5，女 6-9）
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 其他元数据
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+Index("ix_voice_library_gender_enabled", VoiceLibrary.__table__.c.gender_presentation,
+      VoiceLibrary.__table__.c.enabled)
 
 
 class AudioReview(TimestampMixin, Base):

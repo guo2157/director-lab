@@ -68,7 +68,15 @@ export interface ScriptNormalizeResult {
     dialogue_preserved: boolean
     missing_characters: string[]
     missing_dialogues: string[]
+    /** 仅标点或空白差异的台词：提示用，不阻断采用 */
+    punct_warnings?: string[]
     blocked: boolean
+    /** 校验基准来源计数：正则从原文抽取 vs 模型自报，便于排查漏抽与漏报 */
+    baseline?: {
+      regex_characters: number
+      regex_dialogues: number
+      llm_dialogues: number
+    }
   }
   original_chars: number
   normalized_chars: number

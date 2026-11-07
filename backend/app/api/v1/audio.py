@@ -23,7 +23,7 @@ from app.models.enums import (
     TRACK_TYPE,
 )
 from app.models.narrative import Character
-from app.models.production import Asset, Job
+from app.models.production import Asset, Job, Workflow
 from app.services import audio_plan
 from app.services.errors import biz_error, character_not_found
 
@@ -159,12 +159,41 @@ def regenerate_segment(segment_id: str, payload: dict | None = None, db: Session
     else:
         params["sfx_prompt"] = seg.text
 
+    # 绑定工作流：执行器对 workflow_id 为空的任务直接以 no_matching_workflow 失败。
+    # 按轨道类型路由：对白/旁白 → voice_mode=preset 的 TTS workflow；BGM → bgm 类型；
+    # SFX 当前无已部署 Provider，明确拒绝并引导使用素材库（replace 接口）
+    workflow_id = None
+    if job_type == "generate_audio":
+        _rows = db.execute(
+            select(Workflow).where(Workflow.workflow_type == "tts").order_by(Workflow.created_at)
+        ).scalars().all()
+        for _w in _rows:
+            _caps = (_w.capabilities or {}) if isinstance(_w.capabilities, dict) else {}
+            if _caps.get("voice_mode") == "preset" and _caps.get("voice_values"):
+                workflow_id = _w.id
+                break
+        if workflow_id is None:
+            raise biz_error(code="no_matching_workflow", http=422, message="无可用 TTS 工作流，请先在设置中导入")
+    elif job_type == "generate_bgm":
+        _bgm = db.execute(
+            select(Workflow).where(Workflow.workflow_type == "bgm").order_by(Workflow.created_at)
+        ).scalars().first()
+        if _bgm is None:
+            raise biz_error(code="no_matching_workflow", http=422, message="BGM 生成服务未配置")
+        workflow_id = _bgm.id
+    else:
+        raise biz_error(
+            code="sfx_provider_not_configured", http=422,
+            message="SFX 生成服务未部署，请使用素材库音频（replace 接口）或稍后再试",
+        )
+
     job = Job(
         id=ids.job_id(),
         project_id=seg.project_id,
         shot_id=seg.shot_id,
         job_type=job_type,
         status="queued",
+        workflow_id=workflow_id,
         params=params,
         input_snapshot={"audio_segment_id": seg.id, "regeneration": True},
         created_at=_now_naive(),

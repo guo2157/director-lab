@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.v1 import (
     bindings,
     audio,
+    voice_matching,
     agent,
     asset_plans,
     assets,
@@ -109,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(compose.router)
     app.include_router(workflows.router)
     app.include_router(audio.router)
+    app.include_router(voice_matching.router)
     app.include_router(settings.router)
     app.include_router(settings.health_router)
 

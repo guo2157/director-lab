@@ -74,8 +74,9 @@ SEGMENT_TYPE = _values(
     "character_dialogue", "voiceover", "music", "effect", "ambience", "h3_native",
 )
 # 音频片段生成状态（与 JOB_STATUS 分开：片段级状态，pending 为规划未生成）
+# waiting_voice_confirmation：角色音色尚未确认，对白片段暂缓生成（音色确认调度闸口，2026-11-07）
 AUDIO_GENERATION_STATUS = _values(
-    "pending", "queued", "processing", "completed", "failed", "cancelled",
+    "pending", "waiting_voice_confirmation", "queued", "processing", "completed", "failed", "cancelled",
 )
 # 音频审核状态（生成成功不等于审核通过，分开存储）
 AUDIO_REVIEW_STATUS = _values("not_required", "pending", "approved", "rejected")

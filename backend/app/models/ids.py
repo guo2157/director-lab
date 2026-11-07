@@ -131,3 +131,6 @@ def audio_segment_id() -> str:
     return new_id("aseg")
 def audio_review_id() -> str:
     return new_id("arev")
+
+def voice_library_id() -> str:
+    return new_id("vl")

@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     # 多 LLM 实例配置（JSON 数组：[{id, name, provider, base_url, api_key, model, enabled}]），
     # 为空时回退单实例 llm_* 字段；同一时刻仅一个 enabled，后端实时调用启用中的模型
     llm_instances_json: str = ""
-    llm_timeout_seconds: float = 120.0
+    llm_timeout_seconds: float = 600.0
     # 流式接收空闲超时（httpx read timeout 语义）：远端连续该时长不吐数据即抛 llm_timeout，
     # 避免 LLM 流式中途停摆时任务线程永久阻塞，把串行队列堵死
-    llm_stream_idle_timeout_seconds: float = 300.0
+    llm_stream_idle_timeout_seconds: float = 900.0
     llm_max_retries: int = 2
 
     # --- 任务调度（D-18 修订 D-03：并发 = 可用 ComfyUI 实例数，单实例串行排队，多实例负载均衡并行） ---
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     agent_first_batch_auto: bool = True
     worker_poll_interval_seconds: float = 2.0
     # 运行期自愈阈值：LLM 类任务处于 running 且长时间无事件、且本进程无执行线程时回收
-    llm_job_stall_seconds: float = 300.0
+    llm_job_stall_seconds: float = 900.0
     job_max_attempts: int = 3  # §5.7 重试上限（自动+手动累计），范围 1-10
 
     # --- 一致性双阈值（T-04：实测后校准，当前为推荐默认值） ---

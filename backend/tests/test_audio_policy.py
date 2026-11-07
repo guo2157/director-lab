@@ -74,6 +74,7 @@ def test_speakers_prefers_custom_voice(env):
 
 def test_regenerate_dedup_by_segment(env):
     client, tmp_path, Session = env
+    _seed_tts_workflows(env)  # regenerate 现在提交时即绑定 workflow（fail-fast 校验），需预置种子
     pid = _seed_project(env)
     scn = client.post("/api/scenes", json={"project_id": pid, "title": "教室", "episode": 1}).json()
     shot = client.post("/api/shots", json={
