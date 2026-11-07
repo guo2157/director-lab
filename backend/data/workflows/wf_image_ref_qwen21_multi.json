@@ -1,0 +1,296 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Qwen-Image-2.1 Turbo 模型(INT8)"
+    },
+    "inputs": {
+      "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Qwen3-VL 8B 文本编码器(INT8)"
+    },
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Qwen-Image-2.1 VAE"
+    },
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "文本编码, $prompt.prompt!, $negative.negative_prompt"
+    },
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "prompt": "以 <image1> 为场景编辑底图重建画面；角色按 <image2>、<image3>、<image4>、<image5>、<image8>、<image9> 的顺序取身份与服装；道具按 <image6>、<image7> 取形状与材质。9:16 竖构图，电影写实光影。",
+      "negative_prompt": "",
+      "vae": [
+        "3",
+        0
+      ],
+      "resolution": 1024,
+      "images.image_1": [
+        "20",
+        0
+      ],
+      "images.image_2": [
+        "21",
+        0
+      ],
+      "images.image_3": [
+        "22",
+        0
+      ],
+      "images.image_4": [
+        "23",
+        0
+      ],
+      "images.image_5": [
+        "24",
+        0
+      ],
+      "images.image_6": [
+        "25",
+        0
+      ],
+      "images.image_7": [
+        "26",
+        0
+      ],
+      "images.image_8": [
+        "27",
+        0
+      ],
+      "images.image_9": [
+        "28",
+        0
+      ]
+    }
+  },
+  "6": {
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "$seed.noise_seed"
+    },
+    "inputs": {
+      "noise_seed": 0
+    }
+  },
+  "7": {
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "采样器"
+    },
+    "inputs": {
+      "sampler_name": "euler"
+    }
+  },
+  "8": {
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "Turbo 8 步 sigma(结构参数)"
+    },
+    "inputs": {
+      "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0"
+    }
+  },
+  "9": {
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "引导(cfg=1)"
+    },
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "4",
+        1
+      ],
+      "cfg": 1.0
+    }
+  },
+  "10": {
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "采样(画布跟随 $width/$height)"
+    },
+    "inputs": {
+      "noise": [
+        "6",
+        0
+      ],
+      "guider": [
+        "9",
+        0
+      ],
+      "sampler": [
+        "7",
+        0
+      ],
+      "sigmas": [
+        "8",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    }
+  },
+  "11": {
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "解码"
+    },
+    "inputs": {
+      "samples": [
+        "10",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "SplitImageWithAlpha",
+    "_meta": {
+      "title": "拆出 RGB(规避 alpha=0 的黑图)"
+    },
+    "inputs": {
+      "image": [
+        "11",
+        0
+      ]
+    }
+  },
+  "12": {
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "$output.cover"
+    },
+    "inputs": {
+      "images": [
+        "13",
+        0
+      ],
+      "filename_prefix": "mj/keyframe_ref_q21_multi"
+    }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "画布 (9:16 固定画幅)"
+    },
+    "inputs": {
+      "width": 768,
+      "height": 1344,
+      "batch_size": 1
+    }
+  },
+  "20": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_scene.png"
+    },
+    "_meta": {
+      "title": "$ref_scene.~image"
+    }
+  },
+  "21": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_identity.png"
+    },
+    "_meta": {
+      "title": "$ref_identity.~image"
+    }
+  },
+  "22": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_character_2.png"
+    },
+    "_meta": {
+      "title": "$ref_character_2.~image"
+    }
+  },
+  "23": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_character_3.png"
+    },
+    "_meta": {
+      "title": "$ref_character_3.~image"
+    }
+  },
+  "24": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_character_4.png"
+    },
+    "_meta": {
+      "title": "$ref_character_4.~image"
+    }
+  },
+  "25": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_prop.png"
+    },
+    "_meta": {
+      "title": "$ref_prop.~image"
+    }
+  },
+  "26": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_prop_2.png"
+    },
+    "_meta": {
+      "title": "$ref_prop_2.~image"
+    }
+  },
+  "27": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_character_5.png"
+    },
+    "_meta": {
+      "title": "$ref_character_5.~image"
+    }
+  },
+  "28": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_ref_character_6.png"
+    },
+    "_meta": {
+      "title": "$ref_character_6.~image"
+    }
+  }
+}

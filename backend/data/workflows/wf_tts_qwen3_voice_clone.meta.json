@@ -1,0 +1,32 @@
+{
+  "trigger": {
+    "target": "audio",
+    "required_params": [
+      "tts_text",
+      "tts_voice_ref"
+    ],
+    "priority": 10
+  },
+  "capabilities": {
+    "workflow_type": "tts",
+    "target": "audio",
+    "audio": true,
+    "audio_output_mode": "separate",
+    "output": "$output.voice",
+    "output_format": "mp3",
+    "voice_mode": "clone_reference_audio",
+    "reference_audio_seconds": [
+      1,
+      10
+    ],
+    "reference_audio_max_seconds": 30,
+    "supports": {
+      "tts_speed": false,
+      "duration_hint": false,
+      "tts_emotion": false,
+      "word_timestamps": false
+    },
+    "requires": "自定义节点 DarioFT/ComfyUI-Qwen3-TTS（Base 模型）；上游 qwen-tts 依赖 transformers==4.57.3",
+    "notes": "character.voice_id 指向角色参考音频资产；建议 1–10 秒干净人声并提供 ref_text；每次一个说话人"
+  }
+}

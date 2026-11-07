@@ -1,0 +1,60 @@
+{
+  "1": {
+    "class_type": "Qwen3Loader",
+    "_meta": {
+      "title": "Qwen3-TTS 加载器(Base)"
+    },
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "2": {
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "$tts_voice_ref.~audio!"
+    },
+    "inputs": {
+      "audio": "placeholder_voice_ref.wav"
+    }
+  },
+  "3": {
+    "class_type": "Qwen3VoiceClone",
+    "_meta": {
+      "title": "配音克隆, $tts_text.text!, $tts_ref_text.ref_text, $tts_lang.language, $seed"
+    },
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "你好。",
+      "language": "Auto",
+      "ref_audio": [
+        "2",
+        0
+      ],
+      "ref_text": "",
+      "seed": 42,
+      "max_new_tokens": 2048,
+      "ref_audio_max_seconds": 30.0
+    }
+  },
+  "4": {
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "$output.voice"
+    },
+    "inputs": {
+      "audio": [
+        "3",
+        0
+      ],
+      "filename_prefix": "audio/voice_clone",
+      "quality": "320k"
+    }
+  }
+}

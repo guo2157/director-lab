@@ -1,0 +1,26 @@
+{
+  "trigger": {
+    "target": "bgm",
+    "required_params": [
+      "bgm_style"
+    ],
+    "priority": 0
+  },
+  "capabilities": {
+    "workflow_type": "bgm",
+    "target": "bgm",
+    "audio": true,
+    "audio_output_mode": "separate",
+    "output": "$output.bgm",
+    "output_format": "mp3",
+    "duration_param": "duration",
+    "duration_range": [
+      1,
+      47
+    ],
+    "duration_step": 0.1,
+    "stereo": true,
+    "requires": "核心节点；模型 stable-audio-open-1.0.safetensors 与 t5-base.safetensors（须自行核对许可证）",
+    "notes": "时长上限与采样参数(steps50/cfg5/dpmpp_3m_sde_gpu/exponential)按公开示例设定，未经本机验证；BGM 短于成片时由 compose 循环/淡出"
+  }
+}

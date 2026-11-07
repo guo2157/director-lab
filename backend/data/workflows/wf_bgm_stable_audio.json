@@ -1,0 +1,151 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Stable Audio Open 模型"
+    },
+    "inputs": {
+      "ckpt_name": "stable-audio-open-1.0.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "T5-base 文本编码器"
+    },
+    "inputs": {
+      "clip_name": "t5-base.safetensors",
+      "type": "stable_audio",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "$bgm_style.text!"
+    },
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": "cinematic ambient piano, slow tempo, emotional"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "$negative.text"
+    },
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": "noise, distortion, low quality, speech, vocals"
+    }
+  },
+  "5": {
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "$duration.value"
+    },
+    "inputs": {
+      "value": 30.0
+    }
+  },
+  "6": {
+    "class_type": "ConditioningStableAudio",
+    "_meta": {
+      "title": "时长条件"
+    },
+    "inputs": {
+      "positive": [
+        "3",
+        0
+      ],
+      "negative": [
+        "4",
+        0
+      ],
+      "seconds_start": 0.0,
+      "seconds_total": [
+        "5",
+        0
+      ]
+    }
+  },
+  "7": {
+    "class_type": "EmptyLatentAudio",
+    "_meta": {
+      "title": "潜空间时长"
+    },
+    "inputs": {
+      "seconds": [
+        "5",
+        0
+      ],
+      "batch_size": 1
+    }
+  },
+  "8": {
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "采样, $seed"
+    },
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "7",
+        0
+      ],
+      "seed": 0,
+      "steps": 50,
+      "cfg": 5.0,
+      "sampler_name": "dpmpp_3m_sde_gpu",
+      "scheduler": "exponential",
+      "denoise": 1.0
+    }
+  },
+  "9": {
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "解码"
+    },
+    "inputs": {
+      "samples": [
+        "8",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    }
+  },
+  "10": {
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "$output.bgm"
+    },
+    "inputs": {
+      "audio": [
+        "9",
+        0
+      ],
+      "filename_prefix": "audio/bgm",
+      "quality": "320k"
+    }
+  }
+}

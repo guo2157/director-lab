@@ -11,7 +11,11 @@ node_modules/
 dist/
 
 # 数据与媒体（不入库）
-backend/data/
+# 注意：必须是 data/* 而非 data/，否则 Git 不会进入目录、下方例外规则失效
+backend/data/*
+# 工作流定义是 seed_workflows.py 的数据源，且音色性别/描述标注只存在于 meta 中，必须入库
+!backend/data/workflows/
+backend/data/workflows/_removed/
 *.db
 *.db-wal
 *.db-shm
@@ -40,3 +44,15 @@ uvicorn.log
 *.orcaterm-tmp-file-change-*
 .bak_*/
 backend/.bak_*/
+
+# 调试与临时输出（不入库）
+backend/funcs.txt
+backend/pytest_*.txt
+backend/verify_session.txt
+# 一次性排查脚本（保留 seed_workflows.py / verify_full_e2e_test.sh 等正式脚本）
+backend/scripts/_debug_*.py
+backend/scripts/_inspect_wf.py
+backend/scripts/_kf_status.py
+backend/scripts/_fix_*.py
+backend/scripts/_repair_*.py
+backend/scripts/_test_rewrite_refs.py

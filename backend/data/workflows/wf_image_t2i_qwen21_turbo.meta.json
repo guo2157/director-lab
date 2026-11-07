@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "trigger": {
+    "target": "keyframe",
+    "required_params": [],
+    "priority": 10
+  },
+  "capabilities": {
+    "workflow_type": "image",
+    "target": "keyframe",
+    "output": "$output.cover",
+    "audio": false,
+    "width_height_bound": true,
+    "fps": null,
+    "cost": "free_local",
+    "local_only": true,
+    "resolution_constraints": {
+      "multiple_of": 32
+    },
+    "requires": "ComfyUI 须含 TextEncodeQwenImage21（Qwen-Image-2.1 原生节点；参考 commit b5a432157de6，2026-10-30）；模型文件放入 diffusion_models / text_encoders / vae",
+    "hardware": {
+      "target": "NVIDIA A10 24GB (Ampere)",
+      "status": "pending_benchmark",
+      "note": "INT8 ConvRot 的 cu130 优化内核需较新 PyTorch/驱动，否则走慢路径但功能正常"
+    },
+    "reference_slots": [],
+    "max_reference_images": 0,
+    "notes": "Qwen-Image-2.1 Turbo 文生图：8 步、cfg=1，负向提示词不起作用故不开放；缓存节点 QwenImage21Cache 可绕过，未放入；sigma 序列取自公开资料，须与官方模板核对"
+  },
+  "workflow_file": "wf_image_t2i_qwen21_turbo.json"
+}

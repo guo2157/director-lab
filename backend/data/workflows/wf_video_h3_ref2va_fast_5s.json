@@ -1,0 +1,364 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "H3 扩散模型(本地)"
+    },
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "H3 文本编码器(Qwen3-VL)"
+    },
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "H3 视频 VAE"
+    },
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "H3 音频 VAE"
+    },
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "H3 Sigma 偏移"
+    },
+    "inputs": {
+      "model": [
+        "35",
+        0
+      ],
+      "shift_video": 12.0,
+      "shift_audio": 3.0
+    }
+  },
+  "7": {
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "$seed.noise_seed"
+    },
+    "inputs": {
+      "noise_seed": 42
+    }
+  },
+  "8": {
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "采样器"
+    },
+    "inputs": {
+      "sampler_name": "res_multistep"
+    }
+  },
+  "9": {
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "调度(结构参数，不开放)"
+    },
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": 4,
+      "denoise": 1.0
+    }
+  },
+  "10": {
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "引导(H3 为 CFG 蒸馏，无负向)"
+    },
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "conditioning": [
+        "6",
+        0
+      ]
+    }
+  },
+  "11": {
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "音视频联合采样"
+    },
+    "inputs": {
+      "noise": [
+        "7",
+        0
+      ],
+      "guider": [
+        "10",
+        0
+      ],
+      "sampler": [
+        "8",
+        0
+      ],
+      "sigmas": [
+        "9",
+        0
+      ],
+      "latent_image": [
+        "6",
+        1
+      ]
+    }
+  },
+  "12": {
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "拆分音视频 latent"
+    },
+    "inputs": {
+      "av_latent": [
+        "11",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "解码视频"
+    },
+    "inputs": {
+      "samples": [
+        "12",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "14": {
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "解码音频"
+    },
+    "inputs": {
+      "samples": [
+        "12",
+        1
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    }
+  },
+  "15": {
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "合成(24fps)"
+    },
+    "inputs": {
+      "images": [
+        "13",
+        0
+      ],
+      "fps": 24.0,
+      "audio": [
+        "14",
+        0
+      ]
+    }
+  },
+  "16": {
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "$output.clip"
+    },
+    "inputs": {
+      "video": [
+        "15",
+        0
+      ],
+      "filename_prefix": "video/h3_fast_5s",
+      "format": "auto",
+      "codec": "auto"
+    }
+  },
+  "6": {
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "H3 Ref2VA, $prompt.prompt!, $length, $width!, $height!"
+    },
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "audio_vae": [
+        "4",
+        0
+      ],
+      "prompt": "Reference-based video generation. Actual prompt injected at runtime by prompt_compiler.",
+      "width": 480,
+      "height": 864,
+      "length": 124,
+      "ref_image_size": "match",
+      "ref_images.ref_image_0": [
+        "30",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "31",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "32",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "33",
+        0
+      ],
+      "ref_images.ref_image_4": [
+        "34",
+        0
+      ],
+      "ref_images.ref_image_5": [
+        "36",
+        0
+      ],
+      "ref_images.ref_image_6": [
+        "37",
+        0
+      ],
+      "ref_images.ref_image_7": [
+        "38",
+        0
+      ],
+      "ref_images.ref_image_8": [
+        "39",
+        0
+      ]
+    }
+  },
+  "30": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_prev_frame.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_prev_frame.png"
+    }
+  },
+  "31": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_image.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_image.png"
+    }
+  },
+  "32": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_identity.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_identity.png"
+    }
+  },
+  "33": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_character_2.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_character_2.png"
+    }
+  },
+  "34": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_prop.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_prop.png"
+    }
+  },
+  "35": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "H3 ref2v 4步 Turbo LoRA"
+    }
+  },
+  "36": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_character_3.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_character_3.png"
+    }
+  },
+  "37": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_character_4.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_character_4.png"
+    }
+  },
+  "38": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_character_5.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_character_5.png"
+    }
+  },
+  "39": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "$ref_character_6.~image"
+    },
+    "inputs": {
+      "image": "placeholder_ref_character_6.png"
+    }
+  }
+}

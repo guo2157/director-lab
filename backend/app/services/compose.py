@@ -24,6 +24,9 @@ RESOLUTION_BY_RATIO = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 72
                        "4:3": (960, 720), "3:4": (720, 960)}
 DEFAULT_RESOLUTION = (1280, 720)
 LOUDNESS_TARGET = "I=-16:TP=-1"  # PRD M7-04：-16 LUFS，峰值 -1 dBTP
+# 对白超长延长镜头上限：超出基础时长的 max(比例, 绝对秒数) 时须人工放行
+DIALOGUE_EXTENSION_MAX_RATIO = 0.5
+DIALOGUE_EXTENSION_MAX_SECONDS = 3.0
 SUBTITLE_SPLIT_THRESHOLD = 40  # SRT 单句超 40 字切分
 SUBTITLE_MIN_SECONDS = 1.0     # 最短显示时长（软约束）
 SUBTITLE_MAX_LINES = 2         # 单条烧录字幕最多两行，超出按标点再切
@@ -57,6 +60,9 @@ class ShotInput:
     audio_asset_id: str | None
     audio_asset_version: int | None
     review_released: bool = False      # 超容差经人工放行
+    tts_audios: list = field(default_factory=list)  # TTS 混音输入（discard 策略）：[{segment_id, track_type, path, offset_ms, duration_ms}]
+    drop_native_audio: bool = False   # discard 策略：丢弃 H3 内嵌音轨（无 TTS 片段时补静音）
+    keep_native_audio: bool = False   # preserve 策略：tts_mix 时把视频内嵌音轨作为底层一并混入
 
 
 @dataclass
@@ -102,6 +108,7 @@ def build_timeline(shots: list[ShotInput], *, tolerance: float = 0.5) -> Timelin
     - 镜头视频缺失/失效 → output_missing
     - 按策略要求配音但音频缺失/失效 → output_missing
     - 音画差值超容差且未放行 → duration_mismatch_review_required
+    - 对白总时长超基础时长过多且未放行 → dialogue_extension_review_required
     """
     result = TimelineResult()
     cursor = 0.0
@@ -111,8 +118,32 @@ def build_timeline(shots: list[ShotInput], *, tolerance: float = 0.5) -> Timelin
             result.errors.append(("output_missing", f"镜头 ep{s.episode}/seq{s.seq} 视频产物缺失"))
             continue
         # 目标时长基准
-        voiced = s.audio_source in ("h3_va", "tts_fallback")
-        if voiced:
+        voiced = s.audio_source in ("h3_va", "tts_fallback", "tts_mix")
+        if s.audio_source == "tts_mix":
+            # 对白时长为音画时长权威依据（V1 解耦方案）：超长优先延长镜头，不截断不加速
+            # 基准时长：有配音镜头以视频实测时长（actual_duration）为准，缺失才回落计划时长，
+            # 避免用计划时长与实测时长比对导致误判 duration_mismatch_review_required
+            tts_total = sum(float(t.get("duration_ms") or 0) for t in (s.tts_audios or [])) / 1000.0
+            base = float(s.actual_duration) if (s.actual_duration and s.actual_duration > 0) else float(s.duration)
+            target = max(base, tts_total)
+            if tts_total > base + 0.001:
+                overflow = tts_total - base
+                # 延长上限：超出基础时长 max(基础时长×比例, 绝对秒数) 时不得静默延长，
+                # 否则单镜可能被配音无限拉长（画面定格数十秒），必须人工放行
+                allowed = max(base * DIALOGUE_EXTENSION_MAX_RATIO, DIALOGUE_EXTENSION_MAX_SECONDS)
+                if overflow > allowed and not s.review_released:
+                    result.errors.append((
+                        "dialogue_extension_review_required",
+                        f"镜头 ep{s.episode}/seq{s.seq} 对白总时长 {tts_total:.2f}s 超基础时长 "
+                        f"{base:.2f}s 共 {overflow:.2f}s（超过上限 {allowed:.2f}s），须审核放行"))
+                    continue
+                if overflow > allowed:
+                    result.warnings.append(
+                        f"镜头 ep{s.episode}/seq{s.seq} 对白超出上限 {overflow:.2f}s，经人工放行按对白时长延长镜头")
+                else:
+                    result.warnings.append(
+                        f"镜头 ep{s.episode}/seq{s.seq} 对白总时长 {tts_total:.2f}s 超基础时长 {base:.2f}s，按对白时长延长镜头")
+        elif voiced:
             if not s.actual_duration or s.actual_duration <= 0:
                 result.errors.append(("output_missing", f"镜头 ep{s.episode}/seq{s.seq} 配音时长无效"))
                 continue
@@ -395,6 +426,7 @@ def shot_segment_cmd(item: TimelineItem, out_path: str, *, width: int, height: i
     """单镜片段命令：对齐到目标时长（tpad 定格 / trim 截断）、统一分辨率帧率与音轨。
 
     音轨规则：h3_va 保留视频内嵌音轨（无音轨时补静音）；tts_fallback 用独立音频替换；
+    tts_mix 丢弃内嵌音轨并按时间轴混入 TTS 对白/旁白（V1 解耦方案 discard 策略）；
     none 补目标时长静音——所有片段统一带音轨以便 concat。
     """
     target = item.target_duration
@@ -404,6 +436,9 @@ def shot_segment_cmd(item: TimelineItem, out_path: str, *, width: int, height: i
     if s.audio_source == "tts_fallback" and s.audio_path:
         inputs += ["-i", s.audio_path]
         audio_index = 1
+    elif s.audio_source == "tts_mix" and s.tts_audios:
+        for ta in s.tts_audios:
+            inputs += ["-i", ta["path"]]
     # 视频链：pad 模式先定格补齐，再统一 trim 到目标时长，最后缩放/补边/帧率
     vchain = f"[0:v]"
     if item.align_mode == "pad":
@@ -416,8 +451,34 @@ def shot_segment_cmd(item: TimelineItem, out_path: str, *, width: int, height: i
         achain = f"[{audio_index}:a]atrim=0:{target:.3f},asetpts=PTS-STARTPTS,apad=whole_dur={target:.3f}[a]"
         fc = f"{vchain};{achain}"
         maps = ["-map", "[v]", "-map", "[a]"]
-    elif s.audio_source == "h3_va":
-        # 内嵌音轨：存在则截到目标并补齐，不存在时由调用方改为静音方案
+    elif s.audio_source == "tts_mix" and s.tts_audios:
+        # TTS 混音：各片段 adelay 定位 + amix 求和（同镜对白顺序排列不重叠，normalize=0 不衰减）
+        # keep_native_audio（preserve 策略）：视频内嵌音轨作为底层一并混入，实现原生音轨 + TTS 叠加
+        chains = []
+        labels = []
+        if s.keep_native_audio:
+            chains.append(
+                f"[0:a]aresample={COMPOSE_AUDIO_RATE},aformat=channel_layouts=stereo,"
+                f"atrim=0:{target:.3f},asetpts=PTS-STARTPTS,apad=whole_dur={target:.3f}[nat]"
+            )
+            labels.append("[nat]")
+        for idx, ta in enumerate(s.tts_audios):
+            off = int(ta.get("offset_ms") or 0)
+            chains.append(
+                f"[{idx + 1}:a]aresample={COMPOSE_AUDIO_RATE},aformat=channel_layouts=stereo,"
+                f"adelay={off}:all=1[a{idx}]"
+            )
+            labels.append(f"[a{idx}]")
+        chains.append(
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,"
+            f"atrim=0:{target:.3f},asetpts=PTS-STARTPTS,"
+            f"apad=whole_dur={target:.3f},aresample={COMPOSE_AUDIO_RATE}[a]"
+        )
+        fc = vchain + ";" + ";".join(chains)
+        maps = ["-map", "[v]", "-map", "[a]"]
+    elif s.audio_source == "h3_va" and not s.drop_native_audio:
+        # 内嵌音轨：存在则截到目标并补齐，不存在时由调用方改为静音方案；
+        # discard 策略（drop_native_audio=True）丢弃内嵌音轨，落入下方静音分支
         achain = (f"[0:a]atrim=0:{target:.3f},asetpts=PTS-STARTPTS,"
                   f"apad=whole_dur={target:.3f},aresample={COMPOSE_AUDIO_RATE}[a]")
         fc = f"{vchain};{achain}"

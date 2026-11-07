@@ -1,0 +1,48 @@
+{
+  "1": {
+    "class_type": "Qwen3Loader",
+    "_meta": {
+      "title": "Qwen3-TTS 加载器(CustomVoice)"
+    },
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "2": {
+    "class_type": "Qwen3CustomVoice",
+    "_meta": {
+      "title": "配音, $tts_text.text!, $tts_voice.speaker, $tts_lang.language, $tts_emotion.instruct, $seed"
+    },
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "你好。",
+      "language": "Auto",
+      "speaker": "Vivian",
+      "seed": 42,
+      "instruct": "",
+      "custom_speaker_name": "",
+      "max_new_tokens": 2048
+    }
+  },
+  "3": {
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "$output.voice"
+    },
+    "inputs": {
+      "audio": [
+        "2",
+        0
+      ],
+      "filename_prefix": "audio/voice",
+      "quality": "320k"
+    }
+  }
+}

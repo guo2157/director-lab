@@ -1,0 +1,77 @@
+{
+  "trigger": {
+    "target": "audio",
+    "required_params": [
+      "tts_text"
+    ],
+    "priority": 0
+  },
+  "capabilities": {
+    "workflow_type": "tts",
+    "target": "audio",
+    "audio": true,
+    "audio_output_mode": "separate",
+    "output": "$output.voice",
+    "output_format": "mp3",
+    "voice_mode": "preset",
+    "voice_values": [
+      "Vivian",
+      "Serena",
+      "Uncle_Fu",
+      "Dylan",
+      "Eric",
+      "Ryan",
+      "Aiden",
+      "Ono_Anna",
+      "Sohee"
+    ],
+    "voice_display_names": {
+      "Vivian": "薇薇安",
+      "Serena": "塞雷娜",
+      "Uncle_Fu": "傅叔叔",
+      "Dylan": "迪伦",
+      "Eric": "埃里克",
+      "Ryan": "瑞安",
+      "Aiden": "艾登",
+      "Ono_Anna": "小野安娜",
+      "Sohee": "素熙"
+    },
+    "voice_genders": {
+      "Vivian": "female",
+      "Serena": "female",
+      "Uncle_Fu": "male",
+      "Dylan": "male",
+      "Eric": "male",
+      "Ryan": "male",
+      "Aiden": "male",
+      "Ono_Anna": "female",
+      "Sohee": "female"
+    },
+    "voice_descriptions": {
+      "Vivian": "女声 · 中文 | 明亮、略有个性的年轻嗓音",
+      "Serena": "女声 · 中文 | 温暖、温柔的年轻嗓音",
+      "Uncle_Fu": "男声 · 中文 | 低沉醇厚的成熟嗓音",
+      "Dylan": "男声 · 中文（京腔） | 京味年轻男声，音色清亮自然",
+      "Eric": "男声 · 中文（成都话） | 活泼成都男声，略带沙哑明亮感",
+      "Ryan": "男声 · 英文 | 富有节奏感的动态男声",
+      "Aiden": "男声 · 英文（美式） | 阳光美式男声，中频清晰",
+      "Ono_Anna": "女声 · 日语 | 轻快俏皮的日语女声",
+      "Sohee": "女声 · 韩语 | 温暖且富有情感的韩语女声"
+    },
+    "supports": {
+      "tts_speed": false,
+      "duration_hint": false,
+      "tts_emotion": "free_text_instruct",
+      "word_timestamps": false
+    },
+    "emotion_map": {
+      "neutral": "",
+      "happy": "Happy",
+      "sad": "Sad",
+      "angry": "Angry",
+      "fearful": "Fearful, trembling voice"
+    },
+    "requires": "自定义节点 DarioFT/ComfyUI-Qwen3-TTS；其上游 qwen-tts 依赖 transformers==4.57.3，可能降级现有版本",
+    "notes": "一次只合成单个说话人；多人对白由后端按 8.6.2 分段调用并拼接；speed 与目标时长不可控，实际时长以探测为准；emotion_map 为推荐映射，未经验证"
+  }
+}

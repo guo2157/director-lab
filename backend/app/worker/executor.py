@@ -102,7 +102,12 @@ def _asset_regenerate_target(db: Session, job: Job) -> Asset | None:
 
 
 def _overwrite_asset_file(asset: Asset, content: bytes) -> str:
-    """原地覆盖资产文件：file_path 固定不变，返回实际写入路径。"""
+    """原地覆盖资产文件：file_path 固定不变，返回实际写入路径。
+
+    组合参考图（character_prop_binding）没有候选版本语义：覆盖即视为生效，
+    写入后把 validity 置为 current。否则 Reference Resolver 的 _valid_asset
+    会因 validity=pending 永远拒绝采用，组合图能力静默失效（2026-11-06 排查确认）。
+    """
     from pathlib import Path
 
     dest = Path(asset.file_path)
@@ -110,6 +115,8 @@ def _overwrite_asset_file(asset: Asset, content: bytes) -> str:
         dest = Path(get_settings().media_dir) / dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
+    if asset.asset_type == "character_prop_binding":
+        asset.validity = "current"
     return str(dest)
 
 
@@ -132,12 +139,31 @@ def _apply_regenerate_gates(db: Session, job: Job, asset: Asset) -> None:
         reset_assets_review(db, job.project_id)
 
 
+def _task_progress(db: Session, job_id: str, progress: int) -> None:
+    """统一任务编排层：按 job_id 更新关联任务阶段进度（里程碑推进，异常隔离）。"""
+    try:
+        from app.services.task_orchestrator import update_stage_progress_by_job
+        update_stage_progress_by_job(db, job_id, progress)
+    except Exception:  # noqa: BLE001
+        pass
+
 def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = None) -> None:
     """事件与状态同事务写入 outbox。event_seq 由数据库自增，并回写 job.event_seq 供增量补齐。"""
     ev = JobEvent(job_id=job.id, event_type=event_type, payload=payload or {}, created_at=_now())
     db.add(ev)
     db.flush()
     job.event_seq = ev.event_seq
+    # 统一任务编排层桥接：job_event → task_event（Job 归属任务时同步任务阶段状态）
+    # 必须用 savepoint 隔离：桥接内部含写操作，若失败仅被 except 吞掉，
+    # 外层 Session 会进入 PendingRollback 状态，后续 commit 抛
+    # 「This Session's transaction has been rolled back due to a previous
+    # exception during flush」，把已渲染成功的任务误判失败并陷入重复入队死循环。
+    try:
+        from app.services.task_orchestrator import bridge_job_event
+        with db.begin_nested():
+            bridge_job_event(db, job_id=job.id, event_type=event_type, payload=payload or {})
+    except Exception:  # noqa: BLE001
+        pass  # 桥接失败不影响既有执行链路；savepoint 已回滚，主事务保持干净
 
 
 def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
@@ -209,11 +235,114 @@ def _probe_clip_and_update_shot(db: Session, job: Job, created_assets: list[dict
             "duration": duration,
             "audio_source": "h3_va" if has_audio else "none",
         })
+        # 音频模块改造（2026-11-06）：登记/更新 H3 原生音频片段。
+        # 片段绑定本次视频资产版本（clip.asset_id），视频重新生成后由本函数重建，
+        # 旧片段删除、审核状态不继承；无音频流时登记 absent 状态，流程不阻断。
+        try:
+            from app.services import audio_plan
+            if shot is not None:
+                audio_plan.register_native_audio(
+                    db, job.project_id, shot.episode, shot.id,
+                    clip["asset_id"], has_audio,
+                )
+        except Exception as e:  # noqa: BLE001
+            try:
+                _write_event(db, job, "native_audio.register_failed", {"error": str(e)[:200]})
+            except Exception:
+                pass
     except Exception as e:  # noqa: BLE001
         try:
             _write_event(db, job, "clip.probe_failed", {"error": str(e)[:200]})
         except Exception:
             pass
+
+
+def _sync_audio_segment_after_generate(db: Session, job: Job, created_assets: list[dict]) -> None:
+    """音频生成任务成功后回写片段状态（音频模块改造，2026-11-06）。
+
+    - generate_audio / generate_bgm / generate_sfx：片段指向新资产版本，
+      generation_status=completed，review_status 回到 pending（新版本不继承旧审核）
+    - duration_ms 以 ffprobe 实际探测为准，探测失败不阻断
+    - 片段定位：input_snapshot.audio_segment_id 优先；缺失时仅当同镜同轨道类型的待生成
+      片段**唯一**才回写，多条候选时不做猜测（按 created_at 取首条会把音频挂到错误的片段上），
+      改为写 job 事件留待人工确认
+    """
+    if job.job_type not in ("generate_audio", "generate_bgm", "generate_sfx"):
+        return
+    audio_asset = next((a for a in created_assets if a.get("asset_type") == "audio"), None)
+    if audio_asset is None:
+        return
+    # 音色试听任务：回写 voice_profile 试听缓存。
+    # 指纹与文本在提交时已固化到 input_snapshot，这里只做落库，
+    # 避免回写时角色音色已被改动导致缓存与音频不匹配。
+    _snap_preview = job.input_snapshot or {}
+    if _snap_preview.get("voice_preview") and _snap_preview.get("voice_profile_id"):
+        from app.models.audio import VoiceProfile as _VoiceProfile
+        _vp = db.get(_VoiceProfile, _snap_preview["voice_profile_id"])
+        if _vp is not None:
+            _vp.preview_asset_id = audio_asset["asset_id"]
+            _vp.preview_text = _snap_preview.get("preview_text")
+            _vp.preview_signature = _snap_preview.get("preview_signature")
+            _write_event(db, job, "audio.voice_preview_cached", {
+                "voice_profile_id": _vp.id,
+                "asset_id": audio_asset["asset_id"],
+                "signature": _vp.preview_signature,
+            })
+        return
+    from app.models.audio import AudioSegment
+    seg = None
+    seg_id = (job.input_snapshot or {}).get("audio_segment_id")
+    if seg_id:
+        seg = db.get(AudioSegment, seg_id)
+    if seg is None and job.shot_id:
+        track_map = {
+            "generate_audio": ("dialogue", "narration"),
+            "generate_bgm": ("bgm",),
+            "generate_sfx": ("sfx", "ambient"),
+        }
+        tracks = track_map.get(job.job_type, ())
+        if tracks:
+            from sqlalchemy import select as _select
+            candidates = db.execute(
+                _select(AudioSegment).where(
+                    AudioSegment.shot_id == job.shot_id,
+                    AudioSegment.track_type.in_(tracks),
+                    AudioSegment.generation_status.in_(("pending", "queued", "processing", "failed")),
+                ).order_by(AudioSegment.created_at)
+            ).scalars().all()
+            if len(candidates) == 1:
+                seg = candidates[0]
+            elif len(candidates) > 1:
+                # 无 audio_segment_id 且候选不唯一：不猜测绑定，避免音频挂错片段
+                _write_event(db, job, "audio.segment_sync_ambiguous", {
+                    "shot_id": job.shot_id,
+                    "candidate_segment_ids": [c.id for c in candidates],
+                    "note": "任务未携带 audio_segment_id，存在多个待生成片段，需人工指定",
+                })
+                return
+    if seg is None:
+        return
+    seg.audio_asset_id = audio_asset["asset_id"]
+    seg.generation_status = "completed"
+    seg.review_status = "pending"
+    try:
+        import json as _json
+        import subprocess as _sp
+        proc = _sp.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", audio_asset["file_path"]],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            dur = float((_json.loads(proc.stdout).get("format") or {}).get("duration") or 0)
+            if dur > 0:
+                seg.duration_ms = int(round(dur * 1000))
+    except Exception:  # noqa: BLE001
+        pass
+    _write_event(db, job, "audio.segment_synced", {
+        "segment_id": seg.id,
+        "asset_id": audio_asset["asset_id"],
+        "duration_ms": seg.duration_ms,
+    })
 
 
 def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) -> None:
@@ -687,7 +816,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                     asset.thumb_path = thumb_path
                                 except Exception:
                                     asset.thumb_path = None
-                                created_assets.append({"asset_id": asset_id, "out_name": out_name, "file_path": filepath})
+                                created_assets.append({"asset_id": asset_id, "asset_type": asset_type, "out_name": out_name, "file_path": filepath})
                             # 锚定图回写（D-20）
                             _prop_id = (job.params or {}).get("__prop_id__")
                             _character_id = (job.params or {}).get("__character_id__")
@@ -710,6 +839,33 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _s.baseline_asset_id = _kf[0]["asset_id"]
+                            # 图片质量检查回写（与主成功路径口径一致）：此前该对账续跑路径
+                            # 漏掉质量检查，导致产物 quality_status 永远停留 pending，
+                            # image_quality 验收与道具视觉校验均无法核验（2026-11-06 排查确认）
+                            if not settings.render_mock:
+                                _IMG_TYPES = ("keyframe", "character", "scene", "prop")
+                                for _a in created_assets:
+                                    if _a.get("asset_type") not in _IMG_TYPES:
+                                        continue
+                                    try:
+                                        from app.services.image_quality import check_image_quality
+                                        _qr = check_image_quality(
+                                            _a["file_path"], asset_type=_a["asset_type"]
+                                        )
+                                    except Exception as _qe:  # noqa: BLE001
+                                        _qr = {"passed": False,
+                                               "issues": [f"质量检查异常: {type(_qe).__name__}"],
+                                               "checks": {}}
+                                    _qa = db.get(Asset, _a["asset_id"])
+                                    if _qa is not None:
+                                        _qa.quality_status = "passed" if _qr["passed"] else "failed"
+                                        _qa.quality_issues = _qr["issues"] or None
+                                    if not _qr["passed"]:
+                                        # 对账续跑路径不重排 seed 重试，仅记录事件供人工处理
+                                        _write_event(db, job, "job.quality_warning", {
+                                            "asset_id": _a["asset_id"],
+                                            "issues": _qr["issues"],
+                                        })
                             # 资产库 regenerate 原地覆盖闸口：引用镜头待重做 + 公共资产重置审核
                             if _regen_target is not None:
                                 _apply_regenerate_gates(db, job, _regen_target)
@@ -719,8 +875,18 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             job.finished_at = _now()
                             job.result = {"assets": created_assets, "prompt_id": job.prompt_id, "seed": seed}
                             _write_event(db, job, "job.succeeded", {"assets": len(created_assets)})
+                            # 定义状态回写：与主成功路径一致，绑定正式资产并置为已生成。
+                            # 此前该路径（对账续跑）漏掉这一步，导致任务成功但资产计划
+                            # 一直停留在 pending，前端资产库看不到已生成状态。
+                            try:
+                                from app.services.asset_plan import sync_plan_after_generate
+                                sync_plan_after_generate(db, job, created_assets)
+                            except Exception as _pe:  # noqa: BLE001
+                                _write_event(db, job, "asset_plan.sync_failed", {"error": str(_pe)[:200]})
                             # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
                             _probe_clip_and_update_shot(db, job, created_assets)
+                            # 音频生成任务：片段状态回写（音频模块改造）
+                            _sync_audio_segment_after_generate(db, job, created_assets)
                             # P0：实际尾帧落库（对账续跑路径同样需要绑定尾帧）
                             _persist_shot_last_frame(db, job, created_assets)
                             # 镜头状态派生（统一口径：见 services/shot_state.py）
@@ -817,9 +983,11 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         # 防止工作流内置占位图 placeholder_*.png 污染生成结果）
         try:
             from app.services.workflow_inject import (
+                compact_qwen_image_slots,
                 compact_reference_slots,
                 parse_workflow,
                 prune_unbound_media_inputs,
+                remap_image_tags,
                 remap_picture_refs,
             )
             wf_definition, _pruned = prune_unbound_media_inputs(wf_record.definition, params)
@@ -859,12 +1027,52 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 db.commit()
             elif _slot_remap:
                 _remap_info = {"slot_remap": {k: dict(v) for k, v in _slot_remap.items()}}
+            # P0 修复（Qwen 多参考图身份错位）：剔除槽位后 images.image_N 断档，
+            # autogrow 按连线顺序解释图片身份，断档会让道具槽（如 image_6）
+            # 被当成次角色槽解释（麦袋被当角色参考、角色身份错乱）。
+            # 与 H3 处理一致：先压缩为连续编号，再按同一映射重写提示词 <imageN>。
+            wf_definition, _img_remap = compact_qwen_image_slots(wf_definition)
+            if _img_remap and isinstance(params.get(_prompt_key), str):
+                _new_prompt2, _dropped_imgs = remap_image_tags(params[_prompt_key], _img_remap)
+                if _dropped_imgs:
+                    _img_info = {
+                        "image_remap": {k: dict(v) for k, v in _img_remap.items()},
+                        "dropped_images": _dropped_imgs,
+                    }
+                    _write_event(db, job, "job.image_remap", _img_info)
+                params[_prompt_key] = _new_prompt2
+                db.commit()
+            # 防复发：任务参数的键必须与工作流节点标记声明的参数名一致。
+            # 历史故障：# audio 任务曾把 speaker 写成 voice，而工作流声明的是 tts_voice，
+            # 注入时找不到该参数即静默跳过、沿用画布默认值，导致选任何音色都出同一个声音。
+            try:
+                _declared = set(parse_workflow(wf_record.definition).params.keys())
+                _undeclared = sorted(
+                    k for k in params.keys()
+                    if not k.startswith("__") and k not in _declared
+                )
+                if _undeclared:
+                    _write_event(
+                        db,
+                        job,
+                        "job.undeclared_params",
+                        {
+                            "undeclared": _undeclared,
+                            "declared": sorted(_declared),
+                            "note": "这些参数不会被注入，工作流将沿用画布默认值",
+                        },
+                    )
+                    db.commit()
+            except ValueError:
+                # 标记校验失败交由下方 inject_params 统一报错，此处不重复处理
+                pass
             injected_wf, snapshot = inject_params(wf_definition, params, seed=seed)
-            if _slot_remap or _remap_info:
+            if _slot_remap or _remap_info or _img_remap:
                 _snap = dict(job.input_snapshot or {})
                 _snap["reference_layout"] = {
                     "pruned_slots": _pruned,
                     "slot_remap": {k: dict(v) for k, v in _slot_remap.items()},
+                    "image_remap": {k: dict(v) for k, v in _img_remap.items()},
                 }
                 _snap["params"] = snapshot
                 job.input_snapshot = _snap
@@ -926,6 +1134,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             _write_event(db, job, "job.submitted", {"prompt_id": prompt_id})
             db.commit()
 
+            _task_progress(db, job.id, 30)
             # 4. 等待完成（事务外，超时按 comfy_timeout 处理）
             # WebSocket 优先：订阅 /ws 事件流接收进度并写 job.progress 事件；
             # WS 断连/不可用时自动降级为 HTTP 轮询（与旧行为一致）。
@@ -936,19 +1145,33 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             _last_progress = {"value": None}
 
             def _on_progress(p: dict) -> None:
-                # 进度回调：value 变化时写 job.progress 事件（事件与状态同事务）
+                # 进度回调：value 变化时写 job.progress 事件。
+                # 必须使用独立 Session：进度回调由 WebSocket 线程/事件流触发，
+                # 若复用主 Session 且 commit 中途失败，主事务会进入 rollback 状态，
+                # 后续 db.refresh/commit 全部抛 “transaction has been rolled back”，
+                # 最终把已经在 ComfyUI 渲染成功的任务误判为 failed。
                 if p.get("value") == _last_progress["value"]:
                     return
                 _last_progress["value"] = p.get("value")
+                _pdb = None
                 try:
-                    _write_event(db, job, "job.progress", {
-                        "value": p.get("value"),
-                        "max": p.get("max"),
-                        "node": p.get("node"),
-                    })
-                    db.commit()
+                    _pdb = _db.SessionLocal()
+                    _pjob = _pdb.get(Job, job.id)
+                    if _pjob is not None:
+                        _write_event(_pdb, _pjob, "job.progress", {
+                            "value": p.get("value"),
+                            "max": p.get("max"),
+                            "node": p.get("node"),
+                        })
+                        _pdb.commit()
                 except Exception:
                     pass  # 进度事件失败不阻断任务执行
+                finally:
+                    if _pdb is not None:
+                        try:
+                            _pdb.close()
+                        except Exception:
+                            pass
 
             _conn_failures = 0  # 连续连接失败计数：实例被删/断连时快速失败，不再等待总超时
             _poll_err_desc = ''  # 最近一次轮询请求异常描述（仅请求报错时赋值）
@@ -1101,6 +1324,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 _fail_job(db, job, e.code, e.message)
                 return {"ok": False, "reason": e.code}
 
+        _task_progress(db, job.id, 90)
         # 6. 资产落库（{asset_id}_{version}.{ext} 重命名）
         from app.models import ids as id_gen
         import os
@@ -1252,6 +1476,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             _write_event(db, job, "asset_plan.sync_failed", {"error": str(_pe)[:200]})
         # clip 产物 ffprobe 检测：回写时长与音频来源（compose 对齐依赖）
         _probe_clip_and_update_shot(db, job, created_assets)
+        # 音频生成任务：片段状态回写（音频模块改造）
+        _sync_audio_segment_after_generate(db, job, created_assets)
         # P0：从本次实际生成视频提取末帧并绑定 shot.last_frame_asset_id，
         # 供后续镜头首帧/尾帧引用；失败只记录事件，不阻断任务成功
         _persist_shot_last_frame(db, job, created_assets)
@@ -1303,7 +1529,31 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         try:
             job = db.get(Job, job_id)
             if job is not None and job.status not in ("succeeded", "failed"):
-                _fail_job(db, job, "comfy_execution_error", f"执行器异常: {e}")
+                # 已提交到 ComfyUI 的任务（有 prompt_id 且 submission_state=submitted）
+                # 不因本地异常判失败：远端可能仍在渲染或已渲染成功，
+                # 交回队列由续跑/对账分支接管下载产物，
+                # 否则会出现「视频已在 ComfyUI 生成好、前端却一直标红失败」。
+                # attempts 上限是死循环的最后一道闸：若异常根因未消除而反复重入队，
+                # 超过阈值必须真正判失败，避免同一任务被无限次重复执行。
+                if (
+                    job.prompt_id
+                    and job.submission_state == "submitted"
+                    and (job.attempts or 0) < 3
+                ):
+                    _snap = dict(job.input_snapshot or {})
+                    _snap["resume_prompt"] = True
+                    job.input_snapshot = _snap
+                    job.status = "queued"
+                    job.error_code = None
+                    job.error_msg = None
+                    job.finished_at = None
+                    _write_event(db, job, "job.requeued_after_exception", {
+                        "error": str(e)[:300],
+                        "prompt_id": job.prompt_id,
+                    })
+                    db.commit()
+                else:
+                    _fail_job(db, job, "comfy_execution_error", f"执行器异常: {e}")
         except Exception:
             pass
         return {"ok": False, "reason": f"executor_exception:{e}"}
