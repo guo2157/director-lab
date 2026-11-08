@@ -79,6 +79,7 @@ class LLMClient:
             self.api_key = api_key if api_key is not None else settings.llm_api_key
             self.model = model or settings.llm_model
         self.timeout = timeout or settings.llm_timeout_seconds
+        self.max_tokens = int(getattr(settings, "llm_max_tokens", 16384) or 16384)
 
     def _check_config(self) -> None:
         if not self.api_key:
@@ -104,6 +105,7 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0.3,
+            "max_tokens": self.max_tokens,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -122,9 +124,18 @@ class LLMClient:
             raise LLMError("llm_error", f"语言模型接口 HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
         try:
-            return data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError("llm_error", "语言模型响应结构异常") from e
+        # 推理模型的思考 token 也占用 max_tokens；被截断时 JSON 可能仍「合法」但内容为空，
+        # 必须显式失败，不能把残缺结果当成功落库。
+        if choice.get("finish_reason") == "length":
+            raise LLMError(
+                "llm_output_truncated",
+                f"语言模型输出被截断（max_tokens={self.max_tokens}），请提高 llm_max_tokens 或缩小单次解析范围",
+            )
+        return content
 
     def chat_stream(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True,
                     on_delta=None) -> str:
@@ -138,6 +149,7 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.3,
+            "max_tokens": self.max_tokens,
             "stream": True,
         }
         if json_mode:

@@ -287,6 +287,14 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
     result.data["characters"] = [
         c for c in (raw.get("characters") or []) if isinstance(c, dict) and c.get("name")
     ]
+    # 本次解析输出的角色名集合：首次解析时项目内尚无角色，speaker 只能先保留原名，
+    # 由 apply_parse_result 落库后回填 speaker_id；此处不应把本批新角色误报为未匹配。
+    _parsed_char_names = {
+        (c.get("name") or "").strip() for c in result.data["characters"]
+    }
+    _parsed_char_norms = {
+        normalize_entity_name(n) for n in _parsed_char_names if n
+    }
     result.data["props"] = [
         p for p in (raw.get("props") or []) if isinstance(p, dict) and p.get("name")
     ]
@@ -342,8 +350,10 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
                     if spk_name and spk_name in char_map:
                         ns["speaker_id"] = char_map[spk_name]
                     elif spk_name:
-                        ns["speaker_id"] = None  # 映射失败保留原名，产生审核问题
-                        issues.append(f"镜头 ep{s.get('episode')}/seq{s.get('seq')} 对白说话人 '{spk_name}' 未匹配到项目角色")
+                        ns["speaker_id"] = None  # 首次解析项目内角色尚未落库，确认时回填
+                        if (spk_name not in _parsed_char_names
+                                and normalize_entity_name(spk_name) not in _parsed_char_norms):
+                            issues.append(f"镜头 ep{s.get('episode')}/seq{s.get('seq')} 对白说话人 '{spk_name}' 未匹配到项目角色")
                     if ns.get("emotion") not in _VALID_EMOTIONS:
                         ns["emotion"] = s["emotion"]
                     norm_segs.append(ns)
@@ -660,14 +670,30 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                 continue
             _shot_seen.add(key)
             touched_shot_keys.add(key)
-            # character_id 名称 → 实体 ID 二次映射
+            # character_id 名称 → 实体 ID 二次映射（精确名优先，归一化名兜底）
             char_id = None
             cname = sh.get("character_id") or sh.get("speaker")
-            if cname and cname in char_map:
-                char_id = char_map[cname].id
+            if cname:
+                _ch = char_map.get(cname) or char_norm_map.get(normalize_entity_name(cname))
+                char_id = _ch.id if _ch is not None else None
+            # 对白分段说话人回填：首次解析时角色尚未落库，speaker_id 为空；
+            # 此处角色已 upsert（含本批新建），按 speaker 原名/归一化名补上实体 ID，
+            # 否则配音与出场角色解析只能退回字符串名，角色关联会断。
+            segments = sh.get("dialogue_segments")
+            if isinstance(segments, list):
+                segments = [dict(x) for x in segments if isinstance(x, dict)]
+                for seg in segments:
+                    if seg.get("speaker_id"):
+                        continue
+                    spk = seg.get("speaker")
+                    if not spk:
+                        continue
+                    _ch = char_map.get(spk) or char_norm_map.get(normalize_entity_name(spk))
+                    if _ch is not None:
+                        seg["speaker_id"] = _ch.id
             fields = dict(
                 character_id=char_id, dialogue=sh.get("dialogue"),
-                dialogue_segments=sh.get("dialogue_segments"),
+                dialogue_segments=segments,
                 shot_kind=sh.get("shot_kind") or "visual",
                 image_prompt=sh.get("image_prompt"),
                 video_prompt=sh.get("video_prompt") or _assemble_video_prompt(sh, _is_first_shot),

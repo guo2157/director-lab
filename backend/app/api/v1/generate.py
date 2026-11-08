@@ -95,6 +95,35 @@ def _find_ref_capable_image_workflow(db: Session) -> Workflow | None:
     return None
 
 
+# 视频工作流默认档位优先级：标准 5s 优先，其次极速 5s / 质量 10s
+_VIDEO_TIER_ORDER = {"std_5s": 0, "fast_5s": 1, "quality_10s": 2}
+
+
+def _find_ref_capable_video_workflow(db: Session) -> Workflow | None:
+    """找能接收分镜图参考槽位（ref_image）的视频工作流。
+
+    无显式默认工作流时，避免按插入顺序落到只接受 first_frame 的 FLF2V 工作流：
+    批量出视频注入的是分镜图（ref_image），首个镜头也没有上一镜尾帧，
+    会因 first_frame 必填而整批失败。
+    """
+    rows = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "video")
+        .order_by(Workflow.is_default.desc())
+        .all()
+    )
+    candidates: list[tuple[int, Workflow]] = []
+    for wf in rows:
+        slots = (wf.capabilities or {}).get("reference_slots") or []
+        names = [item.get("param") if isinstance(item, dict) else item for item in slots]
+        if "ref_image" in names:
+            tier = (wf.capabilities or {}).get("tier")
+            candidates.append((_VIDEO_TIER_ORDER.get(tier, 99), wf))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])[1]
+
+
 def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workflow:
     """工作流匹配：显式 workflow_id 优先；分镜图默认自动改用带参考槽位的工作流。
 
@@ -105,6 +134,13 @@ def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workfl
     if workflow_id is None and target == "keyframe":
         if not (wf.capabilities or {}).get("reference_slots"):
             alt = _find_ref_capable_image_workflow(db)
+            if alt is not None:
+                return alt
+    if workflow_id is None and target == "clip" and not wf.is_default:
+        slots = (wf.capabilities or {}).get("reference_slots") or []
+        names = [item.get("param") if isinstance(item, dict) else item for item in slots]
+        if "ref_image" not in names:
+            alt = _find_ref_capable_video_workflow(db)
             if alt is not None:
                 return alt
     return wf

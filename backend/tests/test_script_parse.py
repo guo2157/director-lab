@@ -251,9 +251,14 @@ FAKE_PARSE_OUTPUT_V2 = {
 
 def _run_parse(client, monkeypatch, pid, sv, fake_output):
     """提交解析任务并用替身执行，返回 parse_version_id。"""
+    # 解析范围需与替身输出的集号一致，否则镜头会被范围过滤成空集
+    eps = [sc.get("episode") for sc in (fake_output.get("scenes") or [])
+           if isinstance(sc, dict) and isinstance(sc.get("episode"), int)]
+    episode_start = min(eps) if eps else 1
+    episode_count = (max(eps) - min(eps) + 1) if eps else 1
     r = client.post(f"/api/projects/{pid}/parse",
                     json={"script_version_id": sv["script_version_id"], "text": SCRIPT_TEXT,
-                          "episode_start": 1, "episode_count": 1})
+                          "episode_start": episode_start, "episode_count": episode_count})
     assert r.status_code == 202
     job_id = r.json()["job_id"]
     import app.worker.parse_executor as pe_mod
@@ -289,6 +294,8 @@ def test_parse_confirm_cascades_entities(client, monkeypatch):
     assert len(shots) == 2
     assert shots[0]["status"] == "pending"
     assert shots[0]["character_id"] == chars[0]["id"]
+    # 首次解析时角色尚未落库；确认阶段必须把 speaker 字符串回填为实体 ID
+    assert shots[0]["dialogue_segments"][0]["speaker_id"] == chars[0]["id"]
     plan = client.get(f"/api/projects/{pid}").json()["episode_plan"]
     assert plan[0]["goal"] == "建立悬念"
     # 第二次解析并确认：镜头按范围清理更新，旧版本失效
@@ -509,6 +516,24 @@ def test_normalize_parse_output_reports_character_alias():
     }
     r = normalize_parse_output(raw, episode_start=1, episode_count=1)
     assert any("角色名称未收敛" in i for i in r.review_issues)
+
+
+def test_normalize_first_parse_speaker_not_reported_unmatched():
+    """首次解析：speaker 属于本批输出角色时不应误报未匹配（确认阶段会回填 ID）。"""
+    from app.services.script_parse import normalize_parse_output
+
+    raw = {
+        "project_analysis": {},
+        "characters": [{"name": "小马"}],
+        "props": [], "episodes": [],
+        "scenes": [{
+            "episode": 1, "title": "马棚",
+            "shots": [{"episode": 1, "seq": 1, "duration": 5,
+                       "dialogue_segments": [{"speaker": "小马", "text": "走吧"}]}],
+        }],
+    }
+    r = normalize_parse_output(raw, episode_start=1, episode_count=1)
+    assert not any("未匹配到项目角色" in i for i in r.review_issues)
 
 
 def test_parse_prompt_covers_producibility_rules():

@@ -240,6 +240,27 @@ def execute_parse_job(job_id: str) -> dict:
             raw, episode_start=episode_start, episode_count=episode_count,
             character_name_to_id=char_map,
         )
+        shot_total = sum(len(sc.get("shots") or []) for sc in norm.data.get("scenes") or [])
+        # 推理模型偶发「合法 JSON 但 scenes 无 shots」，表现为下游 no_pending_plans。
+        # 在同一任务内自动重问一次，避免把可恢复的模型抖动直接暴露成流程失败。
+        if shot_total == 0:
+            _task_step(db, job.id, "parse_repair", "模型漏输出分镜，正在自动补全", 55)
+            repair_prompt = user_prompt + (
+                "\n\n【补全要求】上一次输出缺少每个 scene 的 shots 数组。"
+                "请重新输出完整 JSON，必须为每个 scene 提供至少 1 个 shot，"
+                "shot 字段与上述 schema 完全一致，不得省略或留空。"
+            )
+            try:
+                raw = client.chat_json(get_prompt("parse_system"), repair_prompt)
+            except LLMError as e:
+                _upsert_records(db, job.project_id, episode_start, episode_count, "failed", error_msg=e.message[:2000])
+                _fail_job(db, job, e.code, e.message)
+                return {"ok": False, "reason": e.code}
+            norm = normalize_parse_output(
+                raw, episode_start=episode_start, episode_count=episode_count,
+                character_name_to_id=char_map,
+            )
+            shot_total = sum(len(sc.get("shots") or []) for sc in norm.data.get("scenes") or [])
 
         # 结果落库：完整解析结果存 job.result（API.md §5 parse 契约）
         style_diffs = style_config.compute_style_diff(
@@ -263,7 +284,15 @@ def execute_parse_job(job_id: str) -> dict:
             .first()
         )
         next_ver = (max_ver[0] if max_ver else 0) + 1
-        shot_total = sum(len(sc.get("shots") or []) for sc in norm.data.get("scenes") or [])
+        # 空镜头解析不可确认：自动补全后仍无 shots，说明模型持续漏输出，
+        # 若放行会在分镜图阶段才报 no_pending_plans，故障点后移且难以定位。
+        if shot_total == 0:
+            msg = "模型连续两次未输出任何镜头，请重试、换用非推理模型或缩小解析集范围"
+            # 保留原始响应，便于定位是模型漏输出、字段名不符还是被截断
+            job.result = {"raw_response": raw}
+            _upsert_records(db, job.project_id, episode_start, episode_count, "failed", error_msg=msg)
+            _fail_job(db, job, "parse_no_shots", msg)
+            return {"ok": False, "reason": "parse_no_shots"}
         pv = ParseVersion(
             id=ids.parse_version_id(),
             project_id=job.project_id,

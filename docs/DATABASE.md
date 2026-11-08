@@ -193,6 +193,7 @@
 | input_snapshot | json | 产物输入版本与参数快照 |
 | quality_status | string | 图片质量检查状态：pending / passed / failed，默认 pending |
 | quality_issues | json | 质量检查发现的具体问题清单 |
+| updated_at | datetime | 最近一次生成/审核更新时间，可为空 |
 
 索引：`ix_asset_project_type_validity(project_id, asset_type, validity)`，支撑按项目+类型+有效性筛选。
 

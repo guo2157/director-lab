@@ -37,27 +37,30 @@ def _mock_image(job_id: str, out_name: str, width: int = 512, height: int = 288)
     return buf.getvalue()
 
 
-def _run_ffmpeg(args: list[str], fmt: str) -> bytes:
+def _run_ffmpeg(args: list[str], fmt: str, stdin: bytes | None = None) -> bytes:
     """执行 ffmpeg 生成到 stdout 管道，返回文件内容。"""
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, "-f", fmt, "pipe:1"]
-    proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    proc = subprocess.run(cmd, input=stdin, capture_output=True, timeout=60)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg 生成 mock 产物失败: {proc.stderr.decode(errors='replace')[:300]}")
     return proc.stdout
 
 
 def _mock_video(job_id: str, out_name: str) -> bytes:
-    """生成 5 秒 testsrc 测试视频（MP4），分辨率 ≥256×256 以通过尾帧提取校验。"""
-    label = f"job_{job_id[-8:]}_{out_name}"
-    vf = f"drawtext=text='[MOCK] {label}':x=8:y=8:fontsize=20:fontcolor=orange,scale=512:288"
+    """生成 5 秒带标识的测试视频（MP4），分辨率 ≥256×256 以通过尾帧提取校验。
+
+    标识帧由 Pillow 绘制后通过管道送入 ffmpeg，避免 drawtext 依赖 fontconfig：
+    Windows/精简版 ffmpeg 常因缺少 fontconfig 配置直接失败。
+    """
+    png = _mock_image(job_id, out_name, 512, 288)
     return _run_ffmpeg([
-        "-f", "lavfi", "-i", "testsrc=size=512x288:rate=24:duration=5",
-        "-vf", vf,
-        "-pix_fmt", "yuv420p",
+        "-f", "image2pipe", "-framerate", "24", "-vcodec", "png", "-i", "pipe:0",
+        "-vf", "loop=loop=119:size=1:start=0,format=yuv420p",
+        "-r", "24", "-t", "5",
         "-c:v", "libx264",
         "-g", "12",
         "-movflags", "frag_keyframe+empty_moov",
-    ], "mp4")
+    ], "mp4", stdin=png)
 
 
 def _mock_audio(job_id: str, out_name: str) -> bytes:
