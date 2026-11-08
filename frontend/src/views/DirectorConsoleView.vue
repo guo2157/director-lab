@@ -20,6 +20,7 @@ import type { AgentApproval, AgentMessage, AgentSession } from '@/api/agent'
 import { getProjectStyleConfig, getStyleOptions } from '@/api/projects'
 import type { StyleConfig, StyleOptions } from '@/types/project'
 import TaskCard from '@/components/TaskCard.vue'
+import AudioProgressPanel from '@/components/AudioProgressPanel.vue'
 import { useTaskEvents } from '@/composables/useTaskEvents'
 import type { TaskCardData } from '@/api/tasks'
 
@@ -930,6 +931,8 @@ onMounted(() => {
             </div>
           </div>
 
+          <!-- 音频生产进度（与视频生产并行展示，数据库实时统计） -->
+          <AudioProgressPanel v-if="linkedProject.id" :project-id="linkedProject.id" />
           <div class="ctx-label">待审批生成</div>
           <NSpin :show="approvalLoading" size="small">
             <div v-if="!approvals.length" class="ctx-empty">暂无待审批申请</div>

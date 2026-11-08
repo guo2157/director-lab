@@ -15,6 +15,7 @@ export type AudioSegmentType =
 /** 片段生成状态（与审核状态分开） */
 export type AudioGenerationStatus =
   | 'pending'
+  | 'waiting_voice_confirmation'
   | 'queued'
   | 'processing'
   | 'completed'
@@ -176,6 +177,7 @@ export const TRACK_TYPE_LABELS: Record<AudioTrackType, string> = {
 /** 生成状态显示名映射 */
 export const GENERATION_STATUS_LABELS: Record<AudioGenerationStatus, string> = {
   pending: '待生成',
+  waiting_voice_confirmation: '待确认音色',
   queued: '排队中',
   processing: '生成中',
   completed: '已生成',
@@ -189,4 +191,119 @@ export const REVIEW_STATUS_LABELS: Record<AudioReviewStatus, string> = {
   pending: '待审核',
   approved: '已通过',
   rejected: '已驳回',
+}
+
+// ============ 角色音色智能匹配（2026-11-07）============
+
+/** 系统默认音色（VoiceLibrary，speaker_id 溯源 workflow meta） */
+export interface SystemVoice {
+  id: string
+  voice_code: string
+  name: string
+  speaker_id: string
+  display_name: string
+  gender_presentation: 'male' | 'female'
+  perceived_age: string
+  pitch: string
+  timbre: string[]
+  personality_tags: string[]
+  speaking_styles: string[]
+  language: string
+  description: string
+  source_workflow: string
+  enabled: boolean
+  sort_order: number
+  has_preview: boolean
+}
+
+/** 系统音色库列表响应 */
+export interface SystemVoiceList {
+  items: SystemVoice[]
+  total: number
+  male_count: number
+  female_count: number
+}
+
+/** 角色音色绑定详情（含匹配结果与候选） */
+export interface VoiceBinding {
+  voice_profile_id: string
+  voice_library_id: string | null
+  voice_id: string
+  voice_name: string
+  match_score: number | null
+  match_reason: string | null
+  alternatives: Array<{
+    voice_library_id: string
+    voice_code: string
+    name: string
+    speaker_id: string
+    match_score: number
+    match_reason: string
+  }>
+  voice_profile: Record<string, unknown>
+  status: 'locked' | 'confirmed' | 'pending'
+  is_manual: boolean
+  source: 'ai' | 'manual' | 'inherited'
+  approved: boolean
+  is_locked: boolean
+}
+
+/** 角色音色绑定响应 */
+export interface VoiceBindingResponse {
+  character_id: string
+  character_name: string
+  binding: VoiceBinding | null
+}
+
+/** 批量匹配结果条目 */
+export interface VoiceMatchItem {
+  character_id: string
+  character_name: string
+  voice_code: string
+  voice_name: string
+  speaker_id: string
+  match_score: number
+  match_reason: string
+  reused: boolean
+  alternatives: VoiceBinding['alternatives']
+}
+
+/** 批量匹配响应 */
+export interface VoiceMatchResult {
+  matched: VoiceMatchItem[]
+  skipped: Array<{ character_id: string; name: string; reason: string }>
+  total: number
+}
+
+/** 音频生产进度（按轨道分组的状态统计） */
+export interface AudioProductionProgress {
+  project_id: string
+  progress: Record<'dialogue' | 'narration' | 'bgm' | 'sfx', { total: number } & Record<string, number>>
+}
+
+/** 音频片段明细条目（导演台展开视图） */
+export interface AudioSegmentDetail {
+  id: string
+  episode: number
+  shot_id: string | null
+  track_type: AudioTrackType
+  segment_type: AudioSegmentType
+  character_id: string | null
+  character_name: string | null
+  text: string | null
+  voice_profile_id: string | null
+  sequence: number | null
+  generation_status: AudioGenerationStatus
+  review_status: AudioReviewStatus
+  audio_asset_id: string | null
+  duration_ms: number | null
+  note: string | null
+}
+
+/** 音频片段明细分页响应 */
+export interface AudioSegmentDetailPage {
+  items: AudioSegmentDetail[]
+  total: number
+  page: number
+  page_size: number
 }

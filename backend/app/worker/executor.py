@@ -115,6 +115,7 @@ def _overwrite_asset_file(asset: Asset, content: bytes) -> str:
         dest = Path(get_settings().media_dir) / dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
+    asset.updated_at = _now()
     if asset.asset_type == "character_prop_binding":
         asset.validity = "current"
     return str(dest)
@@ -368,10 +369,11 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
     整改前 shot.last_frame_asset_id 只有读取、没有任何写入点，
     导致后续镜头永远拿不到上一镜尾帧，镜间连续性实际未生效。
     尾帧必须来自本次生成视频实际解码的最后一帧（extract_last_frame 含黑屏回退），
-    不使用分镜图或预估帧；提取失败只记录事件，不阻断任务成功。
+    不使用分镜图或预估帧；提取失败只记录事件，不阻断任务成功，
+    但返回 False，调用方据此阻止链式下一环释放（避免下一镜缺首帧参数）。
     """
     if job.job_type != "generate_clip" or not job.shot_id:
-        return
+        return False
     # 正常成功路径与对账续跑路径的 created_assets 只带 asset_id/out_name/file_path，
     # 不带 asset_type；仅按 asset_type 判断会永远取不到 clip，导致尾帧从未落库。
     # 这里同时兼容 out_name，保证两条成功路径都能绑定尾帧。
@@ -384,13 +386,13 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
         None,
     )
     if clip is None:
-        return
+        return False
     shot = db.get(Shot, job.shot_id)
     if shot is None:
-        return
+        return False
     clip_asset = db.get(Asset, clip["asset_id"])
     if clip_asset is None:
-        return
+        return False
     try:
         from app.services.shot_chain import store_shot_last_frame
         result = store_shot_last_frame(db, shot, clip_asset, get_settings().media_dir)
@@ -399,7 +401,7 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
             "shot_id": shot.id,
             "error": f"{type(e).__name__}: {e}"[:300],
         })
-        return
+        return False
     if result.get("ok"):
         _write_event(db, job, "shot.last_frame", {
             "shot_id": shot.id,
@@ -413,6 +415,7 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
             "shot_id": shot.id,
             "error": result.get("error"),
         })
+    return bool(result.get("ok"))
 
 
 def _release_chained_next(db: Session, job: Job) -> None:
@@ -438,7 +441,14 @@ def _release_chained_next(db: Session, job: Job) -> None:
         if chain.get("prev_job_id") != job.id:
             continue
         nj.status = "queued"
-        _write_event(db, nj, "chain.released", {"prev_job_id": job.id})
+        _write_event(db, nj, "chain.released", {
+            "prev_job_id": job.id,
+            "note": "上一镜已成功，其尾帧已绑定为本镜首帧引用，本镜开始排队生成",
+        })
+        _write_event(db, job, "chain.next_released", {
+            "next_job_id": nj.id,
+            "note": "已提取本镜尾帧作为下一镜头首帧，下一镜开始生成；串行链式执行中，请勿中断或重新发起批量",
+        })
 
 
 def _cancel_chained_after_failure(db: Session, job: Job, code: str) -> None:
@@ -484,7 +494,7 @@ def _cancel_chained_after_failure(db: Session, job: Job, code: str) -> None:
         frontier = nxt
     if cancelled_total:
         print(f"[worker] 链式级联取消 {cancelled_total} 个后续任务（前序 {job.id} 失败）", flush=True)
-        print(f"[worker] 链式释放 {nj.id}（前序 {job.id} 成功）", flush=True)
+
 
 
 def _preferred_instance_for_shot(db: Session, job: Job, exclude_instances: list[str]) -> dict | None:
@@ -937,13 +947,22 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     # history 为 None 或实例不可达：降级走正常流程重新提交
                 except ComfyUIError:
                     if job.submission_state == "submitted":
+                        # 续跑兜底（D-25）：ComfyUI 不可达时最多重试 3 次，
+                        # 超过上限直接 fail，防止无限重试耗尽调度资源
+                        _resume_attempts = (job.input_snapshot or {}).get("resume_attempts", 0)
+                        if _resume_attempts >= 3:
+                            _fail_job(db, job, "comfy_unreachable",
+                                      f"ComfyUI 实例不可达，续跑已达最大重试次数（{_resume_attempts}）")
+                            return {"ok": False, "reason": "comfy_unreachable"}
                         _snap = dict(job.input_snapshot or {})
                         _snap["resume_prompt"] = True
+                        _snap["resume_attempts"] = _resume_attempts + 1
                         job.input_snapshot = _snap
                         job.status = "queued"
                         _write_event(db, job, "job.resume_deferred", {
                             "reason": "instance_unreachable",
                             "prompt_id": job.prompt_id,
+                            "resume_attempt": _resume_attempts + 1,
                         })
                         db.commit()
                         return {"ok": False, "reason": "resume_deferred", "retriable": True}
@@ -1496,13 +1515,27 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         # 音频生成任务：片段状态回写（音频模块改造）
         _sync_audio_segment_after_generate(db, job, created_assets)
         # P0：从本次实际生成视频提取末帧并绑定 shot.last_frame_asset_id，
-        # 供后续镜头首帧/尾帧引用；失败只记录事件，不阻断任务成功
-        _persist_shot_last_frame(db, job, created_assets)
-        # 链式生成（chained）：本任务成功且尾帧已绑定后，释放链上下一个 chained_wait 任务
-        try:
-            _release_chained_next(db, job)
-        except Exception as _ce:  # noqa: BLE001
-            _write_event(db, job, "chain.release_failed", {"error": str(_ce)[:200]})
+        # 供后续镜头首帧/尾帧引用；绑定结果决定是否释放链式下一环
+        if job.job_type == "generate_clip":
+            _write_event(db, job, "chain.extracting_last_frame", {
+                "note": "正在提取本镜尾帧，作为下一镜头首帧引用；串行链式执行中，请勿中断或重新发起批量",
+            })
+        _last_frame_bound = _persist_shot_last_frame(db, job, created_assets)
+        # 链式生成（chained）：仅当尾帧已成功绑定时才释放下一环；
+        # 绑定失败则级联取消后续任务，避免下一镜在缺少首帧参数的情况下进入队列
+        if job.job_type == "generate_clip" and not _last_frame_bound:
+            _write_event(db, job, "chain.last_frame_missing", {
+                "note": "尾帧提取/绑定失败，为避免下一镜缺首帧参数，链式后续任务已取消；可修复后重新发起批量",
+            })
+            try:
+                _cancel_chained_after_failure(db, job, "last_frame_extract_failed")
+            except Exception as _ce:  # noqa: BLE001
+                _write_event(db, job, "chain.cancel_failed", {"error": str(_ce)[:200]})
+        else:
+            try:
+                _release_chained_next(db, job)
+            except Exception as _ce:  # noqa: BLE001
+                _write_event(db, job, "chain.release_failed", {"error": str(_ce)[:200]})
         # 7.5 镜头状态派生（§3.2/§4.2）：必需产物齐全 → done，否则回 pending（阶段内部分完成是正常状态）
         # 口径统一在 services/shot_state.py：H3 VA 内嵌音轨即满足对白/旁白镜头的音频必需性
         if job.shot_id:
@@ -1556,18 +1589,22 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     job.prompt_id
                     and job.submission_state == "submitted"
                 ):
-                    _snap = dict(job.input_snapshot or {})
-                    _snap["resume_prompt"] = True
-                    job.input_snapshot = _snap
-                    job.status = "queued"
-                    job.error_code = None
-                    job.error_msg = None
-                    job.finished_at = None
-                    _write_event(db, job, "job.requeued_after_exception", {
-                        "error": str(e)[:300],
-                        "prompt_id": job.prompt_id,
-                    })
-                    db.commit()
+                    if job.attempts >= settings.job_max_attempts:
+                        _fail_job(db, job, "comfy_execution_error",
+                                  f"执行器异常（已达重试上限 {settings.job_max_attempts} 次）: {str(e)[:200]}")
+                    else:
+                        _snap = dict(job.input_snapshot or {})
+                        _snap["resume_prompt"] = True
+                        job.input_snapshot = _snap
+                        job.status = "queued"
+                        job.error_code = None
+                        job.error_msg = None
+                        job.finished_at = None
+                        _write_event(db, job, "job.requeued_after_exception", {
+                            "error": str(e)[:300],
+                            "prompt_id": job.prompt_id,
+                        })
+                        db.commit()
                 else:
                     _fail_job(db, job, "comfy_execution_error", f"执行器异常: {e}")
         except Exception:

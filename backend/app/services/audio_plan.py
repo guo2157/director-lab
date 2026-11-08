@@ -132,7 +132,7 @@ def build_audio_plan(db: Session, project_id: str, episode: int) -> dict:
             continue
         key = shot.scene_id
         if key not in scene_bgm:
-            desc = (shot.bgm or "").strip() or f"场景『{scene.name}』氛围配乐（按情绪规划）"
+            desc = (shot.bgm or "").strip() or f"场景『{scene.title}』氛围配乐（按情绪规划）"
             seg = AudioSegment(
                 id=ids.audio_segment_id(),
                 project_id=project_id, episode=episode, shot_id=shot.id,

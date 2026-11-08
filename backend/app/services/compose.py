@@ -63,6 +63,8 @@ class ShotInput:
     tts_audios: list = field(default_factory=list)  # TTS 混音输入（discard 策略）：[{segment_id, track_type, path, offset_ms, duration_ms}]
     drop_native_audio: bool = False   # discard 策略：丢弃 H3 内嵌音轨（无 TTS 片段时补静音）
     keep_native_audio: bool = False   # preserve 策略：tts_mix 时把视频内嵌音轨作为底层一并混入
+    sfx_audios: list = field(default_factory=list)      # SFX 音效混入：[{path, offset_ms, volume, duration_ms}]
+    ambient_audios: list = field(default_factory=list)  # 环境声混入：[{path, offset_ms, volume, duration_ms}]
 
 
 @dataclass
@@ -108,7 +110,7 @@ def build_timeline(shots: list[ShotInput], *, tolerance: float = 0.5) -> Timelin
     - 镜头视频缺失/失效 → output_missing
     - 按策略要求配音但音频缺失/失效 → output_missing
     - 音画差值超容差且未放行 → duration_mismatch_review_required
-    - 对白总时长超基础时长过多且未放行 → dialogue_extension_review_required
+    - 混合音频（TTS+SFX+环境声）总时长超基础时长过多且未放行 → mixed_audio_duration_review_required
     """
     result = TimelineResult()
     cursor = 0.0
@@ -124,25 +126,31 @@ def build_timeline(shots: list[ShotInput], *, tolerance: float = 0.5) -> Timelin
             # 基准时长：有配音镜头以视频实测时长（actual_duration）为准，缺失才回落计划时长，
             # 避免用计划时长与实测时长比对导致误判 duration_mismatch_review_required
             tts_total = sum(float(t.get("duration_ms") or 0) for t in (s.tts_audios or [])) / 1000.0
+            # SFX/环境声按 offset+duration 计算各层最长结束时间
+            sfx_end = max((float(t.get("offset_ms") or 0) + float(t.get("duration_ms") or 0)) / 1000.0
+                          for t in (s.sfx_audios or [])) if s.sfx_audios else 0.0
+            ambient_end = max((float(t.get("offset_ms") or 0) + float(t.get("duration_ms") or 0)) / 1000.0
+                              for t in (s.ambient_audios or [])) if s.ambient_audios else 0.0
+            mixed_audio_total = max(tts_total, sfx_end, ambient_end)
             base = float(s.actual_duration) if (s.actual_duration and s.actual_duration > 0) else float(s.duration)
-            target = max(base, tts_total)
-            if tts_total > base + 0.001:
-                overflow = tts_total - base
+            target = max(base, mixed_audio_total)
+            if mixed_audio_total > base + 0.001:
+                overflow = mixed_audio_total - base
                 # 延长上限：超出基础时长 max(基础时长×比例, 绝对秒数) 时不得静默延长，
                 # 否则单镜可能被配音无限拉长（画面定格数十秒），必须人工放行
                 allowed = max(base * DIALOGUE_EXTENSION_MAX_RATIO, DIALOGUE_EXTENSION_MAX_SECONDS)
                 if overflow > allowed and not s.review_released:
                     result.errors.append((
-                        "dialogue_extension_review_required",
-                        f"镜头 ep{s.episode}/seq{s.seq} 对白总时长 {tts_total:.2f}s 超基础时长 "
+                        "mixed_audio_duration_review_required",
+                        f"镜头 ep{s.episode}/seq{s.seq} 混合音频总时长 {mixed_audio_total:.2f}s 超基础时长 "
                         f"{base:.2f}s 共 {overflow:.2f}s（超过上限 {allowed:.2f}s），须审核放行"))
                     continue
                 if overflow > allowed:
                     result.warnings.append(
-                        f"镜头 ep{s.episode}/seq{s.seq} 对白超出上限 {overflow:.2f}s，经人工放行按对白时长延长镜头")
+                        f"镜头 ep{s.episode}/seq{s.seq} 混合音频超出上限 {overflow:.2f}s，经人工放行按音频时长延长镜头")
                 else:
                     result.warnings.append(
-                        f"镜头 ep{s.episode}/seq{s.seq} 对白总时长 {tts_total:.2f}s 超基础时长 {base:.2f}s，按对白时长延长镜头")
+                        f"镜头 ep{s.episode}/seq{s.seq} 混合音频总时长 {mixed_audio_total:.2f}s 超基础时长 {base:.2f}s，按音频时长延长镜头")
         elif voiced:
             if not s.actual_duration or s.actual_duration <= 0:
                 result.errors.append(("output_missing", f"镜头 ep{s.episode}/seq{s.seq} 配音时长无效"))
@@ -439,6 +447,10 @@ def shot_segment_cmd(item: TimelineItem, out_path: str, *, width: int, height: i
     elif s.audio_source == "tts_mix" and s.tts_audios:
         for ta in s.tts_audios:
             inputs += ["-i", ta["path"]]
+        for sfx in (s.sfx_audios or []):
+            inputs += ["-i", sfx["path"]]
+        for amb in (s.ambient_audios or []):
+            inputs += ["-i", amb["path"]]
     # 视频链：pad 模式先定格补齐，再统一 trim 到目标时长，最后缩放/补边/帧率
     vchain = f"[0:v]"
     if item.align_mode == "pad":
@@ -469,6 +481,26 @@ def shot_segment_cmd(item: TimelineItem, out_path: str, *, width: int, height: i
                 f"adelay={off}:all=1[a{idx}]"
             )
             labels.append(f"[a{idx}]")
+        # SFX 音效混入：按 offset 定位 + volume 调节后并入 amix
+        sfx_base = 1 + len(s.tts_audios)
+        for idx, sfx in enumerate(s.sfx_audios or []):
+            off = int(sfx.get("offset_ms") or 0)
+            vol = float(sfx.get("volume") or 1.0)
+            chains.append(
+                f"[{sfx_base + idx}:a]aresample={COMPOSE_AUDIO_RATE},aformat=channel_layouts=stereo,"
+                f"volume={vol:.3f},adelay={off}:all=1[sfx{idx}]"
+            )
+            labels.append(f"[sfx{idx}]")
+        # 环境声混入：按 offset 定位 + volume 调节后并入 amix
+        amb_base = sfx_base + len(s.sfx_audios or [])
+        for idx, amb in enumerate(s.ambient_audios or []):
+            off = int(amb.get("offset_ms") or 0)
+            vol = float(amb.get("volume") or 1.0)
+            chains.append(
+                f"[{amb_base + idx}:a]aresample={COMPOSE_AUDIO_RATE},aformat=channel_layouts=stereo,"
+                f"volume={vol:.3f},adelay={off}:all=1[amb{idx}]"
+            )
+            labels.append(f"[amb{idx}]")
         chains.append(
             f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,"
             f"atrim=0:{target:.3f},asetpts=PTS-STARTPTS,"

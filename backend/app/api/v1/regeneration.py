@@ -490,6 +490,7 @@ def adopt_candidate(asset_id: str, db: Session = Depends(get_db)) -> dict:
         _sync_entity_pointer(db, old, target)
 
     target.validity = "current"
+    target.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     # 人工审核闸口（D-23）：实体类公共资产换版后原审核结论失效，需重新提交审核
     if target.asset_type in ("character", "scene", "prop"):

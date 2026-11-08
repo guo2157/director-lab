@@ -32,6 +32,7 @@ class Asset(Base):
     # 图片质量检查（P3）：pending=待检查 / passed=通过 / failed=失败；issues 记录具体问题
     quality_status: Mapped[str | None] = mapped_column(String(16), nullable=True, default="pending", server_default="pending")
     quality_issues: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 Index("ix_asset_project_type_validity", Asset.__table__.c.project_id, Asset.__table__.c.asset_type, Asset.__table__.c.validity)

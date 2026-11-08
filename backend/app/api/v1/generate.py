@@ -533,14 +533,17 @@ def _apply_chain_mode(jobs: list[Job], chain_mode: str) -> None:
       前一任务失败时链条保持暂停，可重新发起批量继续
     """
     prev = None
+    prev_scene_id = None
     for j in jobs:
         snap = dict(j.input_snapshot or {})
         snap["chain_mode"] = chain_mode
-        if chain_mode == "chained" and prev is not None:
+        cur_scene_id = (j.input_snapshot or {}).get("scene_id")
+        if chain_mode == "chained" and prev is not None and cur_scene_id == prev_scene_id:
             j.status = "chained_wait"
             snap["chain"] = {"prev_job_id": prev.id, "mode": "chained"}
         j.input_snapshot = snap
         prev = j
+        prev_scene_id = cur_scene_id
 
 
 def _project_id_from_shot(db: Session, shot: Shot) -> str:
@@ -717,6 +720,7 @@ def _cancel_inflight_jobs(db: Session, shot_id: str, target: str) -> list[str]:
                                 payload={"reason": type(e).__name__}, created_at=_now()))
         j.status = "cancelled"
         j.finished_at = _now()
+        j.prompt_id = None  # 清除 prompt_id，防止 scheduler 续跑分支复用已取消任务
         db.add(JobEvent(job_id=j.id, event_type="job.cancelled",
                         payload={"reason": "shot_clip_regenerate"}, created_at=_now()))
         cancelled.append(j.id)
@@ -1328,14 +1332,38 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
                     params["prompt"] = rewrite_picture_refs(
                         db, project_id, params.get("prompt") or "",
                         params["__media__"], slots)
+        # Reference Resolver（与单镜生成保持一致）：keyframe 批量生成时解析参考图清单，
+        # 组合图优先 → 独立图回退 → offscreen 保护；Resolver 结果优先合并到 __media__
+        _reference_manifest = None
+        if target == "keyframe":
+            from app.services.reference_resolver import resolve_shot_references
+            _reference_manifest = resolve_shot_references(db, shot.id, project_id)
+            _resolver_media = {
+                s.slot: s.file_path for s in _reference_manifest.slots if s.file_path
+            }
+            if _resolver_media:
+                _existing = params.get("__media__", {})
+                _existing.update(_resolver_media)
+                params["__media__"] = _existing
+        # 提示词编译（与单镜生成保持一致）：结构性校验（槽位超限/参考文件缺失/槽位重复）硬阻断
+        compilation = None
+        if target in ("keyframe", "clip"):
+            _fallback = params.get("prompt") or shot.image_prompt or ""
+            params, compilation = _compile_shot_prompt(db, shot, shot_wf, params, target, _fallback)
         # 镜间尾帧依赖（P0）：仅传统模式在提交时注入；
         # independent 不注入；chained 由执行期 ref_prev_frame 注入逻辑解析上一镜尾帧
         prev_frame_info = None
         if target == "clip" and chain_mode is None:
             prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
         _job = _create_job(db, project_id, shot.id, target, shot_wf, params)
+        _attach_compilation(_job, compilation)
+        if _reference_manifest is not None:
+            _snap = dict(_job.input_snapshot or {})
+            _snap["reference_manifest"] = _reference_manifest.to_dict()
+            _job.input_snapshot = _snap
         if target == "clip":
             _snap = dict(_job.input_snapshot or {})
+            _snap["scene_id"] = shot.scene_id
             if prev_frame_info is not None:
                 _snap["prev_frame"] = prev_frame_info
             _job.input_snapshot = _snap

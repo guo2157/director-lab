@@ -882,7 +882,7 @@ function handleBatchClip() {
 
 // --- 批量出视频方式选择弹窗 ---
 const showChainModeModal = ref(false)
-const chainMode = ref<'independent' | 'chained'>('independent')
+const chainMode = ref<'independent' | 'chained'>('chained')
 const pendingClipShots = ref<Shot[]>([])
 function confirmChainMode() {
   showChainModeModal.value = false

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func as sa_func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -698,3 +698,110 @@ def _voice_out(v: VoiceProfile) -> dict:
         "approved": v.approved,
         "is_default": v.is_default,
     }
+
+
+# ============ 音频生产进度（导演台，2026-11-07）============
+
+@router.get("/projects/{project_id}/audio/progress")
+def audio_production_progress(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """音频生产进度聚合：按轨道类型分组统计各生成状态数量。
+
+    - 数据来源：audio_segment 表实时聚合，不伪造进度
+    - ambient（环境声）并入 sfx 展示（同为音效类轨道）；native_audio 不参与统计
+    """
+    _get_project_or_404(db, project_id)
+    rows = db.execute(
+        select(
+            AudioSegment.track_type,
+            AudioSegment.generation_status,
+            sa_func.count(AudioSegment.id),
+        )
+        .where(
+            AudioSegment.project_id == project_id,
+            AudioSegment.track_type != "native_audio",
+        )
+        .group_by(AudioSegment.track_type, AudioSegment.generation_status)
+    ).all()
+    track_map = {"dialogue": "dialogue", "narration": "narration", "bgm": "bgm",
+                 "sfx": "sfx", "ambient": "sfx"}
+    result: dict[str, dict] = {v: {"total": 0} for v in ("dialogue", "narration", "bgm", "sfx")}
+    for track, status, n in rows:
+        key = track_map.get(str(track))
+        if key is None:
+            continue
+        bucket = result[key]
+        n = int(n)
+        bucket["total"] += n
+        bucket[str(status)] = bucket.get(str(status), 0) + n
+    return {"project_id": project_id, "progress": result}
+
+
+@router.get("/projects/{project_id}/audio/segments")
+def audio_segments_detail(
+    project_id: str,
+    episode: int | None = None,
+    character_id: str | None = None,
+    shot_id: str | None = None,
+    track_type: str | None = None,
+    segment_type: str | None = None,
+    generation_status: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+) -> dict:
+    """音频片段明细（分页 + 过滤）：导演台音频进度展开视图的数据源。"""
+    _get_project_or_404(db, project_id)
+    conds = [AudioSegment.project_id == project_id]
+    if episode is not None:
+        conds.append(AudioSegment.episode == episode)
+    if character_id:
+        conds.append(AudioSegment.character_id == character_id)
+    if shot_id:
+        conds.append(AudioSegment.shot_id == shot_id)
+    if track_type:
+        conds.append(AudioSegment.track_type == track_type)
+    if segment_type:
+        conds.append(AudioSegment.segment_type == segment_type)
+    if generation_status:
+        conds.append(AudioSegment.generation_status == generation_status)
+    total = int(
+        db.execute(select(sa_func.count()).select_from(AudioSegment).where(*conds)).scalar() or 0
+    )
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
+    rows = list(
+        db.execute(
+            select(AudioSegment).where(*conds)
+            .order_by(AudioSegment.episode, AudioSegment.created_at)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).scalars().all()
+    )
+    cids = {r.character_id for r in rows if r.character_id}
+    char_names: dict[str, str] = {}
+    if cids:
+        char_names = {
+            c.id: c.name
+            for c in db.execute(select(Character).where(Character.id.in_(cids))).scalars().all()
+        }
+    items = [
+        {
+            "id": r.id,
+            "episode": r.episode,
+            "shot_id": r.shot_id,
+            "track_type": r.track_type,
+            "segment_type": r.segment_type,
+            "character_id": r.character_id,
+            "character_name": char_names.get(r.character_id) if r.character_id else None,
+            "text": r.text,
+            "voice_profile_id": r.voice_profile_id,
+            "sequence": r.sequence,
+            "generation_status": r.generation_status,
+            "review_status": r.review_status,
+            "audio_asset_id": r.audio_asset_id,
+            "duration_ms": r.duration_ms,
+            "note": r.note,
+        }
+        for r in rows
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}

@@ -3,9 +3,15 @@ import type {
   AudioConfig,
   AudioPlan,
   AudioPlanBuildResult,
+  AudioProductionProgress,
+  AudioSegmentDetailPage,
   AudioTimeline,
   NarratorVoice,
   SpeakerInfo,
+  SystemVoice,
+  SystemVoiceList,
+  VoiceBindingResponse,
+  VoiceMatchResult,
   VoiceProfile,
 } from '@/types/audio'
 
@@ -150,4 +156,93 @@ export function setAudioConfig(projectId: string, audioConfig: Partial<AudioConf
     `/audio/projects/${projectId}/audio-config`,
     { audio_config: audioConfig },
   )
+}
+
+// ============ 角色音色智能匹配（2026-11-07）============
+
+/** 系统默认音色库（9 个：男 5 / 女 4，speaker_id 溯源 workflow meta） */
+export function listSystemVoices(params?: { gender?: string; enabled?: boolean }) {
+  return get<SystemVoiceList>('/voices/system', params)
+}
+
+/** 管理员维护系统音色（描述/标签/启用状态；speaker_id 不可改） */
+export function updateSystemVoice(voiceCode: string, payload: Partial<SystemVoice>) {
+  return patch<SystemVoice>(`/voices/system/${voiceCode}`, payload)
+}
+
+/** 系统音色试听（统一测试句，缓存复用） */
+export function previewSystemVoice(
+  voiceCode: string,
+  options?: { text?: string; force?: boolean; project_id?: string },
+) {
+  return post<{ cached: boolean; job_id?: string; audio_url?: string; voice_code: string }>(
+    `/voices/system/${voiceCode}/preview`,
+    options ?? {},
+  )
+}
+
+/** 批量自动匹配：LLM 声音画像 → 程序评分 → 全局分配（锁定角色绝不覆盖） */
+export function matchProjectVoices(
+  projectId: string,
+  payload?: { character_ids?: string[]; include_locked?: boolean; force_rematch?: boolean },
+) {
+  return post<VoiceMatchResult>(`/projects/${projectId}/voices/match`, payload ?? {})
+}
+
+/** 角色音色绑定详情（匹配评分/原因/候选/锁定状态） */
+export function getVoiceBinding(projectId: string, characterId: string) {
+  return get<VoiceBindingResponse>(
+    `/projects/${projectId}/characters/${characterId}/voice/binding`,
+  )
+}
+
+/** 确认角色音色（可指定候选音色；触发 waiting_voice_confirmation 对白放行） */
+export function confirmVoiceBinding(
+  projectId: string,
+  characterId: string,
+  payload?: { voice_library_id?: string; lock?: boolean },
+) {
+  return post<{
+    character_id: string
+    voice_id: string
+    voice_name: string
+    approved: boolean
+    is_locked: boolean
+    released_segments: number
+  }>(`/projects/${projectId}/characters/${characterId}/voice/confirm`, payload ?? {})
+}
+
+/** 锁定角色音色（锁定后自动匹配绝不覆盖） */
+export function lockVoiceBinding(projectId: string, characterId: string) {
+  return post<{ character_id: string; is_locked: boolean }>(
+    `/projects/${projectId}/characters/${characterId}/voice/lock`,
+  )
+}
+
+/** 解锁角色音色 */
+export function unlockVoiceBinding(projectId: string, characterId: string) {
+  return post<{ character_id: string; is_locked: boolean }>(
+    `/projects/${projectId}/characters/${characterId}/voice/unlock`,
+  )
+}
+
+/** 音频生产进度（导演台音频进度区，数据库实时统计） */
+export function getAudioProductionProgress(projectId: string) {
+  return get<AudioProductionProgress>(`/audio/projects/${projectId}/audio/progress`)
+}
+
+/** 音频片段明细（导演台进度展开视图，分页 + 过滤） */
+export function getAudioSegmentDetails(
+  projectId: string,
+  params?: {
+    episode?: number
+    character_id?: string
+    shot_id?: string
+    track_type?: string
+    generation_status?: string
+    page?: number
+    page_size?: number
+  },
+) {
+  return get<AudioSegmentDetailPage>(`/audio/projects/${projectId}/audio/segments`, params)
 }

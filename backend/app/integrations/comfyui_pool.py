@@ -10,7 +10,7 @@ import json
 import random
 import threading
 import time
-from app.core.config import get_settings, save_runtime_settings
+from app.core.config import get_settings, save_runtime_settings, clear_settings_cache
 from app.integrations.comfyui import ComfyUIClient, ComfyUIError
 
 _lock = threading.Lock()
@@ -60,11 +60,15 @@ def list_instances() -> list[dict]:
 
 
 def set_instances(instances: list[dict]) -> list[dict]:
-    """保存实例配置（运行时生效，写入缓存的 Settings 对象）。"""
+    """保存实例配置（运行时生效，写入缓存的 Settings 对象）。
+    保存后清空 comfyui_base_url 防止 list_instances() 回退到旧地址，
+    并清除进程内 Settings 缓存确保跨进程立即感知变更。"""
     normalized = _normalize(instances)
     s = get_settings()
     s.comfyui_instances_json = json.dumps(normalized, ensure_ascii=False)
+    s.comfyui_base_url = ""  # 清除旧回退地址，防止已删除的地址仍然可用
     save_runtime_settings(s)
+    clear_settings_cache()  # 强制刷新进程内缓存，确保后续 get_settings() 返回最新值
     return normalized
 
 

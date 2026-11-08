@@ -54,6 +54,7 @@ def _to_out(a: Asset) -> dict:
         "locked": bool(a.locked),
         "validity": a.validity,
         "created_at": a.input_snapshot.get("created_at") if a.input_snapshot else None,
+        "updated_at": a.updated_at.isoformat() if a.updated_at else None,
     }
 
 
@@ -494,9 +495,12 @@ def _match_image_workflow(db: Session, workflow_id: str | None):
         .first()
     )
     if wf is None:
+        # 资产库角色/场景/道具是纯文生图，应优先匹配无参考槽位的工作流；
+        # 分镜图再生走 regeneration.py 的 _load_workflow，不受此影响。
         wf = (
             db.query(Workflow)
             .filter(Workflow.workflow_type == "image", Workflow.is_builtin == True)  # noqa: E712
+            .order_by(Workflow.capabilities.is_(None).desc(), Workflow.id)
             .first()
         )
     if wf is None:

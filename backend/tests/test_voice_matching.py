@@ -9,6 +9,33 @@
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.core.database import make_engine
+from app.models import Base
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    """与 test_audio_policy.env 相同的隔离环境（独立临时库 + 独立媒体目录）。"""
+    db_file = tmp_path / "test.db"
+    engine = make_engine(f"sqlite:///{db_file}")
+    Base.metadata.create_all(engine)
+    import app.core.database as db_mod
+    from sqlalchemy.orm import sessionmaker
+    new_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(db_mod, "engine", engine)
+    monkeypatch.setattr(db_mod, "SessionLocal", new_session)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    import app.core.config as cfg_mod
+    monkeypatch.setenv("DLAB_MEDIA_DIR", str(media_dir))
+    cfg_mod.clear_settings_cache()
+    client = TestClient(app)
+    return client, tmp_path, new_session
+
 
 def _seed_voices(db):
     from app.models import VoiceLibrary
@@ -34,7 +61,8 @@ def _seed_voices(db):
 
 def _seed_project(env):
     client = env[0]
-    r = client.post("/api/projects", json={"name": "音色测试项目"})
+    # 与 test_audio_policy._seed_project 一致：aspect_ratio 为项目创建必填项
+    r = client.post("/api/projects", json={"name": "音色测试项目", "aspect_ratio": "16:9"})
     assert r.status_code in (200, 201), r.text
     return r.json()["id"]
 

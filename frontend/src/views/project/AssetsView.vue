@@ -23,6 +23,7 @@ import { getAssetGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { AssetGenerationJob, AssetGenerationProgress } from '@/types/generation'
 import VoiceConfigDrawer from '@/components/VoiceConfigDrawer.vue'
+import VoiceMatchPanel from '@/components/VoiceMatchPanel.vue'
 import { listCharacterVoices } from '@/api/audio'
 
 const route = useRoute()
@@ -64,6 +65,7 @@ const categories = [
   { label: '角色', value: 'character' },
   { label: '场景', value: 'scene' },
   { label: '道具', value: 'prop' },
+  { label: '音色', value: 'voice' },
 ]
 const activeCategory = ref('')
 const keyword = ref('')
@@ -81,7 +83,7 @@ async function listAllAssets() {
   for (;;) {
     const res = await listAssets({
       project_id: projectId.value,
-      asset_type: activeCategory.value || undefined,
+      asset_type: (activeCategory.value && activeCategory.value !== 'voice') ? activeCategory.value : undefined,
       keyword: keyword.value || undefined,
       page: current,
       page_size: ALL_PAGE_SIZE,
@@ -1098,8 +1100,10 @@ function clearBatch() {
             @click="router.push(`/project/${projectId}/storyboard-images`)"
           >去分镜图 →</n-button>
         </div>
-        <!-- 制作资产区（公共资产生成） -->
-        <div class="craft-section">
+        <!-- 角色音色智能匹配（独立 tab：音色库展示/批量匹配/试听/确认/锁定） -->
+        <VoiceMatchPanel v-if="activeCategory === 'voice'" :project-id="projectId" />
+        <!-- 制作资产区（公共资产生成；音色匹配 tab 下隐藏） -->
+        <div v-if="activeCategory !== 'voice'" class="craft-section">
           <div class="craft-head">
             <span class="craft-title">制作资产区</span>
             <span class="craft-sub">{{ craftSubText }}</span>
@@ -1174,8 +1178,8 @@ function clearBatch() {
         <!-- Toolbar：独立上传入口已移除（单独上传的角色/场景/道具资产无法绑定实体参考关系，
              资产图统一走角色/场景/道具卡片的生成入口，替换走资产卡片的『上传替换』） -->
 
-        <!-- Upload drop zone -->
-        <div class="drop-zone">
+        <!-- Upload drop zone（音色匹配 tab 下隐藏） -->
+        <div v-if="activeCategory !== 'voice'" class="drop-zone">
           <n-spin v-if="assetsQuery.isLoading.value" class="page-loading" />
           <div v-else-if="assetsQuery.isError.value" class="state-block">
             <p class="state-text">资产加载失败：{{ errMsg(assetsQuery.error.value) }}</p>
