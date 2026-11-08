@@ -2,6 +2,14 @@
 
 自托管漫剧生产工作台：FastAPI + SQLite + Vue 3 前端，以本地 ComfyUI 为渲染底座。
 
+## 项目描述
+
+基于 ComfyUI 的 AI 漫剧生产工作台
+
+完全免费 · 本地化部署：所有算力来自自建 ComfyUI 实例，无需云端 API，零持续费用。支持多台闲置 GPU 机器组池，配合内网穿透即可扩展。
+
+三层负载均衡：实例健康熔断（心跳探测 + 自动摘除恢复）→ 实时负载调度（least-connections 按队列深度派发）→ 任务级故障转移（提交失败自动换实例重试），三重保障高可用。
+
 ## 项目结构
 
 - `backend/`：FastAPI 后端（SQLAlchemy 2.0 + Alembic + Pydantic v2）
