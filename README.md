@@ -24,6 +24,8 @@
 <img width="1866" height="782" alt="image" src="https://github.com/user-attachments/assets/b2ff3953-5aac-4d68-b74b-2f1f288d4f0e" />
 <img width="1886" height="864" alt="image" src="https://github.com/user-attachments/assets/66178fc3-6226-462b-861a-03e2080e7a63" />
 <img width="1872" height="780" alt="image" src="https://github.com/user-attachments/assets/1f306998-a78f-4bbd-94bd-a0b3715e28e9" />
+<img width="1895" height="855" alt="image" src="https://github.com/user-attachments/assets/4e38134c-aba2-41d6-a895-766af52edc87" />
+
 
 ## 核心功能
 
