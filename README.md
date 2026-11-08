@@ -10,6 +10,21 @@
 
 三层负载均衡：实例健康熔断（心跳探测 + 自动摘除恢复）→ 实时负载调度（least-connections 按队列深度派发）→ 任务级故障转移（提交失败自动换实例重试），三重保障高可用。
 
+## 项目页面
+<img width="1898" height="822" alt="image" src="https://github.com/user-attachments/assets/5626cec2-887a-42cb-84ca-ca3adbedbf4a" />
+<img width="1879" height="884" alt="image" src="https://github.com/user-attachments/assets/6303ada9-302f-4a2f-9257-1b389547d94b" />
+<img width="1813" height="821" alt="image" src="https://github.com/user-attachments/assets/5075c938-da08-476c-bf6e-2af93699ed5f" />
+<img width="1830" height="897" alt="image" src="https://github.com/user-attachments/assets/89681156-740a-4578-94f1-26f0c4fb5b6f" />
+<img width="1832" height="824" alt="image" src="https://github.com/user-attachments/assets/15b6cfb5-a4c6-4a01-9ffd-67e5119f852a" />
+<img width="1829" height="792" alt="image" src="https://github.com/user-attachments/assets/041dc867-d9cb-473b-97e5-b4aebfa465a5" />
+<img width="1817" height="773" alt="image" src="https://github.com/user-attachments/assets/1cc63ef9-4224-416c-b6cd-d4d97e870abd" />
+<img width="1835" height="837" alt="image" src="https://github.com/user-attachments/assets/1020c0d6-ab79-4a5c-9ccc-ca8905c28018" />
+<img width="1805" height="765" alt="image" src="https://github.com/user-attachments/assets/60452a89-f8a7-4001-b4bf-0386c01a928f" />
+<img width="1868" height="843" alt="image" src="https://github.com/user-attachments/assets/71edf673-6172-4086-89c5-b8852ebbf570" />
+<img width="1866" height="782" alt="image" src="https://github.com/user-attachments/assets/b2ff3953-5aac-4d68-b74b-2f1f288d4f0e" />
+<img width="1886" height="864" alt="image" src="https://github.com/user-attachments/assets/66178fc3-6226-462b-861a-03e2080e7a63" />
+<img width="1872" height="780" alt="image" src="https://github.com/user-attachments/assets/1f306998-a78f-4bbd-94bd-a0b3715e28e9" />
+
 ## 核心功能
 
 - 剧本创作与评估：AI 编剧（script_writing / script_evaluation），剧本解析、场景切分、意图路由与风格配置
