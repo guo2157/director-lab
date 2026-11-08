@@ -99,41 +99,18 @@ export interface NarratorVoice {
 }
 
 /** H3 原生音轨处理策略（项目级） */
-export type NativeAudioPolicy = 'discard' | 'preserve' | 'preserve_ambience_only'
+export type NativeAudioPolicy = 'discard' | 'preserve' | 'preserve_ambience_only' | 'native'
 
 /** 项目级音频策略（Project.settings.audio_config） */
 export interface AudioConfig {
   tts_enabled: boolean
   tts_provider: string
   tts_model: string
-  /** V1 默认 discard：丢弃 H3 原生音轨，最终用 TTS/BGM/SFX 重建音轨 */
+  /** 默认 native：直接使用 H3 内嵌音轨（口型同步），TTS 仅作 ref_audio 音色参考 */
   native_audio_policy: NativeAudioPolicy
   bgm_enabled: boolean
   sfx_enabled: boolean
 }
-
-/** 原生音轨策略显示名与说明 */
-export const NATIVE_AUDIO_POLICY_OPTIONS: Array<{
-  value: NativeAudioPolicy
-  label: string
-  description: string
-}> = [
-  {
-    value: 'discard',
-    label: '丢弃（默认）',
-    description: '丢弃 H3 原生音轨，最终音轨由 TTS 对白/旁白、BGM、SFX 重建',
-  },
-  {
-    value: 'preserve',
-    label: '保留',
-    description: '保留 H3 原生音轨，需注意与 TTS 对白可能重复，须人工确认',
-  },
-  {
-    value: 'preserve_ambience_only',
-    label: '仅保留环境声',
-    description: '需可靠人声分离能力与审核；当前按丢弃处理，分离能力就绪后启用',
-  },
-]
 
 /** 音频规划（按轨道分组） */
 export interface AudioPlan {

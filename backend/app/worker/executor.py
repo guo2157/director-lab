@@ -45,6 +45,45 @@ def _workflow_frame_size(definition: dict | None) -> tuple[int, int] | None:
     return None
 
 
+def _shot_ref_audios(db: Session, shot: Shot) -> tuple[list[str], int]:
+    """按说话人收集镜头内已审核的配音，作为 H3 ref_audios 参考。
+
+    H3 ref_audios 最多 3 条，且每条应只对应一个音色。此前把整镜所有片段
+    concat 成一条，双角色镜头会把两个人的音色混在一起，模型学到的既不是
+    甲也不是乙。现按说话人分组（角色 ID；旁白按 track_type），每个说话人
+    取该镜第一条已审核片段做锚点，按出场顺序最多 3 条。
+    返回 (参考音频路径列表, 本镜配音总时长毫秒)。总时长供 length 对齐使用。
+    """
+    from app.models.audio import AudioSegment
+
+    segs = (
+        db.query(AudioSegment)
+        .filter(
+            AudioSegment.shot_id == shot.id,
+            AudioSegment.track_type.in_(("dialogue", "narration")),
+            AudioSegment.generation_status == "completed",
+            AudioSegment.review_status == "approved",
+            AudioSegment.audio_asset_id.isnot(None),
+        )
+        .order_by(AudioSegment.sequence, AudioSegment.created_at)
+        .all()
+    )
+    paths: list[str] = []
+    seen_speakers: set[str] = set()
+    total_ms = 0
+    for seg in segs:
+        total_ms += int(seg.duration_ms or 0)
+        speaker_key = seg.character_id or seg.track_type
+        if speaker_key in seen_speakers or len(paths) >= 3:
+            continue
+        asset = db.get(Asset, seg.audio_asset_id)
+        if asset is None or not asset.file_path:
+            continue
+        seen_speakers.add(speaker_key)
+        paths.append(asset.file_path)
+    return paths, total_ms
+
+
 def _next_asset_version(
     db: Session, job: Job, asset_type: str, asset_name: str | None = None
 ) -> int:
@@ -703,6 +742,13 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                 media_files["first_frame"] = _ff
                     except Exception:
                         pass  # 首帧注入失败不阻断生成，回退为无首帧约束
+                # H3 参考音频（音色/口型引导）：按说话人各注入一条 ref_audio_N，
+                # 同一角色跨镜头复用同一音色，双角色镜头不再把两个人声音混成一条
+                _ref_audio_paths, _ref_audio_ms = _shot_ref_audios(db, _shot)
+                for _ref_idx, _ref_path in enumerate(_ref_audio_paths):
+                    _ref_key = f"ref_audio_{_ref_idx}"
+                    if _ref_path and _ref_key not in media_files:
+                        media_files[_ref_key] = _ref_path
                 _project = db.get(Project, job.project_id)
                 if _project is not None and "width" not in params and "height" not in params:
                     # 档位工作流（极速 480×864 / 标准 640×1120 / 质量 768×1344）自带画幅优先，
@@ -717,8 +763,14 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                         if _project.aspect_ratio in _h3_wh:
                             params["width"], params["height"] = _h3_wh[_project.aspect_ratio]
                 if "length" not in params and _shot.duration:
-                    _target = float(_shot.duration) * 24
-                    _n = max(7, min(21, round((_target - 5) / 17)))
+                    if _ref_audio_ms:
+                        # 配音优先：按配音总时长 + 0.3s 余量，对齐 24fps 与 17n+5 网格
+                        import math
+                        _frames = int(math.ceil((_ref_audio_ms / 1000.0 + 0.3) * 24))
+                        _n = max(7, min(21, int(math.ceil((_frames - 5) / 17.0))))
+                    else:
+                        _target = float(_shot.duration) * 24
+                        _n = max(7, min(21, round((_target - 5) / 17)))
                     params["length"] = 17 * _n + 5
                 # 持久化注入参数到 input_snapshot（可追溯：实际提交的生成参数与参考图）
                 _snap = dict(job.input_snapshot or {})
@@ -850,19 +902,21 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             _scene_id = (job.params or {}).get("__scene_id__")
                             if _prop_id:
                                 _p = db.get(Prop, _prop_id)
-                                if _p and not _p.anchor_asset_id and not _is_regen_rec:
+                                # 质量重试会生成新的 current 版本并废弃旧版本，实体指针必须跟随最新产物；
+                                # 仅 regeneration 候选版本不覆盖实体主图指针
+                                if _p and not _is_regen_rec:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _p.anchor_asset_id = _kf[0]["asset_id"]
                             if _character_id:
                                 _c = db.get(Character, _character_id)
-                                if _c and not _c.portrait_asset_id and not _is_regen_rec:
+                                if _c and not _is_regen_rec:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _c.portrait_asset_id = _kf[0]["asset_id"]
                             if _scene_id:
                                 _s = db.get(Scene, _scene_id)
-                                if _s and not _s.baseline_asset_id and not _is_regen_rec:
+                                if _s and not _is_regen_rec:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _s.baseline_asset_id = _kf[0]["asset_id"]

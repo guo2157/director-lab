@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -1044,10 +1045,26 @@ def _has_earlier_shot_anywhere(db: Session, shot: Shot) -> bool:
     用于区分两种『找不到同场景上一镜』：
     - 存在更早镜头 → 属跨场景情形，按文档降级为文字衔接，不阻断；
     - 完全不存在更早镜头 → requires_prev_frame 本身是数据错误，必须阻断。
+
+    Shot.seq 是场景内镜号，跨场景比较必须先比 Scene.seq 再比 Shot.seq，
+    否则会把后续场景里镜号更小的镜头误判成「更早」。
     """
-    return (db.query(Shot)
-            .filter(Shot.episode == shot.episode, Shot.seq < shot.seq)
-            .first()) is not None
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return False
+    return (
+        db.query(Shot.id)
+        .join(Scene, Scene.id == Shot.scene_id)
+        .filter(
+            Scene.project_id == scene.project_id,
+            Shot.episode == shot.episode,
+            or_(
+                Scene.seq < scene.seq,
+                and_(Scene.seq == scene.seq, Shot.seq < shot.seq),
+            ),
+        )
+        .first()
+    ) is not None
 
 
 def compile_shot_video(db: Session, shot_id: str, *,

@@ -4,9 +4,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
 import { NButton, NSpace, NSpin, NEmpty, NTag, NTooltip, NInput, NCheckbox, NImage, NDrawer, NDrawerContent, NProgress, useMessage } from 'naive-ui'
 import { listScenes, listSceneShots, listCharacters, listProps, confirmShotKeyframe, unconfirmShotKeyframe } from '@/api/script'
-import { fetchRegenerateConfig, type RegenerateRef } from '@/api/regeneration'
+import { fetchRegenerateConfig, type RegenerateRef, type RefSlotInfo } from '@/api/regeneration'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
+import { listWorkflows } from '@/api/workflows'
 import { lockAsset, unlockAsset, replaceAsset } from '@/api/assets'
 import { getProject } from '@/api/projects'
 import { getKeyframeGenerationProgress } from '@/api/generation'
@@ -390,18 +391,102 @@ async function handleBatchConfirm() {
 }
 
 // --- 镜头详情：分镜图与生成时的参考图 ---
-// 生图工作流 wf_image_ref_qwen_edit（Qwen-Image-Edit）只声明 3 个参考图槽位，
-// 与视频工作流完全不同：没有「本镜分镜图」槽位，也没有道具槽位。
-//   ref_identity → image1（角色身份参考，唯一必填）
-//   ref_character_2  → image2（角色服装参考）
-//   ref_scene    → image3（场景基准图）
-// 提交前未注入媒体的槽位会被剔除对应 image{n} 连线，占位图不会参与生成。
-const IMG_SLOT_META: Record<string, { label: string; inputKey: string }> = {
-  ref_identity: { label: '角色身份参考', inputKey: 'image1' },
-  ref_character_2: { label: '角色服装参考', inputKey: 'image2' },
-  ref_scene: { label: '场景基准图', inputKey: 'image3' },
+// 生图（图生图）工作流的参考图能力以工作流声明的 reference_slots 为唯一事实来源，
+// 不在前端写死槽位数量与槽位名：多参考版声明 9 槽，纯文生图版声明 0 槽。
+// 有分镜图时取该资产实际工作流的 available_slots；尚无分镜图时取默认生图工作流的声明。
+const IMG_RESERVED_SLOTS = new Set(['ref_image', 'ref_prev_frame', 'first_frame', 'end_frame'])
+
+function isCharSlot(param: string): boolean {
+  return !IMG_RESERVED_SLOTS.has(param)
+    && (param.startsWith('ref_identity') || param.startsWith('ref_character') || param.startsWith('ref_char'))
 }
-const IMG_MAX_REFS = 3
+
+function isSceneSlot(param: string): boolean {
+  return param.startsWith('ref_scene')
+}
+
+function isPropSlot(param: string): boolean {
+  return param.startsWith('ref_prop')
+}
+
+/** 槽位展示名：角色槽按声明顺序编号，场景/道具按类型命名，未知槽位回落参数名。 */
+function imageSlotLabel(param: string, charIndex: number, propIndex: number): string {
+  if (isCharSlot(param)) return charIndex === 0 ? '角色身份参考' : `角色参考 ${charIndex + 1}`
+  if (isSceneSlot(param)) return '场景基准图'
+  if (isPropSlot(param)) return propIndex === 0 ? '道具参考' : `道具参考 ${propIndex + 1}`
+  return param
+}
+
+/** 归一化工作流 reference_slots（兼容字符串数组与对象数组两种声明形式）。 */
+function normalizeRefSlots(caps: Record<string, unknown> | null | undefined): RefSlotInfo[] {
+  const raw = Array.isArray(caps?.reference_slots) ? (caps!.reference_slots as unknown[]) : []
+  const slots: RefSlotInfo[] = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      if (item) slots.push({ param: item, input_key: null, required: false, semantic: 'reference', role: null, system: IMG_RESERVED_SLOTS.has(item) })
+    } else if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>
+      const param = typeof o.param === 'string' ? o.param : ''
+      if (!param) continue
+      slots.push({
+        param,
+        input_key: typeof o.input_key === 'string' ? o.input_key : null,
+        required: o.optional === false,
+        semantic: 'reference',
+        role: null,
+        system: IMG_RESERVED_SLOTS.has(param),
+      })
+    }
+  }
+  return slots
+}
+
+/** 无分镜图时的槽位来源：复刻后端 _match_workflow 的分镜图选型（默认 → 内置 → 带参考槽位）。 */
+const imageWorkflowsQuery = useQuery({
+  queryKey: ['workflows', 'image', 'storyboard'],
+  queryFn: () => listWorkflows({ workflow_type: 'image' }),
+})
+const fallbackImageSlots = computed<RefSlotInfo[]>(() => {
+  const items = (imageWorkflowsQuery.data.value?.items ?? []) as Array<{
+    is_default?: boolean
+    is_builtin?: boolean
+    capabilities?: Record<string, unknown> | null
+  }>
+  if (!items.length) return []
+  const pick = items.find((w) => w.is_default) ?? items.find((w) => w.is_builtin) ?? items[0]
+  const slots = normalizeRefSlots(pick.capabilities)
+  // 分镜图会改用带参考槽位的工作流：默认工作流 0 槽时切到声明角色槽位的那一个
+  if (!slots.some((s) => !s.system)) {
+    for (const w of items) {
+      const alt = normalizeRefSlots(w.capabilities)
+      if (alt.some((s) => isCharSlot(s.param))) return alt
+    }
+  }
+  return slots
+})
+
+/** 该资产实际工作流的槽位；为空时回落到默认生图工作流声明。 */
+const kfActualSlots = ref<RefSlotInfo[]>([])
+const kfSlots = computed<RefSlotInfo[]>(() => {
+  const actual = kfActualSlots.value.filter((s) => !s.system)
+  return actual.length ? actual : fallbackImageSlots.value.filter((s) => !s.system)
+})
+const kfSlotMeta = computed<Record<string, { label: string; inputKey: string }>>(() => {
+  const map: Record<string, { label: string; inputKey: string }> = {}
+  let charIndex = 0
+  let propIndex = 0
+  for (const s of kfSlots.value) {
+    map[s.param] = {
+      label: imageSlotLabel(s.param, isCharSlot(s.param) ? charIndex++ : 0, isPropSlot(s.param) ? propIndex++ : 0),
+      inputKey: s.input_key || '—',
+    }
+  }
+  return map
+})
+const kfMaxRefs = computed(() => kfSlots.value.length)
+const kfCharSlots = computed(() => kfSlots.value.filter((s) => isCharSlot(s.param)).map((s) => s.param))
+const kfPropSlots = computed(() => kfSlots.value.filter((s) => isPropSlot(s.param)).map((s) => s.param))
+const kfSceneSlot = computed(() => kfSlots.value.find((s) => isSceneSlot(s.param))?.param ?? '')
 
 interface KeyframeRefItem {
   key: string
@@ -449,11 +534,13 @@ function openDetail(shot: Shot) {
 async function loadKeyframeRefs(shot: Shot) {
   kfRefs.value = []
   kfInjectedRefs.value = []
+  kfActualSlots.value = []
   kfNegativeSupported.value = false
   if (!shot.current_assets?.keyframe) return
   kfRefsLoading.value = true
   try {
     const cfg = await fetchRegenerateConfig(shot.id, 'keyframe')
+    kfActualSlots.value = cfg.available_slots ?? []
     kfRefs.value = (cfg.refs ?? []).filter((r) => r.enabled !== false)
     kfNegativeSupported.value = Boolean(cfg.negative_prompt?.supported)
     // 快照参数里的 ref_* 键即生成时实际传入的槽位，值为对应资产文件名
@@ -500,12 +587,12 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
     if (s) return s.title
     const p = props.find((x) => x.anchor_asset_id === assetId)
     if (p) return p.name
-    return IMG_SLOT_META[slot]?.label ?? slot
+    return kfSlotMeta.value[slot]?.label ?? slot
   }
 
   // 一（甲）、首次生成的真实传参：从任务输入快照参数还原
   for (const r of kfInjectedRefs.value) {
-    const meta = IMG_SLOT_META[r.slot]
+    const meta = kfSlotMeta.value[r.slot]
     const named = nameOfAsset(r.assetId, r.slot)
     push({
       key: `${r.slot}-${r.assetId}`,
@@ -525,7 +612,7 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
   for (const r of kfRefs.value) {
     if (!r.asset_id) continue
     const slot = r.slot_param
-    const meta = IMG_SLOT_META[slot]
+    const meta = kfSlotMeta.value[slot]
     const assetId = r.asset_id as string
     push({
       key: `${slot}-${assetId}`,
@@ -551,8 +638,8 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
     atIdx = promptText.indexOf('@', atIdx + 1)
   }
 
-  // 二、角色：本镜主角色 + @引用角色，主角色优先占 ref_identity，其次 ref_character_2
-  const charSlots = ['ref_identity', 'ref_character_2']
+  // 二、角色：本镜主角色 + @引用角色，按工作流声明的角色槽位顺序依次填充
+  const charSlots = kfCharSlots.value
   const relatedChars = chars
     .filter((c) => shot.character_id === c.id || atNames.has(c.name))
     .sort((a, b) => (a.id === shot.character_id ? -1 : b.id === shot.character_id ? 1 : 0))
@@ -563,8 +650,8 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
       key: `char-${c.id}`,
       slot,
       name: c.name,
-      roleLabel: slot ? IMG_SLOT_META[slot].label : '角色参考',
-      inputKey: slot ? IMG_SLOT_META[slot].inputKey : '—',
+      roleLabel: slot ? kfSlotMeta.value[slot].label : '角色参考',
+      inputKey: slot ? kfSlotMeta.value[slot].inputKey : '—',
       assetId,
       url: assetId ? `/api/assets/${assetId}/file` : '',
       required: slot === 'ref_identity',
@@ -573,19 +660,20 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
     })
   })
 
-  // 三、场景：所属场景优先占 ref_scene，其余无槽位
+  // 三、场景：所属场景优先占用工作流声明的场景槽位，其余无槽位
+  const sceneSlot = kfSceneSlot.value
   const relatedScenes = scenes
     .filter((s) => shot.scene_id === s.id || atNames.has(s.title))
     .sort((a, b) => (a.id === shot.scene_id ? -1 : b.id === shot.scene_id ? 1 : 0))
   relatedScenes.forEach((s, idx) => {
-    const slot = idx === 0 ? 'ref_scene' : ''
+    const slot = idx === 0 ? sceneSlot : ''
     const assetId = s.baseline_asset_id ?? ''
     push({
       key: `scene-${s.id}`,
       slot,
       name: s.title,
-      roleLabel: slot ? IMG_SLOT_META[slot].label : '场景参考',
-      inputKey: slot ? IMG_SLOT_META[slot].inputKey : '—',
+      roleLabel: slot ? kfSlotMeta.value[slot].label : '场景参考',
+      inputKey: slot ? kfSlotMeta.value[slot].inputKey : '—',
       assetId,
       url: assetId ? `/api/assets/${assetId}/file` : '',
       assetMissing: !assetId,
@@ -593,20 +681,22 @@ const kfRefList = computed<KeyframeRefItem[]>(() => {
     })
   })
 
-  // 四、道具：生图工作流未声明道具槽位，照列但不参与传入
+  // 四、道具：按工作流声明的道具槽位顺序填充，未声明的照列但不参与传入
+  const propSlots = kfPropSlots.value
   const relatedProps = props.filter((p) => atNames.has(p.name))
-  relatedProps.forEach((p) => {
+  relatedProps.forEach((p, idx) => {
+    const slot = propSlots[idx] ?? ''
     const assetId = p.anchor_asset_id ?? ''
     push({
       key: `prop-${p.id}`,
-      slot: '',
+      slot,
       name: p.name,
-      roleLabel: '道具参考',
-      inputKey: '—',
+      roleLabel: slot ? kfSlotMeta.value[slot].label : '道具参考',
+      inputKey: slot ? kfSlotMeta.value[slot].inputKey : '—',
       assetId,
       url: assetId ? `/api/assets/${assetId}/file` : '',
       assetMissing: !assetId,
-      noSlot: true,
+      noSlot: !slot,
     })
   })
 
@@ -886,7 +976,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
             <div class="detail-section-head">
               <span class="detail-section-index">1</span>
               <span class="detail-section-name">生成参考图</span>
-              <span class="detail-section-hint">生图工作流最多 {{ IMG_MAX_REFS }} 张</span>
+              <span class="detail-section-hint">当前生图工作流 {{ kfMaxRefs }} 个参考槽位</span>
             </div>
             <n-spin :show="kfRefsLoading">
               <div v-if="kfRefList.length" class="kf-ref-list">
@@ -919,7 +1009,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
                 </div>
               </div>
               <div v-else class="detail-hint-block">
-                该镜头暂无可展示的参考图：生图工作流只接受角色身份、角色服装、场景基准图三类参考，请在提示词中使用 @角色名 / @场景名 引用，并先补齐对应资产。
+                该镜头暂无可展示的参考图：{{ kfMaxRefs ? '提示词中没有可注入的 @角色 / @场景 / @道具引用，请先补齐对应资产' : '当前生图工作流为纯文生图，未声明参考图槽位' }}。
               </div>
             </n-spin>
             <div class="detail-source-hint">

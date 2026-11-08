@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -92,10 +92,25 @@ def _latest_asset(db: Session, shot_id: str, asset_types: tuple[str, ...], job_t
 
 
 def _shot_start_ms(db: Session, shot: Shot) -> int:
-    """镜头在本集时间轴上的起始毫秒（按 seq 累计前面镜头的计划时长）。"""
+    """镜头在本集时间轴上的起始毫秒（累计前面镜头的计划时长）。
+
+    Shot.seq 是场景内镜号，不能单独比较：必须先比 Scene.seq 再比 Shot.seq，
+    否则会把其他场景中镜号更小的镜头时长错误累计进来（跨场景串镜）。
+    """
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return 0
     rows = db.execute(
-        select(Shot.duration).where(
-            Shot.episode == shot.episode, Shot.seq < shot.seq)
+        select(Shot.duration)
+        .join(Scene, Scene.id == Shot.scene_id)
+        .where(
+            Scene.project_id == scene.project_id,
+            Shot.episode == shot.episode,
+            or_(
+                Scene.seq < scene.seq,
+                and_(Scene.seq == scene.seq, Shot.seq < shot.seq),
+            ),
+        )
     ).scalars().all()
     return int(round(sum(float(d or 0) for d in rows) * 1000))
 
@@ -185,6 +200,8 @@ def _to_shot_input(db: Session, shot: Shot, scene: Scene, audio_policy: str = "d
       无 TTS 片段 → 保持原 audio_source 但丢弃内嵌音轨（drop_native_audio）
     - preserve：h3_va 内嵌音轨保留为底层；若同时存在已审核通过的 TTS 片段且 tts_enabled，
       则转为 tts_mix 并置 keep_native_audio=True，内嵌音轨作底层与 TTS 叠加（不再丢弃配音）
+    - native：优先保留 h3_va 内嵌音轨（口型与内嵌语音同步，适合 H3 ref_audio 生成）；
+      无内嵌音轨的镜头才回退 TTS 混音，避免整片静音
     - preserve_ambience_only：V1 无可靠人声分离能力，按 discard 处理（方案要求分离失败回退 discard）
     """
     # 视频产物：clip 类型、当前有效、来源任务成功（§4.2 口径）
@@ -205,6 +222,16 @@ def _to_shot_input(db: Session, shot: Shot, scene: Scene, audio_policy: str = "d
             # 无可用 TTS 片段（未生成/未审核通过/TTS 已关闭）：丢弃内嵌音轨（discard），
             # 最终音轨由 BGM/SFX/响度归一链路处理
             drop_native = True
+    elif audio_policy == "native":
+        # 原生音轨优先：H3 内嵌语音与口型同步，直接使用内嵌音轨，不用 TTS 覆盖；
+        # 无内嵌音轨的镜头才回退 TTS 混音
+        if shot.audio_source != "h3_va":
+            if tts_enabled:
+                tts_audios = _collect_tts_audios(db, shot, stats=stats)
+            if tts_audios:
+                audio_source = "tts_mix"
+            else:
+                drop_native = True
     elif audio_policy == "preserve" and tts_enabled:
         # 问题4 修复：preserve 策略此前完全不收集 TTS，已生成且审核通过的配音被静默丢弃。
         # 现行为：有内嵌音轨（h3_va）→ 保留为底层，TTS 叠加其上；无内嵌音轨 → 纯 TTS 混音。
@@ -267,9 +294,9 @@ def execute_compose_job(job_id: str) -> dict:
         project = db.get(Project, job.project_id)
         aspect = project.aspect_ratio if project else None
         width, height = cs.resolution_for(aspect)
-        # 项目级音频策略（V1 解耦方案：native_audio_policy 默认 discard）
+        # 项目级音频策略（默认 native：使用 H3 内嵌音轨，TTS 只作 ref_audio 参考）
         audio_cfg = ((project.settings or {}) if project else {}).get("audio_config") or {}
-        audio_policy = audio_cfg.get("native_audio_policy", "discard")
+        audio_policy = audio_cfg.get("native_audio_policy", "native")
         # 修复（问题1）：三个开关此前只在 UI 存在、合成链路从未读取，属假开关。
         tts_enabled = bool(audio_cfg.get("tts_enabled", True))
         bgm_enabled = bool(audio_cfg.get("bgm_enabled", True))

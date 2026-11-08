@@ -5,21 +5,19 @@
 在 Jupyter Notebook 或终端里一键完成：
   1. 环境检查（Python / GPU / 磁盘）
   2. 克隆 ComfyUI 并安装依赖
-  3. 下载 wf_video_h3_ref2va.json 需要的 4 个 MiniMax H3 模型、
-     qwen-image-2-1-turbo-image-edit 需要的 3 个 Qwen-Image-2.1 模型，
-     以及 Qwen3-TTS 1.7B CustomVoice 语音模型（整仓 snapshot）
+  3. 下载 wf_video_h3_ref2va.json 需要的 4 个 MiniMax H3 模型
+     以及 qwen-image-2-1-turbo-image-edit 需要的 3 个 Qwen-Image-2.1 模型
   4. 校验文件大小、启动 ComfyUI（可选 cloudflared 公网隧道）
 
 Notebook 用法::
 
     import comfyui_qwen21_h3_setup as cs
-    cs.print_plan(["h3", "qwen", "tts"])
+    cs.print_plan(["h3", "qwen"])
     cs.check_env()
     cs.ensure_comfyui()
     cs.install_requirements()
-    cs.ensure_qwen3_tts_node()      # 装 Qwen3-TTS 自定义节点，缺了会报 missing_node_type
-    cs.download_models(["h3", "qwen", "tts"])
-    cs.verify_models(["h3", "qwen", "tts"])
+    cs.download_models(["h3", "qwen"])
+    cs.verify_models(["h3", "qwen"])
     cs.launch(wait=True)
 
 命令行用法::
@@ -32,11 +30,9 @@ Notebook 用法::
 
 模型来源（仓库内的目录名与 ComfyUI 的 models/ 子目录完全一致，
 下载后按原路径落到 ComfyUI/models 下，不需要再手动移动文件）：
-  * Comfy-Org/MiniMax-H3        （官方 repack，含 H3 Ref2VA / Qwen3-VL-32B / 视频VAE / 音频VAE / 4step LoRA）
+  * Comfy-Org/MiniMax-H3        （官方 repack，含 H3 Ref2VA / Qwen3-VL-32B / 两个 VAE）
   * Comfy-Org/Qwen-Image-2.1    （官方 repack，含 Turbo 主模型 / Qwen3-VL-8B / VAE）
   * taurusduan/MiniMax-H3       （H3 镜像，官方仓库不可达时自动回退）
-  * Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice （TTS 整仓，保留 HF 目录结构，
-    下载到 ComfyUI/models/Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-CustomVoice）
 """
 
 from __future__ import annotations
@@ -63,18 +59,12 @@ __all__ = [
     "ModelFile",
     "salvage_incomplete",
     "MODELS",
-    "check_workflow",
-    "ensure_workflow_models",
     "human",
     "print_plan",
     "check_env",
     "ensure_comfyui",
     "install_requirements",
     "ensure_hf_hub",
-    "ensure_qwen3_tts_node",
-    "check_tts_nodes",
-    "setup_customvoice",
-    "restore_pip_snapshot",
     "set_hf_token",
     "hf_whoami",
     "ask_hf_token",
@@ -102,7 +92,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 COMFY_DIRNAME = os.environ.get("COMFY_DIRNAME", "ComfyUI")
-__version__ = "2026.11.8.3"
+__version__ = "2026.10.31.6"
 
 
 def _pick_work_dir() -> Path:
@@ -177,26 +167,12 @@ TUNNEL = os.environ.get("COMFY_TUNNEL", "auto")
 COMFY_SAGE = os.environ.get("COMFY_SAGE", "auto")
 PREVIEW_METHOD = os.environ.get("COMFY_PREVIEW", "auto")
 
-DOWNLOAD_GROUPS = ["h3", "qwen", "tts"]
+DOWNLOAD_GROUPS = ["h3", "qwen"]
 
 GROUPS = {
     "h3": "MiniMax H3 / Ref2VA（视频+音频）",
     "qwen": "Qwen-Image-2.1 Turbo（图像编辑）",
-    "tts": "Qwen3-TTS 1.7B CustomVoice（独立语音生成）",
 }
-
-TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-TTS_MODEL_DIR = MODELS_DIR / "Qwen3-TTS" / "Qwen3-TTS-12Hz-1.7B-CustomVoice"
-TTS_MIN_EXPECTED_BYTES = 3_500_000_000  # 仅用于磁盘预检查；实际按仓库文件下载，不按此值校验
-
-# Qwen3-TTS 自定义节点（DarioFT/ComfyUI-Qwen3-TTS）
-# ComfyUI 自带的 custom_nodes 里只有示例脚本，这个包得自己装；缺了它工作流里的
-# Qwen3Loader / Qwen3CustomVoice 会在 /prompt 校验时直接 400 missing_node_type。
-TTS_NODE_DIRNAME = os.environ.get("COMFY_TTS_NODE_DIR", "ComfyUI-Qwen3-TTS")
-TTS_NODE_REPO = os.environ.get("COMFY_TTS_NODE_REPO", "https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git")
-TTS_NODE_MIRRORS = ("https://ghfast.top/", "https://gh-proxy.com/")
-TTS_NODE_CLASSES = ("Qwen3Loader", "Qwen3CustomVoice")
-TTS_NODE_SKIP_DEPS = os.environ.get("COMFY_TTS_NODE_SKIP_DEPS", "0") == "1"
 
 LOG_PATH = WORK_DIR / "comfyui.log"
 TUNNEL_LOG = WORK_DIR / "cloudflared.log"
@@ -215,11 +191,10 @@ def set_work_dir(path):
 
         cs.set_work_dir('/kaggle/temp')
     """
-    global WORK_DIR, COMFY_DIR, MODELS_DIR, TTS_MODEL_DIR, LOG_PATH, TUNNEL_LOG
+    global WORK_DIR, COMFY_DIR, MODELS_DIR, LOG_PATH, TUNNEL_LOG
     WORK_DIR = Path(path).expanduser().resolve()
     COMFY_DIR = WORK_DIR / COMFY_DIRNAME
     MODELS_DIR = COMFY_DIR / "models"
-    TTS_MODEL_DIR = MODELS_DIR / "Qwen3-TTS" / "Qwen3-TTS-12Hz-1.7B-CustomVoice"
     LOG_PATH = WORK_DIR / "comfyui.log"
     TUNNEL_LOG = WORK_DIR / "cloudflared.log"
     log("[环境] 工作目录 -> " + str(WORK_DIR))
@@ -263,23 +238,16 @@ MODELS = (
     ModelFile(
         "h3",
         "Comfy-Org/MiniMax-H3",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+        5_207_808_496,
+        "H3 视频 VAE FP16",
+    ),
+    ModelFile(
+        "h3",
+        "Comfy-Org/MiniMax-H3",
         "vae/minimax_h3_audio_vae_fp32.safetensors",
         605_254_808,
         "H3 音频 VAE FP32",
-    ),
-    ModelFile(
-        "h3",
-        "Comfy-Org/MiniMax-H3",
-        "vae/minimax_h3_video_vae_int8_convrot.safetensors",
-        2_811_065_184,
-        "H3 视频 VAE INT8(convrot)",
-    ),
-    ModelFile(
-        "h3",
-        "Comfy-Org/MiniMax-H3",
-        "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-        1_956_193_000,
-        "H3 Ref2V Turbo 4-step LoRA",
     ),
     ModelFile(
         "qwen",
@@ -308,126 +276,6 @@ FALLBACK_REPOS = {
     "Comfy-Org/MiniMax-H3": ("taurusduan/MiniMax-H3",),
     "Comfy-Org/Qwen-Image-2.1": (),
 }
-
-
-def _workflow_refs(path):
-    """取工作流 JSON 里写死的 .safetensors 引用；文件不存在返回 None。"""
-    wf = Path(path)
-    if not wf.exists():
-        return None
-    text = wf.read_text(encoding="utf-8", errors="replace")
-    return sorted(set(re.findall(r'"([^"\s]+\.safetensors)"', text)))
-
-
-def _models_index() -> dict:
-    """models 目录下现有文件（按文件名索引）。"""
-    actual = {}
-    if MODELS_DIR.exists():
-        for item in MODELS_DIR.rglob("*.safetensors"):
-            actual.setdefault(item.name, item)
-    return actual
-
-
-def check_workflow(path) -> bool:
-    """核对工作流 JSON 里写死的模型文件名是否都在 ComfyUI/models 下。
-
-    提交失败最常见的根因就是这里：工作流里写的文件名和实际下载的不一致
-    （例如工作流要 minimax_h3_video_vae_fp16.safetensors，实际只有 int8 版本），
-    ComfyUI 会在校验阶段以 value_not_in_list 直接拒收。
-    """
-    refs = _workflow_refs(path)
-    if refs is None:
-        log("[对齐] 找不到工作流文件: " + str(path))
-        return False
-    if not refs:
-        log("[对齐] 工作流里没有 .safetensors 引用")
-        return True
-
-    actual = _models_index()
-    missing = []
-    for ref in refs:
-        name = ref.replace("\\", "/").split("/")[-1]
-        if name in actual:
-            log("[对齐] OK    " + ref)
-        else:
-            missing.append(ref)
-            log("[对齐] 缺失  " + ref)
-
-    if missing:
-        log("")
-        log("[对齐] 共缺 %d 个文件。当前 models 下相近的可用文件：" % len(missing))
-        for name in sorted(actual):
-            log("        " + name)
-        log("[对齐] 修复方式二选一：改工作流里的文件名，或补下载对应模型。")
-        return False
-    log("[对齐] 全部存在，工作流可以正常提交")
-    return True
-
-
-WORKFLOW_MODEL_REPOS = (
-    "Comfy-Org/MiniMax-H3",
-    "Comfy-Org/Qwen-Image-2.1",
-)
-
-
-def ensure_workflow_models(workflow, repos=None, workers=None) -> bool:
-    """补齐工作流里引用、但本地缺失的模型。
-
-    做法是拿缺失的文件名去已知仓库里找同名文件，找到就只下那几个文件
-    （按仓库内的原目录落到 models/vae、models/loras 等），不用整仓拉取。
-    """
-    refs = _workflow_refs(workflow)
-    if refs is None:
-        log("[补齐] 找不到工作流文件: " + str(workflow))
-        return False
-    if not refs:
-        log("[补齐] 工作流里没有 .safetensors 引用")
-        return True
-
-    actual = _models_index()
-    missing = [r for r in refs if r.replace("\\", "/").split("/")[-1] not in actual]
-    if not missing:
-        log("[补齐] 模型齐全，无需下载")
-        return True
-
-    log("[补齐] 缺 " + str(len(missing)) + " 个模型，开始在仓库里查找同名文件")
-    candidates = list(repos or WORKFLOW_MODEL_REPOS)
-    plan = {}
-    unknown = []
-    for ref in missing:
-        base = ref.replace("\\", "/").split("/")[-1]
-        hit = None
-        for repo in candidates:
-            try:
-                tree = _repo_tree(repo)
-            except Exception as exc:
-                log("[补齐] 读取仓库失败 " + repo + ": " + str(exc))
-                continue
-            for path in tree:
-                if path.replace("\\", "/").split("/")[-1] == base:
-                    hit = (repo, path)
-                    break
-            if hit:
-                break
-        if hit:
-            repo, path = hit
-            plan.setdefault(repo, []).append(path)
-            log("[补齐] 命中 " + base + " -> " + repo + "/" + path)
-        else:
-            unknown.append(base)
-            log("[补齐] 未找到 " + base)
-
-    for repo, patterns in plan.items():
-        _download_repo(repo, patterns, workers or HF_MAX_WORKERS)
-
-    ok = check_workflow(workflow)
-    if unknown:
-        log("")
-        log("[补齐] 这些文件不在已搜索的仓库里，需要手动指定来源：")
-        for name in unknown:
-            log("        " + name)
-        log("[补齐] 用法: ensure_workflow_models(wf, repos=['你的/仓库名'])")
-    return ok and not unknown
 
 
 # ---------------------------------------------------------------------------
@@ -531,11 +379,6 @@ def print_plan(groups=None) -> None:
     log("下载组   : " + (", ".join(selected) if selected else "(空)"))
     log("")
     for group in selected:
-        if group == "tts":
-            log("[tts] " + GROUPS["tts"] + " —— 整仓 snapshot（预估 " + human(TTS_MIN_EXPECTED_BYTES) + "）")
-            log("    " + TTS_REPO + " -> models/Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-CustomVoice")
-            log("    自定义节点: " + TTS_NODE_REPO + "（cs.ensure_qwen3_tts_node()）")
-            continue
         items = [m for m in MODELS if m.group == group]
         total = sum(m.size for m in items)
         log("[" + group + "] " + GROUPS[group] + " —— " + str(len(items)) + " 个文件, " + human(total))
@@ -543,11 +386,8 @@ def print_plan(groups=None) -> None:
             log("    " + item.path)
             log("        " + human(item.size) + "  " + item.note)
     total_all = sum(m.size for m in MODELS if m.group in selected)
-    if "tts" in selected:
-        total_all += TTS_MIN_EXPECTED_BYTES
     log("")
-    log("合计: " + human(total_all) + "  (" + str(round(total_all / 1e9, 1)) + " GB"
-        + ("，TTS 为预估值" if "tts" in selected else "") + ")")
+    log("合计: " + human(total_all) + "  (" + str(round(total_all / 1e9, 1)) + " GB)")
     log("=" * 74)
 
 
@@ -860,340 +700,6 @@ def install_requirements() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2.5 自定义节点（Qwen3-TTS）
-# ---------------------------------------------------------------------------
-
-
-def _tts_node_dir():
-    """custom_nodes 下 Qwen3-TTS 节点包的位置。"""
-    return COMFY_DIR / "custom_nodes" / TTS_NODE_DIRNAME
-
-
-def _tts_node_installed() -> bool:
-    return (_tts_node_dir() / "__init__.py").is_file()
-
-
-def _pkg_version(name):
-    """读已安装包版本（走 metadata，pip 改完当前进程也能读到新值）。"""
-    try:
-        from importlib import metadata
-
-        return metadata.version(name)
-    except Exception:
-        return None
-
-
-def _clone_tts_node_pack(dest):
-    """克隆节点包，官方地址不通时按顺序换 GitHub 镜像。"""
-    urls = [TTS_NODE_REPO]
-    if TTS_NODE_REPO.startswith("https://"):
-        urls += [mirror.rstrip("/") + "/" + TTS_NODE_REPO for mirror in TTS_NODE_MIRRORS]
-
-    last_error = None
-    for url in urls:
-        log("[节点] 克隆 " + url)
-        try:
-            _run(["git", "clone", "--depth", "1", url, str(dest)], check=True)
-            return
-        except Exception as exc:
-            last_error = exc
-            log("[节点] 克隆失败: " + str(exc))
-            shutil.rmtree(str(dest), ignore_errors=True)
-    raise RuntimeError(
-        "Qwen3-TTS 节点克隆失败，请检查网络或设置 COMFY_TTS_NODE_REPO: " + str(last_error)
-    )
-
-
-def _install_tts_node_requirements(target) -> bool:
-    """装节点包的 requirements.txt；返回是否动了环境。"""
-    requirements = target / "requirements.txt"
-    if not requirements.exists():
-        log("[节点] 没有 requirements.txt，跳过依赖安装")
-        return False
-
-    before_tf = _pkg_version("transformers")
-    if before_tf:
-        try:
-            major = int(str(before_tf).split(".")[0])
-        except Exception:
-            major = 0
-        if major >= 5:
-            log("[节点] 注意：当前 transformers " + str(before_tf) + " 会被 qwen-tts 降到 4.57.3")
-            log("[节点] 如果你的 Qwen3-VL / H3 节点依赖 5.x，先跳过依赖：")
-            log("       cs.ensure_qwen3_tts_node(install_deps=False)   # 或 COMFY_TTS_NODE_SKIP_DEPS=1")
-    snapshot = WORK_DIR / "pip-freeze-before-tts-node.txt"
-    try:
-        freeze = subprocess.run(
-            [sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, timeout=600
-        )
-        if freeze.returncode == 0:
-            snapshot.write_text(freeze.stdout or "", encoding="utf-8")
-            log("[节点] 当前环境已快照: " + str(snapshot))
-            log("[节点] 依赖出问题的回滚命令: " + sys.executable + " -m pip install -r " + str(snapshot))
-    except Exception as exc:
-        log("[节点] 环境快照失败（不影响继续）: " + str(exc))
-
-    # 最小依赖优先：完整 requirements 会拖进 gradio（30MB+，版本解析反复回溯）
-    # 和 librosa → numba/llvmlite（60MB 还要编译），内存小的实例极易被打满 OOM，
-    # 连 sshd 都被杀掉。节点运行时其实只需要 qwen_tts / transformers / soundfile / librosa / accelerate。
-    extra = ["--extra-index-url", TORCH_INDEX_URL] if TORCH_INDEX_URL else []
-    py = _comfy_python()
-    if py != sys.executable:
-        log("[节点] ComfyUI 用的是 " + py)
-        log("[节点] 当前脚本是 " + sys.executable + "，依赖将装进 ComfyUI 那个解释器")
-    ok = False
-    try:
-        log("[节点] 第一步：最小依赖安装（跳过 gradio / tensorboard）")
-        # qwen_tts 的 speech_vq 会 import sox：既要有系统 sox 命令，也要有 python 包 sox
-        if shutil.which("sox") is None:
-            log("[节点] 系统缺少 sox 命令，尝试 apt-get 安装（失败请手动: apt-get install -y sox）")
-            _run(["apt-get", "update"], check=False)
-            _run(["apt-get", "install", "-y", "sox"], check=False)
-        _run([py, "-m", "pip", "install", "--no-deps", "qwen-tts"] + extra, check=True)
-        _run(
-            [
-                py, "-m", "pip", "install",
-                "numpy", "safetensors", "soundfile", "accelerate", "librosa", "modelscope",
-                "sox", "transformers==4.57.3",
-            ]
-            + extra,
-            check=True,
-        )
-        ok = _probe_tts_node_import(target)
-    except Exception as exc:
-        log("[节点] 最小依赖安装失败: " + str(exc))
-
-    if not ok:
-        log("[节点] 最小依赖不足，回退到 requirements.txt 全量安装（较慢、占内存）")
-        cmd = [py, "-m", "pip", "install", "-r", str(requirements)]
-        if TORCH_INDEX_URL:
-            cmd += ["--extra-index-url", TORCH_INDEX_URL]
-        _run(cmd, check=True)
-
-    after_tf = _pkg_version("transformers")
-    if before_tf and after_tf and before_tf != after_tf:
-        log("[节点] transformers " + str(before_tf) + " -> " + str(after_tf) + "（qwen-tts 要求 4.57.3）")
-        log("[节点] 若 Qwen-Image-2.1 / H3 工作流随后报错，回滚: ")
-        log("       " + sys.executable + " -m pip install -r " + str(snapshot))
-    elif after_tf:
-        log("[节点] transformers 保持 " + str(after_tf) + "，未受节点包影响")
-    _report_pip_check()
-    return True
-
-
-def _report_pip_check() -> None:
-    """把 pip check 的冲突列出来——很多平台镜像里包本来就不互相兼容。"""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "check"], capture_output=True, text=True, timeout=300
-        )
-    except Exception as exc:
-        log("[节点] pip check 跳过: " + str(exc))
-        return
-    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    lines = [line for line in lines if "No broken requirements found" not in line]
-    if result.returncode == 0 or not lines:
-        log("[节点] pip check: 没有依赖冲突")
-        return
-    log("[节点] pip check 有 " + str(len(lines)) + " 条冲突（与 ComfyUI 无关的可以忽略）:")
-    for line in lines[:10]:
-        log("       " + line)
-    log("[节点] 判定标准：ComfyUI 能启动 + /object_info 里 Qwen3Loader 在 = 这些冲突不影响你")
-
-
-def restore_pip_snapshot(path=None) -> None:
-    """回滚到装 Qwen3-TTS 节点之前的包版本（用安装时留的 pip freeze 快照）。
-
-    qwen-tts 把 transformers 钉在 4.57.3，而它要求 huggingface-hub<1.0；
-    如果你还要 diffusers（要求 hub>=1.32）这类包，两者无法共存，只能二选一：
-    要么回滚，要么放弃那批包。
-    """
-    snapshot = Path(path) if path else WORK_DIR / "pip-freeze-before-tts-node.txt"
-    if not snapshot.exists():
-        raise RuntimeError(
-            "找不到快照文件 " + str(snapshot) + "；它只在 ensure_qwen3_tts_node() 装依赖时生成"
-        )
-    log("[回滚] 按快照恢复包版本: " + str(snapshot))
-    _run([sys.executable, "-m", "pip", "install", "-r", str(snapshot)], check=False)
-    log("[回滚] 完成。注意：qwen-tts 会因 transformers 版本不匹配而加载失败，需要重新取舍")
-
-
-def _comfy_python() -> str:
-    """取正在跑的 ComfyUI 进程所用的解释器。
-
-    平台（如 CloudStudio）常用 pyenv / conda 里的 python 启动 main.py，
-    和当前脚本的 sys.executable 可能不是同一个；装错环境等于没装。
-    """
-    try:
-        pids = subprocess.run(
-            ["pgrep", "-f", "main.py"], capture_output=True, text=True, timeout=5
-        ).stdout.split()
-    except Exception:
-        return sys.executable
-    for pid in pids:
-        try:
-            raw = Path("/proc/" + pid + "/cmdline").read_bytes().split(b"\0")
-        except Exception:
-            continue
-        if not raw:
-            continue
-        exe = raw[0].decode(errors="replace").strip()
-        if "python" in exe:
-            return exe
-    return sys.executable
-
-
-def _probe_tts_node_import(target) -> bool:
-    """在子进程里 import 一遍依赖，确认不是装了个空壳。"""
-    py = _comfy_python()
-    try:
-        result = subprocess.run(
-            [py, "-c", "import qwen_tts, soundfile, accelerate; print('ok')"],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-    except Exception as exc:
-        log("[节点] 依赖自检异常: " + str(exc))
-        return False
-    if result.returncode == 0:
-        log("[节点] 依赖自检通过（qwen_tts / soundfile / accelerate）")
-        return True
-    lines = [line for line in (result.stderr or "").strip().splitlines() if line.strip()]
-    log("[节点] 依赖自检失败: " + (lines[-1] if lines else "unknown"))
-    log("[节点] 手动修复: " + py + " -m pip install -r " + str(target / "requirements.txt"))
-    return False
-
-
-def ensure_qwen3_tts_node(force=False, install_deps=None, restart=True):
-    """安装 DarioFT/ComfyUI-Qwen3-TTS（Qwen3Loader / Qwen3CustomVoice 等节点）。
-
-    不装这个包，工作流里任何 Qwen3-TTS 节点都会在 /prompt 校验阶段被拒：
-    HTTP 400 missing_node_type: Node '...' not found. The custom node may not be installed.
-
-    参数：
-      force        —— 已存在时也 git pull 更新
-      install_deps —— None 表示按 COMFY_TTS_NODE_SKIP_DEPS 决定；False 只克隆不装依赖
-      restart      —— 新装了节点且 ComfyUI 正在跑时自动停掉，等 launch() 重启
-    """
-    ensure_comfyui()
-    target = _tts_node_dir()
-    changed = False
-
-    if _tts_node_installed():
-        log("[节点] 已存在: " + str(target))
-        if force:
-            log("[节点] 更新到最新版本")
-            _run(["git", "-C", str(target), "pull", "--ff-only"], check=False)
-            changed = True
-    else:
-        if shutil.which("git") is None:
-            raise RuntimeError("找不到 git，请先安装：apt-get update && apt-get install -y git")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.rmtree(str(target), ignore_errors=True)
-        _clone_tts_node_pack(target)
-        changed = True
-        log("[节点] 已克隆到 " + str(target))
-
-    if install_deps is None:
-        install_deps = not TTS_NODE_SKIP_DEPS
-
-    if install_deps:
-        changed = _install_tts_node_requirements(target) or changed
-        _probe_tts_node_import(target)
-    else:
-        log("[节点] 已跳过依赖安装（install_deps=False）")
-        log("[节点] 需要时手动执行: " + sys.executable + " -m pip install -r " + str(target / "requirements.txt"))
-
-    if changed and restart:
-        if _PROC is not None and _PROC.poll() is None:
-            log("[节点] 自定义节点只在启动时加载，当前进程不会识别新节点；正在停止 ...")
-            stop()
-            log("[节点] 下一步: cs.launch() 重启 ComfyUI")
-        elif _http_ok("http://127.0.0.1:" + str(PORT) + "/system_stats", 3.0):
-            log("[节点] 端口 " + str(PORT) + " 上还有旧的 ComfyUI 在跑（不是本 kernel 启动的）")
-            log("[节点] 那个进程不会加载新节点，正在结束它 ...")
-            stop()
-            log("[节点] 下一步: cs.launch() 重启 ComfyUI")
-
-    return target
-
-
-def _node_loaded(node_type, port=None) -> bool:
-    """问 /object_info/<node_type> 是否已注册（返回空对象表示没有）。"""
-    port = int(port or PORT)
-    url = "http://127.0.0.1:" + str(port) + "/object_info/" + node_type
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            return bool(json.loads(response.read().decode("utf-8") or "{}"))
-    except Exception:
-        return False
-
-
-def check_tts_nodes(port=None) -> bool:
-    """确认 Qwen3-TTS 节点真的被 ComfyUI 加载了（而不是只克隆了目录）。"""
-    missing = []
-    for node_type in TTS_NODE_CLASSES:
-        if _node_loaded(node_type, port):
-            log("[节点] 已加载: " + node_type)
-        else:
-            log("[节点] 未加载: " + node_type)
-            missing.append(node_type)
-    if missing:
-        log("[节点] 缺少 " + ", ".join(missing))
-        log("[节点] 依次确认: cs.ensure_qwen3_tts_node() 跑过 -> ComfyUI 重启过 -> 日志里没有 IMPORT FAILED")
-        return False
-
-
-def setup_customvoice(port=None, download=True, restart=True, force=False, install_deps=None, wait=True) -> bool:
-    """一条命令搞定 Qwen3-TTS CustomVoice：装节点 -> 下模型 -> 重启 -> 验证。
-
-    等价于原来手动在终端跑的这几步：
-
-        git clone ... custom_nodes/ComfyUI-Qwen3-TTS   # 走镜像
-        pip install --no-deps qwen-tts
-        pip install numpy safetensors soundfile accelerate librosa modelscope transformers
-        pkill main.py && python main.py ...
-        curl /object_info/Qwen3Loader
-
-    返回 True 表示「节点已加载 且 模型完整」，可以提交工作流。
-    """
-    log("=" * 62)
-    log("Qwen3-TTS CustomVoice 一键安装")
-    log("=" * 62)
-
-    # 1) 自定义节点（已装过则复用；restart=True 时会把跑着的 ComfyUI 停掉）
-    ensure_qwen3_tts_node(force=force, install_deps=install_deps, restart=restart)
-
-    # 2) 模型
-    if download:
-        download_models(["tts"])
-        verify_models(["tts"])
-    else:
-        ok, lines = _tts_check()
-        log("[模型] 跳过下载，当前状态: " + ("完整" if ok else "不完整"))
-        for line in lines:
-            log("  " + line)
-
-    # 3) 重启 + 验证（节点只在启动时加载，所以必须重启才算数）
-    if restart:
-        launch(port=port, wait=wait)
-
-    ok_node = check_tts_nodes(port)
-    ok_model = _tts_ready()
-
-    log("-" * 62)
-    if ok_node and ok_model:
-        log("✅ 全部就绪：节点已加载 + 模型完整，现在提交工作流不会再报 missing_node_type")
-        return True
-    if ok_node:
-        log("⚠️  节点已加载，但模型不完整 -> 执行 cs.download_models(['tts'])")
-        return False
-    log("❌ 节点未加载 -> 执行 cs.tail_log() 看日志里 ComfyUI-Qwen3-TTS 是否 IMPORT FAILED")
-    return False
-
-
-# ---------------------------------------------------------------------------
 # 3. 下载
 # ---------------------------------------------------------------------------
 
@@ -1441,83 +947,6 @@ def _download_repo(repo: str, patterns, workers: int) -> None:
     raise RuntimeError("下载失败：" + " / ".join(errors[-3:]))
 
 
-def _snapshot_to(repo: str, local_dir: Path, workers: int) -> None:
-    """将完整 HF 仓库下载到指定目录，保留 config/tokenizer/权重等目录结构。"""
-    try:
-        from huggingface_hub import snapshot_download
-    except Exception as exc:
-        raise RuntimeError("缺少 huggingface_hub，请先 pip install huggingface_hub（" + str(exc) + "）")
-
-    wanted = [
-        ("repo_id", repo),
-        ("local_dir", str(local_dir)),
-        ("max_workers", int(workers)),
-        ("local_dir_use_symlinks", False),
-    ]
-    if HF_TOKEN:
-        wanted.append(("token", HF_TOKEN))
-    params = inspect.signature(snapshot_download).parameters
-    kwargs = {key: value for key, value in wanted if key in params}
-    kwargs["repo_id"] = repo
-    return _run_with_watchdog(lambda: snapshot_download(**kwargs), repo)
-
-
-TTS_REQUIRED = (
-    # (相对路径, 最小字节数)；小于最小值的直接判为没下完
-    ("config.json", 1),
-    ("model.safetensors", 3_500_000_000),
-    ("tokenizer_config.json", 1),
-    ("vocab.json", 1),
-    ("speech_tokenizer/model.safetensors", 650_000_000),
-)
-
-
-def _tts_check():
-    """逐个核对 TTS 模型文件，返回 (是否完整, 明细行)。"""
-    lines = []
-    ok = True
-    for rel, min_size in TTS_REQUIRED:
-        path = TTS_MODEL_DIR / rel
-        if not path.is_file():
-            lines.append("缺失      " + rel)
-            ok = False
-            continue
-        size = path.stat().st_size
-        good = size >= min_size
-        lines.append(("OK   " if good else "不完整 ") + human(size).rjust(9) + "  " + rel)
-        ok = ok and good
-    return ok, lines
-
-
-def _tts_ready() -> bool:
-    """文件齐全且大小达标才算就绪（只看 config.json 会把半成品误判成可用）。"""
-    return _tts_check()[0]
-
-
-def _download_tts(workers: int) -> None:
-    """下载 Qwen3-TTS 整仓（HF snapshot，保留目录结构）。"""
-    TTS_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    last_error = None
-    for attempt in range(1, HF_RETRIES + 1):
-        log("[下载] " + TTS_REPO + " · 整仓，第 " + str(attempt) + " 次尝试")
-        try:
-            _snapshot_to(TTS_REPO, TTS_MODEL_DIR, workers)
-            if _tts_ready():
-                log("[下载] TTS 模型下载完成: " + str(TTS_MODEL_DIR))
-                return
-            raise RuntimeError("下载后缺少 config.json 或 safetensors 权重")
-        except KeyboardInterrupt:
-            raise
-        except DownloadStalled:
-            raise
-        except Exception as exc:
-            last_error = exc
-            log("[下载] 失败: " + type(exc).__name__ + ": " + str(exc))
-            if attempt < HF_RETRIES:
-                time.sleep(5 * attempt)
-    raise RuntimeError("TTS 模型下载失败: " + str(last_error))
-
-
 def download_models(groups=None, workers=None, force=False, ask_token=None) -> None:
     """按组下载模型，已完整存在的文件自动跳过，支持断点续传。
 
@@ -1533,23 +962,14 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
         return
     items = [m for m in MODELS if m.group in selected]
     total = sum(m.size for m in items)
-    tts_ready = "tts" in selected and _tts_ready()
-    if "tts" in selected and not tts_ready:
-        total += TTS_MIN_EXPECTED_BYTES
     free = _disk_free(WORK_DIR)
     log("")
-    log("[下载] 共 " + str(len(items)) + " 个文件"
-        + (" + TTS 整仓" if "tts" in selected and not tts_ready else "")
-        + ", " + human(total) + ("（TTS 为预估值）" if "tts" in selected and not tts_ready else "")
-        + "；磁盘剩余 " + human(free))
+    log("[下载] 共 " + str(len(items)) + " 个文件, " + human(total) + "；磁盘剩余 " + human(free))
 
     if free and total > free * 0.98 and not force:
         feasible = []
         for group in selected:
-            if group == "tts":
-                size = 0 if tts_ready else TTS_MIN_EXPECTED_BYTES
-            else:
-                size = sum(m.size for m in MODELS if m.group == group)
+            size = sum(m.size for m in MODELS if m.group == group)
             if size <= free * 0.95:
                 feasible.append(group + "（" + human(size) + "）")
         hint = ("磁盘只够: " + "、".join(feasible)) if feasible else "连单独一组都放不下"
@@ -1579,7 +999,7 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
                 pass
         pending.append(item)
 
-    if not pending and ("tts" not in selected or tts_ready):
+    if not pending:
         log("[下载] 所有文件已就绪，无需下载")
         return
 
@@ -1597,10 +1017,6 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
         patterns = [m.path for m in repo_items]
         log("[下载] " + repo + " -> " + str(len(patterns)) + " 个文件")
         _download_repo(repo, patterns, int(workers or HF_MAX_WORKERS))
-
-    if "tts" in selected and not tts_ready:
-        log("[下载] " + TTS_REPO + " -> 完整模型目录")
-        _download_tts(int(workers or HF_MAX_WORKERS))
 
     log("[下载] 全部完成")
 
@@ -1644,19 +1060,9 @@ def verify_models(groups=None, check_hash=False):
         log(flag + "  " + shown.rjust(9) + "  " + item.path)
         if not ok:
             bad.append(item)
-    tts_ok = True
-    if "tts" in selected:
-        tts_ok, tts_lines = _tts_check()
-        log("TTS 模型目录: " + str(TTS_MODEL_DIR))
-        for line in tts_lines:
-            log("  " + line)
-        if not tts_ok:
-            log("[校验] TTS 模型不完整（有缺文件或大小不足）")
     log("-" * 74)
     if bad:
         log("[校验] 有 " + str(len(bad)) + " 个文件不完整，请重新运行 download_models() 继续下载")
-    elif "tts" in selected and not tts_ok:
-        log("[校验] TTS 模型不完整，请重新运行 download_models(['tts'])")
     else:
         log("[校验] 全部通过")
     return bad
@@ -2192,9 +1598,6 @@ def setup_all(groups=None, do_download=True, do_launch=True, port=None, force=Fa
     check_env()
     ensure_comfyui()
     install_requirements()
-    if "tts" in selected:
-        # CustomVoice 是独立自定义节点，不装的话工作流提交必定 400 missing_node_type(Qwen3Loader)
-        ensure_qwen3_tts_node(restart=do_launch)
     if do_download:
         download_models(selected, force=force, ask_token=ask_token)
         verify_models(selected)
@@ -2216,7 +1619,7 @@ def status() -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-_COMMANDS = ("plan", "all", "download", "verify", "tts", "check", "launch", "stop", "log", "status")
+_COMMANDS = ("plan", "all", "download", "verify", "launch", "stop", "log", "status")
 
 
 def in_notebook() -> bool:
@@ -2270,18 +1673,6 @@ def main(argv=None) -> int:
     p_verify = sub.add_parser("verify", help="只校验模型")
     p_verify.add_argument("--groups", nargs="+", default=DOWNLOAD_GROUPS)
 
-    p_tts = sub.add_parser("tts", help="一键装 Qwen3-TTS CustomVoice（节点+模型+重启+验证）")
-    p_tts.add_argument("--port", type=int, default=PORT)
-    p_tts.add_argument("--no-download", action="store_true", help="只装节点，不下模型")
-    p_tts.add_argument("--no-restart", action="store_true", help="装完不重启也不验证节点")
-    p_tts.add_argument("--force", action="store_true", help="已存在时也 git pull 更新")
-    p_tts.add_argument("--no-wait", action="store_true", help="启动后不等就绪")
-
-    p_check = sub.add_parser("check", help="核对工作流引用的模型文件是否齐全")
-    p_check.add_argument("workflow", help="工作流 json 路径")
-    p_check.add_argument("--download", action="store_true", help="缺失的自动从已知仓库补齐")
-    p_check.add_argument("--repo", nargs="+", default=None, help="指定搜索/下载的仓库")
-
     p_launch = sub.add_parser("launch", help="启动 ComfyUI")
     p_launch.add_argument("--port", type=int, default=PORT)
     p_launch.add_argument("--no-wait", action="store_true")
@@ -2320,18 +1711,6 @@ def main(argv=None) -> int:
         verify_models(args.groups)
     elif cmd == "verify":
         verify_models(args.groups)
-    elif cmd == "tts":
-        setup_customvoice(
-            port=getattr(args, "port", PORT),
-            download=not getattr(args, "no_download", False),
-            restart=not getattr(args, "no_restart", False),
-            force=getattr(args, "force", False),
-            wait=not getattr(args, "no_wait", False),
-        )
-    elif cmd == "check":
-        if getattr(args, "download", False):
-            return 0 if ensure_workflow_models(args.workflow, repos=args.repo) else 1
-        return 0 if check_workflow(args.workflow) else 1
     elif cmd == "launch":
         launch(port=args.port, wait=not args.no_wait, timeout=args.timeout, extra_args=args.args, tunnel=args.tunnel)
     elif cmd == "stop":

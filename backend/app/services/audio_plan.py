@@ -45,8 +45,11 @@ def build_audio_plan(db: Session, project_id: str, episode: int) -> dict:
     shots = list(db.execute(
         select(Shot)
         .join(Scene, Shot.scene_id == Scene.id)
-        .where(Shot.episode == episode)
-        .order_by(Scene.id, Shot.seq)
+        .where(
+            Scene.project_id == project_id,
+            Shot.episode == episode,
+        )
+        .order_by(Scene.seq, Shot.seq)
     ).scalars().all())
     if not shots:
         return {"episode": episode, "dialogue": 0, "narration": 0, "bgm": 0,

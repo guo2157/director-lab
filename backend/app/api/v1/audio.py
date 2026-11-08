@@ -406,16 +406,16 @@ def set_narrator_voice(project_id: str, payload: dict, db: Session = Depends(get
 
 # ============ 项目级音频策略 ============
 
-_NATIVE_AUDIO_POLICIES = ("discard", "preserve", "preserve_ambience_only")
+_NATIVE_AUDIO_POLICIES = ("discard", "preserve", "preserve_ambience_only", "native")
 
 
 def _default_audio_config(cfg: dict) -> dict:
-    """项目级音频策略默认值（V1：native_audio_policy 默认 discard）。"""
+    """项目级音频策略默认值（默认 native：使用 H3 内嵌音轨，TTS 仅作 ref_audio 参考）。"""
     return {
         "tts_enabled": bool(cfg.get("tts_enabled", True)),
         "tts_provider": cfg.get("tts_provider", "qwen3-tts"),
         "tts_model": cfg.get("tts_model", "CustomVoice"),
-        "native_audio_policy": cfg.get("native_audio_policy", "discard"),
+        "native_audio_policy": cfg.get("native_audio_policy", "native"),
         "bgm_enabled": bool(cfg.get("bgm_enabled", True)),
         "sfx_enabled": bool(cfg.get("sfx_enabled", True)),
     }
@@ -434,7 +434,7 @@ def get_audio_config(project_id: str, db: Session = Depends(get_db)) -> dict:
 
 @router.put("/projects/{project_id}/audio-config")
 def set_audio_config(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
-    """设置项目级音频策略。native_audio_policy ∈ discard/preserve/preserve_ambience_only。"""
+    """设置项目级音频策略。native_audio_policy ∈ discard/preserve/preserve_ambience_only/native。"""
     from app.models.narrative import Project
     project = db.get(Project, project_id)
     if not project:
@@ -443,7 +443,7 @@ def set_audio_config(project_id: str, payload: dict, db: Session = Depends(get_d
     policy = cfg.get("native_audio_policy", "discard")
     if policy not in _NATIVE_AUDIO_POLICIES:
         raise biz_error(code="invalid_request", http=422,
-                        message="native_audio_policy 必须为 discard/preserve/preserve_ambience_only")
+                        message="native_audio_policy 必须为 discard/preserve/preserve_ambience_only/native")
     merged = _default_audio_config((project.settings or {}).get("audio_config") or {})
     merged.update({
         "tts_enabled": bool(cfg.get("tts_enabled", merged["tts_enabled"])),

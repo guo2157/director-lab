@@ -253,7 +253,17 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
         q = q.filter(AssetPlan.id.in_(plan_ids))
     else:
         q = q.filter(AssetPlan.status == "pending")
-    plans = q.order_by(AssetPlan.episode, AssetPlan.seq).all()
+    # 分镜图/分镜视频按叙事顺序出队：Shot.seq 是「场景内镜号」，
+    # 必须叠加 Scene.seq 才是真正的第 1、2、3 镜，否则多场景会交错排队。
+    if plan_type in ("keyframe", "clip"):
+        plans = (
+            q.join(Shot, Shot.id == AssetPlan.owner_id)
+            .join(Scene, Scene.id == Shot.scene_id)
+            .order_by(AssetPlan.episode, Scene.seq, Shot.seq)
+            .all()
+        )
+    else:
+        plans = q.order_by(AssetPlan.episode, AssetPlan.seq).all()
     if not plans:
         raise errors.AppError("no_pending_plans", "没有符合条件且待生成的资产定义", 409)
 

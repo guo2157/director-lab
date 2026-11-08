@@ -263,6 +263,18 @@
       "ref_images.ref_image_8": [
         "39",
         0
+      ],
+      "ref_audios.ref_audio_0": [
+        "40",
+        0
+      ],
+      "ref_audios.ref_audio_1": [
+        "41",
+        0
+      ],
+      "ref_audios.ref_audio_2": [
+        "42",
+        0
       ]
     }
   },
@@ -359,6 +371,33 @@
     },
     "inputs": {
       "image": "placeholder_character.png"
+    }
+  },
+  "40": {
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "$ref_audio_0.~audio"
+    },
+    "inputs": {
+      "audio": "placeholder_ref_audio.wav"
+    }
+  },
+  "41": {
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "$ref_audio_1.~audio"
+    },
+    "inputs": {
+      "audio": "placeholder_ref_audio.wav"
+    }
+  },
+  "42": {
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "$ref_audio_2.~audio"
+    },
+    "inputs": {
+      "audio": "placeholder_ref_audio.wav"
     }
   }
 }

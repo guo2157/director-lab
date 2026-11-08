@@ -2,7 +2,7 @@
 
 - P1：list_speakers 固定取 voice_mode=preset 的 custom_voice workflow（voice_clone 更早也不取）
 - P2：regenerate_segment 按 audio_segment_id 去重（同镜头多片段不互相阻塞，同片段重复提交 409）
-- audio-config：项目级音频策略读写（native_audio_policy 默认 discard，非法值 422）
+- audio-config：项目级音频策略读写（native_audio_policy 默认 native，非法值 422）
 - tts_mix：对白时长为音画时长权威依据（超长延长镜头，不截断）
 - shot_segment_cmd：tts_mix 混音命令（adelay 定位 + amix 求和，不映射内嵌音轨）；discard 丢内嵌音轨补静音
 """
@@ -109,11 +109,11 @@ def test_regenerate_dedup_by_segment(env):
 def test_audio_config_default_and_update(env):
     client = env[0]
     pid = _seed_project(env)
-    # 默认 discard
+    # 默认 native（H3 内嵌音轨，TTS 仅作 ref_audio 参考）
     r = client.get(f"/api/audio/projects/{pid}/audio-config")
     assert r.status_code == 200
     cfg = r.json()["audio_config"]
-    assert cfg["native_audio_policy"] == "discard"
+    assert cfg["native_audio_policy"] == "native"
     assert cfg["tts_enabled"] is True
     # 更新为 preserve
     r = client.put(f"/api/audio/projects/{pid}/audio-config",
