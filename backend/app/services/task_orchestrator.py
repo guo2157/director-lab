@@ -38,6 +38,82 @@ _STAGE_TRANSITIONS = {
     "cancelled": set(),
 }
 
+# DAG 调度器：最大并发阶段数（Phase 2）
+MAX_CONCURRENT_STAGES = 8
+
+
+# ── DAG 调度器（Phase 2） ────────────────────────────────────────
+
+
+def schedule_ready_stages(db: Session, task: Task) -> int:
+    """扫描任务内所有 pending 阶段，自动启动依赖已满足的阶段。
+
+    - 依赖门禁：前置阶段（depends_on）均 succeeded 后启动
+    - 并发控制：同时 running 数 ≤ MAX_CONCURRENT_STAGES；
+      超限时优先无依赖阶段先发
+    - 返回本次启动的阶段数
+    """
+    if task.status not in ("pending", "running"):
+        return 0
+    all_stages = db.query(TaskStage).filter(TaskStage.task_id == task.id).all()
+    if not all_stages:
+        return 0
+    by_key = {s.stage_key: s for s in all_stages}
+    running_count = sum(1 for s in all_stages if s.status == "running")
+    remaining = max(0, MAX_CONCURRENT_STAGES - running_count)
+    if remaining <= 0:
+        return 0
+    # 候选队列：pending + 依赖已满足，优先无依赖阶段
+    candidates: list[TaskStage] = []
+    for s in all_stages:
+        if s.status != "pending":
+            continue
+        deps_ok = True
+        for dep_key in (s.depends_on or []):
+            dep = by_key.get(dep_key)
+            if dep is None or dep.status != "succeeded":
+                deps_ok = False
+                break
+        if deps_ok:
+            candidates.append(s)
+    # 无依赖的优先（排序稳定：低 index 先发）
+    candidates.sort(key=lambda s: (0 if not s.depends_on else 1, s.stage_index))
+    started = 0
+    for s in candidates:
+        if started >= remaining:
+            break
+        if start_stage(db, task, s):
+            started += 1
+            remaining -= 1
+    return started
+
+
+def _skip_dependent_stages(db: Session, task: Task, failed_stage: TaskStage) -> None:
+    """阶段失败时级联跳过依赖它的阶段：标记为 skipped 并记录阻塞原因。"""
+    all_stages = db.query(TaskStage).filter(TaskStage.task_id == task.id).all()
+    for s in all_stages:
+        if s.status not in ("pending", "running"):
+            continue
+        if not s.depends_on:
+            continue
+        if failed_stage.stage_key not in s.depends_on:
+            continue
+        s.status = "skipped"
+        s.result = {
+            "blocked_by": failed_stage.stage_key,
+            "reason": f"前置阶段 {failed_stage.stage_name} 执行失败",
+        }
+        write_event(
+            db,
+            task,
+            "task.stage_skipped",
+            {
+                "stage_id": s.id,
+                "stage_key": s.stage_key,
+                "blocked_by": failed_stage.stage_key,
+            },
+        )
+
 
 def write_event(db: Session, task: Task, event_type: str, payload: dict | None = None) -> None:
     """写任务事件（outbox）：任务状态的唯一事实来源。"""
@@ -137,6 +213,7 @@ def add_stage(
     stage_name: str,
     job_id: str | None = None,
     depends_on: list[str] | None = None,
+    agent_name: str | None = None,
 ) -> TaskStage:
     """追加任务阶段（stage_index 任务内递增；depends_on 声明前置阶段依赖）。"""
     last = (
@@ -155,6 +232,7 @@ def add_stage(
         progress=0,
         job_id=job_id,
         depends_on=depends_on,
+        agent_name=agent_name,
     )
     db.add(stage)
     db.flush()
@@ -228,6 +306,11 @@ def finish_stage(
         f"task.stage_{status}",
         {"stage_id": stage.id, "stage_key": stage.stage_key, "result": result},
     )
+    # Phase 2 失败级联：阶段失败时跳过依赖它的后置阶段
+    if status == "failed":
+        _skip_dependent_stages(db, task, stage)
+    # Phase 2 自动调度：任一阶段终态后尝试启动下一批就绪阶段
+    schedule_ready_stages(db, task)
     return True
 
 
@@ -265,6 +348,17 @@ def fail_task(db: Session, task: Task, *, error_code: str, error_msg: str) -> bo
 def cancel_task(db: Session, task: Task, reason: str | None = None) -> bool:
     if "cancelled" not in _TASK_TRANSITIONS.get(task.status, set()):
         return False
+    # Phase 2 取消传播：将所有非终态阶段标记为 cancelled
+    stages = db.query(TaskStage).filter(TaskStage.task_id == task.id).all()
+    for s in stages:
+        if s.status in ("pending", "running"):
+            s.status = "cancelled"
+            write_event(
+                db,
+                task,
+                "task.stage_cancelled",
+                {"stage_id": s.id, "stage_key": s.stage_key, "reason": reason},
+            )
     task.status = "cancelled"
     db.flush()
     write_event(db, task, "task.cancelled", {"reason": reason})
@@ -330,6 +424,8 @@ def bridge_job_event(
                 {"stage_id": stage.id, "stage_key": stage.stage_key, "source": event_type, **(payload or {})},
             )
         bridged += 1
+        # Phase 2 自动调度：Job 状态变更后尝试启动下一批就绪阶段
+        schedule_ready_stages(db, task)
         # 全阶段终态时自动闭环任务（阶段结果作为任务结果卡片数据）
         _auto_close_task_if_done(db, task)
     return bridged

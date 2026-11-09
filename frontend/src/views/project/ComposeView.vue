@@ -415,7 +415,6 @@ function statusTagClass(status: string) {
     <header class="page-header">
       <div class="header-left">
         <h1 class="page-title">合成与导出</h1>
-        <span class="page-hint">全部镜头视频就绪后，在此合成整集成片并导出分发</span>
       </div>
       <n-space :size="8" align="center">
         <n-tag size="small" round :bordered="false">
@@ -740,7 +739,7 @@ function statusTagClass(status: string) {
 }
 .record-item.is-plain { cursor: default; }
 .record-item:hover { border-color: var(--border-strong); }
-.record-item.active { border-color: var(--brand-primary); background: rgba(99, 102, 241, 0.08); }
+.record-item.active { border-color: var(--brand-primary); background: rgba(53, 179, 166, 0.08); }
 .record-item.stale { opacity: 0.55; }
 .record-head {
   display: flex;

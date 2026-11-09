@@ -455,7 +455,7 @@ watch(
   font-size: 12px;
   color: var(--text-tertiary, #999);
 }
-.stage-item.active { color: var(--brand-primary, #6366f1); font-weight: 600; }
+.stage-item.active { color: var(--brand-primary); font-weight: 600; }
 .stage-item.done { color: #22C55E; }
 .stage-index {
   width: 18px;
@@ -493,8 +493,8 @@ watch(
 .char-count.over { color: var(--brand-error, #d03050); }
 .editor-wrap { position: relative; flex: 1; overflow: hidden; }
 .editor-mirror { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; overflow-y: auto; color: transparent; pointer-events: none; z-index: 0; }
-.editor-mirror .hl-mark { background: rgba(99, 102, 241, 0.18); border-radius: 3px; }
-.editor-input { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; border: none; outline: none; resize: none; background: transparent; color: var(--text-primary, #333); caret-color: var(--brand-primary, #6366f1); z-index: 1; }
+.editor-mirror .hl-mark { background: rgba(53, 179, 166, 0.18); border-radius: 3px; }
+.editor-input { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; border: none; outline: none; resize: none; background: transparent; color: var(--text-primary, #333); caret-color: var(--brand-primary); z-index: 1; }
 .editor-input::placeholder { color: var(--text-secondary, #999); }
 
 /* 校验对比弹窗 */

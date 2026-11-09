@@ -92,3 +92,128 @@ def verify_execution_result(
     if isinstance(result_data, dict) and result_data.get("job_id"):
         return verify_job_submission(db, result_data, expected_project_id=expected_project_id)
     return VerificationResult(True)
+
+
+# ── 聚合完整性校验（Phase 2） ──────────────────────────────────────
+
+
+def verify_aggregate_completeness(db: Session, *, task_id: str) -> VerificationResult:
+    """聚合完整性校验（数量校验 + 关联关系校验）。
+
+    - 任务必须存在（否则 task_not_found）
+    - TaskResult(result_type="aggregate") 必须存在（否则 aggregate_missing）
+    - 数量守恒：聚合 total 必须等于库中 TaskStage 实际数量
+    - 关联关系：聚合 items/errors/skipped/cancelled 必须与各阶段状态计数一致
+    - 终态一致性：任务已闭环（completed/failed）但存在 pending/running 阶段则
+      标记 terminal_mismatch，防止前端展示与实际状态不一致
+    """
+    from sqlalchemy import select, func
+
+    from app.models.task import Task, TaskResult, TaskStage
+
+    task = db.get(Task, task_id)
+    if task is None:
+        return VerificationResult(False, "task_not_found", f"聚合校验：任务 {task_id} 不存在")
+    result = db.scalars(
+        select(TaskResult)
+        .where(TaskResult.task_id == task_id, TaskResult.result_type == "aggregate")
+        .order_by(TaskResult.created_at.desc())
+        .limit(1)
+    ).first()
+    if result is None or not isinstance(result.data, dict):
+        return VerificationResult(False, "aggregate_missing", f"任务 {task_id} 缺少聚合结果卡片")
+    agg = result.data
+    total = db.scalar(
+        select(func.count(TaskStage.id)).where(TaskStage.task_id == task_id)
+    ) or 0
+    if agg.get("total") != total:
+        return VerificationResult(
+            False,
+            "aggregate_count_mismatch",
+            f"聚合总数 {agg.get('total')} 与库中阶段数 {total} 不一致",
+        )
+    counted = (
+        sum(1 for s in db.query(TaskStage).filter(TaskStage.task_id == task_id).all()
+            if s.status == "succeeded"),
+        sum(1 for s in db.query(TaskStage).filter(TaskStage.task_id == task_id).all()
+            if s.status == "failed"),
+        sum(1 for s in db.query(TaskStage).filter(TaskStage.task_id == task_id).all()
+            if s.status == "skipped"),
+        sum(1 for s in db.query(TaskStage).filter(TaskStage.task_id == task_id).all()
+            if s.status == "cancelled"),
+    )
+    if (
+        agg.get("items") != counted[0]
+        or agg.get("errors") != counted[1]
+        or agg.get("skipped") != counted[2]
+        or agg.get("cancelled") != counted[3]
+    ):
+        return VerificationResult(
+            False,
+            "aggregate_status_mismatch",
+            f"聚合状态计数与实际不一致：items/errors/skipped/cancelled="
+            f"{agg.get('items')}/{agg.get('errors')}/{agg.get('skipped')}/{agg.get('cancelled')} "
+            f"实为 {counted[0]}/{counted[1]}/{counted[2]}/{counted[3]}",
+        )
+    non_terminal = (
+        sum(1 for s in db.query(TaskStage).filter(TaskStage.task_id == task_id).all()
+            if s.status in ("pending", "running"))
+    )
+    if task.status in ("completed", "failed", "cancelled") and non_terminal:
+        return VerificationResult(
+            False,
+            "terminal_mismatch",
+            f"任务已终态 {task.status} 但仍有 {non_terminal} 个阶段未到终态",
+        )
+    return VerificationResult(True, message="聚合完整")
+
+
+def verify_stage_dependencies(db: Session, *, task_id: str) -> VerificationResult:
+    """DAG 依赖关系校验：depends_on 引用的阶段必须存在且为前置阶段。
+
+    - 依赖缺失：depends_on 中的 stage_key 在任务内不存在 → dependency_missing
+    - 依赖倒置：被依赖阶段 stage_index >= 依赖者 stage_index → dependency_inversion
+    - 死锁：存在依赖环（拓扑排序可达性检测）→ dependency_cycle
+    """
+    from app.models.task import Task, TaskStage
+
+    if db.get(Task, task_id) is None:
+        return VerificationResult(False, "task_not_found", f"任务 {task_id} 不存在")
+    stages = db.query(TaskStage).filter(TaskStage.task_id == task_id).all()
+    if not stages:
+        return VerificationResult(True, message="无阶段，依赖校验通过")
+    by_key = {s.stage_key: s for s in stages}
+    for s in stages:
+        for dep_key in (s.depends_on or []):
+            dep = by_key.get(dep_key)
+            if dep is None:
+                return VerificationResult(
+                    False, "dependency_missing",
+                    f"阶段 {s.stage_key} 依赖 {dep_key} 不存在",
+                )
+            if dep.stage_index >= s.stage_index:
+                return VerificationResult(
+                    False, "dependency_inversion",
+                    f"阶段 {s.stage_key} 依赖 {dep_key} 为后置阶段（索引倒置）",
+                )
+    # 环检测：DFS 可达性验证（确定性实现，不依赖拓扑排序库）
+    visited: set[str] = set()
+    stack: set[str] = set()
+
+    def dfs(key: str) -> bool:
+        if key in stack:
+            return False
+        if key in visited:
+            return True
+        stack.add(key)
+        for dep_key in (by_key[key].depends_on or []):
+            if dep_key in by_key and not dfs(dep_key):
+                return False
+        stack.discard(key)
+        visited.add(key)
+        return True
+
+    for key in by_key:
+        if key not in visited and not dfs(key):
+            return VerificationResult(False, "dependency_cycle", f"检测到依赖环（涉及阶段 {key}）")
+    return VerificationResult(True, message="依赖关系合法")

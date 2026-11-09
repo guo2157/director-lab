@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.models.agent import AgentSession
@@ -33,6 +34,10 @@ class ResolvedIntent:
     reason: str
     risk_level: str = "low"
     confidence: float = 1.0
+    # 细粒度子类与分级置信度（Phase 1：继承自 IntentResult 的统一结构化输出）
+    subcategory: str = ""
+    confidence_tier: str = "execute"
+    route_exit: str = "general_answer"
     # 经数据库验证的目标实体（可空：无实体目标的意图）
     target: dict | None = None
     # 目标解析路径：explicit_id / focus_context / none
@@ -46,6 +51,52 @@ class ResolvedIntent:
     focus_updated: bool = False
     # 原始意图识别结果（审计用）
     source: IntentResult | None = None
+
+    def snapshot(self) -> dict:
+        """经 Pydantic Schema 校验的结构化快照（Phase 1：统一结构化输出）。"""
+        try:
+            return ResolvedIntentSchema(
+                intent=self.intent,
+                subcategory=self.subcategory,
+                reason=self.reason,
+                risk_level=self.risk_level,
+                confidence=self.confidence,
+                confidence_tier=self.confidence_tier,
+                route_exit=self.route_exit,
+                target=self.target,
+                resolution_path=self.resolution_path,
+                requires_clarification=self.requires_clarification,
+                clarification_question=self.clarification_question,
+                clarification_code=self.clarification_code,
+                focus_updated=self.focus_updated,
+            ).model_dump()
+        except ValidationError:
+            # 校验失败不阻断主流程：降级为最小可用快照并标记 unsupported
+            return {
+                "intent": self.intent,
+                "subcategory": self.subcategory,
+                "confidence": self.confidence,
+                "confidence_tier": self.confidence_tier,
+                "route_exit": "unsupported",
+            }
+
+
+class ResolvedIntentSchema(BaseModel):
+    """ResolvedIntent 的 Pydantic 校验视图（Phase 1：统一结构化意图输出）。"""
+
+    intent: str
+    subcategory: str = ""
+    reason: str = ""
+    risk_level: str = Field(default="low", pattern="^(low|medium|high)$")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence_tier: str = Field(default="execute", pattern="^(execute|recheck|clarify)$")
+    route_exit: str = Field(default="general_answer", pattern="^(general_answer|clarification|unsupported)$")
+    target: dict | None = None
+    resolution_path: str = Field(default="none", pattern="^(explicit_id|focus_context|none)$")
+    requires_clarification: bool = False
+    clarification_question: str | None = None
+    clarification_code: str | None = None
+    focus_updated: bool = False
 
 
 # 需要目标实体定位的意图场景关键词（生成/修改/重新生成类）
@@ -108,6 +159,9 @@ def resolve_intent(
         reason=intent.reason,
         risk_level=intent.risk_level,
         confidence=intent.confidence,
+        subcategory=getattr(intent, "subcategory", "") or "",
+        confidence_tier=getattr(intent, "confidence_tier", "execute") or "execute",
+        route_exit=getattr(intent, "route_exit", "general_answer") or "general_answer",
         source=intent,
     )
 
@@ -115,6 +169,7 @@ def resolve_intent(
     if intent.intent not in {"generate_request", "pipeline_action"}:
         if intent.intent == "ambiguous":
             base.requires_clarification = True
+            base.route_exit = "clarification"
             base.clarification_question = build_clarification_question(
                 intent.missing_information or ["用户目标不够明确，请补充说明"]
             )
@@ -126,6 +181,7 @@ def resolve_intent(
         # 支持自动创建项目，不拦截既有能力）；仅 pipeline_action 需先关联项目
         if intent.intent == "pipeline_action":
             base.requires_clarification = True
+            base.route_exit = "clarification"
             base.clarification_code = "no_project_context"
             base.clarification_question = "当前会话未关联项目，请先选择或创建项目后再执行该操作。"
         return base
@@ -147,6 +203,7 @@ def resolve_intent(
     if reason is not None:
         # 给了标识但无效（不存在/不在项目内/歧义）：不回退焦点，交澄清
         base.requires_clarification = True
+        base.route_exit = "clarification"
         base.clarification_code = reason
         base.clarification_question = _clarify_message(reason)
         return base
@@ -174,6 +231,7 @@ def resolve_intent(
             return base
         # 无有效焦点：交澄清（不猜测执行）
         base.requires_clarification = True
+        base.route_exit = "clarification"
         base.clarification_code = "entity_unspecified"
         base.clarification_question = (
             "你想操作哪个对象？请提供对象 ID（如 chr_/scn_/prp_/sht_ 前缀），"

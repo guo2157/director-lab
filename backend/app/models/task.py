@@ -86,6 +86,9 @@ class TaskStage(Base, TimestampMixin):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 依赖门禁（Phase 5）：前置阶段 stage_key 列表，前置未全部 succeeded 时本阶段不可启动
     depends_on: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Agent 标识（Phase 2）：执行该阶段的子 Agent 名称（如 script_agent / asset_agent / compose_agent），
+    # 可空：纯编排层阶段无对应 Agent
+    agent_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 Index("ix_task_stage_task_idx", TaskStage.__table__.c.task_id, TaskStage.__table__.c.stage_index)

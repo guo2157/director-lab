@@ -1002,8 +1002,8 @@ onMounted(() => {
   transition: all 0.15s;
 }
 .expand-btn:hover {
-  border-color: var(--brand-primary, #6366f1);
-  color: var(--brand-primary, #6366f1);
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
 }
 .panel {
   background: var(--bg-panel, #fff);
@@ -1080,7 +1080,7 @@ onMounted(() => {
   background: var(--bg-elevated, #f5f5f5);
 }
 .session-item.active {
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(53, 179, 166, 0.1);
 }
 .session-info {
   flex: 1;
@@ -1210,13 +1210,13 @@ onMounted(() => {
   justify-content: flex-end;
 }
 .message-row.user .message-bubble {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(139, 92, 246, 0.07) 100%);
-  border-color: rgba(99, 102, 241, 0.28);
+  background: linear-gradient(135deg, rgba(53, 179, 166, 0.12) 0%, rgba(31, 122, 113, 0.05) 100%);
+  border-color: rgba(53, 179, 166, 0.28);
   border-radius: 16px 4px 16px 16px;
-  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.08);
+  box-shadow: 0 2px 10px rgba(53, 179, 166, 0.08);
 }
 .message-row.user .message-bubble:hover {
-  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.16);
+  box-shadow: 0 4px 18px rgba(53, 179, 166, 0.16);
   transform: translateY(-1px);
 }
 .message-bubble {
@@ -1245,13 +1245,13 @@ onMounted(() => {
   line-height: 1.7;
 }
 .message-content :deep(a) {
-  color: #6366f1;
+  color: var(--brand-primary);
   text-decoration: none;
-  border-bottom: 1px solid rgba(99, 102, 241, 0.3);
+  border-bottom: 1px solid rgba(53, 179, 166, 0.3);
   transition: border-color 0.15s;
 }
 .message-content :deep(a:hover) {
-  border-bottom-color: #6366f1;
+  border-bottom-color: var(--brand-primary);
 }
 .message-content :deep(code) {
   background: rgba(0, 0, 0, 0.05);
@@ -1426,14 +1426,14 @@ onMounted(() => {
 .review-cards-section {
   margin: 0 24px 16px;
   padding: 14px 18px;
-  background: rgba(99, 102, 241, 0.04);
-  border: 1px solid rgba(99, 102, 241, 0.15);
+  background: rgba(53, 179, 166, 0.04);
+  border: 1px solid rgba(53, 179, 166, 0.15);
   border-radius: 12px;
 }
 .review-cards-label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--brand-primary, #6366f1);
+  color: var(--brand-primary);
   margin-bottom: 10px;
 }
 .review-card {
@@ -1474,7 +1474,7 @@ onMounted(() => {
   margin-top: 4px;
   font-size: 12px;
   color: var(--text-primary, #111);
-  background: rgba(99, 102, 241, 0.06);
+  background: rgba(53, 179, 166, 0.06);
   padding: 4px 8px;
   border-radius: 4px;
 }
@@ -1501,7 +1501,7 @@ onMounted(() => {
   transition: box-shadow 0.25s ease, border-color 0.25s ease;
 }
 .composer :deep(.n-input.n-input--focus) {
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  box-shadow: 0 0 0 3px rgba(53, 179, 166, 0.1);
 }
 .composer :deep(.n-input .n-input__textarea) {
   font-size: 14px;
@@ -1523,16 +1523,16 @@ onMounted(() => {
   transition: all 0.2s ease;
 }
 .composer-send.n-button--primary-type {
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  background: var(--brand-primary);
   border: none;
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+  box-shadow: 0 2px 8px rgba(53, 179, 166, 0.25);
 }
 .composer-send.n-button--primary-type:hover {
-  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+  box-shadow: 0 4px 14px rgba(53, 179, 166, 0.35);
 }
 .composer-send.n-button--primary-type:active {
   transform: translateY(0) scale(0.97);
-  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 1px 3px rgba(53, 179, 166, 0.2);
 }
 
 /* 右栏 */
@@ -1553,7 +1553,7 @@ onMounted(() => {
 .style-edit {
   font-size: 12px;
   font-weight: 500;
-  color: var(--brand-primary, #6366f1);
+  color: var(--brand-primary);
   cursor: pointer;
 }
 .style-lines {
@@ -1620,7 +1620,7 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .ctx-links a {
-  color: var(--brand-primary, #6366f1);
+  color: var(--brand-primary);
   cursor: pointer;
 }
 .ctx-links a:hover {

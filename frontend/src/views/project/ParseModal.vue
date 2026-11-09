@@ -188,9 +188,9 @@ function handleSubmit() {
   cursor: pointer;
 }
 .quick-chip.active {
-  border-color: var(--brand-primary, #6366f1);
-  color: var(--brand-primary, #6366f1);
-  background: rgba(99, 102, 241, 0.08);
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
+  background: rgba(53, 179, 166, 0.08);
 }
 .quick-chip.static {
   cursor: default;

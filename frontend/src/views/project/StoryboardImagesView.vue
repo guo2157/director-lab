@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
-import { NButton, NSpace, NSpin, NEmpty, NTag, NTooltip, NInput, NCheckbox, NImage, NDrawer, NDrawerContent, NProgress, useMessage } from 'naive-ui'
+import { NButton, NSpace, NSpin, NEmpty, NTag, NTooltip, NInput, NCheckbox, NImage, NModal, NProgress, useMessage } from 'naive-ui'
 import { listScenes, listSceneShots, listCharacters, listProps, confirmShotKeyframe, unconfirmShotKeyframe } from '@/api/script'
 import { fetchRegenerateConfig, type RegenerateRef, type RefSlotInfo } from '@/api/regeneration'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
@@ -716,7 +716,6 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
     <header class="page-header">
       <div class="header-left">
         <h1 class="page-title">分镜图</h1>
-        <span class="page-hint">基于已审核的公共资产生成分镜图，逐镜确认后进入分镜看板</span>
       </div>
     </header>
     <div class="gate-banner" :class="{ ok: reviewApproved, bad: reviewRejected }">
@@ -950,9 +949,17 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
     </div>
 
     <!-- 镜头详情：分镜图与生成时的真实参考图 -->
-    <n-drawer v-model:show="detailVisible" :width="'min(520px, 100vw)'">
-      <n-drawer-content title="分镜图详情" closable>
+    <n-modal
+      v-model:show="detailVisible"
+      preset="card"
+      title="分镜图详情"
+      closable
+      :bordered="false"
+      :style="{ width: 'min(1120px, 93vw)' }"
+      :content-style="{ maxHeight: 'calc(85vh - 56px)', overflowY: 'auto' }"
+    >
         <template v-if="detailShot">
+          <div class="detail-grid">
           <div class="detail-hero">
             <n-image
               v-if="detailShot.current_assets?.keyframe?.url || detailShot.current_assets?.keyframe?.thumb_url"
@@ -970,6 +977,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
               <n-tag v-if="detailShot.keyframe_confirmed" size="tiny" type="success">已确认</n-tag>
             </div>
           </div>
+          <div class="detail-body">
 
           <!-- 分区一：生成参考图 -->
           <section class="detail-section">
@@ -1013,7 +1021,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
               </div>
             </n-spin>
             <div class="detail-source-hint">
-              真实入参＝该镜头重生成任务实际记录的参考图；按槽位推导＝按提示词引用与工作流槽位规则会传入的图；无可用槽位＝该类型槽位已用尽或工作流未声明，本次不会传入；图未生成＝对应定妆图 / 基准图尚未生成，请先到资产库补齐。
+              真实入参＝实际提交的图；按槽位推导＝按引用与槽位会传入；无可用槽位＝本次不传；图未生成＝需先到资产库补齐。
             </div>
           </section>
 
@@ -1051,9 +1059,10 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
               >{{ detailShot.current_assets?.keyframe ? '重新生成分镜图' : '生成分镜图' }}</n-button>
             </div>
           </section>
+          </div>
+          </div>
         </template>
-      </n-drawer-content>
-    </n-drawer>
+    </n-modal>
   </div>
 </template>
 
@@ -1105,7 +1114,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 .gen-sub { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
 .gen-state { color: var(--text-secondary, #64748b); }
 .gen-state.queued { color: #b45309; }
-.gen-state.running { color: var(--brand-primary, #6366f1); }
+.gen-state.running { color: var(--brand-primary); }
 .gen-state.ok { color: #15803d; font-weight: 500; }
 .gen-state.fail { color: #b91c1c; display: inline-flex; align-items: center; gap: 8px; }
 .gen-inflight { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -1121,7 +1130,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 }
 .gen-inflight-name { color: var(--text-primary, #333); }
 .gen-inflight-state { color: var(--text-secondary, #64748b); }
-.gen-inflight-state.running { color: var(--brand-primary, #6366f1); }
+.gen-inflight-state.running { color: var(--brand-primary); }
 .gen-inflight-state.queued { color: #b45309; }
 /* 镜头卡片上的失败原因与生成中占位 */
 .shot-error {
@@ -1136,8 +1145,8 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.thumb-generating { color: var(--brand-primary, #6366f1); font-size: 12px; }
-.shot-card.is-generating { border-color: rgba(99, 102, 241, 0.45); background: rgba(99, 102, 241, 0.04); }
+.thumb-generating { color: var(--brand-primary); font-size: 12px; }
+.shot-card.is-generating { border-color: rgba(53, 179, 166, 0.45); background: rgba(53, 179, 166, 0.04); }
 .shot-card.is-failed { border-color: rgba(239, 68, 68, 0.4); }
 .summary-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .page-loading { display: block; margin: 48px auto; }
@@ -1172,7 +1181,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 /* ===== 镜头详情（分镜图） ===== */
 .detail-hero { margin-bottom: 4px; }
 .detail-img { width: 100%; border-radius: 8px; background: #000; display: block; }
-.detail-img :deep(img) { width: 100%; max-height: 300px; object-fit: contain; display: block; }
+.detail-img :deep(img) { width: 100%; max-height: 480px; object-fit: contain; display: block; }
 .detail-empty {
   padding: 28px 16px;
   border: 1px dashed var(--border-subtle, #e5e7eb);
@@ -1192,7 +1201,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--brand-primary, #6366f1);
+  background: var(--brand-primary);
   color: #fff;
   font-size: 11px;
   line-height: 18px;
@@ -1250,7 +1259,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 }
 .kf-tag { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 400; }
 .kf-tag.ok { background: rgba(34, 197, 94, 0.12); color: #15803d; }
-.kf-tag.plan { background: rgba(99, 102, 241, 0.12); color: #4338ca; }
+.kf-tag.plan { background: rgba(53, 179, 166, 0.12); color: #4338ca; }
 .kf-tag.warn { background: rgba(245, 158, 11, 0.14); color: #b45309; }
 .detail-source-hint { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary, #909399); }
 .detail-hint { margin-top: 6px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary, #909399); }
@@ -1292,5 +1301,35 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   .detail-hint, .detail-source-hint { font-size: 11px; }
   .kf-ref-input, .kf-ref-slot { font-size: 10px; }
   .detail-actions :deep(.n-button) { width: 100%; }
+}
+
+/* 居中大弹窗：左图右文，窄屏回落单列 */
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.detail-body { min-width: 0; }
+.detail-grid .detail-hero { margin-bottom: 0; }
+@media (max-width: 980px) {
+  .detail-grid { grid-template-columns: 1fr; gap: 16px; }
+  .detail-grid .detail-hero { margin-bottom: 8px; }
+}
+
+/* 弹窗标题接入页面衬线标题体系 */
+:deep(.n-card-header__main) {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 宽屏两栏时左栏吸附，右栏长内容滚动时画面保持可见 */
+@media (min-width: 981px) {
+  .detail-grid .detail-hero {
+    position: sticky;
+    top: 0;
+  }
 }
 </style>

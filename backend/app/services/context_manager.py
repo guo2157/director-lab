@@ -52,11 +52,34 @@ class OperationContext:
 
 
 @dataclass
+class ExecutionContext:
+    """本轮执行态（Phase 1）：意图识别结果的确定性快照。
+
+    - intent / subcategory：父类与细粒度子类（审计与上下文重判用）
+    - confidence / confidence_tier：置信度与档位（execute/recheck/clarify）
+    - target：经数据库验证的目标实体（可空）
+    - stage：pending（等待确认/审批）/ running / done / failed
+    - pending_confirmation_id：待确认事项 ID（确认答复按 ID 精确关联）
+    """
+
+    intent: str
+    subcategory: str = ""
+    confidence: float = 1.0
+    confidence_tier: str = "execute"
+    target: dict | None = None
+    stage: str = "pending"
+    pending_confirmation_id: str | None = None
+    updated_seq: int = 0
+
+
+@dataclass
 class SessionContext:
     """会话结构化上下文快照（Context Manager 对外统一视图）。"""
 
     focus: FocusContext | None = None
     operation: OperationContext | None = None
+    execution: ExecutionContext | None = None
+    pending_confirmation_id: str | None = None
 
 
 # --- 读写（AgentSession.context_state JSON 字段） ---
@@ -86,7 +109,26 @@ def load_context(session: AgentSession) -> SessionContext:
             last_error=o.get("last_error"),
             updated_seq=int(o.get("updated_seq") or 0),
         )
-    return SessionContext(focus=focus, operation=operation)
+    execution = None
+    e = state.get("execution")
+    if isinstance(e, dict) and e.get("intent"):
+        execution = ExecutionContext(
+            intent=str(e["intent"]),
+            subcategory=str(e.get("subcategory") or ""),
+            confidence=float(e.get("confidence") if e.get("confidence") is not None else 1.0),
+            confidence_tier=str(e.get("confidence_tier") or "execute"),
+            target=e.get("target") if isinstance(e.get("target"), dict) else None,
+            stage=str(e.get("stage") or "pending"),
+            pending_confirmation_id=e.get("pending_confirmation_id"),
+            updated_seq=int(e.get("updated_seq") or 0),
+        )
+    pending = state.get("pending_confirmation_id")
+    return SessionContext(
+        focus=focus,
+        operation=operation,
+        execution=execution,
+        pending_confirmation_id=str(pending) if pending else None,
+    )
 
 
 def _save_context(session: AgentSession, ctx: SessionContext) -> None:
@@ -114,6 +156,23 @@ def _save_context(session: AgentSession, ctx: SessionContext) -> None:
         }
     else:
         state.pop("operation", None)
+    if ctx.execution is not None:
+        state["execution"] = {
+            "intent": ctx.execution.intent,
+            "subcategory": ctx.execution.subcategory,
+            "confidence": ctx.execution.confidence,
+            "confidence_tier": ctx.execution.confidence_tier,
+            "target": ctx.execution.target,
+            "stage": ctx.execution.stage,
+            "pending_confirmation_id": ctx.execution.pending_confirmation_id,
+            "updated_seq": ctx.execution.updated_seq,
+        }
+    else:
+        state.pop("execution", None)
+    if ctx.pending_confirmation_id:
+        state["pending_confirmation_id"] = ctx.pending_confirmation_id
+    else:
+        state.pop("pending_confirmation_id", None)
     session.context_state = state
 
 
@@ -161,13 +220,57 @@ def update_operation(
     _save_context(session, ctx)
 
 
+def update_execution(
+    session: AgentSession,
+    *,
+    intent: str,
+    subcategory: str = "",
+    confidence: float = 1.0,
+    confidence_tier: str = "execute",
+    target: dict | None = None,
+    stage: str = "pending",
+    pending_confirmation_id: str | None = None,
+    updated_seq: int = 0,
+) -> None:
+    """记录本轮执行态（意图识别结果 + 目标 + 阶段 + 待确认事项）。"""
+    ctx = load_context(session)
+    ctx.execution = ExecutionContext(
+        intent=intent,
+        subcategory=subcategory,
+        confidence=confidence,
+        confidence_tier=confidence_tier,
+        target=target,
+        stage=stage,
+        pending_confirmation_id=pending_confirmation_id,
+        updated_seq=updated_seq,
+    )
+    ctx.pending_confirmation_id = pending_confirmation_id
+    _save_context(session, ctx)
+
+
+def set_pending_confirmation(
+    session: AgentSession, *, confirmation_id: str | None
+) -> None:
+    """登记或清除待确认事项 ID（确认答复按 ID 精确关联，不靠字符串猜测）。"""
+    ctx = load_context(session)
+    ctx.pending_confirmation_id = confirmation_id
+    if ctx.execution is not None:
+        ctx.execution.pending_confirmation_id = confirmation_id
+    _save_context(session, ctx)
+
+
 def clear_on_project_switch(session: AgentSession) -> bool:
-    """项目切换时清空 focus/operation（防止跨项目上下文污染）。
+    """项目切换时清空 focus/operation/execution 与待确认事项（防止跨项目上下文污染）。
     返回是否发生了清理（调用方可据此落审计消息）。"""
     ctx = load_context(session)
-    if ctx.focus is None and ctx.operation is None:
+    if (
+        ctx.focus is None
+        and ctx.operation is None
+        and ctx.execution is None
+        and not ctx.pending_confirmation_id
+    ):
         return False
-    _save_context(session, SessionContext(focus=None, operation=None))
+    _save_context(session, SessionContext())
     return True
 
 
@@ -211,7 +314,11 @@ def validate_focus(
 # --- LLM 意图识别注入 ---
 
 
-def build_focus_hint(focus: FocusContext | None, operation: OperationContext | None) -> str | None:
+def build_focus_hint(
+    focus: FocusContext | None,
+    operation: OperationContext | None,
+    execution: ExecutionContext | None = None,
+) -> str | None:
     """构建注入 LLM 意图识别的结构化上下文提示（无有效上下文时返回 None）。
     仅作为语义判定辅助：『重新生成』『继续修改』等指代消解的回退依据。"""
     parts: list[str] = []
@@ -231,6 +338,15 @@ def build_focus_hint(focus: FocusContext | None, operation: OperationContext | N
         if operation.last_result:
             op += f"，结果：{operation.last_result}"
         parts.append(f"最近一次操作：{op}。")
+    if execution is not None:
+        stage_label = {
+            "pending": "等待确认或审批",
+            "running": "执行中",
+            "done": "已完成",
+            "failed": "已失败",
+        }.get(execution.stage, execution.stage)
+        sub = f"（{execution.subcategory}）" if execution.subcategory else ""
+        parts.append(f"上一轮意图：{execution.intent}{sub}，状态：{stage_label}。")
     if not parts:
         return None
     return (

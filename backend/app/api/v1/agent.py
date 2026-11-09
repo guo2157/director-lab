@@ -1511,7 +1511,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
 
     ctx = context_manager.load_context(s)
     focus = context_manager.validate_focus(db, s, current_seq=max_seq + 1)
-    focus_hint = context_manager.build_focus_hint(focus, ctx.operation)
+    focus_hint = context_manager.build_focus_hint(focus, ctx.operation, ctx.execution)
     # Pending Confirmation 优先参与上下文解析：存在有效待确认事项时，
     # 把『正在等待确认什么』一并交给意图识别，用户的短回答不会因过短而丢失上下文
     _pending_hint = _rc.build_pending_hint(db, session_id)
@@ -1522,12 +1522,27 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         recent_messages=[{"role": m.role, "content": m.content} for m in recent],
         session_summary=s.summary,
         focus_hint=focus_hint,
+        # 上下文有效性以经数据库验证的焦点实体或有效待确认事项为准，
+        # 不能用 focus_hint 是否为空判断（存在执行态即非空）
+        has_valid_context=bool(focus is not None or _pending_hint),
     )
     # Intent Resolver（意图识别改造 Phase 2）：融合意图结果与结构化上下文，
     # 实体引用解析优先级：显式 ID > 焦点上下文 > 澄清；实体 ID 一律数据库验证
     from app.services.intent_resolver import resolve_intent
 
     resolved = resolve_intent(db, s, payload.content, intent, current_seq=max_seq + 1)
+    # Context Manager（Phase 1）：登记本轮执行态（意图/子类/置信度档位/目标/阶段），
+    # 供下一轮指代消解与上下文重判；context_state 为 JSON 字段，无需数据库迁移
+    context_manager.update_execution(
+        s,
+        intent=resolved.intent,
+        subcategory=resolved.subcategory,
+        confidence=resolved.confidence,
+        confidence_tier=resolved.confidence_tier,
+        target=resolved.target,
+        stage="pending" if resolved.requires_clarification else "running",
+        updated_seq=max_seq + 1,
+    )
     if resolved.focus_updated:
         # 焦点更新随本轮事务持久化（context_state 变更）
         db.add(s)
@@ -1549,7 +1564,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             agent_task_id=task.id,
             project_id=s.project_id,
         )
-    action = route_action(intent.intent)
+    action = route_action(intent.intent, intent.subcategory)
     # Intent Resolver 判定需澄清：目标无法唯一定位时不猜测执行，向用户澄清
     if resolved.requires_clarification and action in (NextAction.GUIDE, NextAction.PIPELINE):
         action = NextAction.CLARIFY
@@ -1617,6 +1632,10 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 "intent_goal": intent.goal,
                 "risk_level": intent.risk_level,
                 "confidence": intent.confidence,
+                # 细粒度意图与分级置信度审计（Phase 1）：子类、档位、兜底出口
+                "intent_subcategory": intent.subcategory,
+                "confidence_tier": intent.confidence_tier,
+                "route_exit": intent.route_exit,
                 "approval": approval_info,
                 # Intent Resolver 审计（意图识别改造 Phase 2）：目标解析路径与结果
                 "intent_resolution": {
@@ -1624,6 +1643,8 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                     "target": resolved.target,
                     "requires_clarification": resolved.requires_clarification,
                     "clarification_code": resolved.clarification_code,
+                    "subcategory": resolved.subcategory,
+                    "confidence_tier": resolved.confidence_tier,
                 },
                 # Parent Agent 任务审计（Phase 3）：任务 ID 与终态（前端任务计划区域展示用）
                 "task_id": task.id if task is not None else None,

@@ -122,7 +122,7 @@ const dirty = computed(() => {
 .block { display: flex; flex-direction: column; gap: 6px; }
 .block-title { font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
 .block-title em { font-style: normal; font-size: 11px; font-weight: 500; padding: 0 6px; border-radius: 8px; }
-.required { color: #fff; background: var(--brand-primary, #6366f1); }
+.required { color: #fff; background: var(--brand-primary); }
 .optional { color: var(--text-secondary); background: var(--bg-elevated, #f1f5f9); }
 .block-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -137,8 +137,8 @@ const dirty = computed(() => {
   border: 1px solid var(--border-subtle, #e5e7eb); background: var(--bg-elevated, #f8fafc);
   display: flex; flex-direction: column; gap: 4px; transition: border-color 0.15s, box-shadow 0.15s;
 }
-.style-card:hover { border-color: var(--brand-primary, #6366f1); }
-.style-card.active { border-color: var(--brand-primary, #6366f1); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15); }
+.style-card:hover { border-color: var(--brand-primary); }
+.style-card.active { border-color: var(--brand-primary); box-shadow: 0 0 0 2px rgba(53, 179, 166, 0.15); }
 .card-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .card-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
 .counter { font-size: 11px; color: var(--text-tertiary); text-align: right; }

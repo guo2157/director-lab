@@ -22,10 +22,10 @@ const queryClient = useQueryClient()
 // --- Tabs（带图标与描述） ---
 const activeTab = ref('comfyui')
 const tabs = [
-  { key: 'comfyui', label: 'ComfyUI', icon: '🖥️', desc: '多实例加权负载均衡配置' },
-  { key: 'llm', label: '语言模型', icon: '🤖', desc: '剧本评估与解析模型配置' },
-  { key: 'workflows', label: '工作流', icon: '🧩', desc: '工作流资产管理说明' },
-  { key: 'about', label: '关于', icon: 'ℹ️', desc: '系统信息' },
+  { key: 'comfyui', label: 'ComfyUI', desc: '多实例加权负载均衡' },
+  { key: 'llm', label: '语言模型', desc: '剧本评估与解析模型' },
+  { key: 'workflows', label: '工作流', desc: '工作流资产管理' },
+  { key: 'about', label: '关于', desc: '系统信息' },
 ]
 
 // --- Settings data ---
@@ -325,7 +325,6 @@ const downloadWorkflow = (wf: Workflow) => {
           :class="{ active: activeTab === tab.key }"
           @click="activeTab = tab.key"
         >
-          <span class="nav-icon">{{ tab.icon }}</span>
           <div class="nav-text">
             <div class="nav-label">{{ tab.label }}</div>
             <div class="nav-desc">{{ tab.desc }}</div>
@@ -603,7 +602,6 @@ const downloadWorkflow = (wf: Workflow) => {
           <n-card class="settings-card" :bordered="false">
             <div class="about-brand">🎬</div>
             <h3 class="about-title">Director Lab 漫剧生产系统</h3>
-            <p class="hint-text">基于 ComfyUI 的 AI 漫剧生产工作台</p>
             <div class="about-summary">
               <p class="summary-text">
                 <strong>完全免费 · 本地化部署</strong>：所有算力来自自建 ComfyUI 实例，无需云端 API，零持续费用。支持多台闲置 GPU 机器组池，配合内网穿透即可扩展。
@@ -674,10 +672,6 @@ const downloadWorkflow = (wf: Workflow) => {
 .nav-item.active .nav-desc {
   color: rgba(255, 255, 255, 0.75);
 }
-.nav-icon {
-  font-size: 18px;
-  line-height: 1;
-}
 .nav-text { min-width: 0; }
 .nav-label {
   font-size: 14px;
@@ -700,20 +694,17 @@ const downloadWorkflow = (wf: Workflow) => {
 .page-header {
   margin: 4px 0 16px;
 }
-.page-title {
+/* 设置页是二级页面：沿用全局衬线标题，字号收敛一级 */
+.settings-content .page-title {
   font-size: 20px;
-  font-weight: 700;
   margin: 0 0 4px;
-  color: var(--text-primary);
 }
-.page-subtitle {
-  font-size: 13px;
-  color: var(--text-secondary);
+.settings-content .page-subtitle {
   margin: 0;
 }
 .settings-card {
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
 }
 
 /* --- Section label --- */

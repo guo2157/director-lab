@@ -2,8 +2,7 @@
 import { computed } from 'vue'
 import logoUrl from '@/assets/logo.svg'
 import { useRoute, useRouter } from 'vue-router'
-import { NLayout, NLayoutHeader, NLayoutContent, NMenu, NButton, NTooltip } from 'naive-ui'
-import type { MenuOption } from 'naive-ui'
+import { NLayout, NLayoutHeader, NLayoutContent } from 'naive-ui'
 import ProjectProgressRail from '@/components/ProjectProgressRail.vue'
 
 const route = useRoute()
@@ -14,40 +13,28 @@ const isProjectPage = computed(() => Boolean(projectId.value))
 /** 导演台为固定视口布局：页面级滚动条不滚动，改由页面内部面板各自滚动 */
 const isFixedViewport = computed(() => route.name === 'director')
 
-const topMenuOptions: MenuOption[] = [
+/** 全局导航固定四个入口：项目内的步骤导航交由左侧流程轨承担 */
+const topMenuOptions = [
   { label: '导演台', key: 'director' },
   { label: '项目', key: 'projects' },
   { label: '任务中心', key: 'jobs' },
   { label: '设置', key: 'settings' },
 ]
 
-const projectMenuOptions: MenuOption[] = [
-  { label: '剧本', key: 'script' },
-  { label: '资产库', key: 'assets' },
-  // 分镜图：资产库人工审核通过后进入，逐镜出图并人工确认
-  { label: '分镜图', key: 'storyboard-images' },
-  { label: '分镜看板', key: 'storyboard' },
-  { label: '合成与导出', key: 'compose' },
-]
+/** 项目页激活全局的「项目」入口 */
+const activeKey = computed(() => {
+  const name = String(route.name ?? '')
+  return isProjectPage.value ? 'projects' : name
+})
 
-const activeKey = computed(() => route.name as string)
-
-function handleMenuSelect(key: string) {
-  if (isProjectPage.value) {
-    router.push(`/project/${projectId.value}/${key}`)
-  } else {
-    router.push({ name: key })
-  }
+function goMenu(key: string) {
+  void router.push({ name: key })
 }
 
-const menuOptions = computed(() => (isProjectPage.value ? projectMenuOptions : topMenuOptions))
-
-/** 当前页面标题（用于面包屑末级展示） */
 const currentTitle = computed(() => String(route.meta?.title ?? ''))
 
-/** 返回项目列表（首页） */
 function goProjects() {
-  if (isProjectPage.value) router.push('/')
+  if (isProjectPage.value) void router.push('/')
 }
 </script>
 
@@ -55,32 +42,32 @@ function goProjects() {
   <n-layout class="app-layout">
     <n-layout-header bordered class="app-header">
       <div class="header-inner">
-        <div class="logo" @click="router.push('/')">
-          <img class="logo-icon" :src="logoUrl" alt="Director Lab logo" />
-          <span class="logo-text">Director Lab</span>
+        <div class="brand" @click="router.push('/')">
+          <img class="brand-mark" :src="logoUrl" alt="Director Lab" />
+          <span class="brand-name">Director Lab</span>
         </div>
-        <!-- 项目内页面：返回项目列表入口 + 面包屑，明确当前位置与出口 -->
+
+        <nav class="top-nav" aria-label="主导航">
+          <button
+            v-for="item in topMenuOptions"
+            :key="item.key"
+            type="button"
+            class="nav-item"
+            :class="{ 'is-active': activeKey === item.key }"
+            @click="goMenu(item.key)"
+          >
+            {{ item.label }}
+          </button>
+        </nav>
+
         <div v-if="isProjectPage" class="crumb-bar">
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button size="small" quaternary class="back-btn" @click="goProjects()">
-                ← 项目列表
-              </n-button>
-            </template>
-            返回项目列表（首页）
-          </n-tooltip>
-          <span class="crumb-sep">/</span>
+          <button type="button" class="crumb-back" @click="goProjects()">项目列表</button>
+          <span class="crumb-sep" aria-hidden="true"></span>
           <span class="crumb-current">{{ currentTitle }}</span>
         </div>
-        <n-menu
-          class="header-menu"
-          mode="horizontal"
-          :options="menuOptions"
-          :value="activeKey"
-          @update:value="handleMenuSelect"
-        />
       </div>
     </n-layout-header>
+
     <n-layout-content class="app-content" :class="{ 'is-fixed': isFixedViewport }">
       <div class="content-body">
         <ProjectProgressRail v-if="isProjectPage && projectId" :project-id="projectId" />
@@ -97,98 +84,168 @@ function goProjects() {
   height: 100vh;
   height: 100dvh;
 }
+
 .app-header {
-  height: var(--app-header-height, 56px);
+  height: var(--app-header-height, 52px);
   display: flex;
   align-items: center;
-  background: var(--bg-panel);
+  background: var(--bg-sunken);
   border-bottom: 1px solid var(--border-subtle);
 }
+
 .header-inner {
   display: flex;
   align-items: center;
-  gap: 32px;
+  gap: 36px;
   width: 100%;
-  max-width: 1600px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 0 24px;
+  padding: 0 24px 0 20px;
   min-width: 0;
 }
-.logo {
-  cursor: pointer;
-  user-select: none;
-  flex-shrink: 0;
+
+.brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+  padding-right: 4px;
 }
-.logo-icon {
-  width: 28px;
-  height: 28px;
+
+.brand-mark {
+  width: 22px;
+  height: 22px;
   display: block;
+  filter: saturate(0.9);
 }
-.logo-text {
+
+.brand-name {
+  font-family: var(--font-display);
   font-size: 16px;
-  font-weight: 700;
-  color: var(--brand-primary);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+  white-space: nowrap;
 }
-.header-menu {
+
+.top-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex: 1;
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-/* 顶部导航菜单字体加大并加粗（Naive UI 默认 14px/400），提升辨识度 */
-.header-menu :deep(.n-menu-item-content) {
-  font-size: 17px;
+.top-nav::-webkit-scrollbar {
+  display: none;
 }
-.header-menu :deep(.n-menu-item-content .n-menu-item-content-header) {
-  font-size: 17px;
+
+.nav-item {
+  position: relative;
+  flex-shrink: 0;
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0 14px;
+  height: var(--app-header-height, 52px);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.nav-item::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: -1px;
+  height: 1px;
+  background: transparent;
+  transition: background var(--transition-fast);
+}
+
+.nav-item:hover {
+  color: var(--text-primary);
+}
+
+.nav-item.is-active {
+  color: var(--text-primary);
   font-weight: 600;
-  letter-spacing: 0.3px;
 }
+
+.nav-item.is-active::after {
+  background: var(--brand-primary);
+}
+
 .crumb-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   flex-shrink: 0;
   min-width: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--border-subtle);
 }
-.back-btn {
-  font-size: 14px;
+
+.crumb-back {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  font-size: 13px;
   color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition-fast);
 }
-.back-btn:hover {
-  color: var(--brand-primary);
+
+.crumb-back:hover {
+  color: var(--brand-hover);
 }
+
 .crumb-sep {
-  font-size: 14px;
-  color: var(--text-tertiary);
+  width: 1px;
+  height: 12px;
+  background: var(--border-strong);
 }
+
 .crumb-current {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  max-width: 160px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .app-content {
   background: var(--bg-base);
-  height: calc(100vh - var(--app-header-height, 56px));
-  height: calc(100dvh - var(--app-header-height, 56px));
+  height: calc(100vh - var(--app-header-height, 52px));
+  height: calc(100dvh - var(--app-header-height, 52px));
   overflow-y: auto;
 }
+
 .content-body {
   display: flex;
   min-height: 100%;
   width: 100%;
-  max-width: 1600px;
+  max-width: 1680px;
   margin: 0 auto;
 }
+
 .content-main {
   flex: 1;
   min-width: 0;
 }
+
 .app-content.is-fixed {
   overflow: hidden;
 }
@@ -203,37 +260,26 @@ function goProjects() {
 
 @media (max-width: 768px) {
   .header-inner {
-    gap: 12px;
+    gap: 14px;
     padding: 0 12px;
   }
-  .logo-text {
+  .brand-name {
     font-size: 14px;
   }
-  .header-menu {
-    overflow-x: auto;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
+  .nav-item {
+    padding: 0 10px;
+    font-size: 13px;
   }
-  .header-menu::-webkit-scrollbar {
-    display: none;
+  .nav-item::after {
+    left: 10px;
+    right: 10px;
   }
-  .header-menu :deep(.n-menu-item),
-  .header-menu :deep(.n-menu-item-content) {
-    flex-shrink: 0;
-  }
-  .header-menu :deep(.n-menu-item-content),
-  .header-menu :deep(.n-menu-item-content .n-menu-item-content-header) {
-    font-size: 14px;
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .content-body {
-    flex-direction: column;
-  }
-  /* 窄屏优先保证返回入口可见，隐藏面包屑末级文字 */
   .crumb-sep,
   .crumb-current {
     display: none;
+  }
+  .content-body {
+    flex-direction: column;
   }
 }
 </style>

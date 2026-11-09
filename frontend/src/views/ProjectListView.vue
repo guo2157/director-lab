@@ -278,7 +278,6 @@ async function handleCreate() {
       <div class="header-left">
         <div>
           <h1 class="page-title">项目列表</h1>
-          <p class="page-subtitle">管理你的漫剧创作项目</p>
         </div>
         <div v-if="projects.length" class="header-stats">
           <span class="stat-chip">{{ projects.length }} 个项目</span>
@@ -531,18 +530,6 @@ async function handleCreate() {
   border-color: rgba(52, 211, 153, 0.35);
   background: rgba(52, 211, 153, 0.08);
 }
-.page-title {
-  margin: 0;
-  font-size: 20px;
-  line-height: 28px;
-  font-weight: 700;
-}
-.page-subtitle {
-  margin: 4px 0 0;
-  font-size: 14px;
-  line-height: 20px;
-  color: var(--text-secondary);
-}
 .config-banner {
   display: flex;
   align-items: center;
@@ -598,7 +585,7 @@ async function handleCreate() {
 .filter-chip.active {
   border-color: var(--brand-primary);
   color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(53, 179, 166, 0.12);
 }
 .sort-group {
   display: flex;
@@ -625,7 +612,7 @@ async function handleCreate() {
 }
 .sort-btn.active {
   color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(53, 179, 166, 0.12);
 }
 .state-block {
   display: flex;
@@ -663,7 +650,7 @@ async function handleCreate() {
 }
 .launch-card:hover {
   border-color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.06);
+  background: rgba(53, 179, 166, 0.06);
   color: var(--brand-primary);
 }
 .launch-plus {
@@ -708,7 +695,7 @@ async function handleCreate() {
 }
 .project-card:hover {
   border-color: var(--brand-primary);
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 2px 8px rgba(53, 179, 166, 0.15);
   transform: translateY(-2px);
 }
 .cover {
@@ -726,13 +713,13 @@ async function handleCreate() {
   user-select: none;
 }
 .cover-9-16 {
-  background: linear-gradient(135deg, #312e81 0%, var(--brand-primary) 100%);
+  background: #17332f;
 }
 .cover-16-9 {
-  background: linear-gradient(135deg, #1e3a5f 0%, #3b82f6 100%);
+  background: #142a2e;
 }
 .cover-1-1 {
-  background: linear-gradient(135deg, #3f2d5b 0%, #8b5cf6 100%);
+  background: #1a2b30;
 }
 .status-tag {
   position: absolute;
@@ -861,7 +848,7 @@ async function handleCreate() {
 }
 .ratio-card.active {
   border-color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(53, 179, 166, 0.12);
 }
 .ratio-shape {
   display: block;
@@ -911,7 +898,7 @@ async function handleCreate() {
 }
 .type-card.active {
   border-color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(53, 179, 166, 0.12);
 }
 .type-name {
   font-size: 14px;
@@ -950,7 +937,7 @@ async function handleCreate() {
 }
 .style-toggle:hover,
 .style-toggle.open {
-  border-color: var(--brand-primary, #6366f1);
+  border-color: var(--brand-primary);
 }
 .toggle-title {
   font-size: 13px;
@@ -965,7 +952,7 @@ async function handleCreate() {
 }
 .toggle-arrow {
   font-size: 12px;
-  color: var(--brand-primary, #6366f1);
+  color: var(--brand-primary);
   white-space: nowrap;
 }
 .style-body {

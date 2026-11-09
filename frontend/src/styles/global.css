@@ -1,33 +1,47 @@
-/* ===== 全局设计令牌 ===== */
+/* ============================================================
+   Director Lab · 设计令牌 v2
+   方向：暗房墨青底 + 青瓷工艺色，服务漫剧制作台
+   ============================================================ */
 :root {
   /* 布局常量 */
-  --app-header-height: 56px;
+  --app-header-height: 52px;
+  --app-rail-width: 212px;
 
-  /* 背景层级 */
-  --bg-base: #101014;
-  --bg-panel: #18181d;
-  --bg-elevated: #202027;
+  /* 背景层级：墨青，而非中性近黑 */
+  --bg-base: #0f1618;
+  --bg-panel: #151e21;
+  --bg-elevated: #1d272b;
+  --bg-sunken: #0a1113;
 
-  /* 边框 */
-  --border-subtle: #26262e;
-  --border-strong: #3a3a45;
+  /* 边框：层级的主要载体 */
+  --border-subtle: #243035;
+  --border-strong: #37454c;
 
-  /* 品牌与危险色 */
-  --brand-primary: #6366f1;
-  --brand-hover: #818cf8;
-  --danger: #ef4444;
+  /* 品牌：青瓷 */
+  --brand-primary: #35b3a6;
+  --brand-hover: #4fd1c2;
+  --brand-deep: #1f7a71;
+  --brand-glow: rgba(53, 179, 166, 0.18);
+  --brand-gradient: linear-gradient(135deg, #35b3a6 0%, #1f7a71 100%);
+  --text-on-brand: #06201d;
+
+  /* 语义色 */
+  --danger: #e04e39;
   --brand-error: var(--danger);
-  --text-on-brand: #ffffff;
+  --state-success: #57c98a;
+  --state-warning: #d9a03c;
+  --accent-amber: #c79a3b;
 
   /* 文本层级 */
-  --text-primary: #e5e7eb;
-  --text-secondary: #9ca3af;
-  --text-tertiary: #4b5563;
+  --text-primary: #e6ecee;
+  --text-secondary: #93a5ac;
+  --text-tertiary: #5a6c74;
   --text-disabled: var(--text-tertiary);
 
-  /* 语义状态色 */
-  --state-success: #22c55e;
-  --state-warning: #f59e0b;
+  /* 字体 */
+  --font-display: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'STSong', serif;
+  --font-ui: 'HarmonyOS Sans SC', 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 
   /* 间距体系 */
   --sp-1: 4px;
@@ -41,23 +55,19 @@
   --sp-12: 48px;
   --sp-16: 64px;
 
-  /* 圆角体系 */
-  --radius-sm: 8px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
-  --radius-pill: 980px;
+  /* 圆角体系：收紧，避免统一大圆角 */
+  --radius-sm: 2px;
+  --radius: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 6px;
+  --radius-pill: 2px;
 
-  /* 阴影层级 */
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25), 0 4px 14px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 4px 14px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.4);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25), 0 4px 14px rgba(0, 0, 0, 0.3);
-  --shadow-lift: 0 4px 14px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.4);
-
-  /* 品牌渐变 */
-  --brand-gradient: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
-  --brand-glow: rgba(99, 102, 241, 0.2);
+  /* 阴影：深色界面改用边框表达层级 */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-card: none;
+  --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lift: 0 8px 28px rgba(0, 0, 0, 0.48);
 
   /* 动效 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -82,130 +92,211 @@ body {
   margin: 0;
   background: var(--bg-base);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 ::selection {
-  background: rgba(99, 102, 241, 0.35);
+  background: rgba(53, 179, 166, 0.28);
+  color: #ffffff;
 }
 
 /* ===== 滚动条 ===== */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
-
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--bg-sunken);
 }
-
 ::-webkit-scrollbar-thumb {
   background: var(--border-strong);
-  border-radius: 4px;
+  border: 3px solid var(--bg-sunken);
+  border-radius: 6px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-tertiary);
 }
 
 /* ===== 页面骨架 ===== */
+.page {
+  padding: var(--sp-6) var(--sp-8) var(--sp-16);
+  min-width: 0;
+}
+
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-3);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .page-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
   color: var(--text-primary);
 }
-.header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
-.page-hint { font-size: 13px; color: var(--text-secondary); }
 
-.page-body {
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 24px;
+.page-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 68ch;
 }
 
-/* ===== 统一状态标签 ===== */
+.header-left {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-4);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.page-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.page-body {
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: var(--sp-6) var(--sp-8) var(--sp-16);
+}
+
+/* ===== 统一状态标签：小方标 + 左侧色条 ===== */
 .status-tag {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 10px;
+  padding: 1px 8px 1px 7px;
   font-size: 12px;
   font-weight: 500;
-  line-height: 20px;
-  border-radius: var(--radius-pill);
+  line-height: 19px;
+  letter-spacing: 0.01em;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
+  border-left-width: 2px;
   white-space: nowrap;
 }
 
 .status-tag.is-pending {
   color: var(--state-warning);
-  background: rgba(245, 158, 11, 0.12);
-  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(217, 160, 60, 0.1);
+  border-color: rgba(217, 160, 60, 0.26);
 }
-
 .status-tag.is-running {
   color: var(--brand-hover);
-  background: rgba(99, 102, 241, 0.12);
-  border-color: rgba(99, 102, 241, 0.3);
+  background: rgba(53, 179, 166, 0.1);
+  border-color: rgba(53, 179, 166, 0.28);
 }
-
 .status-tag.is-succeeded {
   color: var(--state-success);
-  background: rgba(34, 197, 94, 0.12);
-  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(87, 201, 138, 0.1);
+  border-color: rgba(87, 201, 138, 0.26);
 }
-
 .status-tag.is-failed {
   color: var(--danger);
-  background: rgba(239, 68, 68, 0.12);
-  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(224, 78, 57, 0.1);
+  border-color: rgba(224, 78, 57, 0.3);
 }
-
-/* 生成中：带呼吸点，区分「排队/生成中」与普通运行态 */
 .status-tag.is-generating {
-  color: var(--brand-hover);
-  background: rgba(99, 102, 241, 0.12);
-  border-color: rgba(99, 102, 241, 0.35);
+  color: #ff8a72;
+  background: rgba(224, 78, 57, 0.1);
+  border-color: rgba(224, 78, 57, 0.32);
   animation: status-tag-pulse 1.6s ease-in-out infinite;
 }
-
 @keyframes status-tag-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.62; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
 }
-
 .status-tag.is-locked {
   color: var(--text-secondary);
-  background: rgba(156, 163, 175, 0.12);
-  border-color: rgba(156, 163, 175, 0.3);
+  background: rgba(147, 165, 172, 0.08);
+  border-color: rgba(147, 165, 172, 0.24);
 }
-
 .status-tag.is-stale {
   color: var(--text-tertiary);
-  background: rgba(75, 85, 99, 0.15);
-  border-color: rgba(75, 85, 99, 0.35);
+  background: rgba(90, 108, 116, 0.12);
+  border-color: rgba(90, 108, 116, 0.3);
 }
 
-/* ===== 统一卡片 ===== */
+/* ===== 统一卡片：以边框分隔，不堆阴影 ===== */
 .panel-card {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  padding: 20px;
+  padding: var(--sp-5);
 }
 
-/* ===== 全局字号兜底：按钮与正文不小于 13px ===== */
+/* ===== 分节标题 ===== */
+.section-title {
+  margin: 0 0 var(--sp-3);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  color: var(--text-primary);
+}
+
+/* ===== Naive UI 对齐：统一圆角与边框语言 ===== */
+.n-card,
+.n-modal,
+.n-dialog {
+  border-radius: var(--radius-lg) !important;
+}
+.n-card {
+  border: 1px solid var(--border-subtle) !important;
+  box-shadow: none !important;
+}
+.n-input,
+.n-base-selection,
+.n-button {
+  border-radius: var(--radius) !important;
+}
+
+/* ===== 全局字号兜底 ===== */
 .n-button--tiny {
   font-size: 13px;
+}
+
+/* ===== 可访问性基线 ===== */
+:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .page {
+    padding: var(--sp-4) var(--sp-4) var(--sp-12);
+  }
+  .page-title {
+    font-size: 22px;
+  }
 }

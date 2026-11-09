@@ -184,6 +184,7 @@ function assetImgUrl(asset: Asset): string {
 }
 
 function openReplace(asset: Asset) {
+  drawerVisible.value = false
   replaceTarget.value = asset
   replaceFileObj.value = null
   if (replacePreview.value) {
@@ -326,6 +327,7 @@ function startRegenPoll(jobId: string) {
 }
 
 async function openRegenerate(asset: Asset) {
+  drawerVisible.value = false
   regenAsset.value = asset
   regenVisible.value = true
   regenLoading.value = true
@@ -1273,9 +1275,17 @@ function clearBatch() {
     </div>
 
     <!-- Drawer -->
-    <n-drawer v-model:show="drawerVisible" :width="'min(480px, 100vw)'">
-      <n-drawer-content title="资产详情" closable>
-        <template v-if="activeAsset">
+    <n-modal
+      v-model:show="drawerVisible"
+      preset="card"
+      title="资产详情"
+      closable
+      :bordered="false"
+      :style="{ width: 'min(1080px, 92vw)' }"
+      :content-style="{ maxHeight: 'calc(85vh - 56px)', overflowY: 'auto' }"
+    >
+      <template v-if="activeAsset">
+        <div class="detail-grid">
           <div class="drawer-preview">
             <n-image
               v-if="activeAsset.url"
@@ -1285,6 +1295,7 @@ function clearBatch() {
             />
             <div v-else class="preview-placeholder">暂无预览</div>
           </div>
+          <div class="detail-body">
           <n-space vertical :size="16">
             <div class="drawer-title-row">
               <span class="drawer-asset-name">{{ activeAsset.name || activeAsset.id }}</span>
@@ -1310,9 +1321,10 @@ function clearBatch() {
               <n-button size="small" quaternary @click="lockMutation.mutate({ id: activeAsset.id, lock: !activeAsset.locked })">{{ activeAsset.locked ? '解锁' : '锁定' }}</n-button>
             </n-space>
           </n-space>
-        </template>
-      </n-drawer-content>
-    </n-drawer>
+          </div>
+        </div>
+      </template>
+    </n-modal>
 
     <!-- 上传替换确认弹窗 -->
     <n-modal v-model:show="replaceVisible" preset="card" style="width: 640px" title="上传替换资产">
@@ -1503,7 +1515,7 @@ function clearBatch() {
   flex-shrink: 0;
   font-size: 12px;
   font-weight: 600;
-  color: var(--brand-primary, #6366f1);
+  color: var(--brand-primary);
   padding-top: 2px;
 }
 .gen-inflight-items { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
@@ -1519,7 +1531,7 @@ function clearBatch() {
 }
 .gen-inflight-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gen-inflight-state { color: #b45309; display: inline-flex; align-items: center; gap: 6px; }
-.gen-inflight-state.running { color: var(--brand-primary, #6366f1); }
+.gen-inflight-state.running { color: var(--brand-primary); }
 .gen-inflight-state.queued { color: var(--text-secondary, #64748b); }
 .gen-mini-bar { width: 54px; }
 .gen-done-hint { font-size: 12px; color: #15803d; }
@@ -1542,12 +1554,12 @@ function clearBatch() {
   color: var(--text-secondary, #64748b);
   border: 1px solid transparent;
 }
-.batch-chip.running { background: rgba(99, 102, 241, 0.12); color: #4338ca; border-color: rgba(99, 102, 241, 0.3); }
+.batch-chip.running { background: rgba(53, 179, 166, 0.12); color: #4338ca; border-color: rgba(53, 179, 166, 0.3); }
 .batch-chip.fail { background: rgba(239, 68, 68, 0.1); color: #b91c1c; border-color: rgba(239, 68, 68, 0.3); }
 .gen-failed { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #b91c1c; }
 .gen-failed-title { font-weight: 600; }
 .gen-failed-item { color: #b45309; }
-.craft-card.inflight { border-color: rgba(99, 102, 241, 0.45); background: rgba(99, 102, 241, 0.05); }
+.craft-card.inflight { border-color: rgba(53, 179, 166, 0.45); background: rgba(53, 179, 166, 0.05); }
 .craft-card.failed { border-color: rgba(239, 68, 68, 0.4); }
 .assets-page {
   padding: 16px; min-height: calc(100vh - var(--app-header-height, 56px));
@@ -1581,7 +1593,7 @@ function clearBatch() {
 .assets-main { flex: 1; min-width: 0; }
 .craft-section { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); display: flex; flex-direction: column; gap: 10px; }
 .craft-card.category-card { cursor: pointer; transition: border-color 0.2s; }
-.craft-card.category-card:hover { border-color: var(--brand-primary, #6366f1); }
+.craft-card.category-card:hover { border-color: var(--brand-primary); }
 .craft-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .craft-title { font-size: 14px; font-weight: 600; color: var(--text-primary, #333); }
 .craft-sub { font-size: 12px; color: var(--text-secondary, #64748b); margin-right: auto; }
@@ -1609,10 +1621,10 @@ function clearBatch() {
 .asset-group-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--asset-gap); }
 .asset-card {
   background: var(--bg-panel); border-radius: var(--asset-card-radius); overflow: hidden; cursor: pointer;
-  border: 1px solid var(--border-subtle); transition: box-shadow 0.2s; position: relative;
+  border: 1px solid var(--border-subtle); transition: border-color 0.2s; position: relative;
   animation: asset-card-in var(--asset-enter-duration) ease both;
 }
-.asset-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+.asset-card:hover { border-color: var(--brand-primary); }
 @keyframes asset-card-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -1648,7 +1660,7 @@ function clearBatch() {
   font-size: 12px; line-height: 1; text-align: left; cursor: pointer;
   transition: background 0.2s, color 0.2s;
 }
-.asset-voice-bar:hover { background: var(--brand-primary, #6366f1); color: #fff; }
+.asset-voice-bar:hover { background: var(--brand-primary); color: #fff; }
 .asset-voice-bar:hover .avb-value { color: rgba(255, 255, 255, 0.85); }
 .avb-icon { font-size: 13px; }
 .avb-label { font-weight: 600; flex-shrink: 0; }
@@ -1659,7 +1671,19 @@ function clearBatch() {
 }
 .avb-arrow { font-size: 14px; opacity: 0.6; flex-shrink: 0; }
 .asset-card.is-portrait .asset-voice-bar { grid-column: 1 / -1; }
-.drawer-preview { margin-bottom: 16px; }
+/* 居中大弹窗：左图右文，窄屏回落单列 */
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.detail-body { min-width: 0; }
+.drawer-preview { margin-bottom: 0; }
+@media (max-width: 900px) {
+  .detail-grid { grid-template-columns: 1fr; gap: 16px; }
+  .drawer-preview { margin-bottom: 8px; }
+}
 .preview-img { width: 100%; border-radius: 8px; }
 .preview-placeholder { width: 100%; height: 200px; background: var(--bg-elevated); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }
 .field-label { color: var(--text-secondary); font-size: 13px; }
@@ -1681,7 +1705,7 @@ function clearBatch() {
 }
 
 /* 详情抽屉：大图预览、元信息、提示词与版本记录 */
-.drawer-preview-img { width: 100%; max-height: 340px; display: block; }
+.drawer-preview-img { width: 100%; max-height: 460px; display: block; }
 .drawer-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .drawer-asset-name { font-size: 16px; font-weight: 600; color: var(--text-primary); }
 .drawer-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 6px 16px; font-size: 13px; color: var(--text-secondary); }
@@ -1691,4 +1715,20 @@ function clearBatch() {
 .drawer-prompt-version { font-size: 12px; color: var(--text-tertiary); }
 .drawer-prompt { font-size: 13px; line-height: 1.6; color: var(--text-secondary); background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 10px 12px; white-space: pre-wrap; word-break: break-word; }
 .drawer-empty { font-size: 13px; color: var(--text-tertiary); }
+
+/* 弹窗标题接入页面衬线标题体系 */
+:deep(.n-card-header__main) {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 宽屏两栏时左栏吸附，右栏长内容滚动时画面保持可见 */
+@media (min-width: 981px) {
+  .detail-grid .drawer-preview {
+    position: sticky;
+    top: 0;
+  }
+}
 </style>

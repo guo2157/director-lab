@@ -12,12 +12,20 @@
 - _compute_concurrency：Mock 模式 1；多实例 = 实例数
 """
 import json
+import tempfile
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from app.main import app
 from app.core.database import make_engine
 from app.models import Base
+
+# 测试临时文件目录：每次 pytest 会话创建唯一目录，
+# 避免固定 /tmp/xxx.png 被其他用户或历史进程占用导致 PermissionError
+# （/tmp 为 sticky 目录，配合 fs.protected_regular 时 root 无法复用他人文件）
+_TMP_DIR = Path(tempfile.mkdtemp(prefix="director-ref-test-"))
 
 
 @pytest.fixture()
@@ -42,9 +50,9 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
     char_names = []
     for i in range(n_chars):
         # D-23 资产门禁：定妆图文件必须真实存在
-        Path(f"/tmp/p{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        Path(_TMP_DIR / f"p{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
-                  name=f"p{i}", version=1, file_path=f"/tmp/p{i}.png", validity="current")
+                  name=f"p{i}", version=1, file_path=str(_TMP_DIR / f"p{i}.png"), validity="current")
         db.add(a)
         db.flush()
         name = f"角色{i}"
@@ -54,9 +62,9 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
     scene_name = None
     if with_scene:
         # D-23 资产门禁：基准图文件必须真实存在
-        Path("/tmp/s0.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        Path(_TMP_DIR / "s0.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         a2 = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene",
-                   name="s0", version=1, file_path="/tmp/s0.png", validity="current")
+                   name="s0", version=1, file_path=str(_TMP_DIR / "s0.png"), validity="current")
         db.add(a2)
         db.flush()
         scene_name = "教室"
@@ -84,8 +92,8 @@ def test_multi_character_slot_priority(client: TestClient):
     media = ref_inject.build_media_params(db, pid, prompt, None)
     db.close()
     assert media == {
-        "ref_identity": "/tmp/p0.png",
-        "ref_character_2": "/tmp/p1.png",
+        "ref_identity": str(_TMP_DIR / "p0.png"),
+        "ref_character_2": str(_TMP_DIR / "p1.png"),
     }
 
 
@@ -99,7 +107,7 @@ def test_character_never_occupies_ref_image(client: TestClient):
     media = ref_inject.build_media_params(db, pid, f"@{names[0]} 独白", ["ref_identity", "ref_image"])
     db.close()
     assert "ref_image" not in media
-    assert media == {"ref_identity": "/tmp/p0.png"}
+    assert media == {"ref_identity": str(_TMP_DIR / "p0.png")}
 
 
 def test_character_slot_overflow_with_ref_image_declared(client: TestClient):
@@ -137,7 +145,7 @@ def test_same_name_character_scene_422(client: TestClient):
     pid = client.post("/api/projects", json={"name": "同名项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
     a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
-              name="x", version=1, file_path="/tmp/x.png", validity="current")
+              name="x", version=1, file_path=str(_TMP_DIR / "x.png"), validity="current")
     db.add(a)
     db.flush()
     # 直接落库绕过 API 校验，模拟历史同名数据
@@ -227,9 +235,9 @@ def _mk_shots_with_prompt(client, n=3):
     try:
         # D-23 资产门禁：基准图文件必须真实存在
         from pathlib import Path
-        Path("/tmp/playground.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        Path(_TMP_DIR / "playground.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         _a = Asset(id=ids.asset_id(), project_id=pid, asset_type="scene",
-                   name="外景地基准", version=1, file_path="/tmp/playground.png", validity="current")
+                   name="外景地基准", version=1, file_path=str(_TMP_DIR / "playground.png"), validity="current")
         _db.add(_a)
         _db.flush()
         _s = _db.get(Scene, scn["id"])
@@ -261,8 +269,8 @@ def test_batch_generate_carries_media(client: TestClient):
         params = (j.get("effective_inputs") or {}).get("params") or {}
         # 角色定妆图（@角色）与所属场景基准图（自动补入）都会注入为参考图
         assert params.get("__media__") == {
-            "ref_identity": "/tmp/p0.png",
-            "ref_scene": "/tmp/playground.png",
+            "ref_identity": str(_TMP_DIR / "p0.png"),
+            "ref_scene": str(_TMP_DIR / "playground.png"),
         }, j
 
 
@@ -279,8 +287,8 @@ def test_regenerate_carries_media(client: TestClient):
     params = (j.get("effective_inputs") or {}).get("params") or {}
     # 重做与单镜/批量行为一致：角色定妆图与所属场景基准图都会注入
     assert params.get("__media__") == {
-        "ref_identity": "/tmp/p0.png",
-        "ref_scene": "/tmp/playground.png",
+        "ref_identity": str(_TMP_DIR / "p0.png"),
+        "ref_scene": str(_TMP_DIR / "playground.png"),
     }
 
 

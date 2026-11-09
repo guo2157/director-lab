@@ -98,3 +98,113 @@ def retry_task(db: Session, task: AgentTask, note: str | None = None) -> bool:
     """任务重试：failed → running（由 job.retry / job.quality_retry 等确定性事件触发）。
     与统一 Task 层保持两层状态一致；completed/cancelled 终态不可重试。"""
     return transition_task(db, task, "running", result_summary=note)
+
+
+# ── 父 Agent 结果聚合器（Phase 2） ──────────────────────────────────
+
+
+def aggregate_task_results(
+    db: Session,
+    *,
+    task_id: str | None = None,
+    agent_task_id: str | None = None,
+) -> dict:
+    """收集任务所有子任务（TaskStage）结果并写库（Phase 2 结果聚合）。
+
+    - 定位：优先按统一 Task id；也可按 AgentTask id 反查（唯一性由
+      Task.agent_task_id 保证，重复则取最新一条）
+    - 统计：total（子任务总数）/ items（succeeded 数）/ errors（failed 数）/
+      skipped / cancelled，并在任一阶段未到达终态时标记 incomplete=True
+    - 落库：以 result_type="aggregate" 的 TaskResult 幂等保存（存在则更新 data，
+      不存在则新增），供前端任务卡片与后续完整性校验使用
+    - 缺失标记：任务不存在返回 error=task_not_found；终态任务但无任何阶段或
+      无结果卡片时以字段体现，不虚构成功
+    """
+    from sqlalchemy import select
+
+    from app.models.ids import task_result_id
+    from app.models.task import Task, TaskResult, TaskStage
+
+    task: Task | None = None
+    if task_id:
+        task = db.get(Task, task_id)
+    elif agent_task_id:
+        task = db.scalars(
+            select(Task).where(Task.agent_task_id == agent_task_id).order_by(Task.created_at.desc()).limit(1)
+        ).first()
+    if task is None:
+        return {
+            "task_id": task_id or agent_task_id or "",
+            "error": "task_not_found",
+            "total": 0,
+            "items": 0,
+            "errors": 0,
+            "skipped": 0,
+            "cancelled": 0,
+            "incomplete": False,
+            "stage_items": [],
+            "error_items": [],
+        }
+
+    stages = (
+        db.query(TaskStage)
+        .filter(TaskStage.task_id == task.id)
+        .order_by(TaskStage.stage_index)
+        .all()
+    )
+    stage_items: list[dict] = []
+    error_items: list[dict] = []
+    errors = skipped = cancelled = unfinished = 0
+    for s in stages:
+        rec = {
+            "stage_id": s.id,
+            "stage_key": s.stage_key,
+            "stage_name": s.stage_name,
+            "status": s.status,
+            "progress": s.progress,
+            "result": s.result,
+        }
+        stage_items.append(rec)
+        if s.status == "failed":
+            errors += 1
+            error_items.append(
+                {"stage_key": s.stage_key, "stage_name": s.stage_name, "result": s.result}
+            )
+        elif s.status == "skipped":
+            skipped += 1
+        elif s.status == "cancelled":
+            cancelled += 1
+        elif s.status in ("pending", "running"):
+            unfinished += 1
+
+    agg = {
+        "task_id": task.id,
+        "agent_task_id": task.agent_task_id,
+        "task_status": task.status,
+        "total": len(stages),
+        "items": len(stages) - errors - skipped - cancelled - unfinished,
+        "errors": errors,
+        "skipped": skipped,
+        "cancelled": cancelled,
+        "incomplete": unfinished > 0,
+        "stage_items": stage_items,
+        "error_items": error_items,
+    }
+    existing = (
+        db.query(TaskResult)
+        .filter(TaskResult.task_id == task.id, TaskResult.result_type == "aggregate")
+        .first()
+    )
+    if existing is not None:
+        existing.data = agg
+    else:
+        db.add(
+            TaskResult(
+                id=task_result_id(),
+                task_id=task.id,
+                result_type="aggregate",
+                data=agg,
+            )
+        )
+    db.flush()
+    return agg

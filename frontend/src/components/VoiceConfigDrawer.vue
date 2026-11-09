@@ -413,31 +413,29 @@ onBeforeUnmount(stopPreviewPoll)
 .drawer-head { display: flex; align-items: baseline; gap: 10px; }
 .drawer-title { font-size: 16px; font-weight: 700; }
 .drawer-char {
-  font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
-  color: var(--brand-primary, #6366f1);
-  background: color-mix(in srgb, var(--brand-primary, #6366f1) 12%, transparent);
+  font-size: 13px; font-weight: 500; padding: 1px 8px; border-radius: var(--radius-sm);
+  color: var(--brand-primary);
+  background: color-mix(in srgb, var(--brand-primary) 12%, transparent);
 }
 
 /* 当前音色横幅 */
 .hero {
   display: flex; align-items: center; gap: 14px;
   padding: 16px 18px; border-radius: 14px; margin-bottom: 16px;
-  background: linear-gradient(135deg,
-    color-mix(in srgb, var(--brand-primary, #6366f1) 16%, transparent),
-    color-mix(in srgb, var(--brand-primary, #6366f1) 4%, transparent));
-  border: 1px solid color-mix(in srgb, var(--brand-primary, #6366f1) 32%, transparent);
+  background: color-mix(in srgb, var(--brand-primary) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-primary) 26%, transparent);
 }
 .hero-empty { background: rgba(128, 128, 128, 0.06); border-style: dashed; border-color: rgba(128, 128, 128, 0.25); }
 .hero-avatar {
-  width: 52px; height: 52px; flex: 0 0 52px; border-radius: 16px;
+  width: 52px; height: 52px; flex: 0 0 52px; border-radius: var(--radius-lg);
   display: flex; align-items: center; justify-content: center;
-  font-size: 22px; font-weight: 700; color: #fff;
-  background: linear-gradient(135deg, var(--brand-primary, #6366f1), #8b5cf6);
-  box-shadow: 0 6px 16px color-mix(in srgb, var(--brand-primary, #6366f1) 35%, transparent);
+  font-size: 22px; font-weight: 700; color: var(--text-on-brand);
+  background: var(--brand-primary);
+  box-shadow: none;
 }
-.hero-avatar.muted { background: rgba(128, 128, 128, 0.35); box-shadow: none; }
+.hero-avatar.muted { background: rgba(128, 128, 128, 0.35); color: var(--text-primary); }
 .hero-main { flex: 1; min-width: 0; }
-.hero-cap { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.72; font-weight: 600; }
+.hero-cap { font-size: 12px; color: var(--text-secondary); }
 .hero-name { font-size: 20px; font-weight: 700; line-height: 1.3; }
 .hero-sub { font-size: 12px; opacity: 0.8; margin-top: 2px; }
 .hero-actions { flex: 0 0 auto; }
@@ -463,13 +461,13 @@ onBeforeUnmount(stopPreviewPoll)
 }
 .speaker-card:hover {
   transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--brand-primary, #6366f1) 45%, transparent);
-  background: color-mix(in srgb, var(--brand-primary, #6366f1) 6%, transparent);
+  border-color: color-mix(in srgb, var(--brand-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--brand-primary) 6%, transparent);
 }
 .speaker-card.active {
-  border-color: var(--brand-primary, #6366f1);
-  background: color-mix(in srgb, var(--brand-primary, #6366f1) 14%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary, #6366f1) 16%, transparent);
+  border-color: var(--brand-primary);
+  background: color-mix(in srgb, var(--brand-primary) 14%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 16%, transparent);
 }
 .sp-name { font-size: 13px; font-weight: 600; }
 .sp-lang { font-size: 11px; opacity: 0.62; }

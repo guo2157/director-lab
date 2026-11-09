@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
-  NButton, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
+  NButton, NSpin, NEmpty, NTag,
   NInput, NTooltip, NCheckbox, NImage, NModal, NRadioGroup, NRadio, NSelect, NProgress, useMessage,
 } from 'naive-ui'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots, updateShot } from '@/api/script'
@@ -933,7 +933,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     <header class="page-header">
       <div class="header-left">
         <h1 class="page-title">分镜看板</h1>
-        <span class="page-hint">逐镜确认分镜图并生成镜头视频，全部完成后进入合成</span>
       </div>
     </header>
     <!-- 集选择器 -->
@@ -1116,9 +1115,17 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     </div>
 
     <!-- Drawer -->
-    <n-drawer v-model:show="drawerVisible" :width="'min(480px, 100vw)'">
-      <n-drawer-content title="镜头详情" closable>
+    <n-modal
+      v-model:show="drawerVisible"
+      preset="card"
+      title="镜头详情"
+      closable
+      :bordered="false"
+      :style="{ width: 'min(1180px, 94vw)' }"
+      :content-style="{ maxHeight: 'calc(85vh - 56px)', overflowY: 'auto' }"
+    >
         <template v-if="activeShot">
+        <div class="detail-grid">
           <!-- 成片优先：分镜看板以完成视频生成为目标，打开抽屉先看到视频 -->
           <div class="drawer-hero">
             <div class="hero-head">
@@ -1142,6 +1149,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
             </div>
           </div>
 
+          <div class="detail-body">
           <!-- 分区一：镜头信息与提示词 -->
           <section class="drawer-section">
             <div class="section-head">
@@ -1196,7 +1204,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               </div>
               <n-input v-model:value="editNegativePrompt" type="textarea" :rows="4" />
               <div class="field-hint">
-                系统统一默认模板，可直接改写；仅在当前工作流声明支持负向提示词时生效并随生成提交，不支持时不显示也不传参。该模板用于降低缺陷概率，不保证完全消除。
+                仅在当前工作流支持负向提示词时提交，可自行改写。
               </div>
             </div>
 
@@ -1249,7 +1257,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               </div>
             </n-spin>
             <div class="ref-source-hint">
-              已传入＝本次生成实际传给接口的图；将传入＝按当前引用与工作流槽位会传入；无可用槽位＝该类型槽位已被占用，本次不会传入；图未生成＝对应定妆图 / 基准图 / 锚定图尚未生成，请先到资产库补齐。
+              已传入＝本次实际入参；将传入＝按引用与槽位会传入；无可用槽位＝本次不传；图未生成＝需先到资产库补齐。
             </div>
           </section>
 
@@ -1306,10 +1314,10 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
             </div>
             <div class="action-hint">
               <template v-if="!activeShot.keyframe_confirmed">
-                当前阶段：待确认分镜图。生成并确认分镜图后，这里会切换为生成视频。
+                当前阶段：待确认分镜图
               </template>
               <template v-else>
-                当前阶段：分镜图已确认。可调整上方视频提示词与参考图后提交视频生成。
+                当前阶段：分镜图已确认
               </template>
             </div>
           </section>
@@ -1325,9 +1333,10 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               :episode="activeShot.episode"
             />
           </section>
+          </div>
+        </div>
         </template>
-      </n-drawer-content>
-    </n-drawer>
+    </n-modal>
     <!-- 重新生成视频确认弹窗：说明会覆盖原视频，确认后取消该镜头历史任务并提交新任务 -->
     <n-modal
       v-model:show="showRegenClipModal"
@@ -1406,8 +1415,8 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .episode-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .episode-label { font-size: 13px; color: var(--text-secondary); }
 .episode-chip { border: 1px solid var(--border-subtle, #e5e7eb); background: var(--bg-panel, #fff); border-radius: 999px; padding: 6px 16px; font-size: 14px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
-.episode-chip:hover { border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
-.episode-chip.active { background: rgba(99, 102, 241, 0.1); border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); font-weight: 600; }
+.episode-chip:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
+.episode-chip.active { background: rgba(53, 179, 166, 0.1); border-color: var(--brand-primary); color: var(--brand-primary); font-weight: 600; }
 .gate-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); }
 .gate-banner.ok { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
 
@@ -1432,7 +1441,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .gen-sub { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
 .gen-state { color: var(--text-secondary, #64748b); }
 .gen-state.queued { color: #b45309; }
-.gen-state.running { color: var(--brand-primary, #6366f1); }
+.gen-state.running { color: var(--brand-primary); }
 .gen-state.ok { color: #15803d; font-weight: 500; }
 .gen-state.fail { color: #b91c1c; }
 .gen-inflight { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -1448,8 +1457,8 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .gen-inflight-name { color: var(--text-primary, #333); }
 .gen-inflight-state { color: var(--text-secondary, #64748b); }
-.gen-inflight-state.running { color: var(--brand-primary, #6366f1); }
-.gen-inflight-state.chained_wait { color: #7c3aed; }
+.gen-inflight-state.running { color: var(--brand-primary); }
+.gen-inflight-state.chained_wait { color: var(--accent-amber); }
 .gen-inflight-more { font-size: 11px; color: var(--text-tertiary); align-self: center; }
 .gate-badge { font-size: 14px; }
 .gate-text { font-size: 13px; color: var(--text-primary, #333); margin-right: auto; }
@@ -1505,7 +1514,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   overflow: hidden;
   cursor: pointer;
   border: 1px solid var(--border-subtle);
-  transition: box-shadow 0.2s;
+  transition: border-color 0.2s;
   position: relative;
 }
 .shot-check {
@@ -1518,7 +1527,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   padding: 2px;
 }
 .shot-card:hover {
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  border-color: var(--brand-primary);
 }
 .shot-thumb {
   width: 100%;
@@ -1732,7 +1741,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   color: #15803d;
 }
 .ref-tag.plan {
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(53, 179, 166, 0.12);
   color: #4338ca;
 }
 .ref-tag.warn {
@@ -1774,7 +1783,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--brand-primary, #6366f1);
+  background: var(--brand-primary);
   color: #fff;
   font-size: 11px;
   line-height: 18px;
@@ -1812,7 +1821,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .field-badge {
   padding: 1px 6px;
   border-radius: 4px;
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(53, 179, 166, 0.12);
   color: #4338ca;
   font-size: 10px;
   line-height: 16px;
@@ -1898,5 +1907,34 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 @media (max-width: 480px) {
   .shots-row { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+}
+
+/* 居中大弹窗：左视频右分区 */
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.detail-body { min-width: 0; }
+.detail-body .drawer-section:first-of-type { padding-top: 0; }
+@media (max-width: 1020px) {
+  .detail-grid { grid-template-columns: 1fr; gap: 16px; }
+}
+
+/* 弹窗标题接入页面衬线标题体系 */
+:deep(.n-card-header__main) {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 宽屏两栏时左栏吸附，右栏长内容滚动时画面保持可见 */
+@media (min-width: 981px) {
+  .detail-grid .drawer-hero {
+    position: sticky;
+    top: 0;
+  }
 }
 </style>

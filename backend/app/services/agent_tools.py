@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.models import Asset, Character, Job, Project, Prop, Scene, Shot, Workflow, ids
 from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.services.progress import derive_progress
+from collections.abc import Callable
 
 
 # 工具权限等级白名单（注册表校验用）
@@ -96,6 +97,60 @@ from app.services.agent_tool_impls import (  # noqa: F401 向后兼容再导出
 )
 
 
+# ── 工具前置条件（Phase 2） ──────────────────────────────────────────
+# 前置条件签名为 (db: Session, **kwargs) -> tuple[bool, str]
+# 返回 (True, "") 表示通过；(False, "阻塞原因") 表示不满足
+ToolPreconditionFn = Callable[[Session, dict], tuple[bool, str]]
+
+
+def _precheck_project_exists(db: Session, **kwargs: object) -> tuple[bool, str]:
+    """项目必须存在。"""
+    project_id = str(kwargs.get("project_id", "") or "")
+    if not project_id or not db.get(Project, project_id):
+        return False, "项目不存在"
+    return True, ""
+
+
+def _precheck_script_exists(db: Session, **kwargs: object) -> tuple[bool, str]:
+    """项目必须有已保存的剧本。"""
+    project_id = str(kwargs.get("project_id", "") or "")
+    p = db.get(Project, project_id)
+    if not p:
+        return False, "项目不存在"
+    if not p.current_script_version_id:
+        return False, "项目尚未保存剧本，请先保存剧本后再执行此操作"
+    return True, ""
+
+
+def _precheck_script_parsed(db: Session, **kwargs: object) -> tuple[bool, str]:
+    """剧本必须已解析并产出镜头。"""
+    from app.models import ParseVersion
+
+    project_id = str(kwargs.get("project_id", "") or "")
+    p = db.get(Project, project_id)
+    if not p:
+        return False, "项目不存在"
+    if not p.current_parse_version_id:
+        return False, "剧本尚未完成解析，请先执行剧本分析后再操作"
+    pv = db.get(ParseVersion, p.current_parse_version_id)
+    if not pv or pv.status not in ("completed",):
+        return False, f"剧本解析状态为 {pv.status if pv else '未知'}，请等待解析完成后再操作"
+    return True, ""
+
+
+def _precheck_assets_exist(db: Session, **kwargs: object) -> tuple[bool, str]:
+    """项目必须有已生成的资产（角色/场景/道具）。"""
+    project_id = str(kwargs.get("project_id", "") or "")
+    if not db.get(Project, project_id):
+        return False, "项目不存在"
+    asset_count = db.scalar(
+        select(func.count(Asset.id)).where(Asset.project_id == project_id)
+    )
+    if not asset_count:
+        return False, "项目尚无资产，请先生成角色/场景/道具图后再操作"
+    return True, ""
+
+
 TOOL_REGISTRY: dict = {
     "get_shot_prompt": {
         "description": "查看分镜生成入参：镜头存储提示词（图/视频/台词）与编译后分镜图提示词预览",
@@ -126,6 +181,7 @@ TOOL_REGISTRY: dict = {
         "max_retries": 0,
         "input_model": ScriptCheckInput,
         "params": {"project_id": "项目 ID（prj_ 前缀）"},
+        "preconditions": [_precheck_project_exists, _precheck_script_exists],
         "fn": tool_script_normalize,
     },
     "script_evaluate": {
@@ -139,6 +195,7 @@ TOOL_REGISTRY: dict = {
         "max_retries": 0,
         "input_model": ScriptCheckInput,
         "params": {"project_id": "项目 ID（prj_ 前缀）"},
+        "preconditions": [_precheck_project_exists, _precheck_script_exists],
         "fn": tool_script_evaluate,
     },
     "batch_request_generate": {
@@ -156,6 +213,7 @@ TOOL_REGISTRY: dict = {
             "project_id": "项目 ID（prj_ 前缀）",
             "entity_ids": "实体 ID 列表（chr_/scn_/prp_ 前缀，最多 20 个）",
         },
+        "preconditions": [_precheck_project_exists, _precheck_script_parsed],
         "fn": tool_batch_request_generate,
     },
     "project_overview": {
@@ -256,6 +314,7 @@ TOOL_REGISTRY: dict = {
             "target": "keyframe/clip/audio/bgm/sfx/character/scene/prop",
             "prompt": "可选：追加提示词",
         },
+        "preconditions": [_precheck_project_exists, _precheck_script_parsed],
         "fn": tool_request_generate,
     },
     "run_generate": {
@@ -304,6 +363,7 @@ TOOL_REGISTRY: dict = {
             "emotional_tone": "可选：情绪基调列表",
             "custom_style_requirements": "可选：自定义风格要求",
         },
+        "preconditions": [_precheck_project_exists],
         "fn": tool_request_style_update,
     },
     "run_style_update": {
@@ -606,6 +666,10 @@ def tool_specs() -> list[dict]:
             "max_retries": spec.get("max_retries", 0),
             "params": spec["params"],
             "input_schema": spec["input_model"].model_json_schema() if spec.get("input_model") else None,
+            "preconditions": [
+                getattr(fn, "__name__", str(fn))
+                for fn in (spec.get("preconditions") or [])
+            ],
         }
         for name, spec in TOOL_REGISTRY.items()
     ]
@@ -633,6 +697,20 @@ def execute_tool(db: Session, name: str, *, approved: bool = False, **kwargs) ->
             error_message=f"工具 {name} 需要人工审批后执行",
             data={"tool": name, "params": kwargs, "permission": spec.get("permission")},
         )
+    # 前置条件检查（Phase 2）：按注册表 preconditions 列表顺序执行，首个失败即阻断
+    preconditions: list = spec.get("preconditions") or []
+    for check in preconditions:
+        ok_flag, msg = check(db, **kwargs)
+        if not ok_flag:
+            return ToolResult(
+                ok=False,
+                error_code="precondition_failed",
+                error_message=msg or f"工具 {name} 前置条件未满足",
+                data={
+                    "tool": name,
+                    "precondition_code": getattr(check, "__name__", "unknown"),
+                },
+            )
     input_model = spec.get("input_model")
     try:
         if input_model is not None:

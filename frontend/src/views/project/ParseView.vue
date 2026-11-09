@@ -667,7 +667,7 @@ const props = computed(() => propsData.value?.items ?? [])
           <div class="episode-toolbar">
             <span class="pane-label">集数解析状态</span>
             <span class="episode-count-tag">{{ statusSummary.succeeded }}/{{ statusTotalEpisodes || 0 }} 集完成</span>
-            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag" style="background:rgba(99,102,241,0.08);color:var(--brand-primary,#6366f1);">选中 {{ flow.selectedEpisodes.length }} 集</span>
+            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag" style="background:rgba(53, 179, 166, 0.08);color:var(--brand-primary,var(--brand-primary));">选中 {{ flow.selectedEpisodes.length }} 集</span>
             <button
               class="quick-chip"
               :class="{ active: showFailedOnly }"
@@ -738,7 +738,7 @@ const props = computed(() => propsData.value?.items ?? [])
 
 <style scoped>
 .formatted-result-card { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 12px; background: var(--bg-panel, #fff); margin-bottom: 12px; overflow: hidden; }
-.formatted-result-head { padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text-primary, #111); border-bottom: 1px solid var(--border-subtle, #e5e7eb); background: rgba(99, 102, 241, 0.04); }
+.formatted-result-head { padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text-primary, #111); border-bottom: 1px solid var(--border-subtle, #e5e7eb); background: rgba(53, 179, 166, 0.04); }
 .formatted-result-body { margin: 0; padding: 16px 20px; font-size: 13px; line-height: 1.8; color: var(--text-primary, #333); white-space: pre-wrap; word-break: break-word; max-height: 600px; overflow-y: auto; font-family: inherit; }
 .parse-done-card { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 14px; padding: 20px 28px; background: rgba(34, 197, 94, 0.06); }
 .parse-done-head { display: flex; align-items: center; gap: 8px; }
@@ -776,31 +776,31 @@ const props = computed(() => propsData.value?.items ?? [])
 .llm-stream-card { margin-bottom: 10px; border: 1px solid rgba(99, 226, 183, 0.35); border-radius: 8px; overflow: hidden; background: rgba(16, 24, 40, 0.6); }
 .llm-stream-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; color: #63e2b7; background: rgba(99, 226, 183, 0.08); }
 .llm-stream-body { max-height: 360px; overflow-y: auto; padding: 14px 16px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; color: rgba(224, 232, 240, 0.9); }
-.candidate-bar.is-running { background: rgba(99, 102, 241, 0.06); }
+.candidate-bar.is-running { background: rgba(53, 179, 166, 0.06); }
 .candidate-bar.is-succeeded { background: rgba(34, 197, 94, 0.08); }
 .candidate-bar.is-failed { background: rgba(208, 48, 80, 0.06); }
-.candidate-bar-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--brand-primary, #6366f1); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.candidate-bar-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--brand-primary); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; }
 .candidate-bar-badge.is-error { background: var(--brand-error, #d03050); }
 .candidate-bar-text { flex: 1; }
-.spin-dot { width: 12px; height: 12px; border: 2px solid var(--brand-primary, #6366f1); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+.spin-dot { width: 12px; height: 12px; border: 2px solid var(--brand-primary); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .parse-status-panel { border: 1px solid var(--border-subtle, #e0e0e6); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .episode-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pane-label { font-size: 16px; font-weight: 600; color: var(--text-primary, #333); }
-.episode-count-tag { font-size: 14px; font-weight: 600; color: var(--brand-primary, #6366f1); font-variant-numeric: tabular-nums; }
+.episode-count-tag { font-size: 14px; font-weight: 600; color: var(--brand-primary); font-variant-numeric: tabular-nums; }
 .quick-chip { border: 1px solid var(--border-subtle, #e0e0e6); background: none; border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
-.quick-chip:hover:not(:disabled) { border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
-.quick-chip.active { background: rgba(99, 102, 241, 0.1); border-color: var(--brand-primary, #6366f1); color: var(--brand-primary, #6366f1); }
+.quick-chip:hover:not(:disabled) { border-color: var(--brand-primary); color: var(--brand-primary); }
+.quick-chip.active { background: rgba(53, 179, 166, 0.1); border-color: var(--brand-primary); color: var(--brand-primary); }
 .quick-chip:disabled { opacity: 0.4; cursor: not-allowed; }
 .episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
 .episode-cell { position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
 .episode-cell-no { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
 .episode-cell-meta { font-size: 14px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
-@keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.3); } 50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0); } }
+@keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(53, 179, 166, 0.3); } 50% { box-shadow: 0 0 0 4px rgba(53, 179, 166, 0); } }
 .episode-cell.is-running { animation: cell-pulse 1.6s ease-in-out infinite; }
 .episode-cell.is-pending { background: rgba(128, 128, 128, 0.12); color: var(--text-secondary, #888); }
-.episode-cell.is-running { background: rgba(99, 102, 241, 0.15); color: var(--brand-primary, #6366f1); border-color: rgba(99, 102, 241, 0.4); }
+.episode-cell.is-running { background: rgba(53, 179, 166, 0.15); color: var(--brand-primary); border-color: rgba(53, 179, 166, 0.4); }
 .episode-cell.is-succeeded { background: rgba(34, 197, 94, 0.1); color: var(--state-success, #22c55e); border-color: rgba(34, 197, 94, 0.25); }
 .episode-cell.is-failed { background: rgba(208, 48, 80, 0.12); color: var(--brand-error, #d03050); border-color: rgba(208, 48, 80, 0.4); }
 .episode-cell-retry { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border: none; border-radius: 50%; background: rgba(208, 48, 80, 0.15); color: var(--brand-error, #d03050); font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s ease; }
@@ -819,7 +819,7 @@ const props = computed(() => propsData.value?.items ?? [])
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.is-pending { background: rgba(128, 128, 128, 0.4); }
-.dot.is-running { background: var(--brand-primary, #6366f1); }
+.dot.is-running { background: var(--brand-primary); }
 .dot.is-succeeded { background: rgba(34, 197, 94, 0.6); }
 .dot.is-failed { background: var(--brand-error, #d03050); }
 @media (max-width: 768px) {

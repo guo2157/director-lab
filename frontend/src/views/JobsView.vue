@@ -189,7 +189,6 @@ const columns = computed<DataTableColumns<Job>>(() => [
     <div class="page-header">
       <div>
         <h2 class="page-title">任务中心</h2>
-        <p class="page-subtitle">生成任务实时状态，5 秒自动刷新</p>
       </div>
       <div class="sse-indicator" :class="sseConnected ? 'on' : 'off'">
         <span class="sse-dot"></span>
@@ -297,17 +296,6 @@ const columns = computed<DataTableColumns<Job>>(() => [
   gap: var(--sp-4);
   margin: var(--sp-1) 0 var(--sp-4);
 }
-.page-title {
-  font-size: 20px;
-  font-weight: 700;
-  margin: 0 0 var(--sp-1);
-  color: var(--text-primary);
-}
-.page-subtitle {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin: 0;
-}
 .sse-indicator {
   display: flex;
   align-items: center;
@@ -340,15 +328,14 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .stat-card {
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-  transition: transform var(--transition-base), box-shadow var(--transition-base);
+  transition: border-color var(--transition-fast);
 }
 .stat-card.clickable {
   cursor: pointer;
 }
+/* 深色界面用边框明度变化表达可点击，不做位移与投影 */
 .stat-card.clickable:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-lift);
+  border-color: var(--brand-primary);
 }
 .jobs-layout {
   display: block;
@@ -358,7 +345,6 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .panel-card {
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
 }
 .wf-toolbar {
   display: flex;
@@ -423,7 +409,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .running-card.selected {
   border-color: var(--brand-primary);
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(53, 179, 166, 0.08);
 }
 .running-pulse {
   width: 8px;
