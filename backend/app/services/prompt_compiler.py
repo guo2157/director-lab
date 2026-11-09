@@ -49,7 +49,7 @@ TEMPLATE_REGISTRY: dict[str, dict] = {
                     "prompt_name": "compile_prop_asset"},
     TEMPLATE_STORYBOARD: {"version": 2, "task_type": TASK_STORYBOARD_IMAGE, "asset_type": "keyframe",
                           "prompt_name": "compile_storyboard_image"},
-    TEMPLATE_VIDEO: {"version": 2, "task_type": TASK_SHOT_VIDEO, "asset_type": "clip",
+    TEMPLATE_VIDEO: {"version": 3, "task_type": TASK_SHOT_VIDEO, "asset_type": "clip",
                      "prompt_name": "compile_shot_video"},
 }
 
@@ -208,7 +208,7 @@ VIDEO_TEMPLATE = """integrated_multimodal_description:
 Scene: {scene}, with characters {characters} and props {props}. Overall style: {style}. This video must continue the approved storyboard reference image: keep character identity, face, body, costume, colors, props and scene structure exactly consistent in every frame.
 Reference bindings: {ref_bindings}. Character identity is locked by reference images — do not alter face, body type, costume, color palette or proportions. The storyboard reference image defines scene structure, character positions and composition; do not change spatial layout or camera framing.
 
-[Shot 1] {main_action}. Start state: {start_state}. End state: {end_state}. Shot size: {shot_size}. Camera: {camera_angle}. Movement: {camera_movement}. Pacing: {pacing}. Environment changes: {environment_changes}. Continuity in: {continuity_in_type}; source shot: {source_shot_id}; source frame: {source_frame_file_id}. Continuity out: {continuity_out_state}. Dialogue or narration: {dialogue}.
+[Shot 1] Spatial layout is locked to the storyboard reference image: keep every character's exact left/right position, facing direction, depth and distance — do not swap positions, do not re-center, do not move characters closer together or farther apart. {screen_geography} {main_action}. Start state: {start_state}. End state: {end_state}. Shot size: {shot_size}. Camera: {camera_angle}. Movement: {camera_movement}. Pacing: {pacing}. Environment changes: {environment_changes}. Continuity in: {continuity_in_type}; source shot: {source_shot_id}; source frame: {source_frame_file_id}. Continuity out: {continuity_out_state}. Dialogue: {dialogue}.
 
 overall_soundscape: {soundscape}
 
@@ -1067,6 +1067,53 @@ def _has_earlier_shot_anywhere(db: Session, shot: Shot) -> bool:
     ) is not None
 
 
+def _build_screen_geography(characters: list) -> str:
+    """生成屏幕空间地理描述：多人镜头强调互相对视与分镜图站位锁定。
+
+    H3 多人对话常见问题是角色堆在画面中央、左右互换、说话时不看对方，
+    这里把「谁在左/谁在右、互相对视、说话人转向听话人」写成显式约束。
+    """
+    if not characters:
+        return ""
+    if len(characters) == 1:
+        return f"{characters[0].name} stays in the exact position defined by the storyboard reference image."
+    # 多人：按角色出场顺序对应 S1/S2，描述互相对视与站位保持
+    names = [c.name for c in characters]
+    first, second = names[0], names[1]
+    others = ", ".join(names[2:]) if len(names) > 2 else None
+    base = (
+        f"{first} and {second} face each other and maintain their respective "
+        "left/right positions from the storyboard reference image; the speaking "
+        "character turns toward the listener, and the listener looks at the speaker."
+    )
+    if others:
+        base += f" {others} keep their storyboard positions and look toward the conversation."
+    return base
+
+
+def _build_shot_dialogue(shot: Shot, characters: list) -> str:
+    """构建带稳定说话人编号的对白字符串。
+
+    - 优先用 dialogue_segments（按 character_id 匹配出场顺序分配 S1/S2/...）
+    - 回退到 shot.dialogue 纯文本时统一用 (S1)
+    - 对白必须用 <d>[Chinese] 文本</d> 包裹（MiniMax H3 官方格式）
+    """
+    segs = [s for s in (shot.dialogue_segments or [])
+            if isinstance(s, dict) and (s.get("text") or "").strip()]
+    if segs:
+        parts: list[str] = []
+        for seg in segs:
+            cid = seg.get("character_id") or seg.get("speaker_id")
+            speaker_idx = next((i for i, c in enumerate(characters) if c.id == cid), 0)
+            text = seg["text"].strip().replace("\n", " ")
+            parts.append(f"(S{speaker_idx + 1}) <d>[Chinese] {text}</d>")
+        return " ".join(parts)
+    if (shot.dialogue or "").strip():
+        text = shot.dialogue.strip().replace("\n", " ")
+        return f"(S1) <d>[Chinese] {text}</d>"
+    return "no dialogue"
+
+
 def compile_shot_video(db: Session, shot_id: str, *,
                        workflow: Workflow | None = None) -> CompiledPrompt:
     """编译分镜视频提示词：延续已审核分镜图，连续性来源显式绑定到镜头与文件。"""
@@ -1272,8 +1319,12 @@ def compile_shot_video(db: Session, shot_id: str, *,
         "source_shot_id": source_shot_id or "无",
         "source_frame_file_id": source_file_id or "无",
         "continuity_out_state": _text(None, "按镜头动作自然结束"),
-        "dialogue": ("no dialogue" if not (shot.dialogue or "").strip()
-                     else f"(S1) <d>{shot.dialogue.strip().replace(chr(10), ' ')}</d> while the character speaks on screen"),
+        # 对白：按 dialogue_segments 给每个说话人分配稳定编号 (S1)/(S2)，
+        # 多人镜头必须让 H3 知道哪句是谁说的，否则角色会堆叠/错位；
+        # 对白需用 <d>[Language] 文本</d> 包裹（官方格式要求）
+        "dialogue": _build_shot_dialogue(shot, characters),
+        # 屏幕空间地理：多人镜头强调互相对视、保持分镜图左右站位，单人镜头只锁位置
+        "screen_geography": _build_screen_geography(characters),
         "soundscape": _text(shot.soundscape, "N/A"),
         "music": "N/A",
         "style": style,
