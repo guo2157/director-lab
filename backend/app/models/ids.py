@@ -134,3 +134,39 @@ def audio_review_id() -> str:
 
 def voice_library_id() -> str:
     return new_id("vl")
+
+
+# --- 系列化创作（Series / Episode 叙事维度）---
+
+def series_id() -> str:
+    return new_id("srs")
+
+def series_episode_id() -> str:
+    return new_id("eps")
+
+def series_bible_version_id() -> str:
+    return new_id("sbv")
+
+def series_script_version_id() -> str:
+    return new_id("ssv")
+
+def series_asset_id() -> str:
+    return new_id("sas")
+
+def episode_asset_ref_id() -> str:
+    return new_id("ear")
+
+def story_event_id() -> str:
+    return new_id("sev")
+
+def continuity_snapshot_id() -> str:
+    return new_id("csn")
+
+def continuity_proposal_id() -> str:
+    return new_id("ccp")
+
+def episode_context_manifest_id() -> str:
+    return new_id("ecm")
+
+def plot_thread_id() -> str:
+    return new_id("plt")

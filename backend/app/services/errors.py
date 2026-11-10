@@ -61,3 +61,43 @@ def invalid_request(message: str) -> HTTPException:
 
 def asset_in_use(message: str) -> HTTPException:
     return biz_error(code="asset_in_use", http=409, message=message)
+
+
+# --- 系列化创作（Series / Episode）---
+
+
+def series_not_found() -> HTTPException:
+    return biz_error(code="series_not_found", http=404, message="系列不存在")
+
+
+def series_episode_not_found() -> HTTPException:
+    return biz_error(code="episode_not_found", http=404, message="剧集不存在")
+
+
+def series_episode_conflict(message: str = "该集号已存在") -> HTTPException:
+    return biz_error(code="episode_number_conflict", http=409, message=message)
+
+
+def series_state_version_conflict(message: str) -> HTTPException:
+    return biz_error(code="series_state_version_conflict", http=409, message=message)
+
+
+def series_script_not_found() -> HTTPException:
+    return biz_error(code="series_script_not_found", http=404, message="剧本版本不存在")
+
+
+def series_script_status_conflict(message: str) -> HTTPException:
+    return biz_error(code="series_script_status_conflict", http=409, message=message)
+
+
+def series_context_unavailable(message: str) -> HTTPException:
+    """上下文构建失败：不使用空上下文假装成功。"""
+    return biz_error(code="series_context_unavailable", http=409, message=message)
+
+
+def series_bible_not_found() -> HTTPException:
+    return biz_error(code="series_bible_not_found", http=404, message="系列设定不存在")
+
+
+def plot_thread_not_found() -> HTTPException:
+    return biz_error(code="plot_thread_not_found", http=404, message="剧情线不存在")

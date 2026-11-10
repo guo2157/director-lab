@@ -44,6 +44,20 @@ from app.models.task import (
 )
 from app.models.search import SearchRun, SearchResult
 from app.models.audio import AudioReview, AudioSegment, VoiceLibrary, VoiceProfile
+from app.models.series import (
+    Series,
+    SeriesBibleVersion,
+    SeriesEpisode,
+    SeriesScriptVersion,
+)
+from app.models.series_asset import EpisodeAssetRef, SeriesAsset
+from app.models.series_story import (
+    ContinuityChangeProposal,
+    ContinuitySnapshot,
+    EpisodeContextManifest,
+    PlotThread,
+    StoryEvent,
+)
 
 __all__ = [
     "Base",
@@ -91,4 +105,15 @@ __all__ = [
     "TaskStage",
     "TaskEvent",
     "TaskResult",
+    "Series",
+    "SeriesEpisode",
+    "SeriesBibleVersion",
+    "SeriesScriptVersion",
+    "SeriesAsset",
+    "EpisodeAssetRef",
+    "StoryEvent",
+    "ContinuitySnapshot",
+    "ContinuityChangeProposal",
+    "EpisodeContextManifest",
+    "PlotThread",
 ]

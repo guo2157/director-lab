@@ -84,7 +84,6 @@ def schedule_ready_stages(db: Session, task: Task) -> int:
             break
         if start_stage(db, task, s):
             started += 1
-            remaining -= 1
     return started
 
 

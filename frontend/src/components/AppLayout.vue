@@ -9,22 +9,37 @@ const route = useRoute()
 const router = useRouter()
 
 const projectId = computed(() => route.params.id as string | undefined)
-const isProjectPage = computed(() => Boolean(projectId.value))
+/** 仅项目级路由才视为项目页；系列相关路由同样带 id 参数，不能误判 */
+const PROJECT_ROUTE_NAMES = [
+  'script',
+  'estimate',
+  'parse',
+  'storyboard-images',
+  'storyboard',
+  'assets',
+  'compose',
+]
+const isProjectPage = computed(
+  () => Boolean(projectId.value) && PROJECT_ROUTE_NAMES.includes(String(route.name ?? '')),
+)
+/** 系列相关路由统一高亮「作品」入口 */
+const SERIES_ROUTE_NAMES = ['series-list', 'series-create', 'series-detail', 'series-continue', 'episode-review']
 /** 导演台为固定视口布局：页面级滚动条不滚动，改由页面内部面板各自滚动 */
 const isFixedViewport = computed(() => route.name === 'director')
 
-/** 全局导航固定四个入口：项目内的步骤导航交由左侧流程轨承担 */
+/** 全局导航入口：导演台 | 作品（含单集项目与系列）| 任务中心 | 设置 */
 const topMenuOptions = [
   { label: '导演台', key: 'director' },
-  { label: '项目', key: 'projects' },
+  { label: '作品', key: 'projects' },
   { label: '任务中心', key: 'jobs' },
   { label: '设置', key: 'settings' },
 ]
 
-/** 项目页激活全局的「项目」入口 */
+/** 作品页与项目内页面统一高亮「作品」入口 */
 const activeKey = computed(() => {
   const name = String(route.name ?? '')
-  return isProjectPage.value ? 'projects' : name
+  if (isProjectPage.value || SERIES_ROUTE_NAMES.includes(name)) return 'projects'
+  return name
 })
 
 function goMenu(key: string) {

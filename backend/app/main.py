@@ -29,6 +29,7 @@ from app.api.v1 import (
     regeneration,
     scenes,
     script,
+    series,
     settings,
     shots,
     tasks,
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(shots.router)
     app.include_router(bindings.router)
     app.include_router(script.router)
+    app.include_router(series.router)
     app.include_router(jobs.router)
     app.include_router(progress.router)
     app.include_router(events.router)

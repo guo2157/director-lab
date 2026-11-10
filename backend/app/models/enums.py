@@ -33,7 +33,7 @@ ASSET_TYPE = _values("character", "scene", "prop", "keyframe", "clip", "audio", 
 WORKFLOW_TYPE = _values("image", "video", "tts", "bgm", "sfx")
 JOB_TYPE = _values(
     "parse", "generate_keyframe", "generate_clip", "generate_audio",
-    "generate_bgm", "generate_sfx", "compose", "export",
+    "generate_bgm", "generate_sfx", "compose", "export", "series_agent",
 )
 
 # ============ 镜头字段枚举（DATABASE.md shot 表） ============

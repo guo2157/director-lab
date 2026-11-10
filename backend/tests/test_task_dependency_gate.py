@@ -66,9 +66,9 @@ def test_stage_blocked_when_dependency_failed(db):
     to.start_stage(db, task, dep)
     to.finish_stage(db, task, dep, "failed", result={"error_code": "comfy_error"})
 
-    # 前置 failed：依赖阶段仍被拦截
+    # 前置 failed：依赖阶段级联 skipped
     assert to.start_stage(db, task, follower) is False
-    assert follower.status == "pending"
+    assert follower.status == "skipped"
 
 
 def test_stage_blocked_when_dependency_missing(db):

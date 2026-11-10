@@ -58,6 +58,36 @@ const router = createRouter({
       meta: { title: '合成与导出' },
     },
     {
+      path: '/series',
+      name: 'series-list',
+      component: () => import('../views/series/SeriesListView.vue'),
+      meta: { title: '系列' },
+    },
+    {
+      path: '/series/create',
+      name: 'series-create',
+      component: () => import('../views/series/SeriesCreateView.vue'),
+      meta: { title: '新建系列' },
+    },
+    {
+      path: '/series/:id',
+      name: 'series-detail',
+      component: () => import('../views/series/SeriesDetailView.vue'),
+      meta: { title: '系列详情' },
+    },
+    {
+      path: '/series/:id/continue',
+      name: 'series-continue',
+      component: () => import('../views/series/SeriesContinueView.vue'),
+      meta: { title: '续写剧集' },
+    },
+    {
+      path: '/episodes/:id/review',
+      name: 'episode-review',
+      component: () => import('../views/series/EpisodeReviewView.vue'),
+      meta: { title: '剧集审核' },
+    },
+    {
       path: '/jobs',
       name: 'jobs',
       component: () => import('../views/JobsView.vue'),

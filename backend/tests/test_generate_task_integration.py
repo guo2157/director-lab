@@ -9,7 +9,7 @@ from datetime import datetime
 import pytest
 from sqlalchemy.orm import sessionmaker
 from app.core.database import make_engine
-from app.models import Asset, Base, Job, Project, Scene, Shot, Workflow, ids
+from app.models import Asset, Base, Job, ParseVersion, Project, Scene, Shot, Workflow, ids
 from app.models.task import Task, TaskResult, TaskStage
 from app.services import approvals
 from app.services.agent_tools import execute_tool
@@ -56,9 +56,14 @@ def db(tmp_path):
         id=ids.job_id(), project_id=project.id, job_type="parse",
         status="succeeded", created_at=now,
     )
-    session.add_all([project, scene, shot, workflow, baseline, script_version, parse_job])
+    parse_version = ParseVersion(
+        id=ids.parse_version_id(), project_id=project.id, script_version_id=script_version.id,
+        version=1, status="completed", script_hash=script_hash, created_at=now,
+    )
+    session.add_all([project, scene, shot, workflow, baseline, script_version, parse_job, parse_version])
     session.flush()
     project.current_script_version_id = script_version.id
+    project.current_parse_version_id = parse_version.id
     project.estimated_text_hash = script_hash
     session.commit()
     yield session, project.id, shot.id

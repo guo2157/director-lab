@@ -147,7 +147,7 @@ def project_env(client, tmp_path):
 
     # 补齐状态机前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
     # 使 derive_progress 推进到 keyframes 阶段（公共资产已审核通过）
-    from app.models import Job, ScriptVersion
+    from app.models import Job, ParseVersion, ScriptVersion
 
     script_text = "第一场：主角在河边。"
     script_hash = __import__("hashlib").sha256(script_text.encode("utf-8")).hexdigest()
@@ -163,6 +163,13 @@ def project_env(client, tmp_path):
     session.flush()
     project.current_script_version_id = script_version.id
     project.estimated_text_hash = script_hash
+    parse_version = ParseVersion(
+        id=ids.parse_version_id(), project_id=project.id, script_version_id=script_version.id,
+        version=1, status="completed", script_hash=script_hash, created_at=now,
+    )
+    session.add(parse_version)
+    session.flush()
+    project.current_parse_version_id = parse_version.id
     session.add(
         Job(
             id=ids.job_id(),

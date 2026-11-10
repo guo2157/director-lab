@@ -151,7 +151,11 @@ SCENE_TEMPLATE = """场景板（空镜）：{name}，{time_and_weather}，{empty
 光线：{lighting}，光源方向单一且写死，地面反光、玻璃反光与阴影长度全部按此方向一致；画面只允许一个投影方向。
 镜头：{camera_shot}，前中后景层次清晰。
 质感：{texture}，主色调与材质：{palette}。
-环境定义：{identity}。允许出现的固定环境元素：{fixed_elements}。不得出现的剧情道具、车辆与可移动杂物：{excluded_props}。
+环境定义：{identity}
+可站位物件清单（用于下游角色站位对账，硬性）：必须在生成场景基准图的同时，识别并输出本场景中所有角色可站立于旁、可就座、可倚靠的固定物件，每件标注名称、图上大致框区、按透视推算的俯视平面位置、是否可就座、是否为圆形台面。此清单将作为本场所有分镜提示词中 {standable_items} 的来源，后续站位只允许落在清单内的物件上。
+- 站位物件：{standable_items}
+允许出现的固定环境元素：{fixed_elements}。
+不得出现的剧情道具、车辆与可移动杂物：{excluded_props}。
 纯净度要求（硬性，逐条核对）：
 - 没有任何人：不出现人物、行人、群众、角色剪影、人体局部、背影，也不出现远景中的小黑人形
 - 没有间接人影：不出现角色倒影、水面人形倒影、墙上海报人物、雕像、人形立牌、照片中的人
@@ -196,8 +200,16 @@ STORYBOARD_TEMPLATE = """生成镜头 {shot_id} 的单帧分镜参考图，表�
 - 没有文字与装饰：不出现文字、对白气泡、字幕、标签、编号、水印、Logo、边框、分格线、漫画格
 - 画面连续：地面接触阴影真实，人物有立足点，不悬浮、不穿模、不与道具或环境融合
 参考绑定：{ref_bindings}。角色身份只由对应参考图锁定，提示词不重复描述五官细节；所有出现的人脸、体型、服装、配色保持与对应参考图完全一致，各角色独立保持身份。
+首段锚定（仅本场首镜生效）：若当前镜头为本场第一镜，角色站位、朝向与坐站状态必须以 {opening_blocking} 为唯一真值，不自行发挥；后续镜头从该锚定点接续推进。
 动作与叙事瞬间：{action}。
-角色相对位置与视线：{positions}。
+角色站位（每角色独立，不可互换）：
+{position_specs}
+站位规则（硬性，逐条核对）：
+- 各角色只站立或就座于场景基准图中真实存在的物件旁，本场可站立物件清单：{standable_items}
+- 本镜头若为本场首镜，角色开场站位与朝向必须与本场的开场走位句完全一致：{opening_blocking}——禁止自行调整位置、朝向或坐站状态
+- 若为非首镜，各角色相对距离与排列关系必须与上一镜末态保持视觉连贯，不凭空换边、换座、换朝向
+- 同一物件同侧不叠人；双人或多人相邻时须有清晰间隙区分
+- 视线落点：{gaze_targets}——说话时看对手，沉默时眼神方向符合情绪与环境上下文
 道具与角色或环境的关系：{prop_interaction}。
 画面情绪：{emotion}——通过面部表情、眼神方向与身体姿态外化呈现，不使用抽象情绪词。
 镜头语言：景别 {shot_size}；机位与角度 {camera_angle}；构图 {composition}；运动暗示 {camera_movement}；光线与色彩 {lighting}。
@@ -205,10 +217,10 @@ STORYBOARD_TEMPLATE = """生成镜头 {shot_id} 的单帧分镜参考图，表�
 画面风格：{style}"""
 
 VIDEO_TEMPLATE = """integrated_multimodal_description:
-Scene: {scene}, with characters {characters} and props {props}. Overall style: {style}. This video must continue the approved storyboard reference image: keep character identity, face, body, costume, colors, props and scene structure exactly consistent in every frame.
-Reference bindings: {ref_bindings}. Character identity is locked by reference images — do not alter face, body type, costume, color palette or proportions. The storyboard reference image defines scene structure, character positions and composition; do not change spatial layout or camera framing.
+Scene: {scene}. {character_count} characters present, props: {props}. Overall style: {style}. This video must continue the approved storyboard reference image: keep every character's identity, face, body, costume, colors, props and scene structure exactly consistent in every frame — character identity is locked by reference images only, do not generate any character based on name.
+Reference bindings: {ref_bindings}. Do not alter face, body type, costume, color palette or proportions. The storyboard reference image defines scene structure, character positions and composition; do not change spatial layout or camera framing.
 
-[Shot 1] Spatial layout is locked to the storyboard reference image: keep every character's exact left/right position, facing direction, depth and distance — do not swap positions, do not re-center, do not move characters closer together or farther apart. {screen_geography} {main_action}. Start state: {start_state}. End state: {end_state}. Shot size: {shot_size}. Camera: {camera_angle}. Movement: {camera_movement}. Pacing: {pacing}. Environment changes: {environment_changes}. Continuity in: {continuity_in_type}; source shot: {source_shot_id}; source frame: {source_frame_file_id}. Continuity out: {continuity_out_state}. Dialogue: {dialogue}.
+[Shot 1] Spatial layout is locked to the storyboard reference image: keep every character's exact position relative to scene objects (per {character_positions_summary}), facing direction, depth and distance — do not swap positions, do not re-center, do not move characters closer together or farther apart. {main_action}. Start state: {start_state}. End state: {end_state}. Shot size: {shot_size}. Camera: {camera_angle}. Movement: {camera_movement}. Pacing: {pacing}. Environment changes: {environment_changes}. Continuity in: {continuity_in_type}; source shot: {source_shot_id}; source frame: {source_frame_file_id}. Continuity out: {continuity_out_state}. Dialogue: {dialogue}.
 
 overall_soundscape: {soundscape}
 
@@ -587,6 +599,7 @@ def _scene_mapping(scene: Scene, style: str | None = None) -> dict:
             "background": "按场景板远景定义",
             "camera_shot": "24mm 广角，平视机位，一点透视，深景深全部清晰",
             "texture": "自然真实材质质感",
+            "standable_items": "场景板生成后由 LLM 提取并填写，列出本场景中所有角色可站立于旁、可就座、可倚靠的固定物件（名称/图上框区/俯视平面位置/是否可坐/是否圆形）",
             "style": style or asset_prompts._DEFAULT_STYLE,
         }
     clean_desc = _strip_story_content(scene.description)
@@ -610,6 +623,7 @@ def _scene_mapping(scene: Scene, style: str | None = None) -> dict:
         "background": "天际线或远景轮廓，薄雾层次，纵深清晰",
         "camera_shot": "24mm 广角，平视机位，一点透视，深景深全部清晰",
         "texture": "电影感写实摄影，轻微胶片颗粒，高动态范围",
+        "standable_items": "场景板生成后由 LLM 提取并填写，列出本场景中所有角色可站立于旁、可就座、可倚靠的固定物件（名称/图上框区/俯视平面位置/是否可坐/是否圆形）",
         "style": style or asset_prompts._DEFAULT_STYLE,
     }
 
@@ -822,6 +836,68 @@ def _assert_unique_slots(slots: list[dict], blocking: list[dict]) -> None:
         seen.add(key)
 
 
+def _build_position_specs(shot: Shot, characters: list, scene: Scene | None) -> tuple[str, str, str, str]:
+    """构建结构化角色站位数据，返回 (position_specs, standable_items, opening_blocking, gaze_targets)。
+
+    优先从 shot.start_state 读取已有站位；无数据时根据角色列表生成兜底文本。
+    start_state 期望结构：{"positions": {"角色名": {"item": "...", "side": "...",
+    "along": "...", "posture": "站/坐", "facing": "..."}}, "standable_items": [...],
+    "blocking": "开场走位句"}
+    """
+    start_state = shot.start_state or {}
+    positions = start_state.get("positions", {}) if isinstance(start_state, dict) else {}
+    standable_raw = start_state.get("standable_items", []) if isinstance(start_state, dict) else []
+    opening_blocking = start_state.get("blocking", "") if isinstance(start_state, dict) else ""
+
+    if positions and opening_blocking:
+        lines: list[str] = []
+        for c in characters:
+            pos = positions.get(c.name) if isinstance(positions, dict) else None
+            if pos and isinstance(pos, dict):
+                lines.append(
+                    f"- {c.name}：{pos.get('posture', '站')}于 {pos.get('item', '场景内')}"
+                    f"的{pos.get('side', '')}侧"
+                    f"{'，沿该侧 ' + pos.get('along', '') if pos.get('along') else ''}"
+                    f"，面朝{pos.get('facing', '前方')}"
+                )
+        position_specs = "\n".join(lines) if lines else "按已审核参考图与镜头动作安排各角色位置"
+        standable_list = [
+            f"{s.get('name', '?')}" + ("（可坐）" if s.get('can_sit') else "")
+            for s in standable_raw
+        ] if isinstance(standable_raw, list) else []
+        standable_items = "、".join(standable_list) if standable_list else "使用场景基准图中所有固定结构"
+        # 视线落点：从对白 segments 判断说话人与听话人
+        segs = shot.dialogue_segments or []
+        speaker_names = set()
+        for seg in segs:
+            if isinstance(seg, dict):
+                speaker_names.add(seg.get("speaker", ""))
+        if len(characters) >= 2 and speaker_names:
+            gaze_targets = f"{list(speaker_names)[0]} 看对手，其余角色视线跟随对话自然流动"
+        else:
+            gaze_targets = "单人或空镜，视线按情绪自然落点"
+        return position_specs, standable_items, opening_blocking, gaze_targets
+
+    # 兜底：无 start_state 站位数据时以文字描述代替
+    if not characters:
+        return "空镜，无角色站位", "无站位物件（空镜）", "空镜，无开场走位", "无（空镜）"
+    names = "、".join(c.name for c in characters)
+    position_specs = f"{names} 按已审核参考图与镜头动作安排相对位置"
+    standable_items = "使用场景基准图中所有固定结构"
+    opening_blocking = f"{names} 按剧本设定自然站位"
+    gaze_targets = f"{characters[0].name} 看对手或按情绪落点" if len(characters) == 1 else f"{characters[0].name} 说话时看听话人"
+    return position_specs, standable_items, opening_blocking, gaze_targets
+
+
+def _build_character_positions_summary(characters: list) -> str:
+    """构建视频提示词中角色空间位置摘要（场景方位表达，不涉及画面左右）。"""
+    if not characters:
+        return "no characters present"
+    if len(characters) == 1:
+        return f"single character positioned according to the storyboard reference image"
+    return f"{len(characters)} characters positioned relative to scene layout objects as defined in the storyboard reference image; do not swap left/right or re-center"
+
+
 def compile_storyboard_image(db: Session, shot_id: str, *,
                              workflow: Workflow | None = None) -> CompiledPrompt:
     """编译单个镜头的分镜图提示词：只组合镜头绑定且审核通过的角色/场景/道具。"""
@@ -929,6 +1005,7 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
                                              project_id=project.id if project else None)
     beats = shot.beats or []
     action = _text(beats[0] if beats else (shot.dialogue or ""), "镜头动作未提供")
+    position_specs, standable_items, opening_blocking, gaze_targets = _build_position_specs(shot, characters, scene)
     def _image_no(slot: dict, fallback: int) -> int:
         """槽位对应的提示词编号：取 input_key 的 image_N，保证与工作流实际连线一致。"""
         item = declared_map.get(slot.get("slot_key") or "") or {}
@@ -975,7 +1052,10 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         "scene": scene.title if scene is not None and scene.title else "未指定场景",
         "props": "、".join(p.name for p in prop_rows) or "无",
         "action": action,
-        "positions": "按已审核的参考图与镜头动作安排角色相对位置",
+        "position_specs": position_specs,
+        "standable_items": standable_items,
+        "opening_blocking": opening_blocking,
+        "gaze_targets": gaze_targets,
         "prop_interaction": "道具只按镜头绑定关系出现在角色手中或环境里",
         "emotion": shot.emotion or "neutral",
         "shot_size": _text(shot.shot_type),
@@ -1304,7 +1384,7 @@ def compile_shot_video(db: Session, shot_id: str, *,
     mapping = {
         "shot_id": shot.id,
         "duration": f"{duration:g}",
-        "characters": "、".join(c.name for c in characters) or "无",
+        "character_count": f"{len(characters)} characters" if characters else "no characters",
         "scene": scene.title if scene is not None and scene.title else "未指定场景",
         "props": "、".join(p.name for p in prop_rows) or "无",
         "start_state": _text(shot.start_state, "延续已审核分镜图初始状态"),
@@ -1323,8 +1403,8 @@ def compile_shot_video(db: Session, shot_id: str, *,
         # 多人镜头必须让 H3 知道哪句是谁说的，否则角色会堆叠/错位；
         # 对白需用 <d>[Language] 文本</d> 包裹（官方格式要求）
         "dialogue": _build_shot_dialogue(shot, characters),
-        # 屏幕空间地理：多人镜头强调互相对视、保持分镜图左右站位，单人镜头只锁位置
-        "screen_geography": _build_screen_geography(characters),
+        # 场景空间描述：基于站位数据的角色空间关系，不涉及画面左右（画面左右由机位推导）
+        "character_positions_summary": _build_character_positions_summary(characters),
         "soundscape": _text(shot.soundscape, "N/A"),
         "music": "N/A",
         "style": style,

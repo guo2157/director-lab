@@ -35,6 +35,24 @@ export interface TaskEvent {
   [key: string]: unknown
 }
 
+/** 任务详情（GET /api/tasks/{task_id}）：刷新或切换会话后按 task_id 恢复真实进度 */
+export interface TaskDetail extends TaskCardData {
+  project_id: string | null
+  conversation_id: string | null
+  message_id: string | null
+  current_step: string | null
+  current_message: string | null
+  started_at: string | null
+  updated_at: string | null
+  /** 耗时秒数，由后端 started_at 推导，前端不得自行累加 */
+  elapsed_seconds: number
+}
+
+/** 按 task_id 查询任务真实详情 */
+export function getTask(taskId: string) {
+  return get<TaskDetail>(`/tasks/${taskId}`)
+}
+
 /** 任务事件断线补齐：seq 严格大于给定值，按 seq 升序 */
 export function backfillTaskEvents(updatedSinceSeq: number) {
   return get<{ total: number; items: TaskEvent[] }>('/tasks/events/backfill', {

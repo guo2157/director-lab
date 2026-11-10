@@ -216,6 +216,9 @@ def _execute_job(job_id: str, job_type: str) -> dict:
     if job_type == "script_agent":
         from app.services.script_agent import execute_script_agent_job
         return execute_script_agent_job(job_id)
+    if job_type == "series_agent":
+        from app.worker.series_executor import execute_series_agent_job
+        return execute_series_agent_job(job_id)
     if job_type == "parse":
         return execute_parse_job(job_id)
     if job_type == "compose":

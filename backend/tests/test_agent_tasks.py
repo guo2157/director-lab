@@ -165,6 +165,7 @@ def test_execute_tool_precondition_passes(db):
 
 def test_schedule_ready_stages_sequential(db):
     task = to.create_task(db, session_id="s1", task_type="parse", title="DAG")
+    to.start_task(db, task)
     s1 = to.add_stage(db, task, stage_key="a", stage_name="A")
     s2 = to.add_stage(db, task, stage_key="b", stage_name="B", depends_on=["a"])
     started = to.schedule_ready_stages(db, task)
@@ -201,6 +202,7 @@ def test_cancel_task_propagates_to_stages(db):
 
 def test_max_concurrent_stages(db):
     task = to.create_task(db, session_id="s1", task_type="parse", title="并发")
+    to.start_task(db, task)
     stages = [
         to.add_stage(db, task, stage_key=f"s{i}", stage_name=f"S{i}")
         for i in range(10)

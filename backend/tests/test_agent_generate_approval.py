@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import make_engine
-from app.models import Asset, Base, Job, Project, Scene, Shot, Workflow, ids
+from app.models import Asset, Base, Job, ParseVersion, Project, Scene, Shot, Workflow, ids
 from app.services import approvals
 from app.services.agent_tools import TOOL_REGISTRY, execute_tool
 
@@ -95,9 +95,14 @@ def db(tmp_path):
         status="succeeded",
         created_at=now,
     )
-    session.add_all([project, scene, shot, workflow, video_workflow, baseline, script_version, parse_job])
+    parse_version = ParseVersion(
+        id=ids.parse_version_id(), project_id=project.id, script_version_id=script_version.id,
+        version=1, status="completed", script_hash=script_hash, created_at=now,
+    )
+    session.add_all([project, scene, shot, workflow, video_workflow, baseline, script_version, parse_job, parse_version])
     session.flush()
     project.current_script_version_id = script_version.id
+    project.current_parse_version_id = parse_version.id
     project.estimated_text_hash = script_hash
     session.commit()
     yield session, project.id, shot.id
@@ -202,6 +207,7 @@ def test_repeat_resolve_rejected(db):
 def test_shot_must_belong_to_project(db):
     """镜头不属于指定项目时拒绝，避免跨项目触发生成。"""
     session, _pid, sid = db
+    from app.models import ScriptVersion
     now = datetime.now()
     other = Project(
         id=ids.project_id(),
@@ -213,6 +219,22 @@ def test_shot_must_belong_to_project(db):
         updated_at=now,
     )
     session.add(other)
+    session.flush()
+    script_text = "测试"
+    script_hash = __import__("hashlib").sha256(script_text.encode("utf-8")).hexdigest()
+    sv = ScriptVersion(
+        id=ids.script_version_id(), project_id=other.id, version=1,
+        content_snapshot=script_text, content_hash=script_hash, created_at=now,
+    )
+    pv = ParseVersion(
+        id=ids.parse_version_id(), project_id=other.id, script_version_id=sv.id,
+        version=1, status="completed", script_hash=script_hash, created_at=now,
+    )
+    session.add_all([sv, pv])
+    session.flush()
+    other.current_script_version_id = sv.id
+    other.current_parse_version_id = pv.id
+    other.estimated_text_hash = script_hash
     session.commit()
 
     result = execute_tool(
