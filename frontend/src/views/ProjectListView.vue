@@ -508,7 +508,7 @@ async function handleCreate() {
                 <n-dropdown
                   trigger="click"
                   :options="menuOptions(p)"
-                  @select="onDropdownSelect(p)"
+                  @select="onDropdownSelect(p)($event)"
                   @click.stop
                 >
                   <n-button quaternary size="tiny" class="more-btn" @click.stop>⋯</n-button>
