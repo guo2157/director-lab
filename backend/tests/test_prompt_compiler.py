@@ -121,6 +121,10 @@ def test_templates_render_without_residual_placeholders():
         "pacing": "平稳", "environment_changes": "无", "continuity_in_type": "none",
         "source_shot_id": "无", "source_frame_file_id": "无", "continuity_out_state": "延续",
         "dialogue": "(S1) <d>吃草</d> while the character speaks on screen", "soundscape": "风声", "music": "N/A",
+        # 视频模板 v4 新增：按参考图绑定情况条件渲染的三段文案
+        "continuity_lock": "This video must continue the approved storyboard reference image.",
+        "spatial_lock": "Spatial layout is derived from the storyboard reference image.",
+        "screen_geography": "小马 stays in the exact position defined by the storyboard reference image.",
     }
     for template_id in TEMPLATE_REGISTRY:
         rendered = render_template(template_id, mapping)
