@@ -327,6 +327,31 @@ def execute_parse_job(job_id: str) -> dict:
         )
         _task_step(db, job.id, "saving_result", "正在保存解析结果", 90)
 
+        # 覆盖式自动确认：解析成功后直接落库场景/角色/道具/镜头，
+        # 不再依赖前端停留页面触发 confirm 接口。
+        from app.models import Scene as SceneModel
+        from app.services.script_parse import apply_parse_result
+        current_scene_ids = [
+            row[0] for row in db.query(SceneModel.id).filter(SceneModel.project_id == job.project_id).all()
+        ]
+        apply_parse_result(
+            db, project, parse_result,
+            episode_start=episode_start,
+            episode_count=episode_count,
+            current_scene_ids=current_scene_ids,
+        )
+        # 旧版本标记 superseded，新版本设为 current 并更新项目引用
+        old_id = project.current_parse_version_id
+        if old_id and old_id != pv.id:
+            old = db.get(ParseVersion, old_id)
+            if old is not None and old.status == "current":
+                old.status = "superseded"
+        pv.status = "current"
+        pv.confirmed_at = _now().replace(tzinfo=None)
+        project.current_parse_version_id = pv.id
+        # 镜头总数回写项目，供前端判断解析是否完成
+        project.shot_total = shot_total
+
         job.status = "succeeded"
         job.result = {**parse_result, "parse_version_id": pv.id}
         job.finished_at = _now()

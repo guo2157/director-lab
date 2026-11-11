@@ -64,6 +64,7 @@ __all__ = [
     "check_env",
     "ensure_comfyui",
     "install_requirements",
+    "ensure_qwen3_tts_node",
     "ensure_hf_hub",
     "set_hf_token",
     "hf_whoami",
@@ -167,11 +168,12 @@ TUNNEL = os.environ.get("COMFY_TUNNEL", "auto")
 COMFY_SAGE = os.environ.get("COMFY_SAGE", "auto")
 PREVIEW_METHOD = os.environ.get("COMFY_PREVIEW", "auto")
 
-DOWNLOAD_GROUPS = ["h3", "qwen"]
+DOWNLOAD_GROUPS = ["h3", "qwen", "tts"]
 
 GROUPS = {
     "h3": "MiniMax H3 / Ref2VA（视频+音频）",
     "qwen": "Qwen-Image-2.1 Turbo（图像编辑）",
+    "tts": "Qwen3-TTS 1.7B CustomVoice（独立语音生成）",
 }
 
 LOG_PATH = WORK_DIR / "comfyui.log"
@@ -238,16 +240,24 @@ MODELS = (
     ModelFile(
         "h3",
         "Comfy-Org/MiniMax-H3",
-        "vae/minimax_h3_video_vae_fp16.safetensors",
-        5_207_808_496,
-        "H3 视频 VAE FP16",
+        "vae/minimax_h3_audio_vae_fp32.safetensors",
+        605_254_808,
+        "H3 音频 VAE FP32",
+    ),
+    # ---- 出片提速：H3 的 int8 VAE + ref2v 4 步 Turbo LoRA（约 4.8 GiB）----
+    ModelFile(
+        "h3",
+        "Comfy-Org/MiniMax-H3",
+        "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+        2_811_065_184,
+        "H3 视频 VAE INT8（解码比 fp16 快，显存也小）",
     ),
     ModelFile(
         "h3",
         "Comfy-Org/MiniMax-H3",
-        "vae/minimax_h3_audio_vae_fp32.safetensors",
-        605_254_808,
-        "H3 音频 VAE FP32",
+        "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        1_956_193_000,
+        "H3 Ref2V 4 步 Turbo LoRA（20 步 -> 4 步）",
     ),
     ModelFile(
         "qwen",
@@ -276,6 +286,27 @@ FALLBACK_REPOS = {
     "Comfy-Org/MiniMax-H3": ("taurusduan/MiniMax-H3",),
     "Comfy-Org/Qwen-Image-2.1": (),
 }
+
+# Qwen3-TTS 1.7B CustomVoice：按整仓 snapshot 下载，保留 HF 目录结构
+TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+TTS_REL_DIR = "Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+TTS_MIN_EXPECTED_BYTES = 3_500_000_000  # 仅用于磁盘预检查与计划展示
+TTS_REQUIRED = (
+    # (相对路径, 最小字节数)，小于最小值的判为没下完
+    ("config.json", 1),
+    ("model.safetensors", 3_500_000_000),
+    ("tokenizer_config.json", 1),
+    ("vocab.json", 1),
+    ("speech_tokenizer/model.safetensors", 650_000_000),
+)
+
+# Qwen3-TTS 自定义节点（缺失时工作流会在 /prompt 校验阶段 400 missing_node_type）
+TTS_NODE_DIRNAME = os.environ.get("COMFY_TTS_NODE_DIR", "ComfyUI-Qwen3-TTS")
+TTS_NODE_REPO = os.environ.get(
+    "COMFY_TTS_NODE_REPO", "https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git"
+)
+TTS_NODE_MIRRORS = ("https://ghfast.top/", "https://gh-proxy.com/")
+TTS_NODE_SKIP_DEPS = os.environ.get("COMFY_TTS_NODE_SKIP_DEPS", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +410,11 @@ def print_plan(groups=None) -> None:
     log("下载组   : " + (", ".join(selected) if selected else "(空)"))
     log("")
     for group in selected:
+        if group == "tts":
+            log("[tts] " + GROUPS["tts"] + " —— 整仓 snapshot, 约 " + human(TTS_MIN_EXPECTED_BYTES))
+            log("    " + TTS_REPO + " -> models/" + TTS_REL_DIR)
+            log("    自定义节点: " + TTS_NODE_REPO)
+            continue
         items = [m for m in MODELS if m.group == group]
         total = sum(m.size for m in items)
         log("[" + group + "] " + GROUPS[group] + " —— " + str(len(items)) + " 个文件, " + human(total))
@@ -386,6 +422,8 @@ def print_plan(groups=None) -> None:
             log("    " + item.path)
             log("        " + human(item.size) + "  " + item.note)
     total_all = sum(m.size for m in MODELS if m.group in selected)
+    if "tts" in selected:
+        total_all += TTS_MIN_EXPECTED_BYTES
     log("")
     log("合计: " + human(total_all) + "  (" + str(round(total_all / 1e9, 1)) + " GB)")
     log("=" * 74)
@@ -409,6 +447,8 @@ def check_env() -> None:
         log("[警告] Python 版本偏低，建议 3.10+")
     free = _disk_free(WORK_DIR)
     need = sum(m.size for m in MODELS if m.group in DOWNLOAD_GROUPS)
+    if "tts" in DOWNLOAD_GROUPS:
+        need += TTS_MIN_EXPECTED_BYTES
     log("磁盘剩余 : " + human(free) + " / 本次需要 " + human(need))
     if free and free < need * 1.05:
         log("[警告] 磁盘可能不够：建议只下其中一组，或把工作目录换到更大的盘")
@@ -699,6 +739,92 @@ def install_requirements() -> None:
         _run([sys.executable, "-m", "pip", "install", "-U", "sageattention"], check=False)
 
 
+def ensure_qwen3_tts_node(force: bool = False, install_deps: bool = True) -> Path:
+    """安装 ComfyUI-Qwen3-TTS 自定义节点（Qwen3Loader / Qwen3CustomVoice）。
+
+    只装运行时依赖（qwen-tts / soundfile / librosa / accelerate），不装 gradio 等
+    演示依赖，避免动到 ComfyUI 的 torch 环境。装完需要重启 ComfyUI 才生效。
+    """
+    target = COMFY_DIR / "custom_nodes" / TTS_NODE_DIRNAME
+    if (target / "__init__.py").is_file() and not force:
+        log("[节点] Qwen3-TTS 已安装: " + str(target))
+        return target
+    if shutil.which("git") is None:
+        raise RuntimeError("找不到 git，无法安装 Qwen3-TTS 节点")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(str(target), ignore_errors=True)
+
+    urls = [TTS_NODE_REPO]
+    if TTS_NODE_REPO.startswith("https://"):
+        urls += [mirror.rstrip("/") + "/" + TTS_NODE_REPO for mirror in TTS_NODE_MIRRORS]
+
+    last_error = None
+    for url in urls:
+        log("[节点] 克隆 " + url)
+        try:
+            _run(["git", "clone", "--depth", "1", url, str(target)], check=True)
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            log("[节点] 克隆失败: " + str(exc)[:160])
+            shutil.rmtree(str(target), ignore_errors=True)
+    if last_error is not None:
+        raise RuntimeError(
+            "Qwen3-TTS 节点克隆失败，请检查网络或用 COMFY_TTS_NODE_REPO 指向可访问镜像: "
+            + str(last_error)[:160]
+        )
+
+    if install_deps and not TTS_NODE_SKIP_DEPS:
+        extra = ["--extra-index-url", TORCH_INDEX_URL] if TORCH_INDEX_URL else []
+        log("[节点] 安装运行依赖（qwen-tts / soundfile / librosa / accelerate）")
+        _run(
+            [sys.executable, "-m", "pip", "install", "qwen-tts", "soundfile", "librosa", "accelerate"]
+            + extra,
+            check=False,
+        )
+        _run([sys.executable, "-m", "pip", "install", "sox"], check=False)
+        try:
+            _run(
+                [sys.executable, "-c", "import qwen_tts, soundfile, accelerate; print('ok')"],
+                check=True,
+            )
+            log("[节点] 依赖自检通过")
+        except Exception as exc:
+            log("[节点] 依赖自检失败（ComfyUI 启动后可能报错）: " + str(exc)[:200])
+
+    log("[节点] Qwen3-TTS 安装完成，重启 ComfyUI 后生效")
+    return target
+
+
+def _tts_check():
+    """核对 TTS 整仓关键文件，返回 (是否完整, 明细行)。"""
+    root = MODELS_DIR / TTS_REL_DIR
+    lines = []
+    ok = True
+    for rel, min_size in TTS_REQUIRED:
+        path = root / rel
+        if not path.is_file():
+            lines.append("缺失        " + rel)
+            ok = False
+            continue
+        size = path.stat().st_size
+        good = size >= min_size
+        lines.append(("OK    " if good else "不完整 ") + human(size).rjust(9) + "  " + rel)
+        ok = ok and good
+    return ok, lines
+
+
+def _download_tts(workers: int, force: bool = False) -> None:
+    if not force and _tts_check()[0]:
+        log("[下载] TTS 已完整，跳过: " + str(MODELS_DIR / TTS_REL_DIR))
+        return
+    log("[下载] " + TTS_REPO + "（整仓，约 " + human(TTS_MIN_EXPECTED_BYTES) + "）")
+    _download_repo(TTS_REPO, ["*"], int(workers))
+
+
 # ---------------------------------------------------------------------------
 # 3. 下载
 # ---------------------------------------------------------------------------
@@ -962,6 +1088,8 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
         return
     items = [m for m in MODELS if m.group in selected]
     total = sum(m.size for m in items)
+    if "tts" in selected:
+        total += TTS_MIN_EXPECTED_BYTES
     free = _disk_free(WORK_DIR)
     log("")
     log("[下载] 共 " + str(len(items)) + " 个文件, " + human(total) + "；磁盘剩余 " + human(free))
@@ -970,6 +1098,8 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
         feasible = []
         for group in selected:
             size = sum(m.size for m in MODELS if m.group == group)
+            if group == "tts":
+                size += TTS_MIN_EXPECTED_BYTES
             if size <= free * 0.95:
                 feasible.append(group + "（" + human(size) + "）")
         hint = ("磁盘只够: " + "、".join(feasible)) if feasible else "连单独一组都放不下"
@@ -999,7 +1129,8 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
                 pass
         pending.append(item)
 
-    if not pending:
+    tts_needed = "tts" in selected and not _tts_check()[0]
+    if not pending and not tts_needed:
         log("[下载] 所有文件已就绪，无需下载")
         return
 
@@ -1017,6 +1148,9 @@ def download_models(groups=None, workers=None, force=False, ask_token=None) -> N
         patterns = [m.path for m in repo_items]
         log("[下载] " + repo + " -> " + str(len(patterns)) + " 个文件")
         _download_repo(repo, patterns, int(workers or HF_MAX_WORKERS))
+
+    if "tts" in selected:
+        _download_tts(int(workers or HF_MAX_WORKERS), force=force)
 
     log("[下载] 全部完成")
 
@@ -1061,6 +1195,13 @@ def verify_models(groups=None, check_hash=False):
         if not ok:
             bad.append(item)
     log("-" * 74)
+    if "tts" in selected:
+        ok, lines = _tts_check()
+        log("[校验] TTS 整仓 " + TTS_REPO)
+        for line in lines:
+            log("    " + line)
+        if not ok:
+            bad.append(ModelFile("tts", TTS_REPO, TTS_REL_DIR, TTS_MIN_EXPECTED_BYTES, "Qwen3-TTS 整仓"))
     if bad:
         log("[校验] 有 " + str(len(bad)) + " 个文件不完整，请重新运行 download_models() 继续下载")
     else:
@@ -1598,6 +1739,8 @@ def setup_all(groups=None, do_download=True, do_launch=True, port=None, force=Fa
     check_env()
     ensure_comfyui()
     install_requirements()
+    if "tts" in selected:
+        ensure_qwen3_tts_node()
     if do_download:
         download_models(selected, force=force, ask_token=ask_token)
         verify_models(selected)

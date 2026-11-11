@@ -69,7 +69,7 @@ def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:
     }
 
 
-def inject_asset_refs(db: Session, shot: Shot, prompt: str) -> str:
+def inject_asset_refs(db: Session, shot: Shot, prompt: str, *, with_qc: bool = False) -> str:
     """把镜头资产清单中未在提示词出现的角色/场景/道具以 @引用 补入提示词头部。
 
     - 已显式 @引用 的实体不重复注入
@@ -129,6 +129,14 @@ def inject_asset_refs(db: Session, shot: Shot, prompt: str) -> str:
             if not prop.name or not prop.anchor_asset_id:
                 continue
             st = state_map.get(prop.id)
+            # 默认快照（visibility=unknown / existence=not_introduced / interaction=unassigned）
+            # 不代表剧情判断，按无状态处理，避免误判成「该道具不存在」而注入矛盾禁令
+            if st is not None and st.visibility == "unknown" \
+                    and st.existence_state == "not_introduced" \
+                    and st.interaction_state == "unassigned" \
+                    and not st.reference_required and not st.position \
+                    and not st.appearance_constraint:
+                st = None
             if st is not None:
                 if st.existence_state in ("not_introduced", "destroyed", "consumed") \
                         and prop.name in prompt:
@@ -174,4 +182,8 @@ def inject_asset_refs(db: Session, shot: Shot, prompt: str) -> str:
     if negative_names:
         # 负向约束不带 @ 前缀，避免被 @引用解析误判为需要参考图
         body += "\n禁止：画面中出现" + "、".join(negative_names) + "（剧情依据：该道具此时不存在）。"
+    if with_qc:
+        # 出图前质检：道具锚定图缺失直接阻断，多角色站位交由 LLM 复核修正
+        from app.services.prompt_qc import apply_keyframe_qc
+        body = apply_keyframe_qc(db, shot, body)
     return body

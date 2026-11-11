@@ -24,6 +24,11 @@ from app.worker.parse_executor import execute_parse_job
 
 _RUNNING = True
 
+# 对账性能约束：失联 ComfyUI 实例下，单轮最多对账任务数 & 单实例请求超时（秒）。
+# 避免大量失败任务 + 失联实例时，对账循环长时间持有 DB 事务拖垮整个服务。
+_RECONCILE_BATCH = 5
+_RECONCILE_TIMEOUT = 3.0
+
 
 def _handle_signal(signum, frame):
     global _RUNNING
@@ -35,26 +40,37 @@ def _reconcile_submission_unknown(db: Session) -> int:
     - 查远端 history：有结果 → 置回 queued 续跑（executor 会走 submission_unknown 分支续跑下载）
     - 无结果且队列中无该 prompt_id → 确认未提交成功，重置 queued 安全重提
     - 无结果但仍在远端队列 → 保持 submission_unknown，下轮启动再对账
-    返回对账处理数。"""
+    返回对账处理数。
+
+    性能约束：每轮最多对账 _RECONCILE_BATCH 个任务，单实例超时 3s，
+    避免失联实例 + 大量失败任务时单轮占用 DB 事务过久（SQLite 写锁阻塞其他写入）。
+    """
     from app.integrations.comfyui import ComfyUIClient, ComfyUIError
 
     reconciled = 0
-    unknown_jobs = db.query(Job).filter(
-        Job.status == "submission_unknown", Job.prompt_id.isnot(None)
-    ).all()
-    for job in unknown_jobs:
-        snapshot = job.input_snapshot or {}
-        base_url = snapshot.get("comfyui_instance")
+    unknown_jobs = (
+        db.query(Job)
+        .filter(Job.status == "submission_unknown", Job.prompt_id.isnot(None))
+        .limit(_RECONCILE_BATCH)
+        .all()
+    )
+    # 先把需要的信息取出，关闭会话期间再做网络调用，避免长时间占着 DB 事务
+    pending = [
+        (job.id, job.prompt_id, (job.input_snapshot or {}).get("comfyui_instance"))
+        for job in unknown_jobs
+    ]
+    db.close()
+    actions = []  # (job_id, new_status, prompt_id, submission_state)
+    for job_id, prompt_id, base_url in pending:
         if not base_url:
             continue
         try:
-            client = ComfyUIClient(base_url=base_url, timeout=10.0)
-            history = client.get_history(job.prompt_id)
+            client = ComfyUIClient(base_url=base_url, timeout=_RECONCILE_TIMEOUT)
+            history = client.get_history(prompt_id)
         except (ComfyUIError, Exception):
             continue  # 实例不可达：保持现状，下轮再对账
         if history is not None:
             # 远端有结果：保持 submission_unknown，executor 续跑分支直接下载产物（D-23 修复）
-            # 不置回 queued，避免重新提交浪费算力
             reconciled += 1
             continue
         # 远端无结果：检查是否仍在队列中
@@ -63,16 +79,26 @@ def _reconcile_submission_unknown(db: Session) -> int:
         except (ComfyUIError, Exception):
             continue
         in_queue = any(
-            item and len(item) > 1 and item[1] == job.prompt_id
+            item and len(item) > 1 and item[1] == prompt_id
             for item in (queue.get("queue_pending", []) + queue.get("queue_running", []))
         )
         if not in_queue:
             # 确认未提交成功：重置 queued 安全重提
-            job.status = "queued"
-            job.prompt_id = None
-            job.submission_state = "not_submitted"
+            actions.append((job_id, "queued", None, "not_submitted"))
             reconciled += 1
-    db.commit()
+    if actions:
+        db2 = SessionLocal()
+        try:
+            for job_id, status, prompt_id, sub_state in actions:
+                j = db2.get(Job, job_id)
+                if j is None:
+                    continue
+                j.status = status
+                j.prompt_id = prompt_id
+                j.submission_state = sub_state
+            db2.commit()
+        finally:
+            db2.close()
     return reconciled
 
 
@@ -88,19 +114,28 @@ def _reconcile_comfy_timeout_jobs(db: Session) -> int:
     返回对账处理数。"""
     from app.integrations.comfyui import ComfyUIClient, ComfyUIError
     reconciled = 0
-    timeout_jobs = db.query(Job).filter(
-        Job.status == "failed",
-        Job.error_code.in_(("comfy_timeout", "comfy_unreachable", "comfy_execution_error")),
-        Job.prompt_id.isnot(None),
-    ).all()
-    for job in timeout_jobs:
-        snapshot = job.input_snapshot or {}
-        base_url = snapshot.get("comfyui_instance")
+    timeout_jobs = (
+        db.query(Job)
+        .filter(
+            Job.status == "failed",
+            Job.error_code.in_(("comfy_timeout", "comfy_unreachable", "comfy_execution_error")),
+            Job.prompt_id.isnot(None),
+        )
+        .limit(_RECONCILE_BATCH)
+        .all()
+    )
+    pending = [
+        (job.id, job.prompt_id, (job.input_snapshot or {}).get("comfyui_instance"))
+        for job in timeout_jobs
+    ]
+    db.close()
+    actions = []  # job_ids to reset to queued for resume
+    for job_id, prompt_id, base_url in pending:
         if not base_url:
             continue
         try:
-            client = ComfyUIClient(base_url=base_url, timeout=10.0)
-            history = client.get_history(job.prompt_id)
+            client = ComfyUIClient(base_url=base_url, timeout=_RECONCILE_TIMEOUT)
+            history = client.get_history(prompt_id)
         except (ComfyUIError, Exception):
             continue  # 实例不可达：保持现状，下轮再对账
         if history is None:
@@ -112,17 +147,26 @@ def _reconcile_comfy_timeout_jobs(db: Session) -> int:
         if not done or err:
             continue
         # 远端已成功完成：重置为 queued 续跑（executor 走续跑分支直接下载产物）
-        job.status = "queued"
-        job.error_code = None
-        job.error_msg = None
-        job.finished_at = None
-        job.submission_state = "submitted"
-        _snap = dict(job.input_snapshot or {})
-        _snap["resume_prompt"] = True
-        job.input_snapshot = _snap
+        actions.append(job_id)
         reconciled += 1
-    if reconciled:
-        db.commit()
+    if actions:
+        db2 = SessionLocal()
+        try:
+            for job_id in actions:
+                j = db2.get(Job, job_id)
+                if j is None:
+                    continue
+                j.status = "queued"
+                j.error_code = None
+                j.error_msg = None
+                j.finished_at = None
+                j.submission_state = "submitted"
+                _snap = dict(j.input_snapshot or {})
+                _snap["resume_prompt"] = True
+                j.input_snapshot = _snap
+            db2.commit()
+        finally:
+            db2.close()
     return reconciled
 
 

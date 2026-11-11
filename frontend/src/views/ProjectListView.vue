@@ -19,8 +19,8 @@ import type { DropdownOption, FormInst, FormRules } from 'naive-ui'
 import { archiveProject, createProject, deleteProject, getPurgePreview, getStyleOptions, listProjects, purgeProject } from '@/api/projects'
 import type { PurgePreview } from '@/api/projects'
 import { getSettings, listComfyuiInstances } from '@/api/settings'
-import { listSeries } from '@/api/series'
-import type { SeriesListItem } from '@/types/series'
+import { createSeries } from '@/api/series'
+import type { SeriesCreatePayload } from '@/types/series'
 import type { AspectRatio, CreationType, CreateProjectPayload, Project, StyleConfig } from '@/types/project'
 import StyleConfigForm from '@/components/StyleConfigForm.vue'
 const router = useRouter()
@@ -59,19 +59,6 @@ const missingConfigs = computed(() => {
   if (!comfyReady.value) items.push('ComfyUI')
   return items
 })
-/* ---------- Tab 切换：单集项目 / 系列 ---------- */
-const activeTab = ref<'projects' | 'series'>('projects')
-const TAB_OPTIONS: { value: 'projects' | 'series'; label: string }[] = [
-  { value: 'projects', label: '单集项目' },
-  { value: 'series', label: '系列' },
-]
-/* ---------- 系列列表查询（懒加载）---------- */
-const seriesQuery = useQuery({
-  queryKey: ['series-list-tab'],
-  queryFn: () => listSeries({ page: 1, page_size: 100 }),
-  enabled: computed(() => activeTab.value === 'series'),
-})
-const seriesItems = computed<SeriesListItem[]>(() => seriesQuery.data.value?.items ?? [])
 /* ---------- 列表查询 ---------- */
 const { data, isPending, isError, error, refetch } = useQuery({
   queryKey: ['projects'],
@@ -139,6 +126,17 @@ const { mutate: mutateCreate, isPending: creating } = useMutation({
       })
       return
     }
+    message.error(errMsg(e))
+  },
+})
+const { mutate: mutateCreateSeries, isPending: creatingSeries } = useMutation({
+  mutationFn: (payload: SeriesCreatePayload) => createSeries(payload),
+  onSuccess: (s) => {
+    message.success(`系列「${s.name}」创建成功`)
+    showModal.value = false
+    void router.push({ name: 'series-detail', params: { id: s.id } })
+  },
+  onError: (e) => {
     message.error(errMsg(e))
   },
 })
@@ -266,10 +264,24 @@ function coverChar(p: Project): string {
 const showModal = ref(false)
 const createType = ref<'project' | 'series'>('project')
 const formRef = ref<FormInst | null>(null)
+const seriesFormRef = ref<FormInst | null>(null)
 const formModel = ref<{ name: string; aspect_ratio: AspectRatio; creation_type: CreationType }>({
   name: '',
   aspect_ratio: '16:9',
   creation_type: 'novel',
+})
+const seriesForm = ref<{
+  name: string
+  description: string
+  genre: string
+  style: string
+  target_audience: string
+}>({
+  name: '',
+  description: '',
+  genre: '',
+  style: '',
+  target_audience: '',
 })
 /* ---------- 创建时可选风格配置（留空则完全使用后端默认值） ---------- */
 const styleOptionsQuery = useQuery({
@@ -296,12 +308,21 @@ const rules: FormRules = {
     },
   ],
 }
+const seriesRules: FormRules = {
+  name: [
+    { required: true, message: '请输入系列名称', trigger: ['blur', 'input'] },
+    {
+      validator: (_rule, value: string) => value.trim().length >= 1 && value.trim().length <= 200,
+      message: '系列名称需为 1-200 个字符',
+      trigger: ['blur', 'input'],
+    },
+  ],
+  description: [{ max: 2000, message: '简介不能超过 2000 个字符', trigger: ['input', 'blur'] }],
+}
 function openCreateModal() {
-  if (createType.value === 'series') {
-    void router.push({ name: 'series-create' })
-    return
-  }
+  createType.value = 'project'
   formModel.value = { name: '', aspect_ratio: '16:9', creation_type: 'novel' }
+  seriesForm.value = { name: '', description: '', genre: '', style: '', target_audience: '' }
   showStyleConfig.value = false
   styleConfig.value = styleOptions.value ? { ...styleOptions.value.defaults } : null
   showModal.value = true
@@ -342,82 +363,42 @@ async function handleCreate() {
   }
   mutateCreate(payload)
 }
+async function handleCreateSeries() {
+  try {
+    await seriesFormRef.value?.validate()
+  } catch {
+    return
+  }
+  const payload: SeriesCreatePayload = {
+    name: seriesForm.value.name.trim(),
+    description: seriesForm.value.description.trim() || null,
+    genre: seriesForm.value.genre.trim() || null,
+    style: seriesForm.value.style.trim() || null,
+    target_audience: seriesForm.value.target_audience.trim() || null,
+  }
+  mutateCreateSeries(payload)
+}
 </script>
 <template>
   <section class="page project-list-page">
     <header class="page-header">
       <div class="header-left">
-        <div>
-          <h1 class="page-title">作品列表</h1>
-          <div class="tab-switch">
-            <button
-              v-for="t in TAB_OPTIONS"
-              :key="t.value"
-              type="button"
-              class="tab-btn"
-              :class="{ active: activeTab === t.value }"
-              @click="activeTab = t.value"
-            >{{ t.label }}</button>
-          </div>
-        </div>
-        <div v-if="projects.length && activeTab === 'projects'" class="header-stats">
+        <div v-if="projects.length" class="header-stats">
           <span class="stat-chip">{{ projects.length }} 个作品</span>
           <span class="stat-chip stat-active">{{ activeCount }} 个进行中</span>
         </div>
       </div>
       <div class="header-actions">
+        <n-input
+          v-model:value="searchKeyword"
+          placeholder="搜索作品"
+          clearable
+          class="search-input"
+          size="small"
+        />
         <n-button type="primary" @click="openCreateModal">新建作品</n-button>
       </div>
     </header>
-    <!-- ===== 系列 Tab ===== -->
-    <template v-if="activeTab === 'series'">
-      <div v-if="seriesQuery.isError.value" class="state-block">
-        <p class="state-text">系列加载失败：{{ (seriesQuery.error.value as any)?.message ?? '未知错误' }}</p>
-        <n-button secondary @click="() => seriesQuery.refetch()">重试</n-button>
-      </div>
-      <div v-else-if="seriesQuery.isPending.value" class="project-grid">
-        <div v-for="i in 4" :key="i" class="skeleton-card">
-          <div class="skeleton-cover"></div>
-          <div class="skeleton-body">
-            <div class="skeleton-line w-60"></div>
-            <div class="skeleton-line w-40"></div>
-          </div>
-        </div>
-      </div>
-      <div v-else-if="seriesItems.length === 0" class="state-block">
-        <n-empty description="还没有系列，创建一个系列来管理长篇创作">
-          <template #extra>
-            <n-button type="primary" @click="createType = 'series'; openCreateModal()">新建系列</n-button>
-          </template>
-        </n-empty>
-      </div>
-      <div v-else class="series-tab-grid">
-        <article
-          v-for="item in seriesItems"
-          :key="item.id"
-          class="series-card"
-          @click="router.push({ name: 'series-detail', params: { id: item.id } })"
-        >
-          <div class="card-head">
-            <h2>{{ item.name }}</h2>
-            <n-tag size="small" :type="item.status === 'active' ? 'success' : 'default'">
-              {{ item.status === 'active' ? '进行中' : '已归档' }}
-            </n-tag>
-          </div>
-          <p class="desc">{{ item.description || '暂无简介' }}</p>
-          <div class="stats">
-            <span>剧集 {{ item.episode_count }}</span>
-            <span>已确认剧本 {{ item.confirmed_script_count }}</span>
-            <span>已完成视频 {{ item.completed_video_count }}</span>
-          </div>
-          <div class="card-actions" @click.stop>
-            <n-button size="small" @click="router.push({ name: 'series-detail', params: { id: item.id } })">进入</n-button>
-          </div>
-        </article>
-      </div>
-    </template>
-    <!-- ===== 单集项目 Tab ===== -->
-    <template v-if="activeTab === 'projects'">
     <div v-if="missingConfigs.length" class="config-banner">
       <span class="banner-text">
         尚未完成 {{ missingConfigs.join('、') }} 配置，创建作品前请先完成配置
@@ -538,8 +519,7 @@ async function handleCreate() {
         </div>
       </template>
     </template>
-    </template>
-    <!-- ===== 新建弹窗（仅单集）===== -->
+    <!-- ===== 新建作品弹窗 ===== -->
     <n-modal
       :show="showModal"
       :on-update:show="onUpdateShow"
@@ -549,7 +529,33 @@ async function handleCreate() {
       :style="{ width: '520px' }"
       :mask-closable="false"
     >
+      <!-- ===== 创建类型选择 ===== -->
+      <div class="create-type-cards">
+        <button
+          type="button"
+          class="create-type-card"
+          :class="{ active: createType === 'project' }"
+          @click="createType = 'project'"
+        >
+          <span class="ct-icon">🎬</span>
+          <span class="ct-name">单集项目</span>
+          <span class="ct-desc">独立的单集漫剧，快速从剧本到成片</span>
+        </button>
+        <button
+          type="button"
+          class="create-type-card"
+          :class="{ active: createType === 'series' }"
+          @click="createType = 'series'"
+        >
+          <span class="ct-icon">📚</span>
+          <span class="ct-name">系列</span>
+          <span class="ct-desc">多集长篇创作，统一世界观与角色资产</span>
+        </button>
+      </div>
+
+      <!-- ===== 单集项目表单 ===== -->
       <n-form
+        v-if="createType === 'project'"
         ref="formRef"
         :model="formModel"
         :rules="rules"
@@ -614,10 +620,74 @@ async function handleCreate() {
           </div>
         </div>
       </n-form>
+
+      <!-- ===== 系列表单 ===== -->
+      <n-form
+        v-else
+        ref="seriesFormRef"
+        :model="seriesForm"
+        :rules="seriesRules"
+        label-placement="top"
+        :show-require-mark="false"
+      >
+        <n-form-item label="系列名称" path="name">
+          <n-input
+            v-model:value="seriesForm.name"
+            placeholder="例如：小熊成长记"
+            maxlength="200"
+            show-count
+          />
+        </n-form-item>
+        <n-form-item label="系列简介" path="description">
+          <n-input
+            v-model:value="seriesForm.description"
+            type="textarea"
+            :autosize="{ minRows: 3, maxRows: 6 }"
+            placeholder="简述系列的主题、世界观与整体走向"
+            maxlength="2000"
+            show-count
+          />
+        </n-form-item>
+        <div class="form-row">
+          <n-form-item label="题材类型" path="genre" class="form-row-item">
+            <n-input
+              v-model:value="seriesForm.genre"
+              placeholder="例如：儿童成长 / 奇幻冒险"
+              maxlength="64"
+            />
+          </n-form-item>
+          <n-form-item label="目标受众" path="target_audience" class="form-row-item">
+            <n-input
+              v-model:value="seriesForm.target_audience"
+              placeholder="例如：6-10 岁儿童"
+              maxlength="64"
+            />
+          </n-form-item>
+        </div>
+        <n-form-item label="整体风格" path="style">
+          <n-input
+            v-model:value="seriesForm.style"
+            placeholder="例如：温暖治愈的手绘风格"
+            maxlength="200"
+          />
+        </n-form-item>
+      </n-form>
+
       <template #footer>
         <div class="modal-footer">
           <n-button @click="onUpdateShow(false)">取消</n-button>
-          <n-button type="primary" :loading="creating" @click="handleCreate">创建</n-button>
+          <n-button
+            v-if="createType === 'project'"
+            type="primary"
+            :loading="creating"
+            @click="handleCreate"
+          >创建作品</n-button>
+          <n-button
+            v-else
+            type="primary"
+            :loading="creatingSeries"
+            @click="handleCreateSeries"
+          >创建系列</n-button>
         </div>
       </template>
     </n-modal>
@@ -668,7 +738,6 @@ async function handleCreate() {
 .tab-switch {
   display: flex;
   gap: 2px;
-  margin-top: 8px;
   padding: 2px;
   border-radius: 8px;
   background: var(--bg-panel);
@@ -1134,6 +1203,58 @@ async function handleCreate() {
   justify-content: flex-end;
   gap: 12px;
 }
+/* ===== 创建类型选择卡 ===== */
+.create-type-cards {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.create-type-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px;
+  text-align: left;
+  background: var(--bg-elevated, #f8fafc);
+  border: 1.5px solid var(--border-subtle, #e5e7eb);
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--text-primary, #111827);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+.create-type-card:hover {
+  border-color: var(--border-strong, #cbd5e1);
+}
+.create-type-card.active {
+  border-color: var(--brand-primary);
+  background: rgba(53, 179, 166, 0.1);
+}
+.ct-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+.ct-name {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+}
+.ct-desc {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-secondary, #6b7280);
+}
+/* ===== 系列表单两列 ===== */
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+.form-row-item {
+  flex: 1;
+}
+/* ===== 系列引导（已弃用，保留占位防样式漂移）===== */
 /* 新建作品弹窗内的可选风格配置折叠区 */
 .style-section {
   margin-top: 4px;

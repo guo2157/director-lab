@@ -1198,27 +1198,46 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             job.input_snapshot = {**(job.input_snapshot or {}), "params": snapshot, "workflow_version": wf_record.version, "comfyui_instance": used_instance["base_url"]}
             db.commit()
             try:
-                prompt_id = client.submit_prompt(injected_wf)
+                # 任务级 client_id：提交超时时可按它回查远端是否已接收该任务，
+                # 避免共享 client_id 时把别的任务误认成本任务
+                _cid = f"director-lab:{job.id}"
+                prompt_id = client.submit_prompt(injected_wf, client_id=_cid)
             except ComfyUIError as e:
                 job.submission_state = "submission_unknown"
                 db.commit()
-                # 提交失败：还有未尝试实例时换实例重试（D-21 任务级故障转移）
-                remaining = [
-                    i for i in comfyui_pool.enabled_instances()
-                    if i["base_url"] not in exclude_instances
-                    and used_instance is not None
-                    and i["base_url"] != used_instance["base_url"]
-                ]
-                if used_instance is not None and remaining:
-                    _write_event(db, job, "job.retry", {
-                        "stage": "submit", "error_code": e.code,
-                        "failed_instance": used_instance["base_url"],
-                    })
-                    db.commit()
-                    return {"ok": False, "reason": e.code, "retriable": True,
-                            "exclude_instances": exclude_instances + [used_instance["base_url"]]}
-                _fail_job(db, job, e.code, f"提交失败: {e.message}")
-                return {"ok": False, "reason": e.code}
+                # 提交请求超时：远端可能已接收并入队。先按 client_id 回查队列与历史，
+                # 命中即续跑原任务，不重复提交（避免算力浪费与锚定图指针孤儿）
+                prompt_id = None
+                if e.code == "comfy_timeout":
+                    try:
+                        prompt_id = client.find_recent_prompt(_cid)
+                    except ComfyUIError:
+                        prompt_id = None
+                    if prompt_id:
+                        _write_event(db, job, "job.submit_reconciled", {
+                            "prompt_id": prompt_id,
+                            "instance": (used_instance or {}).get("base_url"),
+                            "note": "提交超时但远端已接收，改走续跑",
+                        })
+                        db.commit()
+                if prompt_id is None:
+                    # 提交失败：还有未尝试实例时换实例重试（D-21 任务级故障转移）
+                    remaining = [
+                        i for i in comfyui_pool.enabled_instances()
+                        if i["base_url"] not in exclude_instances
+                        and used_instance is not None
+                        and i["base_url"] != used_instance["base_url"]
+                    ]
+                    if used_instance is not None and remaining:
+                        _write_event(db, job, "job.retry", {
+                            "stage": "submit", "error_code": e.code,
+                            "failed_instance": used_instance["base_url"],
+                        })
+                        db.commit()
+                        return {"ok": False, "reason": e.code, "retriable": True,
+                                "exclude_instances": exclude_instances + [used_instance["base_url"]]}
+                    _fail_job(db, job, e.code, f"提交失败: {e.message}")
+                    return {"ok": False, "reason": e.code}
             job.prompt_id = prompt_id
             job.submission_state = "submitted"
             _write_event(db, job, "job.submitted", {"prompt_id": prompt_id})

@@ -2,7 +2,7 @@
 
 ════ 一、总则 ════
 1. 角色、场景、道具、镜头一律使用稳定唯一名称；同一对象自始至终只用同一个名字，不得出现别名、简称、尊称混用。
-2. 只输出可校验 JSON，不输出自然语言分析报告。顶层字段：project_analysis、characters、props、scenes、episodes。
+2. 只输出可校验 JSON，不输出自然语言分析报告。顶层字段：project_analysis、characters、props、scenes、episodes、prop_events。
 3. 所有描述字段服务于同一个标准：能否据此生成一张合格的参考图。
 
 ════ 二、角色 characters ════
@@ -67,5 +67,12 @@
 ════ 八、@引用规则 ════
 29. 提示词中引用角色、场景、道具一律写成 @名称，名称必须与本 JSON 中 name 或 title 完全一致，包括中间间隔号。
 30. props 数组只填本镜真正参与画面或动作的道具名，未出现的不要列。
+
+════ 九、道具生命周期事件 prop_events ════
+31. prop_events 为顶层数组，记录道具在剧情中明确交代的存在与交互变化，供后续镜头连续性推导。每项含 prop（道具名）、episode、scene_title、shot_seq、event_type、evidence、holder_after、location_after。
+32. event_type 只能取：introduced（首次出现）、picked_up（被拿起）、held、carried（携带或背负）、placed（放下）、transferred（易手）、dropped（掉落）、moved（位置移动）、opened、closed、modified（外观改变）、damaged（损坏）、repaired（修复）、consumed（消耗）、destroyed（毁坏）、lost（丢失）、recovered（找回）。
+33. evidence 必须摘录剧本原文片段（不超过 40 字），不得编造或改写；剧本没有明确交代的变化不要产出事件。
+34. 每件道具只在首次出现的镜头产出一次 introduced；进入 destroyed/consumed/lost 终态后不得再产出交互事件，除非另有 recovered。
+35. scene_title 必须与 scenes 中 title 完全一致；shot_seq 为该场景内该镜头的 seq；无法定位到具体镜头时省略 shot_seq（表示该集开始即生效）。
 
 按用户指定的集范围解析，范围外的集不落库。只输出 JSON。

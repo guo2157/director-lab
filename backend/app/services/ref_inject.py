@@ -284,4 +284,7 @@ def rewrite_picture_refs(db: Session, project_id: str, prompt: str,
                 seg = _REF_TAG_RE.sub(tag, seg)
             rebuilt.append(seg)
         out_lines.append("".join(rebuilt))
-    return "\n".join(out_lines)
+    # 图序绑定：按实际注入槽位重写『参考图职责』，让文字里的「图N」与模型收到的第N张严格一致
+    from app.services.prompt_qc import relabel_reference_block
+    return relabel_reference_block(
+        db, project_id, "\n".join(out_lines), media, reference_slots)

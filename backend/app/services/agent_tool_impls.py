@@ -1199,7 +1199,7 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
             if target == "keyframe" and params.get("prompt"):
                 from app.services.shot_refs import inject_asset_refs
 
-                params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+                params["prompt"] = inject_asset_refs(db, shot, params["prompt"], with_qc=True)
             # @引用注入（D-16）：解析提示词中的 @角色/@场景，自动携带参考图
             if target in ("keyframe", "clip"):
                 from app.services.ref_inject import build_media_params

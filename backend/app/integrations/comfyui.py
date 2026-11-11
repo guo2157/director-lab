@@ -70,6 +70,55 @@ class ComfyUIClient:
         """查询当前队列状态。"""
         return self._request("GET", "/queue")
 
+    def find_recent_prompt(self, client_id: str, history_limit: int = 50) -> str | None:
+        """按 client_id 回查最近提交的 prompt_id（提交响应丢失时避免重复提交）。
+
+        POST /prompt 请求超时不等于服务端未接收：请求可能已入队或已在执行。
+        先查 /queue 的 running/pending，再查最近 history，命中即返回，
+        调用方可续跑原任务，而不是换实例重复提交或直接判失败留下孤儿任务。
+        """
+        def _extra_cid(extra) -> str | None:
+            return extra.get("client_id") if isinstance(extra, dict) else None
+
+        try:
+            queue = self.get_queue()
+        except ComfyUIError:
+            queue = {}
+        best: tuple[int, str] | None = None
+        if isinstance(queue, dict):
+            for key in ("queue_running", "queue_pending"):
+                for entry in queue.get(key) or []:
+                    if not isinstance(entry, list) or len(entry) < 4:
+                        continue
+                    num, pid, extra = entry[0], entry[1], entry[3]
+                    if not pid or _extra_cid(extra) != client_id:
+                        continue
+                    n = num if isinstance(num, int) else 0
+                    if best is None or n > best[0]:
+                        best = (n, pid)
+        if best is not None:
+            return best[1]
+
+        try:
+            history = self._request("GET", "/history", params={"max_items": history_limit})
+        except ComfyUIError:
+            return None
+        if not isinstance(history, dict):
+            return None
+        newest: tuple[int, str] | None = None
+        for pid, entry in history.items():
+            if not isinstance(entry, dict):
+                continue
+            prompt = entry.get("prompt")
+            if not isinstance(prompt, list) or len(prompt) < 4:
+                continue
+            if _extra_cid(prompt[3]) != client_id:
+                continue
+            num = prompt[0] if isinstance(prompt[0], int) else 0
+            if newest is None or num > newest[0]:
+                newest = (num, pid)
+        return newest[1] if newest is not None else None
+
     def interrupt(self) -> None:
         """全局中断（会中断 ComfyUI 上所有正在执行的任务，调用方需二次确认）。"""
         self._request("POST", "/interrupt")

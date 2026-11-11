@@ -380,10 +380,26 @@ def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
     重新生成插队；普通任务保持 0。
     """
     job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
+    if shot_id and target in ("keyframe", "clip"):
+        # 出分镜前资产预检：缺失资产自动补生成并阻断本次提交，避免必然失败的任务
+        _shot_for_preflight = db.get(Shot, shot_id)
+        if _shot_for_preflight is not None:
+            _preflight_shot_assets(db, _shot_for_preflight, target)
     if target == "clip":
+        # 清除上一镜头遗留的质检快照，避免快照串镜头
+        db.info.pop("prompt_qc_last", None)
         # 极速/标准/质量三档工作流各自带画幅，创建任务时就落到 params，
         # 避免 worker 再按项目宽高比覆盖
         params = _apply_tier_frame_size(wf, params)
+        # 出视频前质检：视频提示词在解析阶段生成，此处按分镜图/资产做一致性校验，
+        # 发现疑点交 LLM 整段重写（带缓存），结果写入 input_snapshot 可追溯
+        if params.get("prompt") and shot_id:
+            shot = db.get(Shot, shot_id)
+            if shot is not None:
+                from app.services.prompt_qc import apply_clip_qc
+                params = dict(params)
+                params["prompt"] = apply_clip_qc(db, shot, params["prompt"])[0]
+    qc_meta = db.info.pop("prompt_qc_last", None)
     job = Job(
         id=ids.job_id(),
         project_id=project_id,
@@ -399,6 +415,7 @@ def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
             "workflow_version": wf.version,
             "params": params,
             "generation_mode": generation_mode,
+            "prompt_qc": qc_meta,
         },
     )
     db.add(job)
@@ -676,6 +693,117 @@ def _check_scene_baselines(db: Session, project_id: str) -> None:
         )
 
 
+# 资产补生成任务优先级：高于镜头任务（0），保证缺失的定妆图/基准图/锚定图先出
+_ASSET_PREFLIGHT_PRIORITY = 500
+
+
+def _inflight_asset_keys(db: Session, project_id: str) -> set[tuple[str, str]]:
+    """项目内在途（queued/running）的资产补生成任务：{(类型, 实体 id)}，用于去重。"""
+    rows = (
+        db.query(Job)
+        .filter(
+            Job.project_id == project_id,
+            Job.job_type == "generate_keyframe",
+            Job.status.in_(("queued", "running")),
+        )
+        .all()
+    )
+    keys: set[tuple[str, str]] = set()
+    for job in rows:
+        params = job.params or {}
+        for key, kind in (("__character_id__", "character"),
+                          ("__prop_id__", "prop"),
+                          ("__scene_id__", "scene")):
+            if params.get(key):
+                keys.add((kind, params[key]))
+    return keys
+
+
+def _enqueue_asset_job(db: Session, asset_type: str, entity, wf: Workflow) -> Job:
+    """按资产类型提交补生成任务（与 /characters|props|scenes/{id}/generate 同规则）。"""
+    from app.services.asset_prompts import ASSET_PROMPTS_VERSION
+
+    params, compilation = _compile_asset_prompt(db, asset_type, entity.id, wf, {})
+    params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
+    job = _create_job(db, entity.project_id, None, "keyframe", wf, params,
+                      priority=_ASSET_PREFLIGHT_PRIORITY)
+    _attach_compilation(job, compilation)
+    id_key = {"character": "__character_id__", "prop": "__prop_id__",
+              "scene": "__scene_id__"}[asset_type]
+    job.params = {**(job.params or {}), id_key: entity.id}
+    return job
+
+
+def _preflight_shot_assets(db: Session, shot: Shot, target: str) -> None:
+    """出分镜前资产预检：本镜引用的定妆图/基准图/锚定图缺失时自动补生成。
+
+    缺失资产若不补，提交后必然在参考图门禁处失败（reference_asset_missing /
+    asset_identity_missing），既浪费一次失败任务也污染任务历史。这里改为：
+    自动提交缺失资产的生成任务（高优先级、按实体去重），并阻断本次分镜任务，
+    资产出图后重新发起即可。
+    """
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return
+    project_id = scene.project_id
+    text = shot.image_prompt if target == "keyframe" else (shot.video_prompt or shot.image_prompt)
+    text = text or ""
+
+    missing: list[tuple[str, str]] = []  # (类型, 名称)
+    chars = [
+        ch for ch in db.query(Character).filter(Character.project_id == project_id).all()
+        if ch.name and (f"@{ch.name}" in text or ch.name in text)
+    ]
+    for ch in chars:
+        if not ch.portrait_asset_id:
+            missing.append(("character", ch.name))
+    if target == "keyframe" and not scene.baseline_asset_id:
+        # 视频以已生成的分镜图为参考，场景基准图缺失只影响分镜图
+        missing.append(("scene", scene.title or "场景"))
+    props = [
+        p for p in db.query(Prop).filter(Prop.project_id == project_id).all()
+        if p.name and (f"@{p.name}" in text or p.name in text)
+    ]
+    for p in props:
+        if not p.anchor_asset_id:
+            missing.append(("prop", p.name))
+    if not missing:
+        return
+
+    inflight = _inflight_asset_keys(db, project_id)
+    wf = None
+    created: list[str] = []
+    for kind, name in missing:
+        entity = None
+        if kind == "character":
+            entity = next((c for c in chars if c.name == name), None)
+        elif kind == "prop":
+            entity = next((p for p in props if p.name == name), None)
+        else:
+            entity = scene
+        if entity is None or (kind, entity.id) in inflight:
+            continue
+        if wf is None:
+            wf = _match_pure_asset_workflow(db, None)
+        job = _enqueue_asset_job(db, kind, entity, wf)
+        created.append(job.id)
+        inflight.add((kind, entity.id))
+    # 资产任务必须先落库：随后抛出的 409 会回滚当前事务
+    db.commit()
+
+    names = "、".join(f"{name}（{_ASSET_LABEL[kind]}）" for kind, name in missing)
+    raise errors.AppError(
+        "asset_preflight_pending",
+        f"本镜所需资产缺失，已自动提交补生成：{names}。资产完成后请重新发起生成",
+        409,
+        missing=[{"type": k, "name": n} for k, n in missing],
+        created_job_ids=created,
+    )
+
+
+_ASSET_LABEL = {"character": "角色定妆图", "scene": "场景基准图", "prop": "道具锚定图"}
+
+
 def _check_inflight_duplicate(db: Session, shot_id: str, target: str) -> None:
     """在途任务去重：同镜头同目标已有 queued/running 任务时返回 409，
     防止重复提交/重试产生重复任务（幂等性保障）。"""
@@ -866,7 +994,7 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
     # P2：镜头资产清单注入——出场角色/所属场景未在提示词 @引用 时自动补入头部
     if target == "keyframe" and params.get("prompt"):
         from app.services.shot_refs import inject_asset_refs
-        params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+        params["prompt"] = inject_asset_refs(db, shot, params["prompt"], with_qc=True)
     # @引用注入（D-16）：keyframe/clip 生成时解析提示词中的 @角色/@场景，自动携带参考图
     # 连续性首帧注入可能已设置 __media__.first_frame，此处合并而非覆盖
     if target in ("keyframe", "clip"):
@@ -976,7 +1104,7 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     # P2：镜头资产清单注入（重做与单镜生成行为一致）
     if target == "keyframe" and params.get("prompt"):
         from app.services.shot_refs import inject_asset_refs
-        params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+        params["prompt"] = inject_asset_refs(db, shot, params["prompt"], with_qc=True)
     # @引用注入（D-16）：重做与单镜生成行为一致，重做时同样携带参考图
     # 连续性首帧注入可能已设置 __media__.first_frame，此处合并而非覆盖
     if target in ("keyframe", "clip"):
@@ -1248,7 +1376,7 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
         # P2：镜头资产清单注入（场景批量与单镜生成行为一致）
         if target == "keyframe" and params.get("prompt"):
             from app.services.shot_refs import inject_asset_refs
-            params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+            params["prompt"] = inject_asset_refs(db, shot, params["prompt"], with_qc=True)
         # @引用注入：合并已有 __media__（首帧注入可能已设置 first_frame）
         if target in ("keyframe", "clip"):
             prompt_text = params.get("prompt") or ""
@@ -1353,7 +1481,7 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
             shot_wf = _inject_continuity_first_frame(db, shot, target, wf, params)
         if target == "keyframe" and params.get("prompt"):
             from app.services.shot_refs import inject_asset_refs
-            params["prompt"] = inject_asset_refs(db, shot, params["prompt"])
+            params["prompt"] = inject_asset_refs(db, shot, params["prompt"], with_qc=True)
         if target in ("keyframe", "clip"):
             from app.services.ref_inject import build_media_params
             prompt_text = params.get("prompt") or ""

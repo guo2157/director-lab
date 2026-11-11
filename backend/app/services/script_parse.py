@@ -119,7 +119,7 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 
 ════ 一、总则 ════
 1. 角色、场景、道具、镜头一律使用稳定唯一名称；同一对象自始至终只用同一个名字，不得出现别名、简称、尊称混用。
-2. 只输出可校验 JSON，不输出自然语言分析报告。顶层字段：project_analysis、characters、props、scenes、episodes。
+2. 只输出可校验 JSON，不输出自然语言分析报告。顶层字段：project_analysis、characters、props、scenes、episodes、prop_events。
 3. 所有描述字段服务于同一个标准：能否据此生成一张合格的参考图。
 
 ════ 二、角色 characters ════
@@ -185,6 +185,13 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 29. 提示词中引用角色、场景、道具一律写成 @名称，名称必须与本 JSON 中 name 或 title 完全一致，包括中间间隔号。
 30. props 数组只填本镜真正参与画面或动作的道具名，未出现的不要列。
 
+════ 九、道具生命周期事件 prop_events ════
+31. prop_events 为顶层数组，记录道具在剧情中明确交代的存在与交互变化，供后续镜头连续性推导。每项含 prop（道具名）、episode、scene_title、shot_seq、event_type、evidence、holder_after、location_after。
+32. event_type 只能取：introduced（首次出现）、picked_up（被拿起）、held、carried（携带或背负）、placed（放下）、transferred（易手）、dropped（掉落）、moved（位置移动）、opened、closed、modified（外观改变）、damaged（损坏）、repaired（修复）、consumed（消耗）、destroyed（毁坏）、lost（丢失）、recovered（找回）。
+33. evidence 必须摘录剧本原文片段（不超过 40 字），不得编造或改写；剧本没有明确交代的变化不要产出事件。
+34. 每件道具只在首次出现的镜头产出一次 introduced；进入 destroyed/consumed/lost 终态后不得再产出交互事件，除非另有 recovered。
+35. scene_title 必须与 scenes 中 title 完全一致；shot_seq 为该场景内该镜头的 seq；无法定位到具体镜头时省略 shot_seq（表示该集开始即生效）。
+
 按用户指定的集范围解析，范围外的集不落库。只输出 JSON。""")
 
 
@@ -197,6 +204,13 @@ class NormalizeResult:
 
 
 _VALID_EMOTIONS = {"neutral", "happy", "sad", "angry", "fearful"}
+
+# 道具生命周期事件类型（与 prop_lifecycle._EVENT_TO_* 映射保持一致）
+_PROP_EVENT_TYPES = {
+    "introduced", "picked_up", "held", "carried", "placed", "transferred",
+    "dropped", "moved", "opened", "closed", "modified", "damaged", "repaired",
+    "consumed", "destroyed", "lost", "recovered",
+}
 _STATE_KEYS = ["pose", "position", "expression", "holding", "costume", "injury"]
 
 # --- 解析输出硬约束（第 2 步）：把可制作性要求落到代码侧，不再只依赖提示词自觉 ---
@@ -298,6 +312,40 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
     result.data["props"] = [
         p for p in (raw.get("props") or []) if isinstance(p, dict) and p.get("name")
     ]
+    # prop_events（P1-2）：剧本明确交代的道具存在/交互变化，按集范围过滤并校验
+    _prop_events: list[dict] = []
+    for ev in raw.get("prop_events") or []:
+        if not isinstance(ev, dict):
+            continue
+        pname = (ev.get("prop") or "").strip()
+        etype = (ev.get("event_type") or "").strip()
+        if not pname or etype not in _PROP_EVENT_TYPES:
+            warnings.append(f"道具事件 {pname or '?'}/{etype or '?'} 名称或类型非法，已忽略")
+            continue
+        if not _in_range(ev.get("episode")):
+            continue
+        evidence = (ev.get("evidence") or "").strip()
+        if not evidence:
+            # source_type=script 必须有剧本原文证据，否则无法审计也不可确认
+            warnings.append(f"道具事件 {pname}/{etype} 缺少剧本证据，已忽略")
+            continue
+        item = {
+            "prop": pname,
+            "episode": int(ev.get("episode")),
+            "event_type": etype,
+            "evidence": evidence[:200],
+            "scene_title": (ev.get("scene_title") or "").strip() or None,
+            "shot_seq": ev.get("shot_seq"),
+            "holder_after": (ev.get("holder_after") or "").strip() or None,
+            "location_after": (ev.get("location_after") or "").strip() or None,
+        }
+        _key = (item["prop"], item["episode"], item["scene_title"],
+                item["shot_seq"], item["event_type"])
+        if any((x["prop"], x["episode"], x["scene_title"], x["shot_seq"], x["event_type"]) == _key
+               for x in _prop_events):
+            continue
+        _prop_events.append(item)
+    result.data["prop_events"] = _prop_events
     # episodes 范围过滤
     result.data["episodes"] = [
         e for e in (raw.get("episodes") or []) if isinstance(e, dict) and _in_range(e.get("episode"))
@@ -691,8 +739,15 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                     _ch = char_map.get(spk) or char_norm_map.get(normalize_entity_name(spk))
                     if _ch is not None:
                         seg["speaker_id"] = _ch.id
+            _shot_props = sh.get("props")
+            if _shot_props is not None and not isinstance(_shot_props, list):
+                _shot_props = None
             fields = dict(
-                character_id=char_id, dialogue=sh.get("dialogue"),
+                character_id=char_id,
+                # 剧本标注的本镜涉及道具（道具名数组）：生命周期推导与连续性校验依赖此字段，
+                # 长期未落库会让「本镜涉及道具」判断全部退化为提示词正文启发式
+                props=_shot_props,
+                dialogue=sh.get("dialogue"),
                 dialogue_segments=segments,
                 shot_kind=sh.get("shot_kind") or "visual",
                 image_prompt=sh.get("image_prompt"),
@@ -753,10 +808,47 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
 
     # 7. 道具生命周期状态推导（P0 自动接入）：基于已确认生命周期事件
     #    重算本批次集数内每镜状态（prop_shot_state）并写集末快照（prop_episode_snapshot）。
-    #    推导可重建（先清后写），事件表为唯一事实来源；无事件的道具也会得到
-    #    not_introduced 基线状态，供提示词组装/Resolver 状态驱动分支消费。
+    #    推导可重建（先清后写），事件表为唯一事实来源；无事件的道具不写基线快照，
+    #    避免 not_introduced 被提示词组装误当作剧情判断。
     from app.models import Prop as _Prop
-    from app.services.prop_lifecycle import derive_shot_states, write_episode_snapshot
+    from app.models import PropLifecycleEvent as _PLE
+    from app.services.prop_lifecycle import add_event, derive_shot_states, write_episode_snapshot
+
+    # 7.1 剧本道具事件落库（只追加，重复解析按「同镜同类型同来源」幂等跳过）
+    prop_events_created = 0
+    for ev in parse_result.get("prop_events") or []:
+        _pname = ev.get("prop") or ""
+        _prop = prop_map.get(_pname) or prop_norm_map.get(normalize_entity_name(_pname))
+        if _prop is None:
+            continue
+        _ep = int(ev.get("episode") or 1)
+        _shot_id = None
+        _title = ev.get("scene_title")
+        _scene = None
+        if _title:
+            _scene = scene_title_map.get((_title, _ep)) or scene_title_map.get((_title, int(_ep)))
+        if _scene is not None and ev.get("shot_seq") is not None:
+            try:
+                _sh = (db.query(Shot)
+                       .filter_by(scene_id=_scene.id, episode=_ep, seq=int(ev["shot_seq"]))
+                       .first())
+            except (TypeError, ValueError):
+                _sh = None
+            _shot_id = _sh.id if _sh is not None else None
+        _dup = (db.query(_PLE)
+                .filter_by(project_id=project.id, prop_id=_prop.id, episode=_ep,
+                           shot_id=_shot_id, event_type=ev["event_type"], source_type="script")
+                .first())
+        if _dup is not None:
+            continue
+        add_event(db, project.id, _prop.id, episode=_ep, event_type=ev["event_type"],
+                  source_type="script", shot_id=_shot_id,
+                  source_evidence=ev.get("evidence"),
+                  holder_after=ev.get("holder_after"),
+                  location_after=ev.get("location_after"))
+        prop_events_created += 1
+    stats["prop_events"] = prop_events_created
+
     episodes = list(range(episode_start, episode_start + episode_count))
     derived_props = 0
     for p in db.query(_Prop).filter(_Prop.project_id == project.id).all():

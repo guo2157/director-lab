@@ -140,6 +140,18 @@ def derive_shot_states(db: Session, project_id: str, prop_id: str,
     ).delete(synchronize_session=False)
 
     events = _effective_events(db, project_id, prop_id)
+    if not events:
+        # 无任何有效事件时不写基线快照：not_introduced 是「剧情判断」而非默认值，
+        # 落库后会被提示词组装当成「该道具不存在」而注入禁止约束、跳过参考图。
+        # 派生状态本就可重建，留空让消费方走保守分支（正文提及即注入）。
+        from app.models import PropEpisodeSnapshot as _PES
+        db.query(_PES).filter(
+            _PES.project_id == project_id,
+            _PES.prop_id == prop_id,
+            _PES.episode.in_(episodes or []),
+        ).delete(synchronize_session=False)
+        db.flush()
+        return []
     events_by_shot: dict[str | None, list[PropLifecycleEvent]] = {}
     for e in events:
         events_by_shot.setdefault(e.shot_id, []).append(e)
