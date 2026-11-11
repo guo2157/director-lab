@@ -35,6 +35,40 @@ export async function deleteProject(id: string) {
   await del<void>(`/projects/${id}`)
 }
 
+/** 硬删除影响面预览：返回将被清理的数据量与阻塞任务数 */
+export interface PurgePreview {
+  project_id: string
+  project_name: string
+  blocking_jobs: number
+  deletable: boolean
+  counts: {
+    scenes: number
+    shots: number
+    assets: number
+    jobs: number
+    characters: number
+    props: number
+    script_versions: number
+  }
+}
+export function getPurgePreview(id: string) {
+  return get<PurgePreview>(`/projects/${id}/purge-preview`)
+}
+
+/** 硬删除结果 */
+export interface PurgeResult {
+  project_id: string
+  project_name: string
+  deleted: Record<string, number>
+  preview: PurgePreview['counts']
+  media: { removed: number; missing: number; skipped: number }
+}
+
+/** 硬删除项目：彻底清理全部关联数据与媒体文件，不可恢复。存在进行中任务返回 409 */
+export async function purgeProject(id: string) {
+  return del<PurgeResult>(`/projects/${id}/purge`)
+}
+
 /** 公共资产人工审核（action=approve 审核通过并放行分镜图 / reject 驳回返工） */
 export function reviewProjectAssets(id: string, action: 'approve' | 'reject') {
   return post<Project>(`/projects/${id}/assets-review`, { action })

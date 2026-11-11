@@ -16,7 +16,8 @@ import {
   useMessage,
 } from 'naive-ui'
 import type { DropdownOption, FormInst, FormRules } from 'naive-ui'
-import { archiveProject, createProject, deleteProject, getStyleOptions, listProjects } from '@/api/projects'
+import { archiveProject, createProject, deleteProject, getPurgePreview, getStyleOptions, listProjects, purgeProject } from '@/api/projects'
+import type { PurgePreview } from '@/api/projects'
 import { getSettings, listComfyuiInstances } from '@/api/settings'
 import { listSeries } from '@/api/series'
 import type { SeriesListItem } from '@/types/series'
@@ -157,6 +158,16 @@ const { mutate: mutateDelete } = useMutation({
   },
   onError: (e) => message.error(errMsg(e)),
 })
+const { mutate: mutatePurge } = useMutation({
+  mutationFn: purgeProject,
+  onSuccess: (res) => {
+    const rows = Object.values(res?.deleted ?? {}).reduce((a, b) => a + b, 0)
+    const files = res?.media?.removed ?? 0
+    message.success(`作品已彻底删除：清理 ${rows} 条记录、${files} 个媒体文件`)
+    invalidateProjects()
+  },
+  onError: (e) => message.error(errMsg(e)),
+})
 /* ---------- 卡片操作 ---------- */
 function goProject(id: string) {
   void router.push(`/project/${id}/script`)
@@ -165,7 +176,8 @@ function menuOptions(p: Project): DropdownOption[] {
   return [
     { key: 'copy', label: '复制（后续版本支持）', disabled: true },
     { key: 'archive', label: '归档', disabled: p.status === 'archived' },
-    { key: 'delete', label: '删除', props: { style: 'color: var(--danger);' } },
+    { key: 'delete', label: '删除（仅从列表移除）', props: { style: 'color: var(--danger);' } },
+    { key: 'purge', label: '彻底删除（含媒体文件）', props: { style: 'color: var(--danger);' } },
   ]
 }
 function onMenuSelect(key: string, p: Project) {
@@ -173,6 +185,8 @@ function onMenuSelect(key: string, p: Project) {
     mutateArchive(p.id)
   } else if (key === 'delete') {
     confirmDelete(p)
+  } else if (key === 'purge') {
+    void confirmPurge(p)
   }
 }
 function onDropdownSelect(p: Project) {
@@ -187,6 +201,43 @@ function confirmDelete(p: Project) {
     class: 'danger-dialog',
     onPositiveClick: () => {
       mutateDelete(p.id)
+    },
+  })
+}
+
+async function confirmPurge(p: Project) {
+  let preview: PurgePreview
+  try {
+    preview = await getPurgePreview(p.id)
+  } catch (e) {
+    message.error(errMsg(e))
+    return
+  }
+  if (!preview.deletable) {
+    dialog.error({
+      title: '暂时无法彻底删除',
+      content: `作品「${p.name}」还有 ${preview.blocking_jobs} 个进行中的任务（排队 / 运行 / 提交待确认 / 链式等待），请先到任务页取消或等待完成后再试。`,
+      positiveText: '知道了',
+    })
+    return
+  }
+  const c = preview.counts
+  dialog.error({
+    title: '彻底删除作品（不可恢复）',
+    content: `即将永久删除作品「${p.name}」及其全部内容：
+
+· 场景 ${c.scenes} 个、镜头 ${c.shots} 个
+· 资产 ${c.assets} 个（含分镜图、角色图、视频等媒体文件）
+· 任务记录 ${c.jobs} 条
+· 角色 ${c.characters} 个、道具 ${c.props} 个
+· 剧本版本 ${c.script_versions} 个
+
+数据库记录与磁盘上的媒体文件都会被清除，此操作无法撤销。`,
+    positiveText: '确认彻底删除',
+    negativeText: '取消',
+    class: 'danger-dialog',
+    onPositiveClick: () => {
+      mutatePurge(p.id)
     },
   })
 }

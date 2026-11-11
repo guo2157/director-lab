@@ -3,9 +3,11 @@
 - 创建返回 201，初始 status=draft
 - 详情含派生字段 shot_total/shot_done/current_stage
 - 删除为软删除；存在进行中任务返回 409
+- 硬删除（purge）彻底清理关联数据与媒体文件，不可恢复；存在进行中任务返回 409
 - 归档仅 active 可调用；取消归档仅 archived 可调用；其余 409 invalid_state_transition
 """
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
@@ -151,6 +153,63 @@ def delete_project(project_id: str, db: Session = Depends(get_db)) -> Response:
     p.deleted_at = datetime.now(timezone.utc)
     db.commit()
     return Response(status_code=204)
+
+
+@router.get("/{project_id}/purge-preview")
+def purge_project_preview(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """硬删除影响面预览：返回将被清理的关联数据量与阻塞状态。"""
+    from app.services.project_purge import count_project_data, find_blocking_jobs
+
+    p = _get_project(db, project_id)
+    blocking = find_blocking_jobs(db, project_id)
+    return {
+        "project_id": p.id,
+        "project_name": p.name,
+        "blocking_jobs": blocking,
+        "deletable": blocking == 0,
+        "counts": count_project_data(db, project_id),
+    }
+
+
+@router.delete("/{project_id}/purge")
+def purge_project(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """硬删除项目：彻底清理全部关联数据与媒体文件，不可恢复。
+
+    与 DELETE /{project_id}（软删除，仅写 deleted_at）的本质区别：
+    本接口真正删除数据库行与磁盘文件。
+    存在 queued / running / submission_unknown / chained_wait 任务时返回 409。
+    数据库事务提交成功后才删除媒体文件，避免回滚后文件已丢失。
+    """
+    from app.services.project_purge import count_project_data, find_blocking_jobs, remove_media_files
+    from app.services.project_purge import purge_project as _purge
+
+    p = _get_project(db, project_id)
+    blocking = find_blocking_jobs(db, project_id)
+    if blocking > 0:
+        raise errors.invalid_state_transition(
+            f"存在进行中的任务（{blocking} 个），禁止删除项目"
+        )
+
+    preview = count_project_data(db, project_id)
+    try:
+        result = _purge(db, project_id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    media_root = Path(get_settings().media_dir)
+    if not media_root.is_absolute():
+        media_root = (Path.cwd() / media_root).resolve()
+    media_stats = remove_media_files(result["media_paths"], media_root)
+
+    return {
+        "project_id": result["project_id"],
+        "project_name": result["project_name"],
+        "deleted": result["deleted"],
+        "preview": preview,
+        "media": media_stats,
+    }
 
 
 @router.post("/{project_id}/archive")
