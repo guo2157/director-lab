@@ -4,13 +4,18 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NButton, NSpin, NEmpty, NTag,
-  NInput, NTooltip, NCheckbox, NImage, NModal, NRadioGroup, NRadio, NSelect, NProgress, useMessage,
+  NInput, NTooltip, NCheckbox, NModal, NRadioGroup, NRadio, NSelect, NProgress, NSwitch, useMessage,
 } from 'naive-ui'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots, updateShot } from '@/api/script'
 import { generateShot, generateProjectShots, regenerateShotClip } from '@/api/storyboard'
 import { listJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
-import { fetchRegenerateConfig, type RegenerateRef } from '@/api/regeneration'
+import {
+  fetchRegenerateConfig,
+  fetchRegenerateWorkspace,
+  saveRegenerateWorkspace,
+  type WorkspaceReference,
+} from '@/api/regeneration'
 import { listWorkflows } from '@/api/workflows'
 import { getClipGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
@@ -18,6 +23,7 @@ import type { Scene, Shot, ShotKind } from '@/types/script'
 import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
 import ShotAudioPanel from '@/components/ShotAudioPanel.vue'
+import RegenerateWorkbench from '@/components/RegenerateWorkbench.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -106,6 +112,116 @@ function handleGenerateFromDrawer(target: 'keyframe' | 'clip') {
 
 // --- 重新生成分镜视频：覆盖原视频 + 取消该镜头历史任务（历史任务取消后不再占用 ComfyUI 资源） ---
 const showRegenClipModal = ref(false)
+const showRegenWorkbench = ref(false)
+
+// --- 镜头详情内嵌参考图绑定管理 ---
+const refBindingsLoading = ref(false)
+const refBindingsSaving = ref(false)
+const workspaceBindings = ref<WorkspaceReference[]>([])
+const workspaceSlots = ref<{ param: string; node_id?: string | null; input_key?: string | null; image_no?: number | null; required?: boolean | null }[]>([])
+
+async function loadRefBindings(shotId: string) {
+  refBindingsLoading.value = true
+  try {
+    const ws = await fetchRegenerateWorkspace(shotId, 'clip')
+    workspaceBindings.value = ws.references ?? []
+    workspaceSlots.value = (ws.available_slots ?? []).map((s) => ({
+      param: s.param,
+      node_id: s.node_id,
+      input_key: s.input_key,
+      image_no: s.image_no,
+      required: s.required,
+    }))
+  } catch {
+    workspaceBindings.value = []
+    workspaceSlots.value = []
+  } finally {
+    refBindingsLoading.value = false
+  }
+}
+
+const unboundRefSlots = computed(() => {
+  const bound = new Set(workspaceBindings.value.map((r) => r.slot_id))
+  return workspaceSlots.value.filter((s) => !bound.has(s.param))
+})
+
+function addRefBinding(slotParam: string) {
+  const slot = workspaceSlots.value.find((s) => s.param === slotParam)
+  if (!slot) return
+  workspaceBindings.value = [
+    ...workspaceBindings.value,
+    {
+      reference_id: `ref_${slotParam}_${Date.now()}`,
+      slot_id: slotParam,
+      node_id: slot.node_id,
+      input_key: slot.input_key,
+      image_no: slot.image_no ?? null,
+      asset_id: null,
+      enabled: true,
+      required: Boolean(slot.required),
+      status: 'pending_confirmation',
+    } as WorkspaceReference,
+  ]
+}
+
+function removeRefBinding(referenceId: string) {
+  const ref = workspaceBindings.value.find((r) => r.reference_id === referenceId)
+  if (ref?.required) {
+    message.warning('该槽位为工作流必需输入，不可移除，只能替换资产或关闭启用开关')
+    return
+  }
+  workspaceBindings.value = workspaceBindings.value.filter((r) => r.reference_id !== referenceId)
+}
+
+const shotAssetOptions = computed(() => {
+  const opts: { label: string; value: string }[] = []
+  const chars = (charsData.value?.items ?? []) as Array<{ id: string; name: string; portrait_asset_id?: string | null }>
+  const scenes = (scenesQuery.data.value?.items ?? []) as Array<{ id: string; title: string; baseline_asset_id?: string | null }>
+  const props = (propsData.value?.items ?? []) as Array<{ id: string; name: string; anchor_asset_id?: string | null }>
+  for (const c of chars) {
+    if (c.portrait_asset_id) opts.push({ label: `${c.name}（定妆）`, value: c.portrait_asset_id })
+  }
+  for (const s of scenes) {
+    if (s.baseline_asset_id) opts.push({ label: `${s.title}（场景）`, value: s.baseline_asset_id })
+  }
+  for (const p of props) {
+    if (p.anchor_asset_id) opts.push({ label: `${p.name}（道具）`, value: p.anchor_asset_id })
+  }
+  if (activeShot.value?.current_assets?.keyframe?.asset_id) {
+    opts.push({ label: '本镜分镜图', value: activeShot.value.current_assets.keyframe.asset_id })
+  }
+  return opts
+})
+
+async function saveRefBindings() {
+  if (!activeShot.value) return
+  refBindingsSaving.value = true
+  try {
+    const payload = {
+      target: 'clip',
+      references: workspaceBindings.value,
+      character_bindings: [],
+      spatial_layout: { characters: [] },
+      action_timeline: { actions: [] },
+      prop_bindings: [],
+      prompt_sections: {},
+      final_prompt: '',
+      parameters: {},
+    }
+    await saveRegenerateWorkspace(activeShot.value.id, payload)
+    message.success('参考图绑定已保存')
+    await loadRefBindings(activeShot.value.id)
+  } catch (e: unknown) {
+    message.error(`保存失败：${(e as Error)?.message ?? e}`)
+  } finally {
+    refBindingsSaving.value = false
+  }
+}
+
+watch(() => activeShot.value?.id, (id) => {
+  if (id) { void loadRefBindings(id) }
+})
+
 /** 该镜头是否已有视频产物（含正在生成的在途任务）：有则可视为『重新生成』 */
 const clipActionIsRegenerate = computed(() => {
   const shot = activeShot.value
@@ -141,7 +257,7 @@ function handleClipActionClick() {
     handleGenerateFromDrawer('clip')
     return
   }
-  showRegenClipModal.value = true
+  showRegenWorkbench.value = true
 }
 /** 确认重新生成：携带当前编辑的提示词提交，后端取消历史任务并绑定新任务 */
 function confirmRegenerateClip() {
@@ -162,6 +278,19 @@ function confirmRegenerateClip() {
 // --- Drag & drop (same scene only) ---
 const dragShotId = ref<string | null>(null)
 const dragSceneId = ref<string | null>(null)
+
+
+
+function onRegenWorkbenchSubmitted(_job: Record<string, unknown>) {
+  showRegenWorkbench.value = false
+  queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
+  queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
+  void trackClipProgress()
+}
+
+function onRegenWorkbenchClose() {
+  showRegenWorkbench.value = false
+}
 
 function onDragStart(e: DragEvent, shot: Shot, sceneId: string) {
   dragShotId.value = shot.id
@@ -255,7 +384,7 @@ function buildH3VideoPrompt(shot: Shot): string {
 
 function openDrawer(shot: Shot) {
   activeShot.value = shot
-  void loadRealRefs(shot)
+  void loadNegativeSupported(shot)
   editImagePrompt.value = shot.image_prompt ?? ''
   editVideoPrompt.value = shot.video_prompt || buildH3VideoPrompt(shot)
   // 负向提示词无独立存储字段，每次打开从系统默认模板起，用户可在本次生成前自行改写
@@ -542,213 +671,18 @@ const readiness = computed(() => {
   return { total, done, all: total > 0 && done === total }
 })
 
-// --- 参考图清单：以视频生成接口真实入参为准 ---
-// 数据来源优先级：
-// 1) 镜头已有产物时，读取生成配置接口返回的参考图记录（来自任务入参留痕，即真实传入的图）
-// 2) 尚无产物时，按视频工作流真实声明的参考图槽位推导「将传入」的图，并明确标注未生成
-// 视频工作流 wf_video_h3_ref2va 声明的槽位（含输入位置）：
-//   ref_prev_frame → ref_images.ref_image_0（上一镜尾帧，帧约束）
-//   ref_image      → ref_images.ref_image_1（本镜分镜图，首帧参考）
-//   ref_identity   → ref_images.ref_image_2（角色身份参考）
-//   ref_character_2    → ref_images.ref_image_3（角色服装参考）
-//   ref_scene      → ref_images.ref_image_4（场景基准图）
-//   ref_prop       → ref_images.ref_image_5（道具锚定图）
-const SLOT_META: Record<string, { label: string; inputKey: string }> = {
-  ref_prev_frame: { label: '上一镜尾帧', inputKey: 'ref_images.ref_image_0' },
-  ref_image: { label: '本镜分镜图', inputKey: 'ref_images.ref_image_1' },
-  ref_identity: { label: '角色身份参考', inputKey: 'ref_images.ref_image_2' },
-  ref_character_2: { label: '角色服装参考', inputKey: 'ref_images.ref_image_3' },
-  ref_scene: { label: '场景基准图', inputKey: 'ref_images.ref_image_4' },
-  ref_prop: { label: '道具锚定图', inputKey: 'ref_images.ref_image_5' },
-}
-
-interface ShotRefItem {
-  key: string
-  slot: string
-  name: string
-  roleLabel: string
-  inputKey: string
-  assetId: string
-  url: string
-  /** 缩略图地址（56px 小图用，避免加载 1.8MB 原图导致详情打开慢） */
-  thumbUrl?: string
-  required?: boolean
-  /** 已确认传入：来自生成任务入参留痕（本次生成真正用到的图） */
-  injected?: boolean
-  /** 对应定妆图 / 基准图 / 锚定图尚未生成 */
-  assetMissing?: boolean
-  /** 当前视频工作流无可用槽位，本次生成不会传入 */
-  noSlot?: boolean
-}
-
-/** 真实入参参考图：镜头已有产物时由接口返回，来自生成任务的入参留痕 */
-const realRefs = ref<RegenerateRef[]>([])
-const realRefsLoading = ref(false)
-
-async function loadRealRefs(shot: Shot) {
-  realRefs.value = []
+// 负向提示词支持检测：镜头已有产物时从生成配置接口获取
+async function loadNegativeSupported(shot: Shot) {
   negativeSupported.value = false
   const hasOutput = Boolean(shot.current_assets?.clip || shot.current_assets?.keyframe)
   if (!hasOutput) return
-  realRefsLoading.value = true
   try {
     const cfg = await fetchRegenerateConfig(shot.id, 'clip')
-    realRefs.value = (cfg.refs ?? []).filter((r) => r.enabled !== false)
-    // 只有当前工作流明确声明支持负向提示词时才展示该字段
     negativeSupported.value = Boolean(cfg.negative_prompt?.supported)
   } catch {
-    // 无产物或历史配置缺失时静默降级到槽位推导，不打断详情查看
-    realRefs.value = []
-  } finally {
-    realRefsLoading.value = false
+    negativeSupported.value = false
   }
 }
-const shotRefList = computed<ShotRefItem[]>(() => {
-  const shot = activeShot.value
-  if (!shot) return []
-  const chars = (charsData.value?.items ?? []) as Array<{ id: string; name: string; portrait_asset_id?: string | null }>
-  const scenes = (scenesQuery.data.value?.items ?? []) as Array<{ id: string; title: string; baseline_asset_id?: string | null }>
-  const props = (propsData.value?.items ?? []) as Array<{ id: string; name: string; anchor_asset_id?: string | null }>
-
-  const items: ShotRefItem[] = []
-  const seenAsset = new Set<string>()
-  const push = (v: ShotRefItem) => {
-    if (v.assetId) {
-      if (seenAsset.has(v.assetId)) return
-      seenAsset.add(v.assetId)
-    }
-    if (items.some((x) => x.key === v.key)) return
-    items.push(v)
-  }
-
-  // 按资产编号反查可辨认名称，取不到时回落到槽位用途名
-  const nameOfAsset = (assetId: string, slot: string): string => {
-    const primary = chars.find((c) => c.id === shot.character_id)
-    if (slot === 'ref_image') return `第 ${shotGlobalSeq(shot)} 镜分镜图`
-    if (slot === 'ref_prev_frame') return '上一镜尾帧'
-    const c = chars.find((x) => x.portrait_asset_id === assetId)
-    if (c) return c.name
-    const s = scenes.find((x) => x.baseline_asset_id === assetId)
-    if (s) return s.title
-    const p = props.find((x) => x.anchor_asset_id === assetId)
-    if (p) return p.name
-    if (slot === 'ref_identity' || slot === 'ref_character_2') {
-      return primary ? primary.name : SLOT_META[slot]?.label ?? slot
-    }
-    return SLOT_META[slot]?.label ?? slot
-  }
-
-  // 一、真实入参优先：本镜已有产物时，接口留痕的图排在最前并标注已传入
-  for (const r of realRefs.value) {
-    if (!r.asset_id) continue
-    const slot = r.slot_param
-    const meta = SLOT_META[slot]
-    const assetId = r.asset_id as string
-    push({
-      key: `${slot}-${assetId}`,
-      slot,
-      name: nameOfAsset(assetId, slot),
-      roleLabel: meta?.label ?? r.role ?? slot,
-      inputKey: r.input_key || meta?.inputKey || '—',
-      assetId,
-      url: `/api/assets/${assetId}/file`,
-      thumbUrl: `/api/assets/${assetId}/file?thumb=true`,
-      required: Boolean(r.required),
-      injected: true,
-    })
-  }
-
-  // 二、本镜分镜图 → ref_image（首帧参考）
-  const kf = shot.current_assets?.keyframe
-  if (kf?.asset_id) {
-    push({
-      key: 'ref_image',
-      slot: 'ref_image',
-      name: `第 ${shotGlobalSeq(shot)} 镜分镜图`,
-      roleLabel: SLOT_META.ref_image.label,
-      inputKey: SLOT_META.ref_image.inputKey,
-      assetId: kf.asset_id,
-      url: kf.url || `/api/assets/${kf.asset_id}/file`,
-      thumbUrl: kf.thumb_url || `/api/assets/${kf.asset_id}/file?thumb=true`,
-      required: true,
-    })
-  }
-
-  // 提示词中的 @引用（与后端注入顺序一致）
-  const promptText = `${editVideoPrompt.value} ${shot.image_prompt ?? ''} ${shot.description ?? ''}`
-  const atNames = new Set<string>()
-  let atIdx = promptText.indexOf('@')
-  while (atIdx !== -1) {
-    const rest = promptText.slice(atIdx + 1)
-    const m = rest.match(/^[^\s，,。.;；:：@]+/)
-    if (m) atNames.add(m[0])
-    atIdx = promptText.indexOf('@', atIdx + 1)
-  }
-
-  // 三、角色：本镜主角色 + @引用的角色全部列出（缺定妆图、超槽位也照列）
-  const charSlots = ['ref_identity', 'ref_character_2']
-  const relatedChars = chars
-    .filter((c) => shot.character_id === c.id || atNames.has(c.name))
-    .sort((a, b) => (a.id === shot.character_id ? -1 : b.id === shot.character_id ? 1 : 0))
-  relatedChars.forEach((c, idx) => {
-    const slot = charSlots[idx] ?? ''
-    const assetId = c.portrait_asset_id ?? ''
-    push({
-      key: `char-${c.id}`,
-      slot,
-      name: c.name,
-      roleLabel: slot ? SLOT_META[slot].label : '角色参考',
-      inputKey: slot ? SLOT_META[slot].inputKey : '—',
-      assetId,
-      url: assetId ? `/api/assets/${assetId}/file` : '',
-      thumbUrl: assetId ? `/api/assets/${assetId}/file?thumb=true` : '',
-      assetMissing: !assetId,
-      noSlot: !slot,
-    })
-  })
-
-  // 四、场景：本镜所属场景优先占用 ref_scene，@引用的其它场景照列
-  const relatedScenes = scenes
-    .filter((s) => shot.scene_id === s.id || atNames.has(s.title))
-    .sort((a, b) => (a.id === shot.scene_id ? -1 : b.id === shot.scene_id ? 1 : 0))
-  relatedScenes.forEach((s, idx) => {
-    const slot = idx === 0 ? 'ref_scene' : ''
-    const assetId = s.baseline_asset_id ?? ''
-    push({
-      key: `scene-${s.id}`,
-      slot,
-      name: s.title,
-      roleLabel: slot ? SLOT_META.ref_scene.label : '场景参考',
-      inputKey: slot ? SLOT_META[slot].inputKey : '—',
-      assetId,
-      url: assetId ? `/api/assets/${assetId}/file` : '',
-      thumbUrl: assetId ? `/api/assets/${assetId}/file?thumb=true` : '',
-      assetMissing: !assetId,
-      noSlot: !slot,
-    })
-  })
-
-  // 五、道具：@引用的道具全部列出，首个占用 ref_prop
-  const relatedProps = props.filter((p) => atNames.has(p.name))
-  relatedProps.forEach((p, idx) => {
-    const slot = idx === 0 ? 'ref_prop' : ''
-    const assetId = p.anchor_asset_id ?? ''
-    push({
-      key: `prop-${p.id}`,
-      slot,
-      name: p.name,
-      roleLabel: slot ? SLOT_META.ref_prop.label : '道具参考',
-      inputKey: slot ? SLOT_META[slot].inputKey : '—',
-      assetId,
-      url: assetId ? `/api/assets/${assetId}/file` : '',
-      thumbUrl: assetId ? `/api/assets/${assetId}/file?thumb=true` : '',
-      assetMissing: !assetId,
-      noSlot: !slot,
-    })
-  })
-
-  return items
-})
 
 // --- 保存提示词 ---
 // 后端在提示词变化时会做失效传播：改分镜图提示词会让分镜图与视频一并过期、
@@ -1118,7 +1052,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     <n-modal
       v-model:show="drawerVisible"
       preset="card"
-      title="镜头详情"
+      title="镜头详情 【代码版本 2026-11-12-23:02】"
       closable
       :bordered="false"
       :style="{ width: 'min(1180px, 94vw)' }"
@@ -1214,51 +1148,71 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
             </div>
           </section>
 
-          <!-- 分区二：参考图 -->
+          <div style="background:#f5222d;color:#fff;padding:6px 12px;font-weight:bold;font-size:13px">✅ 参考图分区二已渲染｜绑定数：{{ workspaceBindings.length }}｜槽位数：{{ workspaceSlots.length }}｜加载中：{{ refBindingsLoading }}</div>
+          <!-- 分区二：参考图绑定管理 -->
           <section class="drawer-section">
             <div class="section-head">
               <span class="section-index">2</span>
               <span class="section-name">参考图</span>
+              <n-button size="tiny" :loading="refBindingsSaving" @click="saveRefBindings" style="margin-left:auto">保存绑定</n-button>
             </div>
 
-            <n-spin :show="realRefsLoading">
-              <div v-if="shotRefList.length" class="ref-list">
-                <div v-for="r in shotRefList" :key="r.key" class="ref-item">
-                  <n-image
-                    v-if="r.url"
-                    :src="r.thumbUrl || r.url"
-                    :preview-src="r.url"
-                    width="56"
-                    height="56"
-                    object-fit="cover"
-                    class="ref-thumb"
-                    :img-props="{ style: 'width:56px;height:56px;object-fit:cover;border-radius:6px' }"
-                  />
-                  <div v-else class="ref-thumb ref-thumb-empty">未生成</div>
-                  <div class="ref-item-meta">
-                    <div class="ref-item-name">
-                      {{ r.name }}
-                      <span v-if="r.injected" class="ref-tag ok">已传入</span>
-                      <span v-else-if="r.assetMissing" class="ref-tag warn">图未生成</span>
-                      <span v-else-if="r.noSlot" class="ref-tag warn">无可用槽位</span>
-                      <span v-else class="ref-tag plan">将传入</span>
-                    </div>
-                    <div class="ref-item-role">
-                      {{ r.roleLabel }}
-                      <span v-if="r.slot" class="ref-item-slot">{{ r.slot }}</span>
-                      <span v-if="r.required" class="ref-item-req">必需</span>
-                    </div>
-                    <div class="ref-item-input">输入位置 {{ r.inputKey }}</div>
-                  </div>
-                </div>
-              </div>
+            <n-spin :show="refBindingsLoading">
+              <table v-if="workspaceBindings.length" class="ref-binding-table">
+                <thead>
+                  <tr>
+                    <th style="min-width:90px">槽位</th>
+                    <th>节点</th>
+                    <th style="min-width:160px">绑定资产</th>
+                    <th>启用</th>
+                    <th style="width:48px"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="ref in workspaceBindings" :key="ref.reference_id">
+                    <td>
+                      <span class="wb-slot">{{ ref.slot_id }}</span>
+                      <n-tag v-if="ref.required" type="warning" size="tiny">必需</n-tag>
+                      <span v-if="ref.image_no != null" class="wb-imgno">Img{{ ref.image_no }}</span>
+                    </td>
+                    <td class="wb-mono">{{ ref.node_id ?? '—' }}</td>
+                    <td>
+                      <n-select
+                        :value="ref.asset_id"
+                        @update:value="(v) => ref.asset_id = v"
+                        :options="shotAssetOptions"
+                        size="tiny"
+                        filterable
+                        clearable
+                        placeholder="选择资产"
+                      />
+                    </td>
+                    <td>
+                      <n-switch :value="ref.enabled" @update:value="(v) => ref.enabled = v" size="small" />
+                    </td>
+                    <td>
+                      <n-button text type="error" size="tiny" @click="removeRefBinding(ref.reference_id)">移除</n-button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
               <div v-else class="panel-hint">
-                该镜头暂无可展示的参考图：请先补齐角色定妆图与场景基准图，或在视频提示词中使用 @角色名 / @场景名 / @道具名 引用。
+                暂无参考图绑定，请在下方添加或从工作台管理。
+              </div>
+
+              <div v-if="unboundRefSlots.length" class="wb-add-row" style="margin-top:8px">
+                <span class="wb-hint-line">未绑定槽位：</span>
+                <n-button
+                  v-for="s in unboundRefSlots"
+                  :key="s.param"
+                  size="tiny"
+                  secondary
+                  @click="addRefBinding(s.param)"
+                >
+                  + {{ s.param }}（Img {{ s.image_no ?? '—' }}）
+                </n-button>
               </div>
             </n-spin>
-            <div class="ref-source-hint">
-              已传入＝本次实际入参；将传入＝按引用与槽位会传入；无可用槽位＝本次不传；图未生成＝需先到资产库补齐。
-            </div>
           </section>
 
           <!-- 分区三：生成操作 -->
@@ -1354,6 +1308,24 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       <div style="line-height: 1.7; color: #999; font-size: 12px">
         同时会取消该镜头尚未完成的生成任务，取消后不再占用 ComfyUI 显卡资源，并把这些历史任务从当前任务中移除。
       </div>
+    </n-modal>
+    <!-- 重新生成工作台：多参考图、角色身份、空间布局、动作时间轴、分层提示词、校验与连续性 -->
+    <n-modal
+      v-model:show="showRegenWorkbench"
+      preset="card"
+      title="重新生成工作台"
+      style="max-width:1080px;width:95vw"
+      :mask-closable="false"
+      @close="onRegenWorkbenchClose"
+    >
+      <RegenerateWorkbench
+        v-if="showRegenWorkbench && activeShot"
+        :shot-id="activeShot.id"
+        :project-id="projectId"
+        target="clip"
+        @submitted="onRegenWorkbenchSubmitted"
+        @close="onRegenWorkbenchClose"
+      />
     </n-modal>
     <!-- 批量出视频方式选择弹窗：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接） -->
     <n-modal
@@ -1936,5 +1908,53 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     position: sticky;
     top: 0;
   }
+}
+
+/* 参考图绑定管理表格 */
+.ref-binding-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.ref-binding-table th,
+.ref-binding-table td {
+  border-bottom: 1px solid var(--border-color, #e8e8e8);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+.ref-binding-table th {
+  background: var(--bg-elevated, #fafafa);
+  font-weight: 600;
+  color: #666;
+}
+.ref-binding-table .wb-slot {
+  font-family: monospace;
+  font-size: 12px;
+}
+.ref-binding-table .wb-mono {
+  font-family: monospace;
+  color: #888;
+  font-size: 11px;
+}
+.ref-binding-table .wb-imgno {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  background: #f0f0f0;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #666;
+}
+.wb-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.wb-hint-line {
+  font-size: 12px;
+  color: #999;
+  margin: 4px 0 8px;
 }
 </style>

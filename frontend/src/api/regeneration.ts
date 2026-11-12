@@ -3,7 +3,7 @@
  * - 配置读取从指定基础版本加载原始生成配置，不从最新版本拼装
  * - 重新生成结果一律先落候选版本，采用后才切换为当前生效版本
  */
-import { get, post } from './client'
+import { get, post, put } from './client'
 
 export type RegenerateMode = 'inherit_prompt_only' | 'modify_refs' | 'full_reconfigure'
 
@@ -138,4 +138,229 @@ export function validateRegenerate(
   payload: Record<string, unknown>,
 ): Promise<ValidateResult> {
   return post<ValidateResult>(`/shots/${shotId}/regenerate/validate`, payload)
+}
+
+/* ============================================================
+ * 重新生成工作台：多参考图 / 槽位绑定 / 身份绑定 / 空间布局 /
+ * 动作时间轴 / 分层提示词 / 连续性校验 / 参数快照
+ * ============================================================ */
+
+/** 工作台可用槽位（来自工作流 definition 的真实注入标记，不在前端补造） */
+export interface WorkspaceSlot {
+  param: string
+  node_id: string | null
+  input_key: string | null
+  image_no: number | null
+  required: boolean | null
+}
+
+/** 工作台结构化参考图绑定 */
+export interface WorkspaceReference {
+  reference_id: string
+  slot_id: string
+  node_id?: string | null
+  input_key?: string | null
+  image_no?: number | null
+  reference_type?: string | null
+  asset_type?: string | null
+  asset_id?: string | null
+  asset_name?: string | null
+  character_id?: string | null
+  image_url?: string | null
+  binding_description?: string | null
+  identity_constraints?: string[]
+  required?: boolean
+  enabled?: boolean
+  sort_order?: number
+  semantic?: 'reference' | 'frame_constraint'
+  status?: string
+}
+
+/** 角色身份绑定：解决『谁是谁』 */
+export interface WorkspaceCharacterBinding {
+  character_id: string | null
+  character_name: string | null
+  identity_reference_id?: string | null
+  identity_slot_id?: string | null
+  identity_image_no?: number | null
+  identity_constraints?: string[]
+  status?: string
+}
+
+/** 空间位置（屏幕归一化坐标） */
+export interface WorkspacePosition {
+  horizontal?: 'left' | 'center' | 'right' | null
+  vertical?: 'top' | 'center' | 'bottom' | null
+  depth?: 'foreground' | 'middle_ground' | 'background' | null
+  x?: number | null
+  y?: number | null
+  facing_direction?: string | null
+  status: 'confirmed' | 'pending_confirmation'
+}
+
+/** 角色空间布局：解决『谁在哪里』 */
+export interface WorkspaceSpatialCharacter {
+  character_id: string
+  character_name: string
+  initial_position: WorkspacePosition
+  final_position: WorkspacePosition
+  facing_direction?: string | null
+  movement_enabled?: boolean
+  movement_direction?: string | null
+  movement_path?: Array<Record<string, unknown>>
+  relative_relations?: Array<Record<string, unknown>>
+}
+
+export interface WorkspaceSpatialLayout {
+  coordinate_system?: string
+  aspect_ratio?: string
+  camera_view?: string
+  characters: WorkspaceSpatialCharacter[]
+  prop_positions?: Array<Record<string, unknown>>
+  status?: string
+  source?: string
+  has_last_frame?: boolean
+}
+
+/** 动作时间轴：解决『谁做什么』 */
+export interface WorkspaceAction {
+  action_id: string
+  character_id?: string | null
+  character_name?: string | null
+  start_progress: number
+  end_progress: number
+  action_description: string
+  status: string
+}
+
+export interface WorkspaceActionTimeline {
+  duration_seconds?: number | null
+  actions: WorkspaceAction[]
+  status?: string
+  source?: string
+}
+
+/** 道具绑定 */
+export interface WorkspacePropBinding {
+  prop_id?: string | null
+  prop_name?: string | null
+  reference_id?: string | null
+  reference_slot_id?: string | null
+  holder_character_id?: string | null
+  holder_character_name?: string | null
+  visibility?: string
+  attachment_position?: string | null
+  follows_character?: boolean
+  handover?: string | null
+  status?: string
+}
+
+/** 连续性校验结论（只提示，不自动改写） */
+export interface WorkspaceContinuityIssue {
+  code: string
+  level: 'error' | 'warning' | 'info'
+  message: string
+  character_id?: string
+  character_name?: string
+  prop_id?: string
+  prop_name?: string
+}
+
+export interface WorkspaceContinuity {
+  status: 'conflict' | 'ok' | 'first_shot'
+  previous_shot_id: string | null
+  previous_episode: number | null
+  previous_seq: number | null
+  previous_config_found: boolean
+  issues: WorkspaceContinuityIssue[]
+  summary: string
+  auto_applied: boolean
+}
+
+/** 工作流能力声明：H3 ref2va 仅支持提示词级空间/时间约束 */
+export interface WorkspaceCapabilities {
+  spatial_control: string
+  timeline_control: string
+  reason?: string
+}
+
+export interface WorkspaceHistoryCompat {
+  has_saved_config: boolean
+  saved_version: number | null
+  base_snapshot_complete: boolean
+  incomplete_reasons: string[]
+  base_asset_id: string | null
+}
+
+/** 工作台完整数据 */
+export interface RegenerateWorkspace {
+  shot_id: string
+  target: string
+  source: 'saved' | 'derived'
+  workflow: { id?: string | null; name?: string | null; type?: string | null; version?: number | null }
+  base: Record<string, unknown> | null
+  snapshot_complete: boolean
+  incomplete_reasons: string[]
+  available_slots: WorkspaceSlot[]
+  references: WorkspaceReference[]
+  character_bindings: WorkspaceCharacterBinding[]
+  spatial_layout: WorkspaceSpatialLayout
+  action_timeline: WorkspaceActionTimeline
+  prop_bindings: WorkspacePropBinding[]
+  prompt_sections: Record<string, string>
+  final_prompt: string
+  parameters: Record<string, unknown>
+  validation: ValidateResult & { summary?: Record<string, number> }
+  continuity: WorkspaceContinuity
+  capabilities: WorkspaceCapabilities
+  shot: Record<string, unknown>
+  history_compat: WorkspaceHistoryCompat
+}
+
+/** 工作台校验结果 */
+export interface WorkspaceValidateResult {
+  valid: boolean
+  errors: ConsistencyIssue[]
+  warnings: ConsistencyIssue[]
+  checks: ConsistencyCheck[]
+  workspace: {
+    summary: Record<string, number>
+    continuity: WorkspaceContinuity
+    capabilities: WorkspaceCapabilities
+  }
+}
+
+/** 读取工作台完整数据（有保存配置优先用保存内容） */
+export function fetchRegenerateWorkspace(
+  shotId: string,
+  target: 'keyframe' | 'clip' = 'clip',
+): Promise<RegenerateWorkspace> {
+  return get<RegenerateWorkspace>(`/shots/${shotId}/regenerate/workspace`, { target })
+}
+
+/** 保存工作台草稿（只存可编辑副本，不创建任务、不改写历史视频） */
+export function saveRegenerateWorkspace(
+  shotId: string,
+  payload: Record<string, unknown>,
+): Promise<RegenerateWorkspace> {
+  return put<RegenerateWorkspace>(`/shots/${shotId}/regenerate/workspace`, payload)
+}
+
+/** 工作台提交前预检：结构化校验 + 槽位校验 + 提示词一致性 */
+export function validateRegenerateWorkspace(
+  shotId: string,
+  payload: Record<string, unknown>,
+): Promise<WorkspaceValidateResult> {
+  return post<WorkspaceValidateResult>(`/shots/${shotId}/regenerate/workspace/validate`, payload)
+}
+
+/** 按工作台配置提交重新生成任务（结果落候选版本，不改写当前生效视频） */
+export function submitRegenerateWorkspace(
+  shotId: string,
+  payload: Record<string, unknown>,
+): Promise<RegenerateJob & { workspace_config_id?: string; continuity?: WorkspaceContinuity }> {
+  return post<RegenerateJob & { workspace_config_id?: string; continuity?: WorkspaceContinuity }>(
+    `/shots/${shotId}/regenerate/workspace/regenerate`,
+    payload,
+  )
 }

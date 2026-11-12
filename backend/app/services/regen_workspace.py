@@ -981,6 +981,13 @@ def build_continuity(db, shot, *, current_spatial=None, current_props=None):
     if issues:
         described = "；".join(i.get("message", "") for i in issues if i.get("message"))
         result["summary"] = "衔接上一镜（第 {} 镜）：{}。".format(prev.seq, described)
+    else:
+        # 已比对但无任何冲突时也必须给出明确结论：
+        # 空字符串会被前端误判为『尚未检查』
+        result["summary"] = (
+            "衔接上一镜（第 {} 镜）：已比对上一镜的结构化状态，"
+            "位置、景深、朝向与道具持有关系未发现冲突。".format(prev.seq)
+        )
     return result
 
 
@@ -1057,6 +1064,18 @@ def build_workspace(
         final_prompt=final_prompt,
         nodes=nodes,
     )
+    base_block = base_config.get("base")
+    history_compat = {
+        "has_saved_config": bool(saved),
+        "saved_config_id": (saved or {}).get("config_id"),
+        "saved_version": (saved or {}).get("version"),
+        "source": source,
+        "base_snapshot_complete": bool(base_config.get("snapshot_complete", False)),
+        "incomplete_reasons": list(base_config.get("incomplete_reasons") or []),
+        "base_asset_id": (
+            base_block.get("asset_id") if isinstance(base_block, dict) else None
+        ),
+    }
     return {
         "shot_id": shot.id,
         "target": target,
@@ -1085,6 +1104,7 @@ def build_workspace(
         "parameters": parameters,
         "validation": validation,
         "continuity": continuity,
+        "history_compat": history_compat,
         "capabilities": {
             "spatial_control": "prompt_level",
             "timeline_control": "prompt_level",

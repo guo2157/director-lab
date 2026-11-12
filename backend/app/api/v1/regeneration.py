@@ -620,3 +620,406 @@ def get_impact(shot_id: str, db: Session = Depends(get_db)) -> dict:
         "affected": affected,
         "auto_regenerate": False,
     }
+
+
+# ============================================================
+# 重新生成工作台：多参考图 / 身份绑定 / 空间布局 / 动作时间轴
+# 分层提示词 / 连续性校验 / 参数快照
+# ============================================================
+
+def _ws_refs_to_slots(references: list[dict]) -> list[dict]:
+    """把工作台结构化参考图转换成快照 refs（槽位级）。
+
+    工作台的 slot_id 即工作流槽位参数名；没有 asset_id 的槽位不进入快照，
+    未启用的槽位保留但会被 validate_refs 过滤。
+    """
+    out: list[dict] = []
+    for r in references or []:
+        if not isinstance(r, dict):
+            continue
+        slot = r.get("slot_id")
+        if not slot:
+            continue
+        ref: dict = {"slot_param": slot, "enabled": bool(r.get("enabled", True))}
+        if r.get("asset_id"):
+            ref["asset_id"] = r["asset_id"]
+        out.append(ref)
+    return out
+
+
+def _ws_load_workflow(db: Session, shot: Shot, target: str, payload: dict, base_config: dict):
+    """确定工作台使用的工作流：显式指定优先，否则沿用基础快照，最后回退默认。"""
+    if payload.get("workflow_id"):
+        return _load_workflow(db, payload.get("workflow_id"), target)
+    wf_id = (base_config.get("workflow") or {}).get("id")
+    workflow = db.get(Workflow, wf_id) if wf_id else None
+    if workflow is None:
+        workflow = _load_workflow(db, None, target)
+    return workflow
+
+
+def _ws_upsert_config(
+    db: Session,
+    *,
+    shot: Shot,
+    project_id: str,
+    target: str,
+    workflow: Workflow | None,
+    payload: dict,
+) -> "StoryboardRegenConfig":
+    """保存或更新工作台草稿；只写可编辑副本，不触碰历史视频与既有资产。"""
+    from app.models.regen_config import StoryboardRegenConfig
+
+    row = (
+        db.query(StoryboardRegenConfig)
+        .filter(StoryboardRegenConfig.shot_id == shot.id)
+        .filter(StoryboardRegenConfig.target == target)
+        .first()
+    )
+    now = _now()
+    if row is None:
+        row = StoryboardRegenConfig(
+            id=ids.new_id("rgc"),
+            project_id=project_id,
+            shot_id=shot.id,
+            target=target,
+            version=1,
+            created_at=now,
+        )
+        db.add(row)
+    else:
+        row.version = int(row.version or 1) + 1
+    row.workflow_id = workflow.id if workflow is not None else None
+    row.workflow_version = workflow.version if workflow is not None else None
+    row.references = payload.get("references")
+    row.character_bindings = payload.get("character_bindings")
+    row.spatial_layout = payload.get("spatial_layout")
+    row.action_timeline = payload.get("action_timeline")
+    row.prop_bindings = payload.get("prop_bindings")
+    row.prompt_sections = payload.get("prompt_sections")
+    row.final_prompt = payload.get("final_prompt")
+    row.parameters = payload.get("parameters")
+    row.extra = payload.get("extra")
+    row.updated_at = now
+    return row
+
+
+@router.get("/shots/{shot_id}/regenerate/workspace")
+def get_regenerate_workspace(
+    shot_id: str,
+    target: str = "clip",
+    db: Session = Depends(get_db),
+) -> dict:
+    """读取重新生成工作台完整数据。
+
+    有已保存配置时以保存内容为准，否则由基础快照推导并标注待确认项；
+    同时返回历史数据兼容标记，供前端提示『历史配置不完整』。
+    """
+    from app.services import regen_workspace as ws
+
+    shot = _get_shot(db, shot_id)
+    if target not in _TARGET_ASSET_TYPE:
+        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
+    base_asset = _resolve_base_asset(db, shot, target, None)
+    base_config = regen.build_base_config(db, base_asset)
+    workflow = _ws_load_workflow(db, shot, target, {}, base_config)
+    saved = ws.load_saved_config(db, shot.id, target)
+    data = ws.build_workspace(
+        db,
+        shot=shot,
+        target=target,
+        workflow=workflow,
+        base_config=base_config,
+        saved=saved,
+    )
+    data["history_compat"] = {
+        "has_saved_config": saved is not None,
+        "saved_version": (saved or {}).get("version"),
+        "base_snapshot_complete": bool(base_config.get("snapshot_complete")),
+        "incomplete_reasons": base_config.get("incomplete_reasons") or [],
+        "base_asset_id": base_asset.id,
+    }
+    return data
+
+
+@router.put("/shots/{shot_id}/regenerate/workspace")
+def put_regenerate_workspace(shot_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """保存重新生成工作台草稿。
+
+    仅保存可编辑副本：不创建任务、不覆盖历史视频、不改写已生成的资产。
+    """
+    from app.services import regen_workspace as ws
+
+    shot = _get_shot(db, shot_id)
+    target = payload.get("target") or "clip"
+    if target not in _TARGET_ASSET_TYPE:
+        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
+    project_id = _project_id_of(db, shot)
+    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
+    base_config = regen.build_base_config(db, base_asset)
+    workflow = _ws_load_workflow(db, shot, target, payload, base_config)
+    row = _ws_upsert_config(
+        db,
+        shot=shot,
+        project_id=project_id,
+        target=target,
+        workflow=workflow,
+        payload=payload,
+    )
+    db.commit()
+    db.refresh(row)
+    saved = ws.load_saved_config(db, shot.id, target)
+    data = ws.build_workspace(
+        db,
+        shot=shot,
+        target=target,
+        workflow=workflow,
+        base_config=base_config,
+        saved=saved,
+    )
+    data["history_compat"] = {
+        "has_saved_config": True,
+        "saved_version": row.version,
+        "base_snapshot_complete": bool(base_config.get("snapshot_complete")),
+        "incomplete_reasons": base_config.get("incomplete_reasons") or [],
+        "base_asset_id": base_asset.id,
+    }
+    return data
+
+
+@router.post("/shots/{shot_id}/regenerate/workspace/validate")
+def post_regenerate_workspace_validate(
+    shot_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    """工作台提交前预检：结构化校验 + 槽位/资产校验 + 提示词一致性校验。
+
+    errors 非空必须阻止提交；warnings 需用户确认。不创建任务。
+    """
+    from app.services import regen_workspace as ws
+
+    shot = _get_shot(db, shot_id)
+    target = payload.get("target") or "clip"
+    if target not in _TARGET_ASSET_TYPE:
+        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
+    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
+    base_config = regen.build_base_config(db, base_asset)
+    workflow = _ws_load_workflow(db, shot, target, payload, base_config)
+    data = ws.build_workspace(
+        db,
+        shot=shot,
+        target=target,
+        workflow=workflow,
+        base_config=base_config,
+        saved=None,
+    )
+    # 用提交内容覆盖派生结果，只校验用户当前这一份草稿
+    for key in (
+        "references",
+        "character_bindings",
+        "spatial_layout",
+        "action_timeline",
+        "prop_bindings",
+        "prompt_sections",
+    ):
+        if key in payload and payload[key] is not None:
+            data[key] = payload[key]
+    final_prompt = payload.get("final_prompt")
+    if final_prompt is None:
+        final_prompt = data.get("final_prompt") or ""
+    workspace_check = ws.validate_workspace(
+        db,
+        shot=shot,
+        references=data.get("references") or [],
+        bindings=data.get("character_bindings") or [],
+        spatial=data.get("spatial_layout") or {},
+        timeline=data.get("action_timeline") or {},
+        props=data.get("prop_bindings") or [],
+        final_prompt=final_prompt,
+        nodes=ws.slot_node_map(workflow),
+    )
+    # 槽位与资产级校验：把工作台引用转成快照 refs 后复用既有校验
+    refs = _ws_refs_to_slots(data.get("references") or [])
+    slots = regen.normalize_reference_slots(workflow.capabilities if workflow is not None else None)
+    slot_result = {"errors": [], "warnings": [], "checks": []}
+    try:
+        validated = regen.validate_refs(db, slots, refs)
+        consistency = regen.validate_prompt_consistency(final_prompt, validated, slots)
+        slot_result = consistency
+    except HTTPException as e:
+        detail = getattr(e, "detail", None) or {}
+        slot_result = {
+            "errors": [{
+                "code": detail.get("code") or "invalid_request",
+                "message": detail.get("message") or str(e),
+            }],
+            "warnings": [],
+            "checks": [],
+        }
+    merged_errors = list(workspace_check.get("errors") or []) + list(slot_result.get("errors") or [])
+    merged_warnings = list(workspace_check.get("warnings") or []) + list(slot_result.get("warnings") or [])
+    merged_checks = list(workspace_check.get("checks") or []) + list(slot_result.get("checks") or [])
+    return {
+        "valid": not merged_errors,
+        "errors": merged_errors,
+        "warnings": merged_warnings,
+        "checks": merged_checks,
+        "workspace": {
+            "summary": workspace_check.get("summary") or {},
+            "continuity": data.get("continuity") or {},
+            "capabilities": data.get("capabilities") or {},
+        },
+    }
+
+
+@router.post("/shots/{shot_id}/regenerate/workspace/regenerate", status_code=202)
+def post_regenerate_workspace_generate(
+    shot_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    """按工作台配置提交重新生成任务。
+
+    - 结果先落候选版本，不改写当前生效视频
+    - 生成参数严格来自本次冻结快照
+    - 提交成功后把本份配置保存为工作台草稿，便于下次继续编辑
+    """
+    from app.models.regen_config import StoryboardRegenConfig
+    from app.services import regen_workspace as ws
+
+    shot = _get_shot(db, shot_id)
+    target = payload.get("target") or "clip"
+    if target not in _TARGET_ASSET_TYPE:
+        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
+    idempotency_key = payload.get("idempotency_key")
+    if idempotency_key:
+        exist = db.query(Job).filter(Job.request_key == idempotency_key).first()
+        if exist is not None:
+            return _job_out(exist, (exist.input_snapshot or {}).get("snapshot"))
+    project_id = _project_id_of(db, shot)
+    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
+    base_config = regen.build_base_config(db, base_asset)
+    workflow = _ws_load_workflow(db, shot, target, payload, base_config)
+    refs = _ws_refs_to_slots(payload.get("references") or [])
+    if target == "clip":
+        system_refs = _system_refs_for_clip(db, shot)
+        provided = {r.get("slot_param") for r in refs}
+        refs = list(refs) + [r for r in system_refs if r["slot_param"] not in provided]
+    final_prompt = payload.get("final_prompt")
+    if final_prompt is None:
+        final_prompt = (base_config.get("prompt") or {}).get("rendered") or ""
+    negative = payload.get("negative_prompt")
+    if negative is None:
+        negative = (base_config.get("negative_prompt") or {}).get("rendered") or ""
+    parameters = dict(payload.get("parameters") or {})
+    snapshot = regen.assemble_snapshot(
+        db,
+        mode=regen.MODE_FULL_RECONFIGURE,
+        base_config=base_config,
+        prompt=final_prompt,
+        negative_prompt=negative,
+        refs=refs,
+        params=parameters,
+        workflow=workflow,
+    )
+    consistency = snapshot.get("consistency") or {}
+    if consistency.get("errors"):
+        raise errors.AppError(
+            "prompt_ref_mismatch",
+            "提示词与参考图不一致，已阻止生成：" + "；".join(
+                e.get("message") or str(e) for e in consistency["errors"]
+            ),
+            422,
+            consistency=consistency,
+        )
+    params = dict(snapshot.get("model_params") or {})
+    params["prompt"] = snapshot["prompt"]["rendered"]
+    if snapshot["negative_prompt"]["rendered"]:
+        params["negative"] = snapshot["negative_prompt"]["rendered"]
+    media = regen.snapshot_to_media(snapshot)
+    if media:
+        params["__media__"] = media
+    job_type = "generate_keyframe" if target == "keyframe" else f"generate_{target}"
+    job = Job(
+        id=ids.job_id(),
+        project_id=project_id,
+        shot_id=shot.id,
+        job_type=job_type,
+        workflow_id=workflow.id,
+        workflow_version=workflow.version,
+        params=params,
+        status="queued",
+        request_key=idempotency_key,
+        created_at=_now(),
+        input_snapshot={
+            "snapshot_version": 1,
+            "mode": regen.MODE_FULL_RECONFIGURE,
+            "snapshot": snapshot,
+            "workflow_version": workflow.version,
+            "params": params,
+            "generation_mode": regen.MODE_FULL_RECONFIGURE,
+            "base_asset_id": base_asset.id,
+            "base_asset_version": base_asset.version,
+            "regeneration": True,
+            "workspace": {
+                "references": payload.get("references") or [],
+                "character_bindings": payload.get("character_bindings") or [],
+                "spatial_layout": payload.get("spatial_layout") or {},
+                "action_timeline": payload.get("action_timeline") or {},
+                "prop_bindings": payload.get("prop_bindings") or [],
+                "prompt_sections": payload.get("prompt_sections") or {},
+                "capabilities": {
+                    "spatial_control": "prompt_level",
+                    "timeline_control": "prompt_level",
+                },
+            },
+        },
+    )
+    db.add(job)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        exist = (
+            db.query(Job).filter(Job.request_key == idempotency_key).first()
+            if idempotency_key
+            else None
+        )
+        if exist is not None:
+            return _job_out(exist, (exist.input_snapshot or {}).get("snapshot"))
+        raise errors.AppError(
+            "job_conflict",
+            "该提交与另一个并发请求冲突，请刷新页面后重试",
+            409,
+        )
+    regen.write_input_refs(db, job, snapshot)
+    if target == "clip":
+        from app.api.v1.generate import _inject_prev_shot_frame
+        info = _inject_prev_shot_frame(db, shot, target, params)
+        snap_now = dict(job.input_snapshot or {})
+        snap_now["prev_frame"] = info
+        snap_now["injected_media"] = dict(params.get("__media__") or {})
+        job.input_snapshot = snap_now
+        job.params = params
+    # 保存本份配置为工作台草稿，便于下次继续编辑（不影响本次已冻结的快照）
+    saved_row = _ws_upsert_config(
+        db,
+        shot=shot,
+        project_id=project_id,
+        target=target,
+        workflow=workflow,
+        payload=payload,
+    )
+    db.commit()
+    out = _job_out(job, snapshot)
+    out["workspace_config_id"] = saved_row.id
+    out["workspace_config_version"] = saved_row.version
+    out["continuity"] = ws.build_continuity(
+        db,
+        shot,
+        current_spatial=payload.get("spatial_layout") or {},
+        current_props=payload.get("prop_bindings") or [],
+    )
+    return out
+
