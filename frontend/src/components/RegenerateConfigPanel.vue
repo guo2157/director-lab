@@ -288,51 +288,80 @@ async function adopt(candidate: CandidateAsset) {
 </template>
 
 <style scoped>
+/* 多参考图重新生成工作台：墨青底 + 青瓷强调，层级靠描边与凹槽表达 */
 .regen-panel {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--divider-color, #efeff5);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
 }
 .mode-banner {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   flex-wrap: wrap;
 }
 .mode-label {
   font-size: 12px;
-  color: var(--text-tertiary, #909399);
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
 }
+/* 分节标题：短竖条作为面板内唯一的节奏记号 */
 .section-title {
-  margin: 14px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-5) 0 var(--sp-2);
   font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
 }
+.section-title::before {
+  content: '';
+  flex: none;
+  width: 2px;
+  height: 12px;
+  background: var(--brand-primary);
+}
+/* 参考图行：按槽位清单读，左缘色条标记可编辑项 */
 .ref-card {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px;
-  border: 1px solid var(--divider-color, #efeff5);
-  border-radius: 6px;
-  margin-bottom: 8px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  margin-bottom: var(--sp-2);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
+.ref-card:hover {
+  background: var(--bg-elevated);
+  border-left-color: var(--brand-primary);
+}
+/* 帧约束：虚线 + 下沉底，避免与参考图混淆 */
 .ref-card.constraint {
+  background: var(--bg-sunken);
   border-style: dashed;
+  border-left-width: 1px;
+  border-left-style: dashed;
 }
 .ref-thumb {
+  flex: none;
   width: 48px;
   height: 48px;
   object-fit: cover;
-  border-radius: 4px;
-  background: #f5f7fa;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
 }
 .ref-thumb.placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  color: #c0c4cc;
+  color: var(--text-tertiary);
 }
 .ref-meta {
   flex: 1;
@@ -341,31 +370,42 @@ async function adopt(candidate: CandidateAsset) {
 .ref-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
 }
+/* 槽位参数名：等宽字，让 image_1…image_9 与绑定关系可逐一比对 */
 .ref-slot {
+  font-family: var(--font-mono);
   font-size: 12px;
-  font-family: monospace;
+  letter-spacing: 0.01em;
+  color: var(--brand-hover);
 }
 .ref-sub {
-  font-size: 11px;
-  color: var(--text-tertiary, #909399);
   margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+/* 本次不修改：凹槽底表示只读信息 */
 .locked-box {
-  margin-top: 14px;
-  padding: 8px 10px;
-  background: #fafafa;
-  border-radius: 6px;
+  margin-top: var(--sp-4);
+  padding: var(--sp-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   font-size: 12px;
 }
 .locked-title {
+  margin-bottom: var(--sp-1);
   font-weight: 600;
-  margin-bottom: 4px;
+  color: var(--text-secondary);
 }
 .locked-box ul {
   margin: 0;
   padding-left: 18px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
+  line-height: 1.7;
 }
 </style>

@@ -2,13 +2,21 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
-import { NButton, NSpace, NSpin, NEmpty, NTag, NTooltip, NInput, NCheckbox, NImage, NModal, NProgress, useMessage } from 'naive-ui'
+import { NButton, NSpace, NSpin, NEmpty, NTag, NTooltip, NInput, NCheckbox, NImage, NModal, NProgress, NRadioGroup, NRadioButton, NUpload, NAlert, useMessage } from 'naive-ui'
 import { listScenes, listSceneShots, listCharacters, listProps, confirmShotKeyframe, unconfirmShotKeyframe } from '@/api/script'
-import { fetchRegenerateConfig, type RegenerateRef, type RefSlotInfo } from '@/api/regeneration'
+import {
+  fetchRegenerateConfig,
+  submitRegenerate,
+  validateRegenerate,
+  type RegenerateRef,
+  type RefSlotInfo,
+  type ValidateResult,
+} from '@/api/regeneration'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { listWorkflows } from '@/api/workflows'
-import { lockAsset, unlockAsset, replaceAsset } from '@/api/assets'
+import { lockAsset, unlockAsset, replaceAsset, uploadAsset, listAssets } from '@/api/assets'
+import type { Asset } from '@/types/asset'
 import { getProject } from '@/api/projects'
 import { getKeyframeGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
@@ -528,6 +536,11 @@ const propsQuery = useQuery({
 function openDetail(shot: Shot) {
   detailShot.value = shot
   detailVisible.value = true
+  // 重置重新生成工作台状态
+  regenPrompt.value = shot.image_prompt ?? ''
+  regenMode.value = 'inherit_prompt_only'
+  regenRefs.value = []
+  regenValidation.value = null
   void loadKeyframeRefs(shot)
 }
 
@@ -543,6 +556,11 @@ async function loadKeyframeRefs(shot: Shot) {
     kfActualSlots.value = cfg.available_slots ?? []
     kfRefs.value = (cfg.refs ?? []).filter((r) => r.enabled !== false)
     kfNegativeSupported.value = Boolean(cfg.negative_prompt?.supported)
+    // 初始化重新生成工作台：提示词与参考图来自基础版本原始生成配置
+    regenPrompt.value = cfg.prompt?.rendered ?? shot.image_prompt ?? ''
+    regenMode.value = 'inherit_prompt_only'
+    regenRefs.value = (cfg.refs ?? []).map((r) => ({ ...r }))
+    regenValidation.value = null
     // 快照参数里的 ref_* 键即生成时实际传入的槽位，值为对应资产文件名
     const injected: KfInjectedRef[] = []
     for (const [key, value] of Object.entries(cfg.model_params ?? {})) {
@@ -560,6 +578,224 @@ async function loadKeyframeRefs(shot: Shot) {
     kfRefsLoading.value = false
   }
 }
+
+// ── 重新生成工作台：提示词 + 参考图 + 槽位绑定统一编辑 ──
+/** 工作台提示词（来自基础版本原始配置，可编辑） */
+const regenPrompt = ref('')
+/** 工作台模式：默认沿用原配置只改提示词；modify_refs 可增删替换参考图 */
+const regenMode = ref<'inherit_prompt_only' | 'modify_refs' | 'full_reconfigure'>('inherit_prompt_only')
+/** 工作台参考图列表（含禁用项；提交时按模式决定是否携带） */
+const regenRefs = ref<RegenerateRef[]>([])
+/** 提交前预检结果（null=未校验） */
+const regenValidation = ref<ValidateResult | null>(null)
+const regenSubmitting = ref(false)
+const regenValidating = ref(false)
+/** 资产选择器状态：为哪个槽位选择/替换资产 */
+const assetPickerVisible = ref(false)
+const assetPickerSlot = ref<string>('')
+const assetPickerKeyword = ref('')
+const assetPickerLoading = ref(false)
+const assetPickerItems = ref<Asset[]>([])
+/** 本地上传状态 */
+const assetUploading = ref(false)
+const regenModeOptions = [
+  { label: '沿用原配置，只修改提示词', value: 'inherit_prompt_only' },
+  { label: '修改参考图', value: 'modify_refs' },
+]
+const regenRefsEditable = computed(() => regenMode.value !== 'inherit_prompt_only')
+/** 槽位对应的提示词图片编号：images.image_N → N（与工作流 input_key 严格对应） */
+function slotImageNo(slotParam: string): number | null {
+  const s = kfSlots.value.find((x) => x.param === slotParam)
+  if (!s?.input_key) return null
+  const m = String(s.input_key).match(/image_(\d+)\s*$/)
+  return m ? Number(m[1]) : null
+}
+/** 工作台参考图展示列表：合并已绑定与可用空槽位，按图片编号排序 */
+const regenRefRows = computed(() => {
+  const rows: Array<RegenerateRef & { image_no: number | null; label: string }> = []
+  const bound = new Set(regenRefs.value.map((r) => r.slot_param))
+  for (const r of regenRefs.value) {
+    rows.push({ ...r, image_no: slotImageNo(r.slot_param), label: kfSlotMeta.value[r.slot_param]?.label ?? r.slot_param })
+  }
+  // 未绑定的可用槽位（modify_refs 模式下可新增）
+  for (const s of kfSlots.value) {
+    if (bound.has(s.param)) continue
+    rows.push({
+      slot_param: s.param,
+      input_key: s.input_key,
+      asset_id: null,
+      required: s.required,
+      semantic: 'reference',
+      enabled: false,
+      image_no: slotImageNo(s.param),
+      label: kfSlotMeta.value[s.param]?.label ?? s.param,
+    })
+  }
+  return rows.sort((a, b) => (a.image_no ?? 99) - (b.image_no ?? 99))
+})
+/** 移除参考图：必需槽位禁止移除；移除后清空校验结果 */
+function removeRegenRef(slotParam: string) {
+  const r = regenRefs.value.find((x) => x.slot_param === slotParam)
+  if (!r) return
+  if (r.required) {
+    message.warning(`槽位 ${slotParam} 为当前工作流必需输入，不可移除`)
+    return
+  }
+  regenRefs.value = regenRefs.value.filter((x) => x.slot_param !== slotParam)
+  regenValidation.value = null
+}
+/** 打开资产选择器（为指定槽位新增或替换参考图） */
+function openAssetPicker(slotParam: string) {
+  assetPickerSlot.value = slotParam
+  assetPickerKeyword.value = ''
+  assetPickerVisible.value = true
+  void loadAssetPickerItems()
+}
+/** 加载资产选择器候选：按槽位用途过滤资产类型 */
+async function loadAssetPickerItems() {
+  assetPickerLoading.value = true
+  try {
+    const slot = kfSlots.value.find((x) => x.param === assetPickerSlot.value)
+    const role = slot ? (isCharSlot(slot.param) ? 'character' : isSceneSlot(slot.param) ? 'scene' : isPropSlot(slot.param) ? 'prop' : null) : null
+    const res = await listAssets({
+      project_id: projectId.value,
+      asset_type: role ?? undefined,
+      keyword: assetPickerKeyword.value || undefined,
+      page_size: 50,
+    })
+    assetPickerItems.value = (res.items ?? []) as Asset[]
+  } catch (e: any) {
+    message.error(e?.message ?? '加载资产列表失败')
+    assetPickerItems.value = []
+  } finally {
+    assetPickerLoading.value = false
+  }
+}
+/** 选中资产：绑定到目标槽位（保留槽位，更新资产） */
+function pickAsset(asset: Asset) {
+  const slotParam = assetPickerSlot.value
+  if (!slotParam) return
+  const existing = regenRefs.value.find((x) => x.slot_param === slotParam)
+  const entry: RegenerateRef = {
+    slot_param: slotParam,
+    input_key: kfSlots.value.find((x) => x.param === slotParam)?.input_key ?? null,
+    asset_id: asset.id,
+    asset_version: asset.version,
+    asset_type: asset.asset_type,
+    asset_name: asset.name ?? '',
+    required: kfSlots.value.find((x) => x.param === slotParam)?.required ?? false,
+    file_path: asset.file_path ?? null,
+    semantic: 'reference',
+    enabled: true,
+  }
+  if (existing) {
+    Object.assign(existing, entry)
+  } else {
+    regenRefs.value.push(entry)
+  }
+  assetPickerVisible.value = false
+  regenValidation.value = null
+}
+/** 本地上传参考图并绑定到目标槽位 */
+async function uploadRefImage(file: File) {
+  const slotParam = assetPickerSlot.value
+  if (!slotParam) return
+  assetUploading.value = true
+  try {
+    const asset = await uploadAsset(file, {
+      project_id: projectId.value,
+      asset_type: 'reference',
+      name: file.name.replace(/\.[^.]+$/, ''),
+    })
+    pickAsset(asset)
+    message.success('参考图已上传并绑定')
+  } catch (e: any) {
+    message.error(e?.message ?? '上传参考图失败')
+  } finally {
+    assetUploading.value = false
+  }
+}
+/** 提交前预检：校验提示词图片引用与参考图槽位一致性 */
+async function runRegenValidation() {
+  const shot = detailShot.value
+  if (!shot) return
+  regenValidating.value = true
+  try {
+    const payload: Record<string, unknown> = {
+      target: 'keyframe',
+      mode: regenMode.value,
+      prompt: regenPrompt.value,
+    }
+    if (regenMode.value !== 'inherit_prompt_only') {
+      payload.refs = regenRefs.value.map((r) => ({
+        slot_param: r.slot_param,
+        asset_id: r.asset_id,
+        enabled: r.enabled !== false,
+      }))
+    }
+    regenValidation.value = await validateRegenerate(shot.id, payload)
+  } catch (e: any) {
+    message.error(e?.message ?? '校验失败')
+  } finally {
+    regenValidating.value = false
+  }
+}
+/** 提交重新生成：先预检（错误阻断），再经 workbench API 提交（结果落候选版本） */
+async function submitRegen() {
+  const shot = detailShot.value
+  if (!shot) return
+  if (!reviewApproved.value) {
+    message.warning('公共资产尚未通过人工审核，暂不可生成分镜图')
+    return
+  }
+  if (shot.current_assets?.keyframe?.locked) {
+    message.warning('该分镜图已锁定，请先解锁')
+    return
+  }
+  regenSubmitting.value = true
+  try {
+    // 1. 提交前预检：错误时阻断
+    const payload: Record<string, unknown> = {
+      target: 'keyframe',
+      mode: regenMode.value,
+      prompt: regenPrompt.value,
+      idempotency_key: `${shot.id}-keyframe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    }
+    if (regenMode.value !== 'inherit_prompt_only') {
+      payload.refs = regenRefs.value.map((r) => ({
+        slot_param: r.slot_param,
+        asset_id: r.asset_id,
+        enabled: r.enabled !== false,
+      }))
+    }
+    const check = await validateRegenerate(shot.id, payload)
+    regenValidation.value = check
+    if (check.errors.length) {
+      message.error('校验未通过，请修正后重试')
+      return
+    }
+    // 2. 提交 workbench 任务（结果落候选版本）
+    const job = await submitRegenerate(shot.id, payload)
+    message.success(`已提交重新生成任务（任务 ${job.id}），结果将作为候选版本保存`)
+    detailVisible.value = false
+    await trackAfterSubmit()
+  } catch (e: any) {
+    message.error(e?.message ?? '提交重新生成任务失败')
+  } finally {
+    regenSubmitting.value = false
+  }
+}
+
+/** 详情页生成入口：已有分镜图走工作台重新生成；首次生成同步工作台提示词后走原链路 */
+function detailGenerate(shot: Shot) {
+  if (shot.current_assets?.keyframe) {
+    void submitRegen()
+    return
+  }
+  promptDraft.value[shot.id] = regenPrompt.value
+  handleGenerate(shot)
+}
+
 
 /** 参考图列表：真实入参优先，其余按工作流槽位规则推导并明确标注来源 */
 const kfRefList = computed<KeyframeRefItem[]>(() => {
@@ -1025,24 +1261,65 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
             </div>
           </section>
 
-          <!-- 分区二：分镜图提示词 -->
+          <!-- 分区二：重新生成工作台 -->
           <section class="detail-section">
             <div class="detail-section-head">
               <span class="detail-section-index">2</span>
-              <span class="detail-section-name">分镜图提示词</span>
+              <span class="detail-section-name">重新生成工作台</span>
+              <n-radio-group v-model:value="regenMode" size="small">
+                <n-radio-button v-for="opt in regenModeOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </n-radio-button>
+              </n-radio-group>
             </div>
+            <div class="regen-sub-title">参考图槽位（{{ regenRefs.length }}/{{ kfSlots.length }} 已绑定）</div>
+            <div class="regen-ref-list">
+              <div v-for="row in regenRefRows" :key="row.slot_param" class="regen-ref-item" :class="{ empty: !row.asset_id }">
+                <div class="regen-ref-no">Image {{ row.image_no ?? '—' }}</div>
+                <n-image
+                  v-if="row.asset_id"
+                  :src="`/api/assets/${row.asset_id}/file`"
+                  width="52"
+                  height="52"
+                  object-fit="cover"
+                  class="regen-ref-thumb"
+                  :img-props="{ style: 'width:52px;height:52px;object-fit:cover;border-radius:6px' }"
+                />
+                <div v-else class="regen-ref-thumb regen-ref-empty">空槽位</div>
+                <div class="regen-ref-meta">
+                  <div class="regen-ref-name">
+                    {{ row.asset_name || row.label }}
+                    <n-tag size="tiny" :bordered="false">{{ row.label }}</n-tag>
+                    <n-tag v-if="row.required" size="tiny" type="warning" :bordered="false">必需</n-tag>
+                  </div>
+                  <div class="regen-ref-sub">槽位 {{ row.slot_param }} · 输入位置 {{ row.input_key ?? '—' }}</div>
+                </div>
+                <div v-if="regenRefsEditable" class="regen-ref-actions">
+                  <n-button size="tiny" secondary @click="openAssetPicker(row.slot_param)">{{ row.asset_id ? '替换' : '新增' }}</n-button>
+                  <n-button v-if="row.asset_id" size="tiny" quaternary type="error" :disabled="row.required" @click="removeRegenRef(row.slot_param)">移除</n-button>
+                </div>
+              </div>
+            </div>
+            <div v-if="!regenRefsEditable" class="detail-hint">切换到『修改参考图』模式后可新增、替换或移除参考图。</div>
+            <div class="regen-sub-title">正向提示词</div>
             <n-input
-              :value="promptDraft[detailShot.id] ?? detailShot.image_prompt ?? ''"
+              v-model:value="regenPrompt"
               type="textarea"
-              :rows="5"
-              placeholder="分镜图提示词"
-              @update:value="(v: string) => onPromptInput(detailShot!, v)"
+              :rows="6"
+              placeholder="分镜图提示词（Image 编号与上方参考图槽位对应）"
             />
-            <div class="detail-hint">
-              参考图按 image1→image3 顺序对应角色身份、角色服装、场景基准图；未注入的槽位在提交前会被剔除。@角色名 / @场景名 会在生成时自动解析为对应资产图。
-            </div>
+            <div class="detail-hint">提示词中的 &lt;imageN&gt; 编号与上方参考图槽位严格对应；提交前会自动校验一致性。</div>
+            <template v-if="regenValidation">
+              <div class="regen-sub-title">校验结果</div>
+              <n-alert v-if="regenValidation.errors.length" type="error" :bordered="false">
+                <div v-for="e in regenValidation.errors" :key="e.message">✗ {{ e.message }}</div>
+              </n-alert>
+              <n-alert v-else-if="regenValidation.warnings.length" type="warning" :bordered="false">
+                <div v-for="w in regenValidation.warnings" :key="w.message">⚠ {{ w.message }}</div>
+              </n-alert>
+              <n-alert v-else type="success" :bordered="false">✓ 校验通过，可以提交生成</n-alert>
+            </template>
           </section>
-
           <!-- 分区三：生成操作 -->
           <section class="detail-section">
             <div class="detail-section-head">
@@ -1052,10 +1329,15 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
             <div v-if="!reviewApproved" class="detail-gate">公共资产尚未通过人工审核，暂不可生成分镜图。</div>
             <div class="detail-actions">
               <n-button
+                v-if="detailShot.current_assets?.keyframe"
+                :loading="regenValidating"
+                @click="runRegenValidation"
+              >校验</n-button>
+              <n-button
                 type="primary"
                 :disabled="!reviewApproved || !!detailShot.current_assets?.keyframe?.locked"
-                :loading="generateMutation.isPending.value"
-                @click="handleGenerate(detailShot)"
+                :loading="regenSubmitting || generateMutation.isPending.value"
+                @click="detailGenerate(detailShot)"
               >{{ detailShot.current_assets?.keyframe ? '重新生成分镜图' : '生成分镜图' }}</n-button>
             </div>
           </section>
@@ -1063,60 +1345,95 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
           </div>
         </template>
     </n-modal>
+
+    <!-- 资产选择器：为参考图槽位选择或上传参考图 -->
+    <n-modal
+      v-model:show="assetPickerVisible"
+      preset="card"
+      :title="`选择参考图（槽位 ${assetPickerSlot}）`"
+      closable
+      :bordered="false"
+      :style="{ width: 'min(560px, 92vw)' }"
+    >
+      <n-space vertical>
+        <n-input v-model:value="assetPickerKeyword" placeholder="搜索资产名称" clearable size="small" @update:value="() => loadAssetPickerItems()" />
+        <n-spin :show="assetPickerLoading || assetUploading">
+          <div v-if="assetPickerItems.length" class="picker-list">
+            <div v-for="a in assetPickerItems" :key="a.id" class="picker-item" @click="pickAsset(a)">
+              <n-image
+                :src="`/api/assets/${a.id}/file`"
+                width="44"
+                height="44"
+                object-fit="cover"
+                :img-props="{ style: 'width:44px;height:44px;object-fit:cover;border-radius:4px' }"
+              />
+              <div class="picker-meta">
+                <div class="picker-name">{{ a.name || a.id }}</div>
+                <div class="picker-sub">{{ a.asset_type }} · v{{ a.version }}</div>
+              </div>
+            </div>
+          </div>
+          <n-empty v-else description="没有匹配的资产" size="small" />
+        </n-spin>
+        <n-upload :show-file-list="false" accept="image/*" :custom-request="(opt: any) => uploadRefImage(opt.file.file as File)">
+          <n-button size="small" secondary :loading="assetUploading">本地上传参考图</n-button>
+        </n-upload>
+      </n-space>
+    </n-modal>
   </div>
 </template>
 
 <style scoped>
 .sb-images-page {
   padding: 16px;
-  min-height: calc(100vh - var(--app-header-height, 56px));
+  min-height: calc(100vh - var(--app-header-height, 52px));
 }
 .gate-banner {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  border: 1px solid var(--border-subtle, #e5e7eb);
-  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   padding: 10px 14px;
   margin-bottom: 12px;
-  background: var(--bg-panel, #fff);
+  background: var(--bg-panel);
 }
 .gate-banner.ok {
-  border-color: rgba(34, 197, 94, 0.35);
-  background: rgba(34, 197, 94, 0.06);
+  border-color: rgba(87, 201, 138, 0.32);
+  background: rgba(87, 201, 138, 0.07);
 }
 .gate-banner.bad {
-  border-color: rgba(239, 68, 68, 0.35);
-  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(224, 78, 57, 0.34);
+  background: rgba(224, 78, 57, 0.07);
 }
 .gate-badge { font-size: 14px; }
-.gate-text { font-size: 13px; color: var(--text-primary, #333); margin-right: auto; }
+.gate-text { font-size: 13px; color: var(--text-primary); margin-right: auto; }
 
 /* ===== 生成总体进度面板 ===== */
 .gen-panel {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid var(--border-subtle, #e5e7eb);
-  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   padding: 10px 14px;
   margin-bottom: 12px;
-  background: var(--bg-panel, #fff);
+  background: var(--bg-panel);
 }
-.gen-panel.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
-.gen-panel.fail { border-color: rgba(239, 68, 68, 0.35); }
+.gen-panel.done { border-color: rgba(87, 201, 138, 0.32); background: rgba(87, 201, 138, 0.07); }
+.gen-panel.fail { border-color: rgba(224, 78, 57, 0.34); }
 .gen-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .gen-badge { font-size: 14px; }
-.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
-.gen-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-left: auto; }
+.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.gen-nums { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
 .gen-bar { width: 100%; }
 .gen-sub { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
-.gen-state { color: var(--text-secondary, #64748b); }
-.gen-state.queued { color: #b45309; }
+.gen-state { color: var(--text-secondary); }
+.gen-state.queued { color: var(--accent-amber); }
 .gen-state.running { color: var(--brand-primary); }
-.gen-state.ok { color: #15803d; font-weight: 500; }
-.gen-state.fail { color: #b91c1c; display: inline-flex; align-items: center; gap: 8px; }
+.gen-state.ok { color: var(--state-success); font-weight: 500; }
+.gen-state.fail { color: var(--danger); display: inline-flex; align-items: center; gap: 8px; }
 .gen-inflight { display: flex; gap: 6px; flex-wrap: wrap; }
 .gen-inflight-item {
   display: inline-flex;
@@ -1124,21 +1441,21 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   gap: 6px;
   font-size: 11px;
   padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--bg-elevated, #f8fafc);
-  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
 }
-.gen-inflight-name { color: var(--text-primary, #333); }
-.gen-inflight-state { color: var(--text-secondary, #64748b); }
+.gen-inflight-name { color: var(--text-primary); }
+.gen-inflight-state { color: var(--text-secondary); }
 .gen-inflight-state.running { color: var(--brand-primary); }
-.gen-inflight-state.queued { color: #b45309; }
+.gen-inflight-state.queued { color: var(--accent-amber); }
 /* 镜头卡片上的失败原因与生成中占位 */
 .shot-error {
   font-size: 11px;
-  color: #b91c1c;
+  color: var(--danger);
   line-height: 1.5;
-  background: rgba(239, 68, 68, 0.08);
-  border-radius: 6px;
+  background: rgba(224, 78, 57, 0.1);
+  border-radius: var(--radius);
   padding: 4px 8px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1146,24 +1463,41 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   overflow: hidden;
 }
 .thumb-generating { color: var(--brand-primary); font-size: 12px; }
-.shot-card.is-generating { border-color: rgba(53, 179, 166, 0.45); background: rgba(53, 179, 166, 0.04); }
-.shot-card.is-failed { border-color: rgba(239, 68, 68, 0.4); }
+.shot-card.is-generating { border-color: var(--brand-primary); background: var(--brand-glow); }
+.shot-card.is-failed { border-color: rgba(224, 78, 57, 0.42); }
 .summary-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
-.page-loading { display: block; margin: 48px auto; }
-.state-block { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 48px 24px; }
+.page-loading { display: block; margin: var(--sp-12) auto; }
+.state-block { display: flex; flex-direction: column; align-items: center; gap: var(--sp-3); padding: var(--sp-12) var(--sp-6); }
 .state-text { margin: 0; color: var(--text-secondary); font-size: 14px; }
-.scene-group { margin-bottom: 20px; }
-.scene-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.scene-group { margin-bottom: var(--sp-5); }
+.scene-header { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+/* 场景名后接一条渐隐细线，作为唯一的分组记号，不额外加图标 */
+.scene-header::after {
+  content: '';
+  flex: 1;
+  min-width: var(--sp-4);
+  height: 1px;
+  background: linear-gradient(to right, var(--border-subtle), transparent);
+}
 .scene-seq { color: var(--text-tertiary); font-size: 13px; }
-.scene-title { font-weight: 600; font-size: 14px; }
-.shots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: 12px; }
-.shot-card { display: flex; flex-direction: column; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: var(--radius, 10px); overflow: hidden; background: var(--bg-panel, #fff); }
-.shot-thumb { aspect-ratio: 16 / 9; max-height: 118px; background: var(--bg-elevated, #f5f5f5); display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; transition: border-color 0.15s; }
-.shot-thumb:hover { filter: brightness(0.97); }
+.scene-title { font-size: 14px; font-weight: 600; letter-spacing: 0.01em; color: var(--text-primary); }
+.shots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: var(--sp-3); }
+.shot-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-panel);
+  transition: border-color var(--transition-fast);
+}
+.shot-card:hover { border-color: var(--border-strong); }
+.shot-thumb { aspect-ratio: 16 / 9; max-height: 118px; background: var(--bg-sunken); display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; transition: filter var(--transition-fast); }
+.shot-thumb:hover { filter: brightness(1.06); }
 .shot-thumb-img { width: 100%; height: 100%; display: block; }
 .shot-thumb :deep(img) { width: 100%; height: 100%; object-fit: cover; }
 .thumb-empty { font-size: 13px; color: var(--text-tertiary); }
-.shot-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.shot-body { padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); flex: 1; }
 .shot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .shot-name { font-size: 14px; font-weight: 600; }
 .shot-actions { margin-top: auto; flex-wrap: wrap; }
@@ -1174,51 +1508,51 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 /* 覆盖层只承载勾选与状态标记，不拦截图片点击，否则缩略图的大图预览点不出来 */
 .thumb-overlay { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; align-items: center; justify-content: space-between; z-index: 2; pointer-events: none; }
 .thumb-overlay > * { pointer-events: auto; }
-.select-box { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 6px; background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(2px); cursor: pointer; transition: background 0.15s; }
-.select-box:hover { background: rgba(255, 255, 255, 0.92); }
+.select-box { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: var(--radius); background: rgba(10, 17, 19, 0.62); backdrop-filter: blur(2px); cursor: pointer; transition: background var(--transition-fast); }
+.select-box:hover { background: rgba(10, 17, 19, 0.82); }
 .select-box :deep(.select-box-cb) { pointer-events: none; }
-.select-box.checked { background: rgba(255, 255, 255, 0.92); }
+.select-box.checked { background: rgba(10, 17, 19, 0.82); }
 /* ===== 镜头详情（分镜图） ===== */
 .detail-hero { margin-bottom: 4px; }
-.detail-img { width: 100%; border-radius: 8px; background: #000; display: block; }
+.detail-img { width: 100%; border-radius: var(--radius-lg); background: var(--bg-sunken); display: block; }
 .detail-img :deep(img) { width: 100%; max-height: 480px; object-fit: contain; display: block; }
 .detail-empty {
   padding: 28px 16px;
-  border: 1px dashed var(--border-subtle, #e5e7eb);
-  border-radius: 10px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-lg);
   text-align: center;
   font-size: 13px;
-  color: var(--text-secondary, #666);
-  background: var(--bg-elevated, #fafafa);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
 }
 .detail-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .detail-name { font-size: 14px; font-weight: 600; }
-.detail-status { font-size: 12px; color: var(--text-tertiary, #909399); }
-.detail-section { padding: 14px 0; border-bottom: 1px solid var(--divider-color, #efeff5); }
+.detail-status { font-size: 12px; color: var(--text-tertiary); }
+.detail-section { padding: var(--sp-4) 0; border-bottom: 1px solid var(--border-subtle); }
 .detail-section:last-of-type { border-bottom: none; padding-bottom: 4px; }
 .detail-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .detail-section-index {
   width: 18px;
   height: 18px;
-  border-radius: 50%;
-  background: var(--brand-primary);
-  color: #fff;
+  border-radius: var(--radius-sm);
+  background: var(--brand-deep);
+  color: var(--text-on-brand);
   font-size: 11px;
   line-height: 18px;
   text-align: center;
   flex-shrink: 0;
 }
 .detail-section-name { font-size: 14px; font-weight: 600; }
-.detail-section-hint { margin-left: auto; font-size: 11px; color: var(--text-tertiary, #909399); }
+.detail-section-hint { margin-left: auto; font-size: 11px; color: var(--text-tertiary); }
 .kf-ref-list { display: flex; flex-direction: column; gap: 10px; }
 .kf-ref-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px;
-  border: 1px solid var(--border-subtle, #e5e7eb);
-  border-radius: 8px;
-  background: var(--bg-panel, #fff);
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
 }
 .kf-ref-meta { flex: 1; min-width: 0; }
 .kf-ref-name {
@@ -1228,23 +1562,23 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.kf-ref-role { margin-top: 3px; font-size: 11px; color: var(--text-tertiary, #909399); }
+.kf-ref-role { margin-top: 3px; font-size: 11px; color: var(--text-tertiary); }
 .kf-ref-slot {
   margin-left: 6px;
   padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--bg-elevated, #f5f7fa);
-  font-family: monospace;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
   font-size: 10px;
 }
 .kf-ref-req {
   margin-left: 6px;
   padding: 1px 6px;
-  border-radius: 999px;
-  background: rgba(245, 158, 11, 0.12);
-  color: #b45309;
+  border-radius: var(--radius-sm);
+  background: rgba(217, 160, 60, 0.12);
+  color: var(--accent-amber);
 }
-.kf-ref-input { margin-top: 2px; font-size: 10px; color: var(--text-tertiary, #909399); font-family: monospace; }
+.kf-ref-input { margin-top: 2px; font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
 .kf-ref-thumb { flex-shrink: 0; }
 .kf-ref-empty {
   width: 52px;
@@ -1252,32 +1586,32 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--border-subtle, #e5e7eb);
-  border-radius: 6px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius);
   font-size: 11px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
-.kf-tag { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 400; }
-.kf-tag.ok { background: rgba(34, 197, 94, 0.12); color: #15803d; }
-.kf-tag.plan { background: rgba(53, 179, 166, 0.12); color: #4338ca; }
-.kf-tag.warn { background: rgba(245, 158, 11, 0.14); color: #b45309; }
-.detail-source-hint { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary, #909399); }
-.detail-hint { margin-top: 6px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary, #909399); }
+.kf-tag { margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-sm); font-size: 10px; font-weight: 400; }
+.kf-tag.ok { background: rgba(87, 201, 138, 0.12); color: var(--state-success); }
+.kf-tag.plan { background: rgba(53, 179, 166, 0.12); color: var(--brand-hover); }
+.kf-tag.warn { background: rgba(217, 160, 60, 0.14); color: var(--accent-amber); }
+.detail-source-hint { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary); }
+.detail-hint { margin-top: 6px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary); }
 .detail-hint-block {
   padding: 12px;
-  border: 1px dashed var(--border-subtle, #e5e7eb);
-  border-radius: 8px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-lg);
   font-size: 12px;
   line-height: 1.6;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .detail-gate {
   margin-bottom: 10px;
   padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(245, 158, 11, 0.1);
+  border-radius: var(--radius-lg);
+  background: rgba(217, 160, 60, 0.1);
   font-size: 12px;
-  color: #b45309;
+  color: var(--accent-amber);
 }
 .detail-actions { display: flex; gap: 8px; }
 @media (max-width: 768px) {
@@ -1332,4 +1666,84 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
     top: 0;
   }
 }
+/* 重新生成工作台 */
+.regen-sub-title {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.regen-ref-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.regen-ref-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.regen-ref-item.empty {
+  border-style: dashed;
+  opacity: 0.75;
+}
+.regen-ref-no {
+  min-width: 64px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+.regen-ref-thumb {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  flex-shrink: 0;
+}
+.regen-ref-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.regen-ref-meta { flex: 1; min-width: 0; }
+.regen-ref-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.regen-ref-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.regen-ref-actions { display: flex; gap: 6px; }
+/* 资产选择器 */
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.picker-item:hover { border-color: var(--brand-primary); background: var(--bg-elevated); }
+.picker-meta { flex: 1; min-width: 0; }
+.picker-name { font-size: 13px; }
+.picker-sub { font-size: 11px; color: var(--text-tertiary); }
 </style>

@@ -128,9 +128,13 @@ async function doContinue() {
   submitError.value = ''
   try {
     const res = await continueEpisode(seriesId.value, {
-      user_instruction: instruction.value.trim(),
-      direction: direction.value.trim() || null,
-      constraints: constraints.value.trim() || null,
+      user_instruction: [
+        instruction.value.trim(),
+        direction.value.trim() ? `续写方向：${direction.value.trim()}` : '',
+        constraints.value.trim() ? `创作约束：${constraints.value.trim()}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
       target_episode_number: targetEpisodeNumber.value,
       title: targetTitle.value.trim() || null,
     })

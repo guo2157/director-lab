@@ -22,11 +22,33 @@ export interface RegenerateRef {
   asset_id?: string | null
   asset_version?: number | null
   asset_type?: string | null
+  asset_name?: string | null
   role?: string | null
   required?: boolean
   file_path?: string | null
   semantic?: 'reference' | 'frame_constraint'
   enabled?: boolean
+}
+/** 一致性校验单项问题 */
+export interface ConsistencyIssue {
+  code: string
+  image_no?: number
+  slot?: string
+  message: string
+}
+/** 一致性校验通过项 */
+export interface ConsistencyCheck {
+  image_no: number
+  slot: string
+  status: string
+  message: string
+}
+/** 提交前预检结果：errors 非空阻止提交，warnings 需用户确认 */
+export interface ValidateResult {
+  valid: boolean
+  errors: ConsistencyIssue[]
+  warnings: ConsistencyIssue[]
+  checks: ConsistencyCheck[]
 }
 
 export interface RegenerateConfig {
@@ -109,4 +131,11 @@ export function adoptCandidate(assetId: string): Promise<Record<string, unknown>
 /** 查询更换尾帧或参考图后受影响的后续镜头 */
 export function fetchImpact(shotId: string): Promise<{ shot_id: string; affected: Array<Record<string, unknown>> }> {
   return get<{ shot_id: string; affected: Array<Record<string, unknown>> }>(`/shots/${shotId}/impact`)
+}
+/** 提交前预检：校验提示词图片引用与参考图槽位一致性（不创建任务） */
+export function validateRegenerate(
+  shotId: string,
+  payload: Record<string, unknown>,
+): Promise<ValidateResult> {
+  return post<ValidateResult>(`/shots/${shotId}/regenerate/validate`, payload)
 }
