@@ -216,20 +216,17 @@ def test_parse_version_confirm_optimistic_lock(client, monkeypatch):
     monkeypatch.setattr(pe_mod, "LLMClient", _FakeLLM)
     pe_mod.execute_parse_job(job_id)
     pv_id = client.get(f"/api/jobs/{job_id}").json()["result"]["parse_version_id"]
-    # 乐观锁：携带错误的当前版本 → 409
+    # 覆盖式自动确认：解析任务成功即落库并置 current，无需再调 confirm
+    assert client.get(f"/api/projects/{pid}").json()["current_parse_version_id"] == pv_id
+    # 已 current 的普通解析版本不可再确认（仅候选状态或 script_agent 增量可确认）
     r = client.post(f"/api/projects/{pid}/parse-versions/{pv_id}/confirm",
                     json={"current_parse_version_id": "pv_not_exist"})
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "parse_version_conflict"
-    # 正确确认（当前为空）
-    r = client.post(f"/api/projects/{pid}/parse-versions/{pv_id}/confirm",
-                    json={"current_parse_version_id": None})
-    assert r.status_code == 200
-    assert r.json()["status"] == "current"
-    # 重复确认 → 409（已非 candidate）
     r = client.post(f"/api/projects/{pid}/parse-versions/{pv_id}/confirm",
                     json={"current_parse_version_id": pv_id})
     assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "parse_version_conflict"
 
 
 FAKE_PARSE_OUTPUT_V2 = {
@@ -280,11 +277,8 @@ def test_parse_confirm_cascades_entities(client, monkeypatch):
     pid = _make_project(client)
     sv = _save_script(client, pid)
     _confirmed_estimate(client, pid, sv, monkeypatch)
-    # 第一次解析并确认：实体落库
+    # 第一次解析：覆盖式自动确认，实体直接落库
     pv1 = _run_parse(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT)
-    r = client.post(f"/api/projects/{pid}/parse-versions/{pv1}/confirm",
-                    json={"current_parse_version_id": None})
-    assert r.status_code == 200
     chars = client.get(f"/api/projects/{pid}/characters").json()
     assert [c["name"] for c in chars] == ["林晓"]
     scenes = client.get(f"/api/projects/{pid}/scenes").json()
@@ -300,9 +294,6 @@ def test_parse_confirm_cascades_entities(client, monkeypatch):
     assert plan[0]["goal"] == "建立悬念"
     # 第二次解析并确认：镜头按范围清理更新，旧版本失效
     pv2 = _run_parse(client, monkeypatch, pid, sv, FAKE_PARSE_OUTPUT_V2)
-    r = client.post(f"/api/projects/{pid}/parse-versions/{pv2}/confirm",
-                    json={"current_parse_version_id": pv1})
-    assert r.status_code == 200
     shots = client.get(f"/api/scenes/{scene_id}/shots?episode=1").json()["items"]
     assert len(shots) == 1  # 旧 seq=2 被清理
     assert shots[0]["seq"] == 1 and shots[0]["dialogue"] == "新台词"
@@ -567,11 +558,8 @@ def test_scene_cross_episode_reuse_keeps_description(client, monkeypatch):
         "scenes": [{"episode": 1, "title": "马棚", "description": "首集描述：木质马棚，清晨斜光。",
                     "time_note": "清晨", "shots": [{"episode": 1, "seq": 1, "duration": 5}]}],
     }
-    # 场景要经『确认解析版本』才落库，仅跑解析任务不会写实体表
+    # 覆盖式自动确认：解析任务成功即落库场景，无需再调 confirm
     pv1 = _run_parse(client, monkeypatch, pid, sv, ep1)
-    r = client.post(f"/api/projects/{pid}/parse-versions/{pv1}/confirm",
-                    json={"current_parse_version_id": None})
-    assert r.status_code == 200, r.text
 
     ep2 = {
         "project_analysis": {},
@@ -580,9 +568,6 @@ def test_scene_cross_episode_reuse_keeps_description(client, monkeypatch):
                     "time_note": "清晨", "shots": [{"episode": 2, "seq": 1, "duration": 5}]}],
     }
     pv2 = _run_parse(client, monkeypatch, pid, sv, ep2)
-    r = client.post(f"/api/projects/{pid}/parse-versions/{pv2}/confirm",
-                    json={"current_parse_version_id": pv1})
-    assert r.status_code == 200, r.text
 
     db = SessionLocal()
     try:

@@ -165,7 +165,7 @@ def test_pony_crossing_river_e2e(client: TestClient):
     shot2 = client.post("/api/shots", json={
         "scene_id": scenes["小河与河岸"]["id"], "episode": 1, "shot_kind": "dialogue",
         "duration": 5, "character_id": chars["小马"]["id"],
-        "image_prompt": "@小马 站在河边向 @牛伯伯 询问河水深浅，中景",
+        "image_prompt": "@小马 站在画面左侧的河边，向画面右侧的 @牛伯伯 询问河水深浅，中景",
         "dialogue": "牛伯伯，河水深不深？",
     }).json()
 

@@ -69,9 +69,8 @@ def _run_parse_and_confirm(client, monkeypatch):
     monkeypatch.setattr(pe_mod, "LLMClient", _FakeLLM)
     assert pe_mod.execute_parse_job(job_id)["ok"] is True
     pv_id = client.get(f"/api/jobs/{job_id}").json()["result"]["parse_version_id"]
-    r = client.post(f"/api/projects/{pid}/parse-versions/{pv_id}/confirm",
-                    json={"current_parse_version_id": None})
-    assert r.status_code == 200, r.text
+    # 覆盖式自动确认：解析任务成功即落库，无需再调 confirm
+    assert client.get(f"/api/projects/{pid}").json()["current_parse_version_id"] == pv_id
     return pid
 
 
