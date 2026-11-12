@@ -14,7 +14,7 @@
 """
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -298,6 +298,19 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
         workflow=workflow if mode == regen.MODE_FULL_RECONFIGURE else None,
     )
 
+    # 一致性校验门禁：提示词引用的图片编号没有对应启用参考图时阻断生成（422），
+    # 警告（已注入未引用）不阻断，随快照返回供前端提示用户确认
+    consistency = snapshot.get("consistency") or {}
+    if consistency.get("errors"):
+        raise errors.AppError(
+            "prompt_ref_mismatch",
+            "提示词与参考图不一致，已阻止生成：" + "；".join(
+                e.get("message") or str(e) for e in consistency["errors"]
+            ),
+            422,
+            consistency=consistency,
+        )
+
     # 组装配送参数：媒体参数严格来自快照，确保提交内容与快照一致
     params = dict(snapshot.get("model_params") or {})
     params["prompt"] = snapshot["prompt"]["rendered"]
@@ -365,6 +378,69 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
 
     db.commit()
     return _job_out(job, snapshot)
+
+
+@router.post("/shots/{shot_id}/regenerate/validate")
+def post_validate(shot_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """提交前预检：按当前提示词与参考图配置执行完整校验，不创建任务。
+
+    返回 refs 校验（槽位/资产/类型）与提示词一致性校验（图片编号引用）的
+    合并结果；errors 非空时前端应阻止提交，warnings 需用户确认后允许提交。
+    """
+    shot = _get_shot(db, shot_id)
+    target = payload.get("target", "keyframe")
+    if target not in _TARGET_ASSET_TYPE:
+        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
+    mode = payload.get("mode") or regen.MODE_INHERIT_PROMPT_ONLY
+    if mode not in regen.VALID_MODES:
+        raise errors.AppError("invalid_request", f"不支持的重新生成模式：{mode}", 400)
+    project_id = _project_id_of(db, shot)
+    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
+    base_config = regen.build_base_config(db, base_asset)
+    workflow = None
+    if payload.get("workflow_id"):
+        workflow = _load_workflow(db, payload.get("workflow_id"), target)
+    else:
+        wf_id = (base_config.get("workflow") or {}).get("id")
+        workflow = db.get(Workflow, wf_id) if wf_id else None
+        if workflow is None:
+            workflow = _load_workflow(db, None, target)
+    prompt = payload.get("prompt")
+    if prompt is None:
+        prompt = (base_config.get("prompt") or {}).get("rendered") or ""
+    refs = payload.get("refs")
+    if target == "clip":
+        system_refs = _system_refs_for_clip(db, shot)
+        if refs is not None:
+            provided = {r.get("slot_param") for r in refs}
+            refs = list(refs) + [r for r in system_refs if r["slot_param"] not in provided]
+    # refs 校验失败（槽位/资产/类型）直接返回错误，不进入一致性校验
+    try:
+        slots = (
+            regen.normalize_reference_slots(workflow.capabilities)
+            if workflow is not None
+            else list(base_config.get("available_slots") or [])
+        )
+        final_refs = (
+            (base_config.get("refs") or []) if refs is None else refs
+        )
+        validated = regen.validate_refs(db, slots, final_refs)
+    except HTTPException as e:
+        detail = getattr(e, "detail", None) or {}
+        return {
+            "valid": False,
+            "errors": [{"code": detail.get("code") or "invalid_request",
+                        "message": detail.get("message") or str(e)}],
+            "warnings": [],
+            "checks": [],
+        }
+    consistency = regen.validate_prompt_consistency(prompt, validated, slots)
+    return {
+        "valid": consistency["valid"],
+        "errors": consistency["errors"],
+        "warnings": consistency["warnings"],
+        "checks": consistency["checks"],
+    }
 
 
 @router.get("/jobs/{job_id}/snapshot")

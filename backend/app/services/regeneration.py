@@ -212,6 +212,14 @@ def build_base_config(db: Session, asset: Asset) -> dict:
             ref["semantic"] = slot["semantic"]
             ref["role"] = ref.get("role") or slot["role"]
 
+    # 补充资产名称：供前端展示参考图与资产的绑定关系
+    _name_ids = {r.get("asset_id") for r in refs if r.get("asset_id")}
+    if _name_ids:
+        _name_map = {a.id: a.name for a in db.query(Asset).filter(Asset.id.in_(_name_ids)).all()}
+        for r in refs:
+            aid = r.get("asset_id")
+            if aid and aid in _name_map:
+                r["asset_name"] = _name_map[aid]
     prompt = params.get("prompt") or ""
     negative = params.get("negative") or ""
     model_params = {
@@ -248,7 +256,8 @@ def _type_matches(role: str, asset_type: str | None) -> bool:
     if not asset_type:
         return True
     if role in ("character", "scene", "prop"):
-        return asset_type in (role, "keyframe", "asset")
+        # reference：本地上传的参考图（无实体归属）也允许绑定参考槽位
+        return asset_type in (role, "keyframe", "asset", "reference")
     if role == "keyframe":
         return asset_type in ("keyframe", "asset")
     if role == "prev_frame":
@@ -335,6 +344,7 @@ def validate_refs(db: Session, slots: list[dict], refs: list[dict]) -> list[dict
             "asset_id": asset.id,
             "asset_version": asset.version,
             "asset_type": asset.asset_type,
+            "asset_name": asset.name,
             "role": slot["role"],
             "required": slot["required"],
             "file_path": asset.file_path,
@@ -344,6 +354,74 @@ def validate_refs(db: Session, slots: list[dict], refs: list[dict]) -> list[dict
         })
         seq += 1
     return result
+
+
+def validate_prompt_consistency(prompt: str, refs: list[dict], slots: list[dict]) -> dict:
+    """校验提示词图片引用与参考图槽位的一致性（确定性代码校验，不依赖 LLM）。
+
+    校验等级：
+    - 错误（阻断生成）：提示词引用的图片编号没有对应启用的参考图
+    - 警告（允许确认后生成）：已注入的参考图未被提示词引用
+    图片编号严格按工作流 input_key 换算（images.image_N → N），
+    与 worker 实际注入 ComfyUI 的槽位一一对应，不按数组下标猜测。
+    """
+    import re
+
+    from app.services.ref_inject import slot_image_index, workflow_ref_syntax
+
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    checks: list[dict] = []
+    # 归一化槽位转回 ref_inject 兼容格式（param + input_key），用于图序换算与语法判定
+    raw_slots = [
+        {"param": s["param"], "input_key": s.get("input_key")}
+        for s in slots
+        if s.get("input_key")
+    ]
+    syntax = workflow_ref_syntax(raw_slots)
+    if syntax is None:
+        # 工作流未声明图片引用语法（纯文生图），无编号可校验
+        return {"valid": True, "errors": errors, "warnings": warnings, "checks": checks}
+    # 启用参考图：槽位 → 图片编号（1-based，与工作流 input_key 严格对应）
+    enabled_refs = [r for r in refs if r.get("enabled", True)]
+    slot_to_index: dict[str, int] = {}
+    for ref in enabled_refs:
+        idx = slot_image_index(ref.get("slot_param") or "", raw_slots)
+        if idx is not None:
+            slot_to_index[ref["slot_param"]] = idx
+    # 提取提示词中的图片引用编号（按工作流语法）
+    if syntax == "image":
+        pattern = re.compile(r"<image(\d+)>")
+    else:
+        pattern = re.compile(r"<Picture\s+(\d+)>")
+    referenced = {int(m.group(1)) for m in pattern.finditer(prompt or "")}
+    # 错误：提示词引用的编号没有对应启用的参考图
+    for num in sorted(referenced):
+        matched = [s for s, i in slot_to_index.items() if i == num]
+        if not matched:
+            errors.append({
+                "code": "PROMPT_REF_MISSING",
+                "image_no": num,
+                "message": f"提示词引用了 Image {num}，但没有对应的启用参考图，请补充该槽位图片或修改提示词",
+            })
+        else:
+            checks.append({
+                "image_no": num,
+                "slot": matched[0],
+                "status": "ok",
+                "message": f"Image {num} 对应槽位 {matched[0]}，绑定正确",
+            })
+    # 警告：已注入但未被提示词引用的参考图
+    for ref in enabled_refs:
+        idx = slot_to_index.get(ref["slot_param"])
+        if idx is not None and idx not in referenced:
+            warnings.append({
+                "code": "REF_NOT_REFERENCED",
+                "slot": ref["slot_param"],
+                "image_no": idx,
+                "message": f"参考图 {ref['slot_param']}（Image {idx}）已注入但未被提示词引用，生成时该图仍会传入模型",
+            })
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "checks": checks}
 
 
 def assemble_snapshot(
@@ -398,6 +476,8 @@ def assemble_snapshot(
             final_workflow = base_workflow
 
     validated = validate_refs(db, slots, final_refs)
+    # 提示词与参考图一致性校验（确定性代码校验）：结果随快照冻结，供前端展示与提交门禁复用
+    consistency = validate_prompt_consistency(prompt, validated, slots)
 
     snapshot = {
         "snapshot_version": 1,
@@ -408,6 +488,7 @@ def assemble_snapshot(
         "workflow": final_workflow,
         "model_params": final_params,
         "refs": validated,
+        "consistency": consistency,
         "inherited": {
             "refs_locked": mode == MODE_INHERIT_PROMPT_ONLY,
             "params_locked": mode != MODE_FULL_RECONFIGURE,

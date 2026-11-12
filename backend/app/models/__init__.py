@@ -26,6 +26,7 @@ from app.models.production import (
 )
 from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.models.continuity import EpisodeContinuity
+from app.models.regen_config import StoryboardRegenConfig
 from app.models.prop_lifecycle import PropEpisodeSnapshot, PropLifecycleEvent, PropShotState
 from app.models.prop_binding import CharacterPropBinding
 from app.models.agent import (
@@ -83,6 +84,7 @@ __all__ = [
     "UploadRecord",
     "Workflow",
     "EpisodeContinuity",
+    "StoryboardRegenConfig",
     "AssetPlan",
     "AssetPlanDependency",
     "PropLifecycleEvent",
