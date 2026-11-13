@@ -218,9 +218,6 @@ async function saveRefBindings() {
   }
 }
 
-watch(() => activeShot.value?.id, (id) => {
-  if (id) { void loadRefBindings(id) }
-})
 
 /** 该镜头是否已有视频产物（含正在生成的在途任务）：有则可视为『重新生成』 */
 const clipActionIsRegenerate = computed(() => {
@@ -385,6 +382,7 @@ function buildH3VideoPrompt(shot: Shot): string {
 function openDrawer(shot: Shot) {
   activeShot.value = shot
   void loadNegativeSupported(shot)
+  void loadRefBindings(shot.id)
   editImagePrompt.value = shot.image_prompt ?? ''
   editVideoPrompt.value = shot.video_prompt || buildH3VideoPrompt(shot)
   // 负向提示词无独立存储字段，每次打开从系统默认模板起，用户可在本次生成前自行改写
@@ -1052,7 +1050,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     <n-modal
       v-model:show="drawerVisible"
       preset="card"
-      title="镜头详情 【代码版本 2026-11-12-23:02】"
+      title="镜头详情"
       closable
       :bordered="false"
       :style="{ width: 'min(1180px, 94vw)' }"
@@ -1148,7 +1146,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
             </div>
           </section>
 
-          <div style="background:#f5222d;color:#fff;padding:6px 12px;font-weight:bold;font-size:13px">✅ 参考图分区二已渲染｜绑定数：{{ workspaceBindings.length }}｜槽位数：{{ workspaceSlots.length }}｜加载中：{{ refBindingsLoading }}</div>
           <!-- 分区二：参考图绑定管理 -->
           <section class="drawer-section">
             <div class="section-head">
