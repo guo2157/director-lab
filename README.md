@@ -15,11 +15,11 @@
 <img src="https://img.shields.io/badge/ComfyUI-Self--Hosted-orange?style=flat-square" alt="ComfyUI">
 </p>
 
-<a href="assets/readme/gallery/video/demo-final-20s.mp4">
-  <img src="assets/readme/gallery/video/demo-final-preview.gif" width="270" alt="Director-Lab 最终成片片段">
+<a href="assets/readme/gallery/video/demo-final.mp4">
+  <img src="assets/readme/gallery/video/demo-final-preview.gif" width="270" alt="Director-Lab 最终成片预览">
 </a>
 
-<sub>示例项目《游乐场》最终成片片段 · 点击查看 20 秒 MP4 · 2:17 完整成片由 26 个镜头自动串联</sub>
+<sub>示例项目《游乐场》成片 · 点击封面在 GitHub 内置播放器中在线播放 2:12 完整成片 · 26 个镜头自动串联</sub>
 
 </div>
 
@@ -291,11 +291,27 @@ flowchart TD
 <tr>
 <td align="center" width="33%"><img src="assets/readme/gallery/storyboards/shot-12.webp" alt="分镜参考图"><br><sub>① 分镜参考图</sub></td>
 <td align="center" width="33%"><img src="assets/readme/gallery/video/demo-final-poster.jpg" alt="视频帧"><br><sub>② H3 生成的视频帧</sub></td>
-<td align="center" width="33%"><a href="assets/readme/gallery/video/demo-final-20s.mp4"><img src="assets/readme/gallery/video/demo-final-preview.gif" alt="最终成片动图"><br><sub>③ 最终成片（点击播放 20 秒）</sub></a></td>
+<td align="center" width="33%"><a href="assets/readme/gallery/video/demo-final.mp4"><img src="assets/readme/gallery/video/demo-final-preview.gif" alt="最终成片动图"><br><sub>③ 最终成片（点击在线播放）</sub></a></td>
 </tr>
 </table>
 
-最终成片包含角色对白、配音、BGM 和烧录字幕。完整成片为 2:17、720×1280、57.7 MB。
+最终成片包含角色对白、配音、BGM 和烧录字幕。
+
+### 完整成片 · 在线播放
+
+GitHub 会过滤 README 中的 `<video>` 标签，无法直接内嵌播放器。点击封面或下面的链接，会打开仓库文件页，由 GitHub 内置播放器在线播放，无需下载：
+
+<div align="center">
+<a href="assets/readme/gallery/video/demo-final.mp4">
+  <img src="assets/readme/gallery/video/demo-final-poster.jpg" width="300" alt="《游乐场》完整成片封面">
+</a>
+
+<br>
+
+<a href="assets/readme/gallery/video/demo-final.mp4"><b>▶ 在线播放 2:12 完整成片</b></a>
+
+<sub>540×960 · H.264 + AAC · 18.7 MB · 原始导出为 720×1280、57.7 MB</sub>
+</div>
 
 ## 技术架构
 
@@ -426,7 +442,25 @@ DLAB_LLM_MODEL=deepseek-chat
 DLAB_LLM_API_KEY=your-api-key
 ```
 
-ComfyUI 实例也可以在应用内运行时配置（`backend/data/runtime_settings.json`），支持动态增删实例、切换实例和清理连接缓存，无需重启服务。
+ComfyUI 实例和语言模型也可以在应用内配置（设置页），配置写入 `backend/data/runtime_settings.json`，保存后立即生效，无需重启服务。
+
+**ComfyUI 多实例**
+
+<img src="assets/readme/screenshots/12-settings-comfyui.webp" alt="ComfyUI 配置" width="100%">
+
+- 实例列表支持新增、删除、行内修改权重和启用状态，改动自动保存；
+- 每个实例可单独测试连通性，返回延迟或失败原因；
+- 权重越大分配到的生成任务越多，实例不可用时自动切换到其他实例。
+
+**语言模型**
+
+<img src="assets/readme/screenshots/13-settings-llm.webp" alt="语言模型配置" width="100%">
+
+- 支持 DeepSeek / OpenAI / Ollama / 自定义（OpenAI 兼容接口），切换提供商会自动填充默认 API URL；
+- 每张模型卡片独立配置 API URL、API Key 和模型名，可一键拉取模型列表后选择；
+- 同一时刻只有一个模型处于启用状态，开启新模型会自动关闭其他模型，可逐卡片测试连接。
+
+> 截图中实例地址、API URL 与 API Key 已打码。
 
 ### 4. 启动前端
 
@@ -524,7 +558,8 @@ README 中的界面截图来自本地真实运行的产品；作品素材来自�
 
 - 截图：`docs/img/` 与 `assets/readme/screenshots/`，统一转为 WebP 以减小体积；
 - 角色 / 场景 / 道具 / 分镜：`assets/readme/gallery/`，由原始 PNG 转为 WebP；
-- 视频：`assets/readme/gallery/video/`，包含 3 秒 GIF 预览、20 秒压缩 MP4 与成片海报帧；
+- 视频：`assets/readme/gallery/video/`，包含 3 秒 GIF 预览、2:12 压缩成片 MP4 与成片海报帧；
+- 截图中的实例地址、API URL、API Key 均已打码；
 - 原始媒体位于 `backend/data/media/`，因体积与数据安全原因不入库。
 
 ## License
