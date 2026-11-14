@@ -337,6 +337,10 @@ def run_worker(once: bool = False) -> None:
                     if resumed:
                         print(f"[worker] 对账取回 {resumed} 个远端已完成的 comfy_timeout 任务")
                 job = _next_job(db)
+                # 已在执行的任务可能尚未把状态置为 running（认领窗口期），
+                # 此处直接跳过，避免同一任务被重复提交到线程池
+                if job is not None and job.id in in_flight.values():
+                    job = None
             finally:
                 db.close()
             if job is None:

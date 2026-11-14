@@ -720,8 +720,26 @@ def get_regenerate_workspace(
     shot = _get_shot(db, shot_id)
     if target not in _TARGET_ASSET_TYPE:
         raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
-    base_asset = _resolve_base_asset(db, shot, target, None)
+    fallback_from: str | None = None
+    try:
+        base_asset = _resolve_base_asset(db, shot, target, None)
+    except HTTPException as exc:
+        # 尚未生成分镜视频时，视频侧没有可用的基础版本。此时仍应展示参考图，
+        # 否则详情页参考图区为空，用户无法新增或修改参考图。改为复用当前分镜图
+        # 那次任务的参考图绑定，正文换用该镜头的分镜视频提示词。
+        if target != "clip" or (exc.detail or {}).get("code") != "asset_not_found":
+            raise
+        base_asset = _resolve_base_asset(db, shot, "keyframe", None)
+        fallback_from = "keyframe"
     base_config = regen.build_base_config(db, base_asset)
+    if fallback_from:
+        base_config = dict(base_config)
+        _video_prompt = shot.video_prompt or ""
+        base_config["prompt"] = {
+            **(base_config.get("prompt") or {}),
+            "rendered": _video_prompt,
+            "editable": _video_prompt,
+        }
     workflow = _ws_load_workflow(db, shot, target, {}, base_config)
     saved = ws.load_saved_config(db, shot.id, target)
     data = ws.build_workspace(
@@ -738,6 +756,8 @@ def get_regenerate_workspace(
         "base_snapshot_complete": bool(base_config.get("snapshot_complete")),
         "incomplete_reasons": base_config.get("incomplete_reasons") or [],
         "base_asset_id": base_asset.id,
+        # keyframe 表示该镜头尚无分镜视频，参考图与正文来自分镜图快照
+        "fallback_from": fallback_from,
     }
     return data
 

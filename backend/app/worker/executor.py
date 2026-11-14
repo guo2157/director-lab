@@ -10,6 +10,7 @@
 import random
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -599,9 +600,27 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             return {"ok": False, "reason": f"invalid_status:{job.status}"}
 
         if job.status != "running":
-            job.status = "running"
-            job.started_at = _now()
-            job.attempts = (job.attempts or 0) + 1
+            # 认领必须原子：调度器按并发度（ComfyUI 实例数）多线程取任务，
+            # 同一 queued 任务可能被连续取到两次（工作线程尚未置 running 的窗口期），
+            # 无条件赋值会让同一任务提交两次、产出两个资产版本。此处用条件 UPDATE 抢占。
+            now = _now()
+            claimed = (
+                db.query(Job)
+                .filter(Job.id == job_id, Job.status.in_(("queued", "submission_unknown")))
+                .update(
+                    {
+                        "status": "running",
+                        "started_at": now,
+                        "attempts": func.coalesce(Job.attempts, 0) + 1,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            db.refresh(job)
+            if not claimed:
+                # 已被其他执行线程认领，直接退出，避免重复提交
+                return {"ok": False, "reason": f"already_claimed:{job.status}"}
             _write_event(db, job, "job.started", {"attempt": job.attempts})
             # 镜头状态流转：进入生成中（§3.2）
             if job.shot_id:
@@ -837,7 +856,6 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                 item = d["item"]
                                 content = d["content"]
                                 ext = (item["filename"].rsplit(".", 1)[-1] or "png").lower()
-                                _is_regen_rec = bool((job.input_snapshot or {}).get("regeneration"))
                                 asset_type_map = {"cover": "keyframe", "clip": "clip", "voice": "audio", "bgm": "audio", "sfx": "audio"}
                                 asset_type = asset_type_map.get(out_name, "keyframe")
                                 if asset_type == "keyframe" and _entity_asset_type:
@@ -866,8 +884,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                 # 版本号必须在产物类型与实体归属确定之后再计算，
                                 # 否则会用到尚未赋值的类型变量，且实体类资产无法按名称隔离版本
                                 version = _next_asset_version(db, job, asset_type, _entity_asset_name)
-                                if not _is_regen_rec:
-                                    _supersede_previous_versions(db, job, asset_type, _entity_asset_name)
+                                _supersede_previous_versions(db, job, asset_type, _entity_asset_name)
                                 filename = f"{asset_id}_v{version}.{ext}"
                                 filepath = os.path.join(media_dir, filename)
                                 with open(filepath, "wb") as f_out:
@@ -883,7 +900,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                     version=version, file_path=filepath,
                                     thumb_path=None,
                                     source_job_id=job.id,
-                                    validity=("candidate" if _is_regen_rec else "current"),
+                                    validity="current",
                                     input_snapshot=job.input_snapshot,
                                 )
                                 db.add(asset)
@@ -902,21 +919,20 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                             _scene_id = (job.params or {}).get("__scene_id__")
                             if _prop_id:
                                 _p = db.get(Prop, _prop_id)
-                                # 质量重试会生成新的 current 版本并废弃旧版本，实体指针必须跟随最新产物；
-                                # 仅 regeneration 候选版本不覆盖实体主图指针
-                                if _p and not _is_regen_rec:
+                                # 质量重试会生成新的 current 版本并废弃旧版本，实体指针必须跟随最新产物
+                                if _p:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _p.anchor_asset_id = _kf[0]["asset_id"]
                             if _character_id:
                                 _c = db.get(Character, _character_id)
-                                if _c and not _is_regen_rec:
+                                if _c:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _c.portrait_asset_id = _kf[0]["asset_id"]
                             if _scene_id:
                                 _s = db.get(Scene, _scene_id)
-                                if _s and not _is_regen_rec:
+                                if _s:
                                     _kf = [a for a in created_assets if a["out_name"] == "cover"]
                                     if _kf:
                                         _s.baseline_asset_id = _kf[0]["asset_id"]
@@ -1450,9 +1466,6 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             # 定妆图/基准图/锚定图按实体归属落 character/scene/prop（否则前端资产库分类永远查不到）
             if asset_type == "keyframe" and _entity_asset_type:
                 asset_type = _entity_asset_type
-            # 多图参考重新生成工作台 V1：重新生成任务落候选版本，
-            # 版本号按同镜头同类型递增，不覆盖当前生效版本
-            _is_regen = bool((job.input_snapshot or {}).get("regeneration"))
             if _regen_target is not None:
                 # 资产库 regenerate：原地覆盖原文件，名称与位置固定不变
                 filepath = _overwrite_asset_file(_regen_target, rec["content"])
@@ -1473,8 +1486,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 })
                 continue
             version = _next_asset_version(db, job, asset_type, _entity_asset_name)
-            if not _is_regen:
-                _supersede_previous_versions(db, job, asset_type, _entity_asset_name)
+            # 分镜图重新生成直接覆盖当前版本，不保留候选版本概念
+            _supersede_previous_versions(db, job, asset_type, _entity_asset_name)
             aid = id_gen.asset_id()
             stored_name = f"{aid}_v{version}.{ext}"
             stored_path = media_dir / stored_name
@@ -1496,7 +1509,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 file_path=str(stored_path),
                 thumb_path=thumb_path,
                 source_job_id=job.id,
-                validity=("candidate" if _is_regen else "current"),
+                validity="current",
                 input_snapshot=job.input_snapshot,
             )
             db.add(asset)
@@ -1519,8 +1532,8 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             (a for a in created_assets if a["asset_type"] in ("keyframe", "character", "scene", "prop")),
             None,
         )
-        # 重新生成产物为候选版本，采纳前不得改动实体主图指针，否则详情页会指向未采纳的候选
-        if _kf_asset is not None and not _is_regen:
+        # 产物即为当前生效版本，实体主图指针同步跟随
+        if _kf_asset is not None:
             for _key, _model, _field in _anchor_map:
                 _tid = (job.params or {}).get(_key)
                 if not _tid:

@@ -260,8 +260,26 @@ def purge_project(db: Session, project_id: str) -> dict:
         "episode_continuity",
     )
     # series_episodes 为 project_id 直挂表，当前多为 0 行仍需显式清理
-    series_episodes = Project.__table__.metadata.tables.get("series_episodes")
+    tables = Project.__table__.metadata.tables
+    series_episodes = tables.get("series_episodes")
     if series_episodes is not None and "project_id" in series_episodes.columns:
+        episode_ids = [
+            r[0]
+            for r in db.execute(
+                select(series_episodes.c.id).where(series_episodes.c.project_id == project_id)
+            )
+        ]
+        # 集级子表以 episode_id 外键挂在 series_episodes 上，必须先删子表再删集
+        for name in (
+            "series_script_versions",
+            "episode_asset_refs",
+            "story_events",
+            "continuity_change_proposals",
+            "episode_context_manifests",
+        ):
+            tbl = tables.get(name)
+            if episode_ids and tbl is not None and "episode_id" in tbl.columns:
+                _delete(delete(tbl).where(tbl.c.episode_id.in_(episode_ids)), name)
         _delete(
             delete(series_episodes).where(series_episodes.c.project_id == project_id),
             "series_episode",

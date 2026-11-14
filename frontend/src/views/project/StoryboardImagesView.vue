@@ -740,7 +740,7 @@ async function runRegenValidation() {
     regenValidating.value = false
   }
 }
-/** 提交重新生成：先预检（错误阻断），再经 workbench API 提交（结果落候选版本） */
+/** 提交重新生成：先预检（错误阻断），再经 workbench API 提交，完成后直接替换当前分镜图 */
 async function submitRegen() {
   const shot = detailShot.value
   if (!shot) return
@@ -774,9 +774,9 @@ async function submitRegen() {
       message.error('校验未通过，请修正后重试')
       return
     }
-    // 2. 提交 workbench 任务（结果落候选版本）
+    // 2. 提交 workbench 任务（产物直接作为当前分镜图，不保留候选版本）
     const job = await submitRegenerate(shot.id, payload)
-    message.success(`已提交重新生成任务（任务 ${job.id}），结果将作为候选版本保存`)
+    message.success(`已提交重新生成任务（任务 ${job.id}），生成完成后自动替换当前分镜图`)
     detailVisible.value = false
     await trackAfterSubmit()
   } catch (e: any) {
