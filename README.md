@@ -303,7 +303,7 @@ GitHub 会过滤 README 中的 `<video>` 标签，无法内嵌播放器。点击
 
 <div align="center">
 <a href="https://github.com/user-attachments/assets/0838916c-3ce9-4791-80ba-39aefc2b0119">
-  <img src="assets/readme/gallery/video/demo-final-poster.jpg" width="300" alt="《游乐场》完整成片封面">
+  <img src="assets/readme/gallery/video/demo-final-preview.gif" width="300" alt="《游乐场》完整成片动态预览">
 </a>
 
 <br>
