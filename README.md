@@ -7,8 +7,7 @@
 <p>剧本 · 角色 · 场景 · 道具 · 分镜 · 视频 · 配音 · 成片，在同一个工作台里完成</p>
 
 <p>
-<a href="https://github.com/guo2157/director-lab/stargazers"><img src="https://img.shields.io/github/stars/guo2157/director-lab?style=flat-square&amp;color=2ea043" alt="GitHub Stars"></a>
-<a href="https://github.com/guo2157/director-lab/network/members"><img src="https://img.shields.io/github/forks/guo2157/director-lab?style=flat-square&amp;color=58a6ff" alt="GitHub Forks"></a>
+<img src="https://img.shields.io/badge/GitHub-Private%20Repository-6e7681?style=flat-square&amp;logo=github&amp;logoColor=white" alt="Private Repository">
 <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python">
 <img src="https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&amp;logo=node.js&amp;logoColor=white" alt="Node.js">
 <img src="https://img.shields.io/badge/FastAPI-Web%20API-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI">
