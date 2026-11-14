@@ -310,7 +310,7 @@ GitHub 会过滤 README 中的 `<video>` 标签，无法直接内嵌播放器。
 
 <a href="assets/readme/gallery/video/demo-final.mp4"><b>▶ 在线播放 2:12 完整成片</b></a>
 
-<sub>540×960 · H.264 + AAC · 18.7 MB · 原始导出为 720×1280、57.7 MB</sub>
+<sub>540×960 · H.264 + AAC · 9.2 MB · 原始导出为 720×1280、57.7 MB</sub>
 </div>
 
 ## 技术架构
