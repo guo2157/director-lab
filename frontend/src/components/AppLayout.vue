@@ -1,12 +1,47 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import logoUrl from '@/assets/logo.svg'
 import { useRoute, useRouter } from 'vue-router'
 import { NLayout, NLayoutHeader, NLayoutContent } from 'naive-ui'
+import { useAgentStore } from '@/stores/agent'
+import { onWorkspaceEvent, startWorkspaceEvents } from '@/composables/useWorkspaceEvents'
+import { initContextRevision, setContextConflictHandler } from '@/services/workspaceNavigation'
+import type { WorkspaceEvent } from '@/api/workspace'
 import ProjectProgressRail from '@/components/ProjectProgressRail.vue'
+import DirectorAgentPanel from '@/components/DirectorAgentPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
+const agent = useAgentStore()
+
+// ── 工作台事件流（V2 Phase 3）──
+// 在应用外壳层启动一次，与任何业务页面的挂载/卸载无关（任务不依赖页面生命周期）。
+// 这里只做两件事：启动连接 + 订阅导航事件回写 store；不承载业务状态。
+let offWorkspaceEvent: (() => void) | null = null
+onMounted(() => {
+  startWorkspaceEvents()
+  // 页面上下文版本号初始化：刷新后本地从 0 开始会必然冲突，启动时读取服务端当前值
+  void initContextRevision()
+  // 冲突回调：如实提示，不静默覆盖服务端上下文
+  setContextConflictHandler(({ currentRevision, expectedRevision }) => {
+    agent.navNotice =
+      `页面上下文已被更新（本地 ${expectedRevision} / 服务端 ${currentRevision}），已同步最新版本，操作未丢失`
+  })
+  offWorkspaceEvent = onWorkspaceEvent((ev: WorkspaceEvent) => {
+    // 导航事件：仅在本端尚未由 chat 响应写入提示时兜底展示，不重复提示
+    if (ev.event_type === 'workspace.navigate' && !agent.navNotice && ev.route_name) {
+      agent.navNotice = `已按 Agent 指令切换到「${ev.route_name}」`
+    }
+  })
+})
+onUnmounted(() => {
+  // 只解除本组件订阅，不关闭全局连接（其他消费者仍在用）
+  offWorkspaceEvent?.()
+  offWorkspaceEvent = null
+  setContextConflictHandler(null)
+})
+/** 助手面板是否以文档流形式占用右侧空间（窄屏由面板自身改为浮层） */
+const isAgentDocked = computed(() => agent.panelOpen)
 
 const projectId = computed(() => route.params.id as string | undefined)
 /** 仅项目级路由才视为项目页；系列相关路由同样带 id 参数，不能误判 */
@@ -29,7 +64,6 @@ const isFixedViewport = computed(() => route.name === 'director')
 
 /** 全局导航入口：导演台 | 作品（含单集项目与系列）| 任务中心 | 设置 */
 const topMenuOptions = [
-  { label: '导演台', key: 'director' },
   { label: '作品', key: 'projects' },
   { label: '任务中心', key: 'jobs' },
   { label: '设置', key: 'settings' },
@@ -84,11 +118,16 @@ function goProjects() {
     </n-layout-header>
 
     <n-layout-content class="app-content" :class="{ 'is-fixed': isFixedViewport }">
-      <div class="content-body">
+      <div
+        class="content-body"
+        :class="{ 'has-agent': isProjectPage, 'is-agent-docked': isAgentDocked }"
+      >
         <ProjectProgressRail v-if="isProjectPage && projectId" :project-id="projectId" />
         <div class="content-main">
+          <!-- 页面导航由左侧「制作流程」竖列与页内 FlowNav 承担，不再重复挂载工作区竖列 -->
           <slot />
         </div>
+        <DirectorAgentPanel v-if="route.name !== 'director'" />
       </div>
     </n-layout-content>
   </n-layout>
@@ -257,9 +296,33 @@ function goProjects() {
 }
 
 .content-main {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow-x: hidden;
 }
+/* 助手面板展开时：面板占据自身宽度，主内容只收缩可用部分，左侧轨道与起始位置保持不变 */
+.content-body.is-agent-docked .content-main {
+  transition: flex-basis var(--transition-base);
+}
+/* 非项目页内容区高度自适应：面板吸顶并限制在视口高度内，内部自行滚动 */
+.content-body:not(.has-agent) :deep(.agent-drawer) {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: calc(100dvh - var(--app-header-height, 52px));
+}
+/* 右侧常驻 Agent 面板：内容区高度锁定，滚动交给 .content-main */
+.content-body.has-agent {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.content-body.has-agent .content-main {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 
 .app-content.is-fixed {
   overflow: hidden;
@@ -295,6 +358,20 @@ function goProjects() {
   }
   .content-body {
     flex-direction: column;
+  }
+}
+@media (max-width: 768px) {
+  .content-body.has-agent {
+    height: auto;
+    overflow: visible;
+  }
+  .content-body.has-agent .content-main {
+    height: auto;
+    overflow-y: visible;
+  }
+  /* 窄屏下助手为全屏浮层，不参与文档流占位 */
+  .content-body.is-agent-docked .content-main {
+    transition: none;
   }
 }
 </style>

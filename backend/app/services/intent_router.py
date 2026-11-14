@@ -23,6 +23,7 @@ from typing import Any
 
 from app.integrations.llm import LLMClient, LLMError
 from app.services.agent_governance import NextAction
+from app.services.workspace_nav import NAVIGATE_KEYWORD_TO_ROUTE
 
 # 意图类别白名单（父类：6 类保持不变，路由与任务落库只看父类，保证向后兼容）
 INTENT_CATEGORIES = {"query", "analysis", "generate_request", "pipeline_action", "ambiguous", "unsafe"}
@@ -107,6 +108,13 @@ _QUERY_RULES: list[re.Pattern[str]] = [
     re.compile(r"(看看|看一下|瞧瞧).{0,6}(图|视频|片段|素材|角色|场景|道具|关键帧|分镜|资产)"),
 ]
 
+# 导航关键词正则：唯一真相在 workspace_nav.NAVIGATE_KEYWORD_TO_ROUTE，
+# 避免此处与 agent.build_navigate_payload 各自维护一份导致不同步（坑 16）。
+# 按长度降序拼接，保证『分镜图』优先于『分镜』、『系列列表』优先于『系列』。
+_NAV_KEYWORDS = "|".join(
+    re.escape(k) for k in sorted(NAVIGATE_KEYWORD_TO_ROUTE, key=len, reverse=True)
+)
+
 # 流程操作规则（流程节点意图快路径：命中即携带 entities.pipeline_action）
 # review_current：泛化审核确认（审核通过/没问题），由调用方按当前流程节点解析为具体审核动作
 _PIPELINE_RULES: list[tuple[re.Pattern[str], str]] = [
@@ -130,6 +138,16 @@ _PIPELINE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(合成|拼接)(成片|视频|导出)?"), "compose_video"),
     (re.compile(r"导出(视频|成片|文件)?"), "export_video"),
     (re.compile(r"^(审核通过|通过审核|确认无误|没问题|审核没问题)$"), "review_current"),
+    # 导航请求（Agent 驱动的双栏可视化导演工作台 V2）：不经过状态机与 ToolBudget，
+    # 仅返回结构化导航 payload 供前端路由跳转。关键词来自 workspace_nav。
+    (re.compile(
+        r"(去|打开|进入|跳转到?|切换到?|导航到?|帮我到|我要去)(一下|下)?"
+        r"(" + _NAV_KEYWORDS + r")"
+        r"(页|页面|界面|面板|看板|工作区)?"
+    ),
+     "navigate_workspace"),
+    (re.compile(r"^(" + _NAV_KEYWORDS + r")(页(面)?)?$"),
+     "navigate_workspace"),
 ]
 
 

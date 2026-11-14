@@ -11,11 +11,12 @@ const router = useRouter()
 const flow = useScriptFlowStore()
 
 /**
- * 剧本阶段子流程导航（Agent 一体化：评估+解析合并，集数由 Agent 决定）
- * 保存 → 解析，禁止跨级跳转
+ * 剧本阶段子流程导航：保存 → 评估 → 解析，禁止跨级跳转。
+ * 『评估』原本只由左侧工作区竖列提供入口，竖列移除后并入此处，避免入口丢失。
  */
 const steps = [
   { key: 'script', label: '剧本' },
+  { key: 'estimate', label: '评估' },
   { key: 'parse', label: '解析' },
 ]
 
@@ -55,13 +56,19 @@ const parseAllSucceeded = computed(() => {
 
 const stepDone = computed<Record<string, boolean>>(() => ({
   script: !!flow.scriptVersionId,
+  // 评估完成：已产出评估结果（刷新后 store 为空，此时靠步骤顺序进入）
+  estimate: !!flow.estimate || !!flow.estimateId,
   parse: !!flow.candidateVersionId || flow.parseConfirmed || parseAllSucceeded.value,
 }))
 
 /** 单一出口：前置步骤完成才可进入下一步 */
 function reachable(key: string): boolean {
   if (key === 'script') return true
-  if (key === 'parse') return stepDone.value.script
+  if (key === 'estimate') return stepDone.value.script
+  if (key === 'parse') {
+    // 解析已完成时允许直接回看；否则必须先完成评估
+    return stepDone.value.parse || (stepDone.value.script && stepDone.value.estimate)
+  }
   return false
 }
 

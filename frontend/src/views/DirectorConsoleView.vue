@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { NButton, NEmpty, NImage, NInput, NPopconfirm, NSelect, NSpin, NTag } from 'naive-ui'
 import { ApiError, get, post } from '@/api/client'
@@ -25,6 +25,7 @@ import { useTaskEvents } from '@/composables/useTaskEvents'
 import type { TaskCardData } from '@/api/tasks'
 
 const message = useMessage()
+const route = useRoute()
 const router = useRouter()
 
 // --- 面板折叠 ---
@@ -303,6 +304,18 @@ async function send() {
     if (optimisticIdx >= 0) messages.value.splice(optimisticIdx, 1, chatRes.user_message)
     else messages.value.push(chatRes.user_message)
     messages.value.push(chatRes.assistant_message)
+
+    // Phase 2: Agent 驱动的双栏导航——当 assistant payload 包含 navigate_workspace 时触发路由跳转
+    const navPayload = chatRes.assistant_message.payload as Record<string, unknown> | null
+    if (navPayload?.route_action === 'navigate_workspace' && typeof navPayload.route_name === 'string') {
+      const projectId = route.params.id as string | undefined
+      if (projectId && navPayload.route_name !== 'director' && navPayload.route_name !== 'projects') {
+        void router.push({ name: navPayload.route_name, params: { id: projectId } })
+      } else {
+        void router.push({ name: navPayload.route_name })
+      }
+    }
+
     scrollToBottom(true)
     // 首条消息后自动命名：标题仍为默认『新会话』时，用用户消息摘要命名
     const cur = sessions.value.find((s) => s.id === activeSessionId.value)
