@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.integrations.llm import LLMClient, LLMError
+from app.integrations.llm import LLMClient, LLMError, is_truncated_json_output
 from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion, ids
 from app.services import style_config
 from app.services.prompt_store import get_prompt
@@ -226,8 +226,39 @@ def execute_parse_job(job_id: str) -> dict:
             f"共 {episode_count} 集。范围外的集不要输出。\n\n剧本全文：\n{text}"
         )
         client = LLMClient()
+
+        def _parse_llm(prompt_text: str) -> dict:
+            """解析调用：输出被截断时放大 max_tokens 并强制紧凑输出重试一次。
+
+            单集分镜正文很长，上游又不一定回 finish_reason=length，
+            表现为 JSON 在字符串中途结束；直接失败会让用户反复重试。
+            """
+            try:
+                return client.chat_json(get_prompt("parse_system"), prompt_text)
+            except LLMError as exc:
+                truncated = exc.code == "llm_output_truncated" or (
+                    exc.code == "llm_invalid_output"
+                    and is_truncated_json_output(exc.message)
+                )
+                if not truncated:
+                    raise
+                retry_prompt = prompt_text + (
+                    "\n\n【输出约束】上一次输出在中途被截断。请重新输出完整 JSON："
+                    "紧凑排版（不使用换行缩进）、省略无实际信息的空值字段，确保 JSON 完整闭合。"
+                )
+                try:
+                    return client.chat_json(
+                        get_prompt("parse_system"), retry_prompt,
+                        max_tokens=min(client.max_tokens * 2, 32768),
+                    )
+                except LLMError as retry_exc:
+                    # 放大后仍失败：保留首次错误语义（截断比 HTTP 报错更准确）
+                    if retry_exc.code in ("llm_error", "llm_timeout", "llm_unreachable"):
+                        raise exc from retry_exc
+                    raise
+
         try:
-            raw = client.chat_json(get_prompt("parse_system"), user_prompt)
+            raw = _parse_llm(user_prompt)
         except LLMError as e:
             # 集级记录回写 failed（含本次范围内的全部集）
             _upsert_records(db, job.project_id, episode_start, episode_count, "failed", error_msg=e.message[:2000])
@@ -251,7 +282,7 @@ def execute_parse_job(job_id: str) -> dict:
                 "shot 字段与上述 schema 完全一致，不得省略或留空。"
             )
             try:
-                raw = client.chat_json(get_prompt("parse_system"), repair_prompt)
+                raw = _parse_llm(repair_prompt)
             except LLMError as e:
                 _upsert_records(db, job.project_id, episode_start, episode_count, "failed", error_msg=e.message[:2000])
                 _fail_job(db, job, e.code, e.message)

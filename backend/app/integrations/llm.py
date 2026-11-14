@@ -87,7 +87,8 @@ class LLMClient:
         if not self.base_url:
             raise LLMError("llm_unconfigured", "语言模型未配置 base_url")
 
-    def chat(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True) -> str:
+    def chat(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True,
+             max_tokens: int | None = None) -> str:
         """单次对话调用，返回文本内容。json_mode 时请求 response_format=json_object。"""
         return self.chat_messages(
             [
@@ -95,17 +96,21 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             json_mode=json_mode,
+            max_tokens=max_tokens,
         )
 
-    def chat_messages(self, messages: list[dict], *, json_mode: bool = False) -> str:
+    def chat_messages(self, messages: list[dict], *, json_mode: bool = False,
+                      max_tokens: int | None = None) -> str:
         """多轮消息列表对话（导演台 Agent 用）：messages 为 OpenAI 格式 role/content 列表。
-        默认 json_mode=False（自然语言回复）；错误分类与 chat() 一致。"""
+        默认 json_mode=False（自然语言回复）；错误分类与 chat() 一致。
+        max_tokens 可单次覆盖实例默认值（长输出被截断时放大重试用）。"""
         self._check_config()
+        limit = int(max_tokens or self.max_tokens)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": 0.3,
-            "max_tokens": self.max_tokens,
+            "max_tokens": limit,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -133,7 +138,7 @@ class LLMClient:
         if choice.get("finish_reason") == "length":
             raise LLMError(
                 "llm_output_truncated",
-                f"语言模型输出被截断（max_tokens={self.max_tokens}），请提高 llm_max_tokens 或缩小单次解析范围",
+                f"语言模型输出被截断（max_tokens={limit}），请提高 llm_max_tokens 或缩小单次解析范围",
             )
         return content
 
@@ -212,10 +217,27 @@ class LLMClient:
             raise LLMError("llm_unreachable", f"语言模型网络错误: {type(e).__name__}") from e
         return "".join(parts)
 
-    def chat_json(self, system_prompt: str, user_prompt: str) -> dict:
+    def chat_json(self, system_prompt: str, user_prompt: str,
+                  *, max_tokens: int | None = None) -> dict:
         """单次对话调用并解析 JSON 输出。模型返回非合法 JSON 时报 llm_invalid_output。"""
-        content = self.chat(system_prompt, user_prompt, json_mode=True)
+        content = self.chat(system_prompt, user_prompt, json_mode=True, max_tokens=max_tokens)
         return parse_llm_json(content)
+
+
+def is_truncated_json_output(message: str) -> bool:
+    """判断 JSON 解析失败是否由输出被截断引起。
+
+    上游不一定返回 finish_reason=length（部分代理会省略），此时只能从 JSON 解码
+    错误特征判断：字符串未闭合、末尾缺分隔符/括号等。命中即值得放大 max_tokens 重试。
+    """
+    markers = (
+        "Unterminated string",
+        "Expecting ',' delimiter",
+        "Expecting property name enclosed in double quotes",
+        "Expecting value",
+        "Invalid \\uXXXX escape",
+    )
+    return any(marker in (message or "") for marker in markers)
 
 
 def parse_llm_json(content: str) -> dict:
