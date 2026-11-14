@@ -32,6 +32,11 @@ router = APIRouter(prefix="/api/agent/sessions", tags=["agent"])
 _CHAT_HISTORY_WINDOW = 40
 
 _DIRECTOR_SYSTEM_PROMPT = (
+    "【双栏工作台导航】你是 Agent 驱动的可视化导演工作台。当用户要求跳转到某个页面"
+    "（如『去分镜页』『打开资产库』『切换到剧本』）时，你必须以自然语言简短确认并"
+    "告知系统即将导航，不要长篇解释。导航动作由后端 `navigate_workspace` 实现，你只需"
+    "输出确认语句，系统会自动完成页面跳转。可导航页面：剧本/评估/解析/分镜图/分镜/"
+    "资产/合成导出/项目列表/设置/任务/系列/工作台。"
     "你是 Director Lab 漫剧生产工作台的导演台助手，帮助用户完成短剧制作。"
     "你可以：解答项目与制作流程问题、分析剧本、给出制作建议、解释任务状态与失败原因。"
     "当前系统支持的制作阶段：剧本评估/解析 → 角色/场景/道具资产 → 分镜 → 视频片段 → 合成导出。"
@@ -583,6 +588,137 @@ def _resolve_regen_target(db: Session, project_id: str, text: str) -> tuple[dict
         "请明确要返工的目标：给出资产 ID（ast_ 开头）或镜头（『第 N 镜』或镜头 ID，sht_ 开头）。"
     )
 
+# ── 页面导航映射（V2 双栏工作台） ──
+# 统一收口到 services/workspace_nav.py，不再内联维护字典。
+from app.services.workspace_nav import build_navigate_payload
+
+
+def _build_assistant_payload(
+    base: dict | None = None,
+    *,
+    unified_task=None,
+    db=None,
+    nav_request: dict | None = None,
+    **extra,
+) -> dict:
+    """统一助手消息 payload 构造（Phase 1.5 地基修正）。
+
+    chat() 存在多个助手消息返回分支（待确认裁决 / 视频工作流 / 联网搜索 /
+    流程动作与主对话）。若各分支各自手写 payload，新增能力（导航、任务卡片、
+    审批引用）必然漏注入其中几条。所有分支统一经此函数合并，保证：
+    - task_card 只在 unified_task 存在时注入（不伪造任务）
+    - nav_request 只在前端确实需要跳转时注入（导航 ≠ 执行）
+    """
+    payload: dict = dict(base or {})
+    for k, v in extra.items():
+        payload.setdefault(k, v)
+    if db is not None:
+        from app.services import task_orchestrator
+        payload["task_card"] = (
+            task_orchestrator.task_payload(db, unified_task)
+            if unified_task is not None
+            else None
+        )
+    if nav_request:
+        # 导航指令必须覆盖 base 里的 route_action（base 携带的是意图路由动作），
+        # 否则前端按 route_action 判定跳转时读不到 navigate_workspace
+        for k, v in nav_request.items():
+            if k.startswith("route_") or k in ("ok", "available_routes"):
+                payload[k] = v
+            else:
+                payload.setdefault(k, v)
+    return payload
+
+
+
+def _write_nav_workspace_event(
+    db: Session, session_id: str, session: AgentSession, nav_request: dict | None
+) -> None:
+    # 写导航事件（导演工作台 V2 Phase 3）。
+    # 只在确实产生导航指令时写入，且与业务写入同一事务（由调用方 commit），
+    # 保证事件可见性与数据落库严格一致（Transactional Outbox）。
+    # 事件为旁路事实流：写入失败不阻断对话主流程，仅记录 warning。
+    if not nav_request:
+        return
+    try:
+        from app.services.workspace_event import write_workspace_event
+
+        route_name = nav_request.get("route_name")
+        write_workspace_event(
+            db,
+            "workspace.navigate",
+            session_id=session_id,
+            project_id=getattr(session, "project_id", None),
+            route_name=route_name if isinstance(route_name, str) else None,
+            payload={
+                "route_action": nav_request.get("route_action") or "navigate_workspace",
+                "route_name": route_name,
+            },
+        )
+    except Exception as exc:  # 事件写入失败不影响导航
+        import logging
+
+        logging.getLogger("director-lab.workspace_event").warning(
+            "write workspace.navigate event failed: %s", exc
+        )
+
+
+def _resolve_create_project_args(
+    db: Session, text: str
+) -> tuple[dict | None, str | None]:
+    """从用户消息解析新建项目的工具参数（名称 + 画幅）。
+
+    返回 (kwargs, error)：error 非空表示无法安全创建，调用方需给出可操作引导，
+    绝不猜测项目名，也绝不为『有名字但缺画幅』拒绝创建（画幅取明示默认并在回复中告知）。
+    """
+    import re as _re
+
+    from app.services.video_workflow import detect_orientation, find_project_by_name
+
+    name: str | None = None
+    # 形式一：新建/创建《小马过河》项目、新建小马过河的项目
+    m = _re.search(
+        r"(?:新建|创建|建立|建)\s*(?:一个|个)?\s*[《<「\"']?(.{2,40}?)[》>」\"']?\s*(?:的)?\s*项目",
+        text,
+    )
+    if m:
+        name = m.group(1)
+    if not name:
+        # 形式二：新建项目：小马过河 / 新建项目 小马过河
+        m = _re.search(
+            r"(?:新建|创建|建立|建)\s*(?:一个|个)?\s*项目\s*[:：]?\s*[《<「\"']?(.{2,40}?)[》>」\"']?\s*$",
+            text,
+        )
+        if m:
+            name = m.group(1)
+    if name:
+        name = _re.sub(r"^(一个|个|新|名为|叫做|叫)", "", name.strip())
+        name = _re.sub(r"(这个|那个)$", "", name).strip(" 的，,、:：《》<>「」\"'")
+
+    if not name or len(name) < 2:
+        return None, (
+            "需要项目名称才能创建。请这样告诉我：『新建小马过河的项目』。"
+            "也可以先到项目列表页手动创建。"
+        )
+    if len(name) > 100:
+        return None, "项目名称过长（限 100 字以内），请精简后重试。"
+
+    existing = find_project_by_name(db, name)
+    if existing is not None and existing.deleted_at is None:
+        return None, (
+            f"已存在同名项目『{existing.name}』（ID: {existing.id}），未重复创建。"
+            "如需进入该项目，请从项目列表页打开；如需新建，请换一个名称。"
+        )
+
+    # 画幅未提及时取默认 16:9（项目创建后可改），并在回复中明示，不静默假设
+    aspect_ratio = detect_orientation(text) or "16:9"
+    return {
+        "name": name,
+        "aspect_ratio": aspect_ratio,
+        "creation_type": "novel",
+        "description": None,
+    }, None
+
 
 def _handle_pipeline_action(
     db: Session, session: AgentSession, session_id: str, intent, text: str
@@ -604,6 +740,9 @@ def _handle_pipeline_action(
             "审核资产库、确认分镜图、合成成片、导出成片，或直接描述你的需求。",
             None,
         )
+    # navigate_workspace：Agent 驱动的双栏导航（不经过状态机、不消耗 ToolBudget）
+    if action == "navigate_workspace":
+        return build_navigate_payload(text)
     # 泛化审核确认：按当前流程节点解析为具体审核动作
     if action == "review_current":
         if not session.project_id:
@@ -691,6 +830,14 @@ def _handle_pipeline_action(
         )
     # 普通流程操作：经状态机门禁直接执行
     kwargs: dict = {"project_id": session.project_id} if action != "create_project" else {}
+    if action == "create_project":
+        # 新建项目是流程起点：必须先从消息中解析出真实项目名与画幅。
+        # 缺名时给出可操作引导，绝不传空参让工具报 tool_invalid_args，
+        # 也绝不擅自用占位名创建一个『无名项目』。
+        create_kwargs, create_err = _resolve_create_project_args(db, text)
+        if create_err:
+            return create_err, None
+        kwargs = create_kwargs or {}
     if action == "analyze_script":
         # 解析是异步耗时任务：把发起方会话带进去，完成后据此把结果回推到本对话
         kwargs["session_id"] = session_id
@@ -724,6 +871,32 @@ def _handle_pipeline_action(
     data = result.data or {}
     node_name = data.get("pipeline_node_name", "")
     next_hint = data.get("next_hint", "")
+    if action == "create_project":
+        # 新建项目成功：绑定会话项目上下文（后续对话即可直接操作该项目），
+        # 并下发真实导航指令携带新项目 ID，让用户直接进入项目而不是停在提示语。
+        # 导航 ≠ 执行：这里只做页面跳转，不触发任何生成。
+        new_project_id = data.get("project_id")
+        new_name = data.get("name") or kwargs.get("name") or ""
+        aspect = kwargs.get("aspect_ratio") or "16:9"
+        if new_project_id:
+            session.project_id = new_project_id
+            db.add(session)
+        return (
+            f"已创建项目『{new_name}』（画幅 {aspect}，项目 ID: {new_project_id}），"
+            "已切换到剧本页并把这个项目设为当前会话项目。\n"
+            "接下来可以把剧本发给我，或对我说『保存剧本：』后跟剧本全文。",
+            {
+                "ok": True,
+                "tool": action,
+                "created_project_id": new_project_id,
+                "created_project_name": new_name,
+                # 触发 chat 的 nav_request 转换：route_action + route_name + project_id
+                "route_action": "navigate_workspace",
+                "route_name": "script",
+                "route_label": "剧本",
+                "project_id": new_project_id,
+            },
+        )
     # 异步任务不得谎称『已执行』：受理即回『正在分析』，结果由完成回推补上
     if action == "analyze_script":
         job_id = data.get("job_id", "")
@@ -1313,9 +1486,15 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # 1.30 待确认事项优先解析（Confirmation Intent Resolver）
     # 存在有效待确认事项时，用户的『可以 / 不可以 / 退回 / 再改改 / 再看看』
     # 必须先按该事项解释，不能因回答过短就当普通闲聊；解析结论直接改业务状态。
-    pending_reply, pending_payload = _handle_pending_confirmation(
-        db, s, session_id, payload.content
-    )
+    # V2 修正：导航请求（如「去分镜页」）不走确认裁决，避免有挂起审批时导航被短路（坑 4）。
+    from app.services.intent_router import _pipeline_action_of as _fast_pipeline
+    _fast_action = _fast_pipeline(payload.content)
+    if _fast_action == "navigate_workspace":
+        pending_reply, pending_payload = None, None
+    else:
+        pending_reply, pending_payload = _handle_pending_confirmation(
+            db, s, session_id, payload.content
+        )
     if pending_reply is not None:
         # 裁决会额外写入 role=approval 审计消息占用 seq，助手回复须重新取号，
         # 否则同一会话 (session_id, seq) 唯一索引会冲突
@@ -1363,7 +1542,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             session_id=session_id,
             role="assistant",
             content=wf_reply,
-            payload={"route_action": "video_workflow", **(wf_payload or {})},
+            payload=_build_assistant_payload({"route_action": "video_workflow", **(wf_payload or {})}),
             seq=max_seq + 2,
             created_at=datetime.now(),
         )
@@ -1408,7 +1587,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 session_id=session_id,
                 role="assistant",
                 content=fail_reply,
-                payload={"route_action": "web_search", "search": search_record},
+                payload=_build_assistant_payload({"route_action": "web_search", "search": search_record}),
                 seq=max_seq + 2,
                 created_at=datetime.now(),
             )
@@ -1466,7 +1645,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             session_id=session_id,
             role="assistant",
             content=search_reply,
-            payload={"route_action": "web_search", "search": search_record},
+            payload=_build_assistant_payload({"route_action": "web_search", "search": search_record}),
             seq=max_seq + 2,
             created_at=datetime.now(),
         )
@@ -1566,13 +1745,21 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         )
     action = route_action(intent.intent, intent.subcategory)
     # Intent Resolver 判定需澄清：目标无法唯一定位时不猜测执行，向用户澄清
-    if resolved.requires_clarification and action in (NextAction.GUIDE, NextAction.PIPELINE):
+    # 但导航请求不在此列：导航只做页面跳转，不需要项目上下文就可以生效
+    _nav_action = (intent.entities or {}).get("pipeline_action") if intent else None
+    if (
+        resolved.requires_clarification
+        and action in (NextAction.GUIDE, NextAction.PIPELINE)
+        and _nav_action != "navigate_workspace"
+    ):
         action = NextAction.CLARIFY
     # 结构化意图（B 档）：ambiguous 且带缺失信息时向用户澄清，不进入主对话（不虚构目标）
     if intent.intent == "ambiguous" and intent.missing_information:
         action = NextAction.CLARIFY
     # 生成请求预解析：定位不到目标时不落固定文案，回落主对话由大模型结合上下文兜底
     guide_reply, guide_approval = None, None
+    # 导航请求单独承载（Phase 1.5）：导航是意图层产物，不能混进 approval 字段
+    nav_request: dict | None = None
     if action == NextAction.GUIDE:
         guide_reply, guide_approval = _try_create_generate_approval(db, s, session_id, payload.content)
         if guide_reply is None:
@@ -1590,6 +1777,14 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         elif action == NextAction.PIPELINE:
             # 流程操作：意图识别流程节点，经状态机门禁执行（审核闸口/审批纪律不跳过）
             reply, approval_info = _handle_pipeline_action(db, s, session_id, intent, payload.content)
+            # navigate_workspace 的产物是导航指令而不是审批申请：
+            # 混在 approval 里前端读不到 route_action，导航会静默失效
+            if (
+                isinstance(approval_info, dict)
+                and approval_info.get("route_action") == "navigate_workspace"
+            ):
+                nav_request = approval_info
+                approval_info = None
         else:
             # Intent Resolver 判定需澄清时优先使用其确定性澄清问题（含目标定位失败原因）
             reply = (
@@ -1624,8 +1819,9 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             session_id=session_id,
             role="assistant",
             content=reply,
-            payload={
-                "intent": intent.intent,
+            payload=_build_assistant_payload(
+                {
+                    "intent": intent.intent,
                 "intent_reason": intent.reason,
                 "intent_classified": intent.classified,
                 "route_action": action,
@@ -1638,23 +1834,28 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 "route_exit": intent.route_exit,
                 "approval": approval_info,
                 # Intent Resolver 审计（意图识别改造 Phase 2）：目标解析路径与结果
-                "intent_resolution": {
-                    "resolution_path": resolved.resolution_path,
-                    "target": resolved.target,
-                    "requires_clarification": resolved.requires_clarification,
-                    "clarification_code": resolved.clarification_code,
-                    "subcategory": resolved.subcategory,
-                    "confidence_tier": resolved.confidence_tier,
+                    "intent_resolution": {
+                        "resolution_path": resolved.resolution_path,
+                        "target": resolved.target,
+                        "requires_clarification": resolved.requires_clarification,
+                        "clarification_code": resolved.clarification_code,
+                        "subcategory": resolved.subcategory,
+                        "confidence_tier": resolved.confidence_tier,
+                    },
+                    # Parent Agent 任务审计（Phase 3）：任务 ID 与终态。task_card 由统一构造注入
+                    "task_id": task.id if task is not None else None,
+                    "task_status": task.status if task is not None else None,
                 },
-                # Parent Agent 任务审计（Phase 3）：任务 ID 与终态（前端任务计划区域展示用）
-                "task_id": task.id if task is not None else None,
-                "task_status": task.status if task is not None else None,
-                "task_card": task_orchestrator.task_payload(db, unified_task) if unified_task is not None else None,
-            },
+                unified_task=unified_task,
+                db=db,
+                nav_request=nav_request,
+            ),
             seq=max_seq + 2,
             created_at=datetime.now(),
         )
         db.add(assistant_msg)
+        # 导航事实落 outbox（与消息同事务提交，避免事件先于数据可见）
+        _write_nav_workspace_event(db, session_id, s, nav_request)
         s.updated_at = datetime.now()
         db.commit()
         db.refresh(assistant_msg)
@@ -1869,27 +2070,33 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         session_id=session_id,
         role="assistant",
         content=reply,
-        payload={
-            "intent": intent.intent,
+        payload=_build_assistant_payload(
+            {
+                "intent": intent.intent,
             "intent_reason": intent.reason,
             "intent_classified": intent.classified,
             "route_action": action,
             "intent_goal": intent.goal,
             "risk_level": intent.risk_level,
             "confidence": intent.confidence,
-            # 资产引用：前端据此渲染缩略图（assistant 气泡内）
-            "asset_refs": asset_refs,
-            # 预算审计（agent_governance）：本轮工具调用数/耗时/上下文字符数与违规记录
-            "tool_budget": budget.audit_payload() if s.project_id else None,
-            # Parent Agent 任务审计（Phase 3）：GUIDE 回落主对话/CHAT 时任务由主对话闭环
-            "task_id": task.id if task is not None else None,
-            "task_status": task.status if task is not None else None,
-            "task_card": task_orchestrator.task_payload(db, unified_task) if unified_task is not None else None,
-        },
+                # 资产引用：前端据此渲染缩略图（assistant 气泡内）
+                "asset_refs": asset_refs,
+                # 预算审计（agent_governance）：本轮工具调用数/耗时/上下文字符数与违规记录
+                "tool_budget": budget.audit_payload() if s.project_id else None,
+                # Parent Agent 任务审计（Phase 3）：任务 ID 与终态，task_card 由统一构造注入
+                "task_id": task.id if task is not None else None,
+                "task_status": task.status if task is not None else None,
+            },
+            unified_task=unified_task,
+            db=db,
+            nav_request=nav_request,
+        ),
         seq=tool_event_seq + 1,
         created_at=datetime.now(),
     )
     db.add(assistant_msg)
+    # 导航事实落 outbox（与消息同事务提交）
+    _write_nav_workspace_event(db, session_id, s, nav_request)
     # Parent Agent：主对话分支闭环任务（GUIDE 回落/CHAT 的执行类意图由主对话完成）
     if task is not None:
         parent_agent.complete_task(db, task, str(reply)[:2000])

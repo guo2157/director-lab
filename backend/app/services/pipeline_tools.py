@@ -770,25 +770,29 @@ PIPELINE_TOOL_REGISTRY: dict = {
 }
 
 
-def execute_pipeline_tool(db: Session, name: str, *, approved: bool = False, **kwargs) -> ToolResult:
+def execute_pipeline_tool(db: Session, tool_name: str, *, approved: bool = False, **kwargs) -> ToolResult:
     """执行流程工具：审批门禁 → Schema 校验 → 状态机门禁（工具内）→ 执行 → 结构化结果。
 
     与 agent_tools.execute_tool 同构：
     - requires_approval=True 且 approved=False：返回 approval_required，不执行、无副作用
     - 状态机门禁阻断返回 pipeline_gate_blocked（含当前节点与所需节点）
+
+    形参命名注意：工具名用 tool_name 而非 name，因为 create_project 的业务参数本身
+    就叫 name（项目名称），形参同名会让 **kwargs 展开时抛
+    TypeError: got multiple values for argument 'name'。
     """
     import time as _time
     from pydantic import ValidationError
     start = _time.monotonic()
-    spec = PIPELINE_TOOL_REGISTRY.get(name)
+    spec = PIPELINE_TOOL_REGISTRY.get(tool_name)
     if not spec:
-        return ToolResult(ok=False, error_code="tool_not_found", error_message=f"未注册的工具: {name}")
+        return ToolResult(ok=False, error_code="tool_not_found", error_message=f"未注册的工具: {tool_name}")
     if spec.get("requires_approval") and not approved:
         return ToolResult(
             ok=False,
             error_code="approval_required",
-            error_message=f"工具 {name} 需要人工审批后执行",
-            data={"tool": name, "params": kwargs, "permission": spec.get("permission")},
+            error_message=f"工具 {tool_name} 需要人工审批后执行",
+            data={"tool": tool_name, "params": kwargs, "permission": spec.get("permission")},
         )
     input_model = spec.get("input_model")
     try:

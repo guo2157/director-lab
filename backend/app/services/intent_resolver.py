@@ -178,12 +178,20 @@ def resolve_intent(
     project_id = session.project_id or ""
     if not project_id:
         # 无项目上下文：generate_request 透传（上层 _try_create_generate_approval
-        # 支持自动创建项目，不拦截既有能力）；仅 pipeline_action 需先关联项目
+        # 支持自动创建项目，不拦截既有能力）；仅 pipeline_action 需先关联项目。
+        # 例外：create_project 本身就是流程起点，若在此强制澄清会形成死锁——
+        # 空会话永远无法创建第一个项目（表现为『请先选择或创建项目』但无入口）。
         if intent.intent == "pipeline_action":
-            base.requires_clarification = True
-            base.route_exit = "clarification"
-            base.clarification_code = "no_project_context"
-            base.clarification_question = "当前会话未关联项目，请先选择或创建项目后再执行该操作。"
+            _pipeline_action = (intent.entities or {}).get("pipeline_action")
+            _is_create_project = (
+                _pipeline_action == "create_project"
+                or getattr(intent, "subcategory", "") == "project.create"
+            )
+            if not _is_create_project:
+                base.requires_clarification = True
+                base.route_exit = "clarification"
+                base.clarification_code = "no_project_context"
+                base.clarification_question = "当前会话未关联项目，请先选择或创建项目后再执行该操作。"
         return base
 
     # 1. 显式 ID 定位

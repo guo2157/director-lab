@@ -102,6 +102,9 @@ class AgentPlanStep(Base, TimestampMixin):
     __tablename__ = "agent_plan_step"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # 外键指向 agent_task.id（前缀 agt_），而非统一 task.id（前缀 task_）。
+    # V2 修正注记：不能直接 db.get(Task, plan_step.task_id)——ID 前缀不同会静默返回 None。
+    # 跨表查询应通过 agent_task_id 反查 Task：select(Task).where(Task.agent_task_id == plan_step.task_id)。
     task_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     # 步骤序号（任务内递增）
     step_index: Mapped[int] = mapped_column(nullable=False, default=0)
