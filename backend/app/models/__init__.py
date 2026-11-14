@@ -43,6 +43,8 @@ from app.models.task import (
     TaskResult,
     TaskStage,
 )
+from app.models.workspace_event import WorkspaceEvent
+from app.models.workspace_page_context import WORKSPACE_CONTEXT_ID, WorkspacePageContext
 from app.models.search import SearchRun, SearchResult
 from app.models.audio import AudioReview, AudioSegment, VoiceLibrary, VoiceProfile
 from app.models.series import (
@@ -103,6 +105,9 @@ __all__ = [
     "AudioReview",
     "AgentConfirmation",
     "AgentMemory",
+    "WorkspaceEvent",
+    "WorkspacePageContext",
+    "WORKSPACE_CONTEXT_ID",
     "Task",
     "TaskStage",
     "TaskEvent",

@@ -34,6 +34,7 @@ from app.api.v1 import (
     shots,
     tasks,
     workflows,
+    workspace,
 )
 from app.core.config import get_settings
 
@@ -109,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(progress.router)
     app.include_router(events.router)
     app.include_router(tasks.router)
+    app.include_router(workspace.router)
     app.include_router(compose.router)
     app.include_router(workflows.router)
     app.include_router(audio.router)

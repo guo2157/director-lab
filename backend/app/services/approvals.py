@@ -220,6 +220,27 @@ def resolve_confirmation(
             "bridge_approval_resolved 调用失败 (confirmation_id=%s, approve=%s): %s",
             confirmation_id, approve, __import__("traceback").format_exc(),
         )
+    # 工作台事件（V2 Phase 3）：审批裁决事实落 outbox，与裁决同事务提交。
+    # 旁路事实流：写入失败不阻断审批，仅记录 warning。
+    try:
+        from app.services.workspace_event import write_workspace_event
+        write_workspace_event(
+            db,
+            "workspace.approval_resolved",
+            session_id=getattr(confirmation, "session_id", None),
+            payload={
+                "confirmation_id": confirmation.id,
+                "tool_name": confirmation.tool_name,
+                "status": new_status,
+                "approved": bool(approve),
+                "comment": comment,
+            },
+        )
+    except Exception:
+        _log.warning(
+            "write workspace.approval_resolved event failed (confirmation_id=%s): %s",
+            confirmation_id, __import__("traceback").format_exc(),
+        )
     db.commit()
     db.refresh(confirmation)
     return confirmation
