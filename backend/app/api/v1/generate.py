@@ -158,12 +158,28 @@ def _workflow_binds_param(wf: Workflow, param_name: str) -> bool:
     return param_name in parsed.params and not parsed.errors
 
 
+def _prompt_fingerprint(params: dict) -> str:
+    """最终下发提示词的内容指纹：重生成/手工编辑后能区分不同版本。"""
+    import hashlib
+
+    text = str(params.get("prompt") or params.get("tts_text") or "")
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
 def _attach_compilation(job: Job, compilation: dict | None) -> None:
     """把阶段 B 编译结果写入 input_snapshot，便于复现与排障。"""
     if not compilation:
         return
     snap = dict(job.input_snapshot or {})
     snap["prompt_compilation"] = compilation
+    version = snap.get("prompt_version")
+    if not isinstance(version, dict):
+        version = {"fingerprint": _prompt_fingerprint(job.params or {})}
+    version.update({
+        "template_id": compilation.get("template_id"),
+        "template_version": compilation.get("template_version"),
+    })
+    snap["prompt_version"] = version
     job.input_snapshot = snap
 
 
@@ -313,6 +329,7 @@ def _compile_shot_prompt(db: Session, shot: Shot, wf: Workflow, params: dict,
         apply_to_params,
         compile_shot_video,
         compile_storyboard_image,
+        to_h3_clip_prompt,
         validate_compilation,
     )
 
@@ -323,12 +340,17 @@ def _compile_shot_prompt(db: Session, shot: Shot, wf: Workflow, params: dict,
     out = dict(params)
     if soft and "prompt" not in out:
         out["prompt"] = fallback_prompt
+        # 历史 video_prompt 里的『台词/对白/第N段』标签会被 H3 一起念出来，统一改成可播报格式
+        if task == "clip":
+            out["prompt"] = to_h3_clip_prompt(shot, out["prompt"])
         snapshot = compiled.to_dict()
         snapshot["deferred_blocking_issues"] = soft
         return out, snapshot
     if "prompt" not in out:
         out = apply_to_params(compiled, out)
     else:
+        if task == "clip":
+            out["prompt"] = to_h3_clip_prompt(shot, out.get("prompt") or "")
         out = _apply_compiled_media(compiled, out)
     out = _finalize_negative(compiled, wf, out)
     snapshot = compiled.to_dict()
@@ -399,6 +421,25 @@ def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
                 from app.services.prompt_qc import apply_clip_qc
                 params = dict(params)
                 params["prompt"] = apply_clip_qc(db, shot, params["prompt"])[0]
+                # 质检可整段重写，重写后再按结构化对白兜一次，确保 <d> 外不出现“台词/对白”标签
+                from app.services.prompt_compiler import to_h3_clip_prompt
+                params["prompt"] = to_h3_clip_prompt(shot, params["prompt"])
+    # 参考图槽位职责硬校验：身份槽只允许本镜主体角色、时序槽只允许尾帧。
+    # 串位会在出图/出视频阶段直接换脸或构图串镜，必须在提交前阻断。
+    if target in ("keyframe", "clip") and shot_id:
+        from app.services.prompt_compiler import audit_reference_slots
+
+        _shot = db.get(Shot, shot_id)
+        if _shot is not None:
+            _ref_issues = audit_reference_slots(db, _shot, params.get("__media__") or {})
+            if _ref_issues:
+                raise errors.AppError(
+                    "reference_slot_mismatch",
+                    "；".join(i.get("message", "") for i in _ref_issues if i.get("message"))
+                    + "。已阻止生成，请检查参考图槽位绑定",
+                    409,
+                    reference_issues=_ref_issues,
+                )
     qc_meta = db.info.pop("prompt_qc_last", None)
     job = Job(
         id=ids.job_id(),
@@ -413,6 +454,7 @@ def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
         created_at=_now(),
         input_snapshot={
             "workflow_version": wf.version,
+            "prompt_version": {"fingerprint": _prompt_fingerprint(params)},
             "params": params,
             "generation_mode": generation_mode,
             "prompt_qc": qc_meta,
@@ -1071,8 +1113,8 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     _check_inflight_duplicate(db, shot.id, target)
     # 旧资产转历史版本 + 下游失效传播
     # - keyframe 重做：分镜图会被重绘，本镜确认状态回退（D-13）
-    # - clip 重做：分镜图不变，不回退确认状态；旧尾帧置 superseded，
-    #   使下游镜头解析前序尾帧时拿不到旧版本（P0 失效传播）
+    # - clip 重做：分镜图不变，不回退确认状态；本镜尾帧不置失效，
+    #   重新生成成功后原地覆盖同一张，失败时下游仍可沿用旧尾帧
     chain_info: dict = {}
     if target in ("keyframe", "clip"):
         from app.services.shot_chain import invalidate_chain_after_regenerate

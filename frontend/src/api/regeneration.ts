@@ -1,7 +1,7 @@
 /** 多图参考重新生成工作台 V1 接口封装。
  * 约定：
  * - 配置读取从指定基础版本加载原始生成配置，不从最新版本拼装
- * - 重新生成结果一律先落候选版本，采用后才切换为当前生效版本
+ * - 分镜图/视频重新生成结果直接替换当前生效版本，没有候选版本环节
  */
 import { get, post, put } from './client'
 
@@ -108,7 +108,7 @@ export function fetchRegenerateConfig(
   return get<RegenerateConfig>(`/shots/${shotId}/regenerate/config`, params)
 }
 
-/** 提交重新生成任务（结果落候选版本） */
+/** 提交重新生成任务（结果直接替换当前版本） */
 export function submitRegenerate(shotId: string, payload: Record<string, unknown>): Promise<RegenerateJob> {
   return post<RegenerateJob>(`/shots/${shotId}/regenerate/workbench`, payload)
 }
@@ -315,6 +315,8 @@ export interface RegenerateWorkspace {
   capabilities: WorkspaceCapabilities
   shot: Record<string, unknown>
   history_compat: WorkspaceHistoryCompat
+  /** 串联生成首帧衔接：ready=上一镜尾帧可作本镜首帧；missing=上一镜尚无尾帧；not_applicable=集内首镜 */
+  chain_frame?: { prev_shot_id: string | null; status: 'ready' | 'missing' | 'not_applicable' }
 }
 
 /** 工作台校验结果 */
@@ -354,7 +356,7 @@ export function validateRegenerateWorkspace(
   return post<WorkspaceValidateResult>(`/shots/${shotId}/regenerate/workspace/validate`, payload)
 }
 
-/** 按工作台配置提交重新生成任务（结果落候选版本，不改写当前生效视频） */
+/** 按工作台配置提交重新生成任务（结果直接替换当前生效视频，无候选版本） */
 export function submitRegenerateWorkspace(
   shotId: string,
   payload: Record<string, unknown>,

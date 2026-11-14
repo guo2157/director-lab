@@ -60,13 +60,17 @@ def _current_asset_info(db: Session, shot_id: str, asset_type: str) -> dict | No
     )
     if row is None:
         return None
+    # 替换上传是原地覆盖文件、asset_id 与路径都不变；不带版本参数时
+    # 浏览器会继续用缓存里的旧图，页面看起来"替换没生效"
+    stamp = int(row.updated_at.timestamp()) if row.updated_at else 0
     return {
         "asset_id": row.id,
         "file_path": row.file_path,
         "thumb_path": row.thumb_path,
         "version": row.version,
-        "url": f"/api/assets/{row.id}/file",
-        "thumb_url": f"/api/assets/{row.id}/file?thumb=true" if row.thumb_path else None,
+        "url": f"/api/assets/{row.id}/file?v={stamp}",
+        "thumb_url": f"/api/assets/{row.id}/file?thumb=true&v={stamp}" if row.thumb_path else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         # 锁定状态：分镜图工作台据此显示锁定/解锁入口（锁定后禁止重新生成覆盖）
         "locked": bool(row.locked),
     }

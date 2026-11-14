@@ -295,11 +295,11 @@ def _character_names(db: Session, project_id: str) -> set[str]:
 
 def _visual_text(prompt: str) -> str:
     """剔除「对白与声音」分段：对白里提到的角色/道具并不出现在画面，不能参与一致性比对。"""
-    m = re.search(r"(?:^|\n)\s*对白与声音\s*[:：]", prompt)
+    m = re.search(r"(?:^|\n)\s*【?对白与声音】?\s*[:：]?", prompt)
     if m is None:
         return prompt
     tail = prompt[m.end():]
-    nxt = re.search(r"\n\s*(输出|禁止|允许变化|必须保持|目标状态)\s*[:：]", tail)
+    nxt = re.search(r"\n\s*(?:【|输出|禁止|允许变化|必须保持|目标状态)\s*", tail)
     if nxt is not None:
         return prompt[: m.start()] + tail[nxt.start():]
     return prompt[: m.start()]
@@ -356,7 +356,450 @@ def check_clip_prompt(db: Session, shot: Shot, prompt: str) -> list[dict[str, st
             "level": "warn",
             "detail": f"景别为『{shot_type}』但提示词要求角色跑出/走出画面，动作幅度与景别冲突",
         })
+    # 道具数量/持有关系是结构化冲突，不能交给 LLM 改文案掩盖，必须阻断提交
+    issues.extend(check_prop_count_consistency(db, shot))
     return issues
+
+
+# ── 道具数量 / 持有关系确定性校验 ──────────────────────────────
+# 分镜结构化数据里 holding 仍是自然语言（DATABASE.md：六项枚举均为文本），没有
+# 数量/左右手字段。这里只做保守的规则解析：仅当「开场数量、交接数量、目标数量」
+# 三侧都能明确解析时才判定冲突；任一侧无法解析即跳过（宁可漏报，不做猜测式阻断）。
+# 判定口径与剧情一致：交接不改变道具总量，只改变持有者与所在手。
+
+PROP_COUNT_QC_VERSION = 1
+
+_CN_DIGITS = {
+    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "百": 100, "半": 0.5,
+}
+_UNIT_CHARS = "只杯个瓶罐支把块张份袋盒盘碗"
+_QTY_RE = re.compile(
+    rf"(?P<num>\d+(?:\.\d+)?|[零一二两三四五六七八九十百半]+)\s*"
+    rf"(?P<unit>[{_UNIT_CHARS}])(?P<rest>[^，,。；;、：:\n]{{0,16}})"
+)
+_NOUN_STOP = re.compile(
+    r"递给|交给|送给|拿给|递到|递出|接过|接住|收下|取出|放在|放到|塞给|"
+    r"拿起|端起|举起|捧着|抱着|握着|托着|垂在|握|捧|抱|举|端|托|拿|放|递|接|取|收|持|的"
+)
+_NOUN_PREFIX = ("仍然", "仍", "还", "剩下", "剩余", "一共", "共", "各", "已", "现", "手中", "手里")
+_GENERIC_NOUN = "__held__"
+_EMPTY_HAND = "__empty_hand__"
+_EMPTY_HAND_RE = re.compile(r"空手|空着|没有拿|未持|无物|两手空空")
+_BOTH_RE = re.compile(r"双手各|两手各|左右手各|双手分别|两手分别|左右手分别")
+_TRANSFER_OUT_RE = re.compile(r"递给|递出|递到|交给|交到|送给|送到|拿给|塞给")
+_TRANSFER_IN_RE = re.compile(r"接过|接住|收下|取过")
+_PICK_RE = re.compile(r"拿起|端起|拾起|捡起|取出")
+_LOSS_RE = re.compile(r"放下|丢掉|扔下|吃掉|喝掉|消耗|销毁|摔碎")
+_HAND_RE = re.compile(r"(左|右)手")
+_HAND_SIDE = {"左": "left", "右": "right"}
+
+
+def _parse_number(raw: str) -> float | None:
+    """解析阿拉伯数字或 1~99 的中文数字（含半）。"""
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    total = 0
+    section = 0
+    num = 0
+    for ch in raw:
+        value = _CN_DIGITS.get(ch)
+        if value is None:
+            return None
+        if value == 10:
+            section += (num or 1) * 10
+            num = 0
+        elif value == 100:
+            section += (num or 1) * 100
+            num = 0
+        elif value == 0.5 and not num and not section:
+            num = 0.5
+        else:
+            num = value
+    return section + num
+
+
+def _normalize_noun(rest: str) -> str:
+    """从数量后面的残余文本里提取道具名（如「一只冰可乐杯抱在胸前」→「冰可乐」）。"""
+    text = _NOUN_STOP.split(rest or "")[0].strip()
+    for prefix in _NOUN_PREFIX:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    text = text.strip("的 ")
+    while text and text[-1] in _UNIT_CHARS + "子":
+        text = text[:-1]
+    return text or _GENERIC_NOUN
+
+
+def _clauses(text: str) -> list[str]:
+    return [c for c in re.split(r"[，,。；;、\n]", text or "") if c.strip()]
+
+
+def _holding_counts(text: str) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """解析 holding 文本：返回 (每个道具总数, {左手/右手: 每个道具数量})。
+
+    「双手各持一杯」按每手一杯计数（合计 2）；「双手捧着同一只杯」合计 1；
+    「双手握杆」没有数量单位，不产出计数（视为无法判定）。
+    """
+    total: dict[str, float] = {}
+    hands: dict[str, dict[str, float]] = {"left": {}, "right": {}}
+    for clause in _clauses(text):
+        each = bool(_BOTH_RE.search(clause))
+        shared = each or "双手" in clause or "两手" in clause
+        hand = "left" if "左手" in clause else ("right" if "右手" in clause else None)
+        matched = False
+        for m in _QTY_RE.finditer(clause):
+            value = _parse_number(m.group("num"))
+            if value is None or value == 0:
+                continue
+            matched = True
+            noun = _normalize_noun(m.group("rest"))
+            amount = value * 2 if each else value
+            total[noun] = total.get(noun, 0) + amount
+            if each and hand is None:
+                # 双手各持：左右手各一份
+                hands["left"][noun] = hands["left"].get(noun, 0) + value
+                hands["right"][noun] = hands["right"].get(noun, 0) + value
+            elif hand is not None:
+                hands[hand][noun] = hands[hand].get(noun, 0) + amount
+            elif shared:
+                # 双手共同捧持且未分左右：只记总量，不参与左右手比对
+                continue
+        if not matched and _EMPTY_HAND_RE.search(clause):
+            # 明确写「空手 / 右手空着」：记为 0，便于校验接收方开局为空
+            if hand is not None:
+                hands[hand][_EMPTY_HAND] = 0
+            else:
+                total[_EMPTY_HAND] = 0
+    return total, hands
+
+
+def _split_holding_by_character(text: str, names: list[str]) -> dict[str | None, str]:
+    """按角色名把 holding 文本切成逐角色片段；没有角色名时整段归入 None。"""
+    if not text:
+        return {}
+    hits = sorted((text.find(n), n) for n in names if n and n in text)
+    if not hits:
+        return {None: text}
+    result: dict[str | None, str] = {}
+    for index, (start, name) in enumerate(hits):
+        end = hits[index + 1][0] if index + 1 < len(hits) else len(text)
+        result[name] = (result.get(name, "") + text[start:end]).strip()
+    return result
+
+
+def _state_holding(state: Any, names: list[str]) -> dict[str | None, tuple[dict[str, float], dict[str, dict[str, float]]]]:
+    """从 start_state / end_state 取 holding 并解析为逐角色数量。"""
+    if not isinstance(state, dict):
+        return {}
+    raw = state.get("holding")
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        pieces = {str(k): str(v) for k, v in raw.items() if str(v).strip()}
+    else:
+        pieces = _split_holding_by_character(str(raw), names)
+    return {key: _holding_counts(text) for key, text in pieces.items() if text.strip()}
+
+
+def _match_noun(mapping: dict[str, float], noun: str) -> str | None:
+    """在解析结果中定位同一个道具名（支持「冰可乐」与「冰可乐杯」这类写法差异）。"""
+    if not mapping:
+        return None
+    if noun in mapping:
+        return noun
+    if noun == _GENERIC_NOUN and len(mapping) == 1:
+        return next(iter(mapping))
+    candidates = [
+        key for key in mapping
+        if key != _GENERIC_NOUN and noun != _GENERIC_NOUN and (noun in key or key in noun)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=len)
+
+
+def _qty_near(text: str) -> tuple[float, str] | None:
+    """取文本中唯一的「数量 + 道具」；多重歧义时返回 None。"""
+    pairs: list[tuple[float, str]] = []
+    for m in _QTY_RE.finditer(text or ""):
+        value = _parse_number(m.group("num"))
+        if value is None or value == 0:
+            continue
+        noun = _normalize_noun(m.group("rest"))
+        if (value, noun) not in pairs:
+            pairs.append((value, noun))
+    if len(pairs) != 1:
+        return None
+    return pairs[0]
+
+
+def _beat_events(action: str, names: list[str], default_actor: str | None) -> list[dict]:
+    """从一拍动作里解析交接/拾取/失去事件（只解析能确定对象的简单句式）。"""
+    events: list[dict] = []
+    text = action or ""
+    if not text:
+        return events
+    actor = next((n for n in names if n in text), None) or default_actor
+    specs = (
+        (_TRANSFER_OUT_RE, "transfer"),
+        (_TRANSFER_IN_RE, "receive"),
+        (_PICK_RE, "pick"),
+        (_LOSS_RE, "loss"),
+    )
+    for regex, kind in specs:
+        for m in regex.finditer(text):
+            before, after = text[: m.start()], text[m.end():]
+            before_names = [n for n in names if n in before]
+            after_names = [n for n in names if n in after]
+            source = target = None
+            source_hand = target_hand = None
+            if kind == "transfer":
+                source = before_names[-1] if before_names else actor
+                target = after_names[0] if after_names else None
+                hand_before = _HAND_RE.findall(before)
+                hand_after = _HAND_RE.findall(after)
+                source_hand = _HAND_SIDE.get(hand_before[-1]) if hand_before else None
+                target_hand = _HAND_SIDE.get(hand_after[0]) if hand_after else None
+            elif kind == "receive":
+                target = before_names[-1] if before_names else actor
+                source = after_names[0] if after_names else None
+                hand_before = _HAND_RE.findall(before)
+                hand_after = _HAND_RE.findall(after)
+                target_hand = _HAND_SIDE.get(hand_before[-1]) if hand_before else None
+                source_hand = _HAND_SIDE.get(hand_after[0]) if hand_after else None
+            elif kind == "pick":
+                target = actor
+            else:
+                source = actor
+            qty_pair = _qty_near(text)
+            events.append({
+                "kind": kind,
+                "source": source,
+                "target": target,
+                "source_hand": source_hand,
+                "target_hand": target_hand,
+                "quantity": qty_pair[0] if qty_pair else None,
+                "noun": qty_pair[1] if qty_pair else None,
+                "action": text,
+            })
+    return events
+
+
+def _prop_names(db: Session, project_id: str) -> list[str]:
+    return [p.name for p in db.query(Prop).filter(Prop.project_id == project_id).all() if p.name]
+
+
+def _matches_prop(noun: str, props: set[str]) -> bool:
+    if noun == _GENERIC_NOUN:
+        return False
+    return any(noun == name or noun in name or name in noun for name in props)
+
+
+def check_prop_count_consistency(db: Session, shot: Shot) -> list[dict[str, str]]:
+    """道具数量/持有关系确定性校验（PROP_COUNT_CONFLICT）。
+
+    校验链路：开场 holding 数量 → beats 中的交接/拾取/失去数量 → 目标 holding 数量。
+    交接只转移持有者与所在手，不改变总量；数量变化必须由明确事件解释。
+    """
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return []
+    names = _character_names(db, scene.project_id)
+    start_by_char = _state_holding(shot.start_state, sorted(names))
+    end_by_char = _state_holding(shot.end_state, sorted(names))
+    if not start_by_char:
+        return []
+
+    def _char_total(side: dict, char: str | None, noun: str):
+        piece = side.get(char)
+        if piece is None and None in side and len(side) == 1:
+            piece = side[None]
+        if piece is None:
+            return None
+        mapping = piece[0]
+        key = _match_noun(mapping, noun)
+        if key is None:
+            return 0.0 if mapping and all(k == _EMPTY_HAND for k in mapping) else None
+        return mapping[key]
+
+    def _char_hand(side: dict, char: str | None, hand: str | None, noun: str):
+        if hand not in ("left", "right"):
+            return None
+        piece = side.get(char)
+        if piece is None and None in side and len(side) == 1:
+            piece = side[None]
+        if piece is None:
+            return None
+        hand_map = piece[1].get(hand) or {}
+        key = _match_noun(hand_map, noun)
+        if key is None:
+            return 0.0 if hand_map and all(k == _EMPTY_HAND for k in hand_map) else None
+        return hand_map[key]
+
+    default_actor = None
+    if shot.character_id and len(start_by_char) == 1:
+        ch = db.get(Character, shot.character_id)
+        if ch is not None:
+            default_actor = ch.name
+
+    issues: list[dict[str, str]] = []
+    seen: set[str] = set()
+    events: list[dict] = []
+    for beat in (shot.beats or []):
+        action = beat.get("action") if isinstance(beat, dict) else str(beat)
+        events.extend(_beat_events(str(action or ""), sorted(names), default_actor))
+
+    props = set(_prop_names(db, scene.project_id))
+    for event in events:
+        qty, noun = event.get("quantity"), event.get("noun")
+        if not qty or not noun:
+            continue
+        for side, char, sign in ((start_by_char, event.get("source"), -1),
+                                 (start_by_char, event.get("target"), +1)):
+            if char is None:
+                continue
+            start_total = _char_total(side, char, noun)
+            if start_total is None:
+                continue
+            expected = start_total + sign * qty
+            if expected < 0:
+                detail = (
+                    f"道具『{noun}』数量冲突：{char} 开场持有 {start_total:g}，"
+                    f"但动作要求{'递出' if sign < 0 else '接收'} {qty:g}，持有量不足"
+                )
+                if detail not in seen:
+                    seen.add(detail)
+                    issues.append({"code": "PROP_COUNT_CONFLICT", "level": "error", "detail": detail})
+                continue
+            end_total = _char_total(end_by_char, char, noun)
+            if end_total is not None and end_total != expected:
+                detail = (
+                    f"道具『{noun}』数量冲突：{char} 开场持有 {start_total:g}，"
+                    f"动作{'递出' if sign < 0 else '接收'} {qty:g} 后应为 {expected:g}，"
+                    f"但目标状态写的是 {end_total:g}"
+                )
+                if detail not in seen:
+                    seen.add(detail)
+                    issues.append({"code": "PROP_COUNT_CONFLICT", "level": "error", "detail": detail})
+            # 左右手级别校验：仅当动作、开场、目标三处都明确到同一只手时可判定
+            hand = event.get("source_hand" if sign < 0 else "target_hand")
+            hand_label = {"left": "左手", "right": "右手"}.get(hand or "", "")
+            start_hand = _char_hand(start_by_char, char, hand, noun)
+            end_hand = _char_hand(end_by_char, char, hand, noun)
+            if start_hand is None or end_hand is None:
+                continue
+            expected_hand = start_hand + sign * qty
+            if expected_hand < 0 or end_hand == expected_hand:
+                continue
+            detail = (
+                f"道具『{noun}』左右手归属冲突：{char} {hand_label}开场持有 {start_hand:g}，"
+                f"动作{'递出' if sign < 0 else '接收'} {qty:g} 后应为 {expected_hand:g}，"
+                f"但目标状态写的是 {end_hand:g}"
+            )
+            if detail not in seen:
+                seen.add(detail)
+                issues.append({"code": "PROP_COUNT_CONFLICT", "level": "error", "detail": detail})
+
+    # 无任何数量事件时，数量不允许自行变化（仅对项目内已登记道具判定，避免把环境物当道具）
+    if not any(e.get("quantity") for e in events):
+        for char, (start_total, _start_hands) in start_by_char.items():
+            end_piece = end_by_char.get(char)
+            if end_piece is None:
+                continue
+            end_total = end_piece[0]
+            for noun, amount in start_total.items():
+                if not _matches_prop(noun, props):
+                    continue
+                key = _match_noun(end_total, noun)
+                if key is None or end_total[key] == amount:
+                    continue
+                detail = (
+                    f"道具『{noun}』数量冲突：开场持有 {amount:g}，目标状态为 "
+                    f"{end_total[key]:g}，但动作时间线没有任何交接/拾取/消耗事件"
+                )
+                if detail not in seen:
+                    seen.add(detail)
+                    issues.append({"code": "PROP_COUNT_CONFLICT", "level": "error", "detail": detail})
+    return issues
+
+
+def check_prev_state_continuity(db: Session, shot: Shot) -> list[str]:
+    """下一镜开场状态与上一镜末态的文本对账（warn 级，不阻断）。
+
+    尾帧是图片，无法直接读取画面中的道具数量；这里以上一镜 end_state 的文本作为
+    「实际尾帧状态」代理，发现数量/持有关系不一致时提示人工确认，而不是静默放行。
+    """
+    from app.services.shot_chain import previous_shot
+
+    prev = previous_shot(db, shot)
+    if prev is None or prev.scene_id != shot.scene_id or not prev.last_frame_asset_id:
+        return []
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return []
+    names = sorted(_character_names(db, scene.project_id))
+    prev_end = _state_holding(prev.end_state, names)
+    cur_start = _state_holding(shot.start_state, names)
+    if not prev_end or not cur_start:
+        return []
+    props = set(_prop_names(db, scene.project_id))
+    warnings: list[str] = []
+    for char, (prev_total, _hands) in prev_end.items():
+        cur_piece = cur_start.get(char) or (cur_start.get(None) if None in cur_start else None)
+        if cur_piece is None:
+            continue
+        cur_total = cur_piece[0]
+        for noun, amount in prev_total.items():
+            if not _matches_prop(noun, props):
+                continue
+            key = _match_noun(cur_total, noun)
+            if key is None:
+                warnings.append(
+                    f"上一镜末帧中『{noun}』数量为 {amount:g}，本镜开场状态未提及该道具，"
+                    f"请确认是否被遗漏或已在剧情中放下"
+                )
+            elif cur_total[key] != amount:
+                warnings.append(
+                    f"上一镜末帧中『{noun}』数量为 {amount:g}，本镜开场为 {cur_total[key]:g}，"
+                    f"疑似跨镜连续性不一致，请人工确认"
+                )
+    # 相同道具/数量只提示一次
+    return list(dict.fromkeys(warnings))
+
+
+# ── 提示词结构检查（warn 级，不阻断）────────────────────────────
+# 手工维护的长模板经常留下空标题或断段（实测第 1 集第 5 镜出现空的「【七、」），
+# 这类残缺不会直接导致画面错误，但会让后续模型误判分段职责，先提示再人工/LLM 修。
+_NUMBERED_HEADING_RE = re.compile(r"^([一二三四五六七八九十]+)、")
+_HEADING_RE = re.compile(r"^\s*【([^】]{0,40})(】?)")
+
+
+def check_prompt_structure(prompt: str) -> list[str]:
+    """检查编号分段标题是否残缺或为空；只返回提示，不参与阻断。"""
+    warnings: list[str] = []
+    lines = (prompt or "").split("\n")
+    for index, line in enumerate(lines):
+        match = _HEADING_RE.match(line)
+        if not match:
+            continue
+        title = match.group(1).strip()
+        if not _NUMBERED_HEADING_RE.match(title):
+            continue
+        if not match.group(2):
+            warnings.append(f"分段标题『{line.strip()[:24]}』缺少结束括号或标题被截断")
+            continue
+        cursor = index + 1
+        while cursor < len(lines) and not lines[cursor].strip():
+            cursor += 1
+        if cursor >= len(lines) or _HEADING_RE.match(lines[cursor]):
+            warnings.append(f"分段『【{title}】』没有任何内容")
+    return list(dict.fromkeys(warnings))
 
 
 _CLIP_SYSTEM = """你是分镜视频提示词质检员。视频提示词用于把已确认的分镜图延续成动态镜头。给定镜头信息、分镜图提示词、资产清单与待修正问题，输出修正后的完整视频提示词。
@@ -366,7 +809,7 @@ _CLIP_SYSTEM = """你是分镜视频提示词质检员。视频提示词用于�
 2. 道具连续性：分镜图中的道具必须出现，持有者与位置连续，不得凭空消失或复制；
 3. 首帧衔接：依赖上一镜末帧时，开场状态必须描述如何接上；
 4. 动作与景别：特写/近景不得出现跑出画面等全身大幅位移；
-5. 时长与对白：保持原时长与对白文本不变。
+5. 时长与对白：保持原时长与对白文本不变；「对白与声音」段只保留 `<d>[Chinese] 台词原文</d>` 形式，禁止出现“台词：”“对白：”“第N段”等标签，环境声/音乐描述留在 <d> 外。
 
 只输出 JSON：{"ok": true/false, "issues": [{"code": "...", "detail": "..."}], "fixed_prompt": "完整视频提示词，无问题或无法修正时为空字符串"}。
 允许整段重写，但必须保留：任务抬头、镜头编号、剧情与动作、对白、时长、参考图标签格式（如 <Picture 1>）。"""
@@ -425,15 +868,40 @@ def llm_audit_clip_prompt(
 
 
 def apply_clip_qc(db: Session, shot: Shot, prompt: str, *, with_llm: bool = True) -> tuple[str, dict[str, Any]]:
-    """出视频前质检：确定性疑点 → LLM 整段重写（带缓存）。返回 (提示词, 质检快照)。"""
+    """出视频前质检：确定性疑点 → LLM 整段重写（带缓存）。返回 (提示词, 质检快照)。
+
+    道具数量/持有关系冲突（PROP_COUNT_CONFLICT）属于结构化错误：
+    改文案无法修复，直接阻断提交并给出可定位到镜头字段的原因。
+    """
     issues = check_clip_prompt(db, shot, prompt)
     meta: dict[str, Any] = {
         "stage": "clip",
         "rules_version": CLIP_QC_RULES_VERSION,
+        "prop_count_rules_version": PROP_COUNT_QC_VERSION,
         "issues": issues,
+        "continuity_warnings": check_prev_state_continuity(db, shot),
+        "structure_warnings": check_prompt_structure(prompt),
         "rewritten": False,
     }
+    hard = [i for i in issues if i.get("level") == "error"]
+    if hard:
+        db.info["prompt_qc_last"] = meta
+        raise errors.AppError(
+            "PROP_COUNT_CONFLICT",
+            "；".join(i["detail"] for i in hard)
+            + "。请先修正分镜的开场状态、动作时间线与目标状态后重试",
+            409,
+            issues=hard,
+        )
     if not issues:
+        db.info["prompt_qc_last"] = meta
+        return prompt, meta
+    # 已是 H3 三段式的提示词（通常是用户在详情页手工编辑的）禁止整段重写：
+    # LLM 重写会丢掉 overall_soundscape/non_diegetic_music 并改动台词，
+    # 等于用旧值覆盖用户本次提交的内容；格式问题由 to_h3_clip_prompt 收敛
+    if "integrated_multimodal_description:" in (prompt or ""):
+        meta["unresolved"] = [i["detail"] for i in issues]
+        meta["rewrite_skipped"] = "h3_prompt_protected"
         db.info["prompt_qc_last"] = meta
         return prompt, meta
     key = _clip_cache_key(shot, prompt)

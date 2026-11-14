@@ -7,13 +7,14 @@ import {
   NInput, NTooltip, NCheckbox, NModal, NRadioGroup, NRadio, NSelect, NProgress, NSwitch, useMessage,
 } from 'naive-ui'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots, updateShot } from '@/api/script'
-import { generateShot, generateProjectShots, regenerateShotClip } from '@/api/storyboard'
+import { generateShot, generateProjectShots } from '@/api/storyboard'
 import { listJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import {
   fetchRegenerateConfig,
   fetchRegenerateWorkspace,
   saveRegenerateWorkspace,
+  submitRegenerateWorkspace,
   type WorkspaceReference,
 } from '@/api/regeneration'
 import { listWorkflows } from '@/api/workflows'
@@ -23,7 +24,6 @@ import type { Scene, Shot, ShotKind } from '@/types/script'
 import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
 import ShotAudioPanel from '@/components/ShotAudioPanel.vue'
-import RegenerateWorkbench from '@/components/RegenerateWorkbench.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -95,9 +95,8 @@ const generateMutation = useMutation({
 function handleGenerateFromDrawer(target: 'keyframe' | 'clip') {
   if (!activeShot.value) return
   const params: Record<string, string> = {}
-  if (target === 'keyframe') {
-    if (editImagePrompt.value) params.prompt = editImagePrompt.value
-  } else {
+  // 分镜图提示词不再在视频看板编辑，生成分镜图时使用镜头自身的 image_prompt
+  if (target === 'clip') {
     if (editVideoPrompt.value) params.prompt = editVideoPrompt.value
     // 负向提示词仅在当前工作流声明支持时传入，避免向不支持的节点强塞参数
     if (negativeSupported.value && editNegativePrompt.value.trim()) {
@@ -110,21 +109,26 @@ function handleGenerateFromDrawer(target: 'keyframe' | 'clip') {
   })
 }
 
-// --- 重新生成分镜视频：覆盖原视频 + 取消该镜头历史任务（历史任务取消后不再占用 ComfyUI 资源） ---
-const showRegenClipModal = ref(false)
-const showRegenWorkbench = ref(false)
+// --- 重新生成分镜视频：直接复用详情页 H3 提示词与参考图，生成的视频替换原视频 ---
+const directRegenLoading = ref(false)
 
 // --- 镜头详情内嵌参考图绑定管理 ---
 const refBindingsLoading = ref(false)
 const refBindingsSaving = ref(false)
 const workspaceBindings = ref<WorkspaceReference[]>([])
 const workspaceSlots = ref<{ param: string; node_id?: string | null; input_key?: string | null; image_no?: number | null; required?: boolean | null }[]>([])
+const chainFrameStatus = ref<'ready' | 'missing' | 'not_applicable' | null>(null)
 
 async function loadRefBindings(shotId: string) {
   refBindingsLoading.value = true
   try {
     const ws = await fetchRegenerateWorkspace(shotId, 'clip')
     workspaceBindings.value = ws.references ?? []
+    chainFrameStatus.value = ws.chain_frame?.status ?? null
+    // 档位跟随该镜头实际使用的工作流，避免打开详情后被默认档位覆盖
+    const wfName = ws.workflow?.name ?? ''
+    const tier = (['fast_5s', 'std_5s', 'quality_10s'] as const).find((t) => wfName.endsWith(t))
+    if (tier) clipTier.value = tier
     workspaceSlots.value = (ws.available_slots ?? []).map((s) => ({
       param: s.param,
       node_id: s.node_id,
@@ -135,6 +139,7 @@ async function loadRefBindings(shotId: string) {
   } catch {
     workspaceBindings.value = []
     workspaceSlots.value = []
+    chainFrameStatus.value = null
   } finally {
     refBindingsLoading.value = false
   }
@@ -190,6 +195,12 @@ const shotAssetOptions = computed(() => {
   if (activeShot.value?.current_assets?.keyframe?.asset_id) {
     opts.push({ label: '本镜分镜图', value: activeShot.value.current_assets.keyframe.asset_id })
   }
+  // 已绑定但不在上述选项里的资产（如上一镜尾帧）也要有可读名称，否则选择框只显示资产 ID
+  for (const ref of workspaceBindings.value) {
+    if (ref.asset_id && ref.asset_name && !opts.some((o) => o.value === ref.asset_id)) {
+      opts.push({ label: ref.asset_name, value: ref.asset_id })
+    }
+  }
   return opts
 })
 
@@ -229,65 +240,62 @@ const clipActionIsRegenerate = computed(() => {
 const clipActionLabel = computed(() =>
   clipActionIsRegenerate.value ? '重新生成' : '生成视频',
 )
-const regenerateClipMutation = useMutation({
-  mutationFn: (params: { shotId: string; payload: GenerateShotPayload }) =>
-    regenerateShotClip(params.shotId, params.payload),
-  onSuccess: (res: any) => {
-    const cancelled: string[] = res?.cancelled_job_ids ?? []
-    message.success(
-      cancelled.length
-        ? `已提交重新生成，原视频将被覆盖，已取消 ${cancelled.length} 个历史任务`
-        : '已提交重新生成，原视频将被覆盖',
-    )
+/**
+ * 重新生成视频：不再弹工作台，直接复用详情页当前的 H3 提示词与参考图绑定提交。
+ * 生成成功后由执行器把新视频置为 current，原视频转历史版本。
+ */
+async function regenerateClipDirect() {
+  const shot = activeShot.value
+  if (!shot) return
+  directRegenLoading.value = true
+  try {
+    // 只提交已绑定资产的槽位；用户手动关闭的槽位保留 enabled=false，避免被系统槽位重新补齐
+    const references = workspaceBindings.value
+      .filter((r) => r.asset_id)
+      .map((r) => ({
+        slot_id: r.slot_id,
+        asset_id: r.asset_id,
+        asset_name: r.asset_name ?? null,
+        node_id: r.node_id ?? null,
+        input_key: r.input_key ?? null,
+        image_no: r.image_no ?? null,
+        semantic: r.semantic ?? 'reference',
+        enabled: r.enabled !== false,
+      }))
+    await submitRegenerateWorkspace(shot.id, {
+      target: 'clip',
+      workflow_id: clipWorkflowId.value,
+      final_prompt: editVideoPrompt.value,
+      references,
+      idempotency_key: `clip-rerun-${shot.id}-${Date.now()}`,
+    })
+    message.success('已按当前参数提交重新生成，完成后将替换原视频')
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
     queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
     void trackClipProgress()
-  },
-  onError: (e: any) => {
-    message.error(`重新生成失败: ${e?.message ?? e}`)
-  },
-})
-/** 抽屉内点击视频按钮：未生成过直接提交；已生成/在生成中先弹窗确认覆盖 */
+    // 提交成功（无异常）后稍作停留让提示可见，再关闭镜头详情
+    window.setTimeout(() => {
+      drawerVisible.value = false
+    }, 1000)
+  } catch (e: unknown) {
+    message.error(`重新生成失败: ${(e as Error)?.message ?? e}`)
+  } finally {
+    directRegenLoading.value = false
+  }
+}
+/** 抽屉内点击视频按钮：未生成过直接提交；已生成/在生成中直接按当前提示词与参考图重新生成 */
 function handleClipActionClick() {
   if (!activeShot.value) return
   if (!clipActionIsRegenerate.value) {
     handleGenerateFromDrawer('clip')
     return
   }
-  showRegenWorkbench.value = true
-}
-/** 确认重新生成：携带当前编辑的提示词提交，后端取消历史任务并绑定新任务 */
-function confirmRegenerateClip() {
-  const shot = activeShot.value
-  if (!shot) return
-  const params: Record<string, string> = {}
-  if (editVideoPrompt.value) params.prompt = editVideoPrompt.value
-  if (negativeSupported.value && editNegativePrompt.value.trim()) {
-    params.negative_prompt = editNegativePrompt.value.trim()
-  }
-  showRegenClipModal.value = false
-  regenerateClipMutation.mutate({
-    shotId: shot.id,
-    payload: { target: 'clip', params, workflow_id: clipWorkflowId.value } as GenerateShotPayload,
-  })
+  void regenerateClipDirect()
 }
 
 // --- Drag & drop (same scene only) ---
 const dragShotId = ref<string | null>(null)
 const dragSceneId = ref<string | null>(null)
-
-
-
-function onRegenWorkbenchSubmitted(_job: Record<string, unknown>) {
-  showRegenWorkbench.value = false
-  queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
-  queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
-  void trackClipProgress()
-}
-
-function onRegenWorkbenchClose() {
-  showRegenWorkbench.value = false
-}
 
 function onDragStart(e: DragEvent, shot: Shot, sceneId: string) {
   dragShotId.value = shot.id
@@ -349,14 +357,12 @@ const DEFAULT_NEGATIVE_PROMPT = [
   'text artifacts, random text, watermark, logo, unwanted borders, unwanted black bars',
 ].join(', ')
 
-const editImagePrompt = ref('')
 const editVideoPrompt = ref('')
 /** 负向提示词：默认用统一模板，用户可改；工作流未声明支持时不显示也不传参 */
 const editNegativePrompt = ref(DEFAULT_NEGATIVE_PROMPT)
 /** 当前视频工作流是否支持负向提示词，由重生成配置接口的 negative_prompt.supported 决定 */
 const negativeSupported = ref(false)
-/** 打开抽屉时的原始提示词快照：用于判断用户是否真的改过，避免无改动也触发下游产物失效 */
-const originImagePrompt = ref('')
+/** 打开抽屉时的原始视频提示词：用于判断用户是否真的改过，避免无改动也触发下游产物失效 */
 const originVideoPrompt = ref('')
 
 /** 按 MiniMax H3 提示词规范（I2VA：首帧关键帧全参考）构建默认视频提示词。
@@ -383,13 +389,10 @@ function openDrawer(shot: Shot) {
   activeShot.value = shot
   void loadNegativeSupported(shot)
   void loadRefBindings(shot.id)
-  editImagePrompt.value = shot.image_prompt ?? ''
   editVideoPrompt.value = shot.video_prompt || buildH3VideoPrompt(shot)
   // 负向提示词无独立存储字段，每次打开从系统默认模板起，用户可在本次生成前自行改写
   editNegativePrompt.value = DEFAULT_NEGATIVE_PROMPT
-  // 以打开抽屉时实际展示的内容作为比对基准：
-  // 自动填充的默认视频提示词不算用户改动，避免只改图像提示词时连带作废视频
-  originImagePrompt.value = editImagePrompt.value
+  // 以打开抽屉时实际展示的内容作为比对基准：自动填充的默认视频提示词不算用户改动
   originVideoPrompt.value = editVideoPrompt.value
   drawerVisible.value = true
 }
@@ -691,22 +694,17 @@ async function handleSavePrompts() {
   if (!activeShot.value) return
   const shot = activeShot.value
 
-  const imageChanged = editImagePrompt.value !== originImagePrompt.value
   const videoChanged = editVideoPrompt.value !== originVideoPrompt.value
-  if (!imageChanged && !videoChanged) {
+  if (!videoChanged) {
     message.info('提示词没有改动')
     return
   }
-  // 分镜图提示词变更会让分镜图与视频一并失效，视频提示词变更只影响视频：按实际改动分字段提交
-  const payload: { image_prompt?: string; video_prompt?: string } = {}
-  if (imageChanged) payload.image_prompt = editImagePrompt.value
+  // 视频看板只维护视频提示词：分镜图提示词属于分镜图环节，这里不再提交
+  const payload: { video_prompt?: string } = {}
   if (videoChanged) payload.video_prompt = editVideoPrompt.value
 
-  const hasKeyframe = Boolean(shot.current_assets?.keyframe)
   const hasClip = Boolean(shot.current_assets?.clip)
-  if (imageChanged && (hasKeyframe || hasClip)) {
-    message.warning('分镜图提示词已修改，已有分镜图与视频会被标记为过期，需要重新生成。')
-  } else if (videoChanged && hasClip) {
+  if (videoChanged && hasClip) {
     message.warning('视频提示词已修改，原有视频会被标记为过期，需要重新生成。')
   }
 
@@ -717,18 +715,11 @@ async function handleSavePrompts() {
       shot.video_prompt = payload.video_prompt
       originVideoPrompt.value = payload.video_prompt
     }
-    if (payload.image_prompt !== undefined) {
-      shot.image_prompt = payload.image_prompt
-      originImagePrompt.value = payload.image_prompt
-    }
     const list = shotsMap.value[shot.scene_id]
     const target = list?.find((s) => s.id === shot.id)
-    if (target) {
-      if (payload.video_prompt !== undefined) target.video_prompt = payload.video_prompt
-      if (payload.image_prompt !== undefined) target.image_prompt = payload.image_prompt
-    }
+    if (target && payload.video_prompt !== undefined) target.video_prompt = payload.video_prompt
     message.success('提示词已保存')
-    if (hasKeyframe || hasClip) {
+    if (hasClip) {
       queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
       await loadSceneShots(shot.scene_id, shot.episode)
       const refreshed = shotsMap.value[shot.scene_id]?.find((s) => s.id === shot.id)
@@ -1099,28 +1090,12 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 
             <div class="field">
               <div class="field-head">
-                <label class="field-label">分镜图正向提示词</label>
-                <span class="field-badge">生图</span>
-              </div>
-              <n-input
-                v-model:value="editImagePrompt"
-                type="textarea"
-                :rows="4"
-                placeholder="描述该镜头关键帧的画面：主体、动作、环境、构图、光线与风格"
-              />
-              <div class="field-hint">
-                用于生成本镜分镜图（关键帧）。修改后已有分镜图与视频会一并标记为过期。
-              </div>
-            </div>
-
-            <div class="field">
-              <div class="field-head">
                 <label class="field-label">视频提示词（MiniMax H3）</label>
                 <span class="field-badge">生视频</span>
               </div>
               <n-input v-model:value="editVideoPrompt" type="textarea" :rows="8" />
               <div class="field-hint">
-                首帧指令 + integrated_multimodal_description / overall_soundscape / non_diegetic_music；&lt;Picture 1&gt; 对应本镜分镜图，@角色名/@场景名 自动携带定妆图与基准图。
+                首帧指令 + integrated_multimodal_description / overall_soundscape / non_diegetic_music；串联生成时 &lt;Picture 1&gt; 为上一镜尾帧（本镜首帧），&lt;Picture 2&gt; 为本镜分镜图；@角色名/@场景名 自动携带定妆图与基准图。
               </div>
             </div>
 
@@ -1158,6 +1133,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               <table v-if="workspaceBindings.length" class="ref-binding-table">
                 <thead>
                   <tr>
+                    <th style="width:56px">预览</th>
                     <th style="min-width:90px">槽位</th>
                     <th>节点</th>
                     <th style="min-width:160px">绑定资产</th>
@@ -1167,6 +1143,15 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                 </thead>
                 <tbody>
                   <tr v-for="ref in workspaceBindings" :key="ref.reference_id">
+                    <td>
+                      <img
+                        v-if="ref.asset_id"
+                        class="wb-thumb"
+                        :src="`/api/assets/${ref.asset_id}/file`"
+                        :alt="ref.asset_name ?? ref.slot_id"
+                      />
+                      <span v-else class="wb-mono">—</span>
+                    </td>
                     <td>
                       <span class="wb-slot">{{ ref.slot_id }}</span>
                       <n-tag v-if="ref.required" type="warning" size="tiny">必需</n-tag>
@@ -1208,6 +1193,12 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                 >
                   + {{ s.param }}（Img {{ s.image_no ?? '—' }}）
                 </n-button>
+              </div>
+              <div v-if="chainFrameStatus === 'ready'" class="panel-hint" style="margin-top:6px">
+                串联生成时本镜首帧（&lt;Picture 1&gt;）取上一镜实际尾帧，见上方 ref_prev_frame 绑定。
+              </div>
+              <div v-else-if="chainFrameStatus === 'missing'" class="panel-hint" style="margin-top:6px">
+                串联生成时本镜首帧取上一镜实际尾帧；上一镜尚未生成视频尾帧，请先生成上一镜视频。
               </div>
             </n-spin>
           </section>
@@ -1252,14 +1243,14 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                   <n-button
                     type="primary"
                     :disabled="!readiness.all"
-                    :loading="generateMutation.isPending.value || regenerateClipMutation.isPending.value"
+                    :loading="generateMutation.isPending.value || directRegenLoading"
                     @click="handleClipActionClick"
                   >
                     {{ clipActionLabel }}
                   </n-button>
                 </template>
                 {{ readiness.all
-                  ? (clipActionIsRegenerate ? '重新生成视频：会覆盖原视频并取消该镜头历史任务' : '提交视频生成任务')
+                  ? (clipActionIsRegenerate ? '重新生成视频：使用当前修改后的 H3 提示词、参考图与视频档位（5s/10s）重新生成，完成后替换原视频' : '提交视频生成任务')
                   : '公共资产尚未齐全，暂不能生成视频' }}
               </n-tooltip>
             </div>
@@ -1287,42 +1278,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           </div>
         </div>
         </template>
-    </n-modal>
-    <!-- 重新生成视频确认弹窗：说明会覆盖原视频，确认后取消该镜头历史任务并提交新任务 -->
-    <n-modal
-      v-model:show="showRegenClipModal"
-      preset="dialog"
-      type="warning"
-      title="重新生成视频"
-      positive-text="确认重新生成"
-      negative-text="取消"
-      :loading="regenerateClipMutation.isPending.value"
-      @positive-click="confirmRegenerateClip"
-    >
-      <div style="line-height: 1.7; margin: 8px 0 4px">
-        将使用当前提示词重新生成本镜视频，<b>原视频会被覆盖</b>（旧版本转历史留痕，不物理删除）。
-      </div>
-      <div style="line-height: 1.7; color: #999; font-size: 12px">
-        同时会取消该镜头尚未完成的生成任务，取消后不再占用 ComfyUI 显卡资源，并把这些历史任务从当前任务中移除。
-      </div>
-    </n-modal>
-    <!-- 重新生成工作台：多参考图、角色身份、空间布局、动作时间轴、分层提示词、校验与连续性 -->
-    <n-modal
-      v-model:show="showRegenWorkbench"
-      preset="card"
-      title="重新生成工作台"
-      style="max-width:1080px;width:95vw"
-      :mask-closable="false"
-      @close="onRegenWorkbenchClose"
-    >
-      <RegenerateWorkbench
-        v-if="showRegenWorkbench && activeShot"
-        :shot-id="activeShot.id"
-        :project-id="projectId"
-        target="clip"
-        @submitted="onRegenWorkbenchSubmitted"
-        @close="onRegenWorkbenchClose"
-      />
     </n-modal>
     <!-- 批量出视频方式选择弹窗：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接） -->
     <n-modal
@@ -1942,6 +1897,14 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   border-radius: 3px;
   font-size: 10px;
   color: #666;
+}
+.ref-binding-table .wb-thumb {
+  width: 44px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: #f0f0f0;
+  display: block;
 }
 .wb-add-row {
   display: flex;

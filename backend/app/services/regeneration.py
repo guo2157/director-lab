@@ -99,6 +99,26 @@ def workflow_binds_param(wf: Workflow | None, param: str) -> bool:
     return param in parsed.params and not parsed.errors
 
 
+def tier_generation_params(wf: Workflow | None) -> dict:
+    """取档位工作流自带的画幅与帧数（极速/标准 5s、质量 10s）。
+
+    换档重新生成时必须用新档位的参数，不能沿用上一版任务快照里的
+    width/height/length，否则选了 10s 档位仍按 5s 出片。
+    """
+    if wf is None or not (wf.capabilities or {}).get("tier"):
+        return {}
+    for node in (wf.definition or {}).values():
+        if not isinstance(node, dict) or node.get("class_type") != "MiniMaxH3ReferenceToVideo":
+            continue
+        inputs = node.get("inputs") or {}
+        return {
+            key: inputs[key]
+            for key in ("width", "height", "length")
+            if isinstance(inputs.get(key), int)
+        }
+    return {}
+
+
 def _asset_brief(asset: Asset | None) -> dict | None:
     if asset is None:
         return None
@@ -251,6 +271,108 @@ def build_base_config(db: Session, asset: Asset) -> dict:
     }
 
 
+def build_clip_refs_from_keyframe(db: Session, shot, keyframe: Asset) -> list[dict]:
+    """尚未生成分镜视频时，按视频生成的真实槽位口径构造参考图绑定。
+
+    视频任务实际注入的是：上一镜尾帧（ref_prev_frame）+ 分镜图（ref_image）
+    + 角色定妆图（ref_identity/ref_character_N）+ 道具锚定图（ref_prop），
+    不包含场景基准图。因此这里不能直接复用分镜图任务的参考清单
+    （那是 image_1..7 口径，含场景且没有分镜图本身）。
+    """
+    from app.models import Character, Prop, Scene
+    from app.services.shot_chain import resolve_prev_frame
+    from app.services.shot_refs import collect_shot_characters
+
+    scene = db.get(Scene, shot.scene_id)
+    refs: list[dict] = []
+    # 串联生成时本镜首帧取自上一镜实际尾帧（ref_images.ref_image_0），需在参考图中可见可改
+    frame = resolve_prev_frame(db, shot)
+    if frame is not None:
+        refs.append({
+            "slot_param": "ref_prev_frame",
+            "asset_id": frame["asset_id"],
+            "asset_version": frame["version"],
+            "asset_type": "last_frame",
+            "role": "prev_frame",
+            "required": bool(shot.requires_prev_frame),
+            "file_path": frame["file_path"],
+            "semantic": "frame_constraint",
+            "enabled": True,
+            "asset_name": frame.get("asset_name") or "上一镜尾帧（串联首帧）",
+            "source": "keyframe_fallback",
+        })
+    refs.append({
+        "slot_param": "ref_image",
+        "asset_id": keyframe.id,
+        "asset_version": keyframe.version,
+        "asset_type": keyframe.asset_type,
+        "role": "keyframe",
+        "required": True,
+        "file_path": keyframe.file_path,
+        "semantic": "reference",
+        "enabled": True,
+        "asset_name": keyframe.name or "本镜分镜图",
+        "source": "keyframe_fallback",
+    })
+    if scene is None:
+        return refs
+    char_slots = ["ref_identity"] + [f"ref_character_{i}" for i in range(2, 7)]
+    for index, name in enumerate(collect_shot_characters(db, shot)):
+        if index >= len(char_slots):
+            break
+        char = (
+            db.query(Character)
+            .filter(Character.project_id == scene.project_id, Character.name == name)
+            .first()
+        )
+        if char is None or not char.portrait_asset_id:
+            continue
+        asset = db.get(Asset, char.portrait_asset_id)
+        if asset is None:
+            continue
+        refs.append({
+            "slot_param": char_slots[index],
+            "asset_id": asset.id,
+            "asset_version": asset.version,
+            "asset_type": asset.asset_type,
+            "role": "character",
+            "required": False,
+            "file_path": asset.file_path,
+            "semantic": "reference",
+            "enabled": True,
+            "asset_name": char.name,
+            "source": "keyframe_fallback",
+        })
+    prop_ids = [pid for pid in (shot.props or []) if isinstance(pid, str)]
+    prop_query = db.query(Prop).filter(Prop.project_id == scene.project_id,
+                                       Prop.anchor_asset_id.isnot(None))
+    prop = prop_query.filter(Prop.id.in_(prop_ids)).first() if prop_ids else None
+    if prop is None:
+        # shot.props 可能为空（旧数据未持久化），按正文提及回退，避免道具参考图整体缺失
+        text = f"{shot.video_prompt or ''}\n{shot.image_prompt or ''}"
+        for candidate in prop_query.all():
+            if candidate.name and candidate.name in text:
+                prop = candidate
+                break
+    if prop is not None:
+        asset = db.get(Asset, prop.anchor_asset_id)
+        if asset is not None:
+            refs.append({
+                "slot_param": "ref_prop",
+                "asset_id": asset.id,
+                "asset_version": asset.version,
+                "asset_type": asset.asset_type,
+                "role": "prop",
+                "required": False,
+                "file_path": asset.file_path,
+                "semantic": "reference",
+                "enabled": True,
+                "asset_name": prop.name,
+                "source": "keyframe_fallback",
+            })
+    return refs
+
+
 def _type_matches(role: str, asset_type: str | None) -> bool:
     """参考图资产类型与槽位用途的匹配判定，避免类型错配静默通过。"""
     if not asset_type:
@@ -260,10 +382,12 @@ def _type_matches(role: str, asset_type: str | None) -> bool:
         return asset_type in (role, "keyframe", "asset", "reference")
     if role == "keyframe":
         return asset_type in ("keyframe", "asset")
+    # 尾帧/首帧资产由 shot_chain 从视频抽取并落为 asset_type=last_frame，
+    # 绑定到 ref_prev_frame 时不能按图片类型误判为错配
     if role == "prev_frame":
-        return asset_type in ("clip", "keyframe", "frame", "asset")
+        return asset_type in ("clip", "keyframe", "frame", "last_frame", "asset")
     if role in ("first_frame", "end_frame"):
-        return asset_type in ("clip", "keyframe", "frame", "asset")
+        return asset_type in ("clip", "keyframe", "frame", "last_frame", "asset")
     return True
 
 
@@ -454,7 +578,10 @@ def assemble_snapshot(
     base_workflow = dict(base_config.get("workflow") or {})
 
     if mode == MODE_INHERIT_PROMPT_ONLY:
-        final_refs = base_refs
+        # 沿用原配置时参考图仍需以调用方传入的实时系统槽位为准：
+        # 历史快照里的文件路径可能已随尾帧/分镜图改名失效，反查资产为空，
+        # 直接用 base_refs 会报『槽位缺少 asset_id』
+        final_refs = base_refs if refs is None else refs
         final_params = base_params
         final_workflow = base_workflow
     elif mode == MODE_MODIFY_REFS:

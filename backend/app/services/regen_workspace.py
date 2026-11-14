@@ -225,6 +225,144 @@ def build_references(
     return refs
 
 
+def system_clip_refs(db: Session, shot: Shot) -> list[dict]:
+    """clip 目标的系统参考（快照口径）：本镜分镜图与上一镜实际尾帧。
+
+    两类语义必须区分：ref_image 是本镜构图参考，ref_prev_frame 是上一镜尾帧约束。
+    """
+    from app.services.shot_chain import resolve_prev_frame
+
+    def _current(asset_type: str) -> Asset | None:
+        return (
+            db.query(Asset)
+            .join(Job, Job.id == Asset.source_job_id)
+            .filter(
+                Job.shot_id == shot.id,
+                Job.status == "succeeded",
+                Asset.asset_type == asset_type,
+                Asset.validity == "current",
+            )
+            .order_by(Asset.version.desc())
+            .first()
+        )
+
+    refs: list[dict] = []
+    keyframe = _current("keyframe")
+    if keyframe is not None and keyframe.file_path:
+        refs.append({
+            "slot_param": "ref_image",
+            "input_key": "ref_images.ref_image_1",
+            "asset_id": keyframe.id,
+            "asset_version": keyframe.version,
+            "asset_type": keyframe.asset_type,
+            "role": "keyframe",
+            "required": False,
+            "file_path": keyframe.file_path,
+            "semantic": "reference",
+            "enabled": True,
+            "asset_name": keyframe.name or "本镜分镜图",
+        })
+    frame = resolve_prev_frame(db, shot)
+    if frame is not None:
+        refs.append({
+            "slot_param": "ref_prev_frame",
+            "input_key": "ref_images.ref_image_0",
+            "asset_id": frame["asset_id"],
+            "asset_version": frame["version"],
+            "asset_type": "last_frame",
+            "role": "prev_frame",
+            "required": bool(shot.requires_prev_frame),
+            "file_path": frame["file_path"],
+            "semantic": "frame_constraint",
+            "enabled": True,
+            "asset_name": frame.get("asset_name") or "上一镜尾帧（串联首帧）",
+        })
+    return refs
+
+
+# 系统槽位：必须实时解析当前生效产物，不能沿用基础版本任务快照里的旧绑定
+SYSTEM_SLOT_PARAMS = ("ref_prev_frame", "ref_image")
+
+
+def merge_system_refs(existing: list[dict], system_refs: list[dict]) -> list[dict]:
+    """用实时系统参考覆盖同槽位快照绑定，其余槽位保持原顺序。
+
+    ref_prev_frame / ref_image 若实时解析不到（上一镜无尾帧、本镜无分镜图），
+    必须移除旧快照绑定，不能用过期资产顶替。
+    """
+    by_slot = {ref["slot_param"]: ref for ref in system_refs}
+    merged: list[dict] = []
+    for ref in existing:
+        slot = ref.get("slot_param")
+        if slot in by_slot:
+            merged.append(by_slot[slot])
+        elif slot in SYSTEM_SLOT_PARAMS:
+            continue
+        else:
+            merged.append(ref)
+    present = {ref.get("slot_param") for ref in merged}
+    merged.extend(ref for ref in system_refs if ref["slot_param"] not in present)
+    return merged
+
+
+def refresh_system_references(
+    db: Session, shot: Shot, references: list[dict], nodes: dict[str, dict]
+) -> list[dict]:
+    """把工作区参考里的系统槽位刷新为当前生效资产。
+
+    已保存配置（saved）和任务快照都可能指向旧尾帧/旧分镜图，
+    刷新后工作台与镜头、视频详情显示的是同一张图。
+    """
+    by_slot = {ref["slot_param"]: ref for ref in system_clip_refs(db, shot)}
+    refreshed: list[dict] = []
+    for ref in references:
+        slot = ref.get("slot_id")
+        if slot in by_slot:
+            live = by_slot.pop(slot)
+            node = nodes.get(slot) or {}
+            item = dict(ref)
+            item.update({
+                "asset_id": live["asset_id"],
+                "asset_name": live["asset_name"],
+                "asset_type": _asset_kind(live["asset_type"]),
+                "image_url": live["file_path"],
+                "semantic": live["semantic"],
+                "required": live["required"],
+                "enabled": True,
+                "status": "confirmed" if node.get("node_id") else item.get("status", "slot_unmapped"),
+            })
+            refreshed.append(item)
+        elif slot in SYSTEM_SLOT_PARAMS:
+            continue
+        else:
+            refreshed.append(ref)
+    for slot, live in by_slot.items():
+        node = nodes.get(slot) or {}
+        ref_type = _ref_type_for_slot(slot, live.get("role"))
+        refreshed.append({
+            "reference_id": f"ref_{slot}",
+            "slot_id": slot,
+            "node_id": node.get("node_id"),
+            "input_key": node.get("input_key"),
+            "image_no": node.get("image_index"),
+            "reference_type": ref_type,
+            "asset_type": _asset_kind(live["asset_type"]),
+            "asset_id": live["asset_id"],
+            "asset_name": live["asset_name"],
+            "character_id": None,
+            "image_url": live["file_path"],
+            "binding_description": f"{live['asset_name']} 的{REF_TYPE_LABEL.get(ref_type, '参考')}",
+            "identity_constraints": [],
+            "required": live["required"],
+            "enabled": True,
+            "sort_order": -1 if slot == "ref_prev_frame" else 0,
+            "semantic": live["semantic"],
+            "status": "confirmed" if node.get("node_id") else "slot_unmapped",
+        })
+    refreshed.sort(key=lambda r: 0 if r.get("slot_id") == "ref_prev_frame" else 1)
+    return refreshed
+
+
 def build_character_bindings(
     db: Session,
     references: list[dict],
@@ -1052,6 +1190,11 @@ def build_workspace(
         final_prompt = base_prompt or compose_final_prompt(sections)
         parameters = dict(base_config.get("model_params") or {})
         source = "derived"
+
+    if target == "clip":
+        # 系统槽位（上一镜尾帧/本镜分镜图）以当前生效产物为准，
+        # 已保存配置与任务快照里的旧绑定都不可信
+        references = refresh_system_references(db, shot, references, nodes)
 
     validation = validate_workspace(
         db,

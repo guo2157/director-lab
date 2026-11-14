@@ -458,6 +458,112 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
     return bool(result.get("ok"))
 
 
+def _store_shot_keyframe(db: Session, job: Job, shot: Shot, content: bytes, ext: str) -> dict:
+    """分镜图每镜唯一：命名 storyboard_{项目内全局镜号}_img，重新生成原地覆盖。
+
+    与尾帧一致的单资产模型：复用同一 Asset 行（同 id / 同名 / 同文件路径），
+    不再产生历史版本；同镜旧分镜图资产连文件一起清理，保证资产库中
+    每个镜头只有一张 storyboard_N_img，工作台可直接选中。
+    """
+    import os
+
+    from app.models import AssetRef, JobInputRef, ids as id_gen
+    from app.services.shot_chain import shot_global_index
+    from app.services.thumbnail import make_thumb
+
+    name = f"storyboard_{shot_global_index(db, shot)}_img"
+    pic_dir = os.path.join(str(get_settings().media_dir), "storyboards")
+    os.makedirs(pic_dir, exist_ok=True)
+    pic_path = os.path.join(pic_dir, f"{name}.{ext}")
+
+    # 复用本镜当前生效分镜图，其次同名资产，都没有才新建
+    asset = (
+        db.query(Asset)
+        .join(Job, Job.id == Asset.source_job_id)
+        .filter(
+            Job.shot_id == shot.id,
+            Asset.asset_type == "keyframe",
+            Asset.validity == "current",
+        )
+        .order_by(Asset.version.desc())
+        .first()
+    )
+    if asset is None:
+        asset = (
+            db.query(Asset)
+            .filter(
+                Asset.project_id == job.project_id,
+                Asset.asset_type == "keyframe",
+                Asset.name == name,
+            )
+            .first()
+        )
+    if asset is None:
+        asset = Asset(
+            id=id_gen.asset_id(),
+            project_id=job.project_id,
+            asset_type="keyframe",
+            name=name,
+            version=1,
+            validity="current",
+        )
+        db.add(asset)
+        db.flush()
+
+    with open(pic_path, "wb") as f:
+        f.write(content)
+
+    old_path = asset.file_path
+    asset.name = name
+    asset.file_path = pic_path
+    asset.source_job_id = job.id
+    asset.validity = "current"
+    asset.version = 1
+    asset.quality_status = None
+    asset.updated_at = _now().replace(tzinfo=None)
+    asset.input_snapshot = job.input_snapshot
+    try:
+        asset.thumb_path = make_thumb(pic_path, name)
+    except Exception:  # noqa: BLE001
+        asset.thumb_path = None
+    if old_path and old_path != pic_path and os.path.exists(old_path):
+        try:
+            os.remove(old_path)
+        except OSError:
+            pass
+    db.flush()
+
+    # 清理同镜历史分镜图，只保留当前这一张
+    duplicates = (
+        db.query(Asset)
+        .join(Job, Job.id == Asset.source_job_id)
+        .filter(
+            Job.shot_id == shot.id,
+            Asset.asset_type == "keyframe",
+            Asset.id != asset.id,
+        )
+        .all()
+    )
+    for dup in duplicates:
+        db.query(AssetRef).filter(AssetRef.asset_id == dup.id).delete(synchronize_session=False)
+        db.query(JobInputRef).filter(JobInputRef.asset_id == dup.id).delete(synchronize_session=False)
+        dup_path = dup.file_path
+        db.delete(dup)
+        if dup_path and dup_path != pic_path and os.path.exists(dup_path):
+            try:
+                os.remove(dup_path)
+            except OSError:
+                pass
+    db.flush()
+
+    return {
+        "asset_id": asset.id,
+        "asset_type": "keyframe",
+        "out_name": "cover",
+        "file_path": pic_path,
+    }
+
+
 def _release_chained_next(db: Session, job: Job) -> None:
     """链式生成（chained）：本任务成功后释放链上下一个 chained_wait 任务。
 
@@ -880,6 +986,13 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                         "file_path": filepath,
                                     })
                                     continue
+                                if asset_type == "keyframe" and job.shot_id:
+                                    _resume_shot = db.get(Shot, job.shot_id)
+                                    if _resume_shot is not None:
+                                        created_assets.append(
+                                            _store_shot_keyframe(db, job, _resume_shot, content, ext)
+                                        )
+                                        continue
                                 asset_id = id_gen.asset_id()
                                 # 版本号必须在产物类型与实体归属确定之后再计算，
                                 # 否则会用到尚未赋值的类型变量，且实体类资产无法按名称隔离版本
@@ -1485,6 +1598,11 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     "out_name": out_name, "file_path": filepath,
                 })
                 continue
+            if asset_type == "keyframe" and job.shot_id:
+                _shot = db.get(Shot, job.shot_id)
+                if _shot is not None:
+                    created_assets.append(_store_shot_keyframe(db, job, _shot, rec["content"], ext))
+                    continue
             version = _next_asset_version(db, job, asset_type, _entity_asset_name)
             # 分镜图重新生成直接覆盖当前版本，不保留候选版本概念
             _supersede_previous_versions(db, job, asset_type, _entity_asset_name)

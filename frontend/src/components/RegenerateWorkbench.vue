@@ -27,6 +27,9 @@ const props = defineProps<{
   shotId: string
   projectId: string
   target: 'keyframe' | 'clip'
+  /** 镜头所属集号与全片镜号：用于顶部标明本次重新生成对应第几镜 */
+  shotEpisode?: number
+  shotGlobalSeq?: number
 }>()
 
 const emit = defineEmits<{
@@ -46,10 +49,13 @@ const assets = ref<Asset[]>([])
 const validationResult = ref<{ valid: boolean; errors: ConsistencyIssue[]; warnings: ConsistencyIssue[] } | null>(null)
 const pendingKey = ref<string | null>(null)
 
-/** 可绑定的参考图资产：角色/场景/道具/参考图/分镜图 */
+/** 可绑定的参考图资产：角色/场景/道具/参考图/分镜图/尾帧
+ * last_frame 必须包含：串联生成时 ref_prev_frame 绑定的是上一镜尾帧资产，
+ * 过滤掉会导致下拉框匹配不到当前值，看起来像“资产匹配错误”。
+ */
 const assetOptions = computed(() =>
   assets.value
-    .filter((a) => ['character', 'scene', 'prop', 'reference', 'keyframe'].includes(a.asset_type))
+    .filter((a) => ['character', 'scene', 'prop', 'reference', 'keyframe', 'last_frame'].includes(a.asset_type))
     .map((a) => ({ label: `${a.name ?? a.id}（${a.asset_type} v${a.version}）`, value: a.id })),
 )
 
@@ -63,6 +69,25 @@ const continuity = computed(() => workspace.value?.continuity)
 const validation = computed(() => workspace.value?.validation)
 const historyCompat = computed(() => workspace.value?.history_compat)
 const capabilities = computed(() => workspace.value?.capabilities)
+
+/** 顶部镜头标识：优先用调用方传入的集号/全片镜号，缺失时回退工作台返回的镜头信息 */
+const shotHeading = computed(() => {
+  const meta = (workspace.value?.shot ?? {}) as Record<string, unknown>
+  const episode = props.shotEpisode ?? (meta.episode as number | undefined)
+  const seq = props.shotGlobalSeq ?? (meta.seq as number | undefined)
+  if (episode == null || seq == null) return '本镜重新生成'
+  return `第 ${episode} 集 · 第 ${seq} 镜（全片第 ${seq} 镜）重新生成`
+})
+
+function refThumbUrl(ref: WorkspaceReference) {
+  if (ref.image_url) return ref.image_url
+  return ref.asset_id ? `/api/assets/${ref.asset_id}/file` : ''
+}
+
+const SEMANTIC_LABELS: Record<string, string> = {
+  reference: '参考图',
+  frame_constraint: '帧约束',
+}
 
 /** 已绑定槽位集合，用于新增时排除重复 */
 const boundSlots = computed(() => new Set(references.value.map((r) => r.slot_id)))
@@ -190,7 +215,7 @@ async function handleSubmit() {
       ...buildPayload(),
       idempotency_key: pendingKey.value,
     })
-    message.success('已提交生成，结果先落候选版本，需确认后才会替换当前视频')
+    message.success('已提交生成，新视频将直接替换当前视频')
     emit('submitted', job as unknown as Record<string, unknown>)
     pendingKey.value = null
     await loadAll()
@@ -220,6 +245,58 @@ function _posLabel(p: Record<string, any> | null | undefined) {
     <div v-if="loading" class="wb-loading">正在读取工作台…</div>
 
     <template v-else-if="workspace">
+      <!-- 镜头标识 + 视频提示词与参考图：与「查看详情」保持同一阅读顺序 -->
+      <div class="wb-shot-head">
+        <div class="wb-shot-title">{{ shotHeading }}</div>
+        <div class="wb-shot-meta">
+          <n-tag size="small" :bordered="false">{{ workspace.workflow?.name || '当前视频工作流' }}</n-tag>
+          <n-tag size="small" type="warning" :bordered="false">提交后直接替换当前视频</n-tag>
+        </div>
+      </div>
+
+      <div class="wb-detail-grid">
+        <section class="wb-panel">
+          <div class="wb-section-title">视频提示词（MiniMax H3）</div>
+          <n-input
+            v-model:value="workspace.final_prompt"
+            type="textarea"
+            :autosize="{ minRows: 8, maxRows: 16 }"
+            placeholder="此处为实际提交给工作流的完整提示词"
+          />
+          <div class="wb-hint-line">
+            首帧指令 + integrated_multimodal_description / overall_soundscape / non_diegetic_music；串联生成时
+            &lt;Picture 1&gt; 为上一镜尾帧（本镜首帧），&lt;Picture 2&gt; 为本镜分镜图。
+          </div>
+        </section>
+
+        <section class="wb-panel">
+          <div class="wb-section-title">参考图</div>
+          <div class="wb-ref-list">
+            <div v-for="ref in references" :key="ref.reference_id" class="wb-ref-card">
+              <img
+                v-if="refThumbUrl(ref)"
+                class="wb-ref-thumb"
+                :src="refThumbUrl(ref)"
+                :alt="ref.asset_name ?? ref.slot_id"
+              />
+              <div v-else class="wb-ref-thumb wb-ref-empty">未绑定资产</div>
+              <div class="wb-ref-meta">
+                <div class="wb-ref-slot">
+                  {{ ref.slot_id }}
+                  <span v-if="ref.image_no != null" class="wb-hint">· Img{{ ref.image_no }}</span>
+                </div>
+                <div class="wb-ref-name">{{ ref.asset_name ?? '—' }}</div>
+                <n-tag size="tiny" :type="ref.semantic === 'frame_constraint' ? 'warning' : 'default'">
+                  {{ SEMANTIC_LABELS[ref.semantic ?? 'reference'] ?? '参考图' }}
+                </n-tag>
+              </div>
+            </div>
+            <div v-if="!references.length" class="wb-empty">当前没有绑定任何参考图</div>
+          </div>
+          <div class="wb-hint-line">需要更换资产或增删槽位时，在下方「参考图与槽位」中调整。</div>
+        </section>
+      </div>
+
       <!-- 状态条 -->
       <div class="wb-status">
         <n-tag :type="workspace.source === 'saved' ? 'success' : 'default'" size="small">
@@ -432,7 +509,7 @@ function _posLabel(p: Record<string, any> | null | undefined) {
           :disabled="validationResult ? !validationResult.valid : false"
           @click="handleSubmit"
         >
-          提交生成（先落候选）
+          提交生成（直接替换）
         </n-button>
       </div>
     </template>
@@ -467,4 +544,18 @@ function _posLabel(p: Record<string, any> | null | undefined) {
 .wb-props { margin-top: 10px; }
 .wb-prop-item { font-size: 12px; color: #666; line-height: 1.8; }
 .wb-hint { font-size: 11px; color: #999; font-weight: normal; }
+/* 顶部镜头标识与提示词/参考图概览：与镜头详情同序（先提示词后参考图） */
+.wb-shot-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 2px 0 4px; border-bottom: 1px solid #f0f0f0; }
+.wb-shot-title { font-size: 15px; font-weight: 600; color: #1f2937; }
+.wb-shot-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.wb-detail-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 900px) { .wb-detail-grid { grid-template-columns: minmax(0, 1fr); } }
+.wb-panel { border: 1px solid #f0f0f0; border-radius: 6px; padding: 10px 12px; background: #fcfcfc; }
+.wb-ref-list { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow: auto; }
+.wb-ref-card { display: flex; gap: 10px; align-items: center; background: #fff; border: 1px solid #f0f0f0; border-radius: 6px; padding: 6px; }
+.wb-ref-thumb { width: 72px; height: 48px; object-fit: cover; border-radius: 4px; background: #f5f5f5; flex: none; }
+.wb-ref-empty { display: flex; align-items: center; justify-content: center; color: #bbb; font-size: 11px; text-align: center; }
+.wb-ref-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wb-ref-slot { font-family: monospace; font-size: 12px; color: #555; }
+.wb-ref-name { font-size: 12px; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

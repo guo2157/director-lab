@@ -179,7 +179,7 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 
 ════ 七、提示词字段 ════
 27. image_prompt 必须按结构化分段模板输出（PROMPTS.md §5.1），固定分段依次为：任务（任务类型，如多参考图人物一致性生成）、参考图职责（只描述实际注入的参考图：出场角色定妆图在前、所属场景基准图在后，逐行对应；不描述道具参考图，道具写进目标画面的画面描述）、美术风格（项目主视觉风格原文，全图统一，不改写）、目标画面（主体、动作、构图、景别、光线、质感，一段连续描述）、必须保持（跨图一致性 3-6 项，聚焦身份与外观）、允许变化（可省略）、禁止（人物畸形、换脸、无关元素、水印等，逐项）、输出（产物形态与清晰度）。禁止输出无分段的自由文本。
-28. video_prompt 必须按状态衔接结构模板输出（PROMPTS.md §5.2），固定分段依次为：任务（生成方式 T2VA/I2VA/Ref2VA 与镜号）、参考图职责（按连线顺序以 <Picture N> 语法引用：非首镜为 <Picture 1> 上一镜头尾帧、<Picture 2> 当前镜头分镜图；每集首镜无上一镜头尾帧，仅引用 <Picture 1>）、美术风格（项目主视觉风格原文）、身份约束、开场状态（六项枚举，与 start_state 同源）、剧情与动作（本镜剧情一句话、人物动作按 beats 逐拍、镜头运动与 camera_movement 一致、画面衔接说明）、目标状态（六项枚举，与 end_state 同源）、必须保持（3-6 项）、允许变化（可省略）、禁止、对白与声音、输出（时长按 duration、画幅与质量要求）。禁止输出无分段的自由文本。
+28. video_prompt 必须按状态衔接结构模板输出（PROMPTS.md §5.2），固定分段依次为：任务（生成方式 T2VA/I2VA/Ref2VA 与镜号）、参考图职责（按连线顺序以 <Picture N> 语法引用：非首镜为 <Picture 1> 上一镜头尾帧、<Picture 2> 当前镜头分镜图；每集首镜无上一镜头尾帧，仅引用 <Picture 1>）、美术风格（项目主视觉风格原文）、身份约束、开场状态（六项枚举，与 start_state 同源）、剧情与动作（本镜剧情一句话、人物动作按 beats 逐拍、镜头运动与 camera_movement 一致、画面衔接说明）、目标状态（六项枚举，与 end_state 同源）、必须保持（3-6 项）、允许变化（可省略）、禁止、对白与声音、输出（时长按 duration、画幅与质量要求）。其中「对白与声音」段只写播报内容：台词逐句写成 `<d>[Chinese] 台词原文</d>`，环境声与音乐另起一句；禁止出现“台词：”“对白：”“第1段”等标签，`</d>` 之外禁止出现“语气温和”“语气轻快”等表演提示，情绪只写进 dialogue_segments.emotion 与画面表情描述，否则 H3 会把提示词当台词念出来。禁止输出无分段的自由文本。
 
 ════ 八、@引用规则 ════
 29. 提示词中引用角色、场景、道具一律写成 @名称，名称必须与本 JSON 中 name 或 title 完全一致，包括中间间隔号。
@@ -444,7 +444,7 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
 # 非首镜版：<Picture 1> 上镜尾帧 + <Picture 2> 当前分镜图
 _register_default("video_prompt_first", """任务：Ref2VA 第 {episode}-{seq} 镜
 
-【<Picture 1>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。
+【<Picture 1>：当前镜头分镜图】当前镜头的构图、人物站位与画面内容基准（Ref2VA 参考图，不保证作为强制首帧）：景别、构图、机位、人物外貌与关键动作。
 
 【身份约束】参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。
 
@@ -465,7 +465,7 @@ _register_default("video_prompt_first", """任务：Ref2VA 第 {episode}-{seq} �
 2. 场景布局与光线色调连续
 3. 道具位置与持有状态连续
 
-禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。
+禁止：换脸、服装跳变、道具消失、多余肢体、文字水印、上一镜画面叠加、双重曝光、叠化、半透明虚影/残影/重影。
 
 对白与声音：{sound}
 
@@ -473,9 +473,9 @@ _register_default("video_prompt_first", """任务：Ref2VA 第 {episode}-{seq} �
 
 _register_default("video_prompt_body", """任务：Ref2VA 第 {episode}-{seq} 镜
 
-【<Picture 1>：上一镜头尾帧】本镜头开始时的连续状态基准：人物位置、站姿、朝向、表情、视线、道具与空间关系。
+【<Picture 1>：上一镜头尾帧】仅用于时间与空间连续性参考：理解人物位置、站姿、朝向、视线、道具状态与场景空间关系。它不是本镜头需要显示的画面，禁止直接复现、叠加、双重曝光、叠化或保留为背景层，禁止出现半透明人物、残影、虚影或重影。
 
-【<Picture 2>：当前镜头分镜图】本镜头结束时的目标视觉效果基准：景别、构图、机位、人物外貌与关键动作。
+【<Picture 2>：当前镜头分镜图】当前镜头的构图、人物站位与画面内容基准（Ref2VA 参考图，不保证作为强制首帧）：景别、构图、机位、人物外貌与关键动作。
 
 【身份约束】两张参考图中的同一人物必须保持面部特征、发型、服装、体型与配饰一致，不得无故更换外观。
 
@@ -486,7 +486,7 @@ _register_default("video_prompt_body", """任务：Ref2VA 第 {episode}-{seq} �
 本镜头剧情：{shot_purpose}
 人物动作：{beats}
 镜头运动：{camera_movement}
-画面衔接：开场保持 <Picture 1> 的位置、姿态、视线与道具状态，随动作自然过渡到 <Picture 2> 的构图与动作。
+画面衔接：从第一帧起画面必须完整属于当前镜头，只还原 <Picture 2> 的构图、站位与场景；<Picture 1> 只提供位置、姿态、视线与道具状态的连续性，不得原样复现、叠加或作为首帧背景。
 
 目标状态（对齐 <Picture 2>）：
 {end_state}
@@ -496,7 +496,7 @@ _register_default("video_prompt_body", """任务：Ref2VA 第 {episode}-{seq} �
 2. 场景布局与光线色调连续
 3. 道具位置与持有状态连续
 
-禁止：换脸、服装跳变、道具消失、多余肢体、文字水印。
+禁止：换脸、服装跳变、道具消失、多余肢体、文字水印、上一镜画面叠加、双重曝光、叠化、半透明虚影/残影/重影。
 
 对白与声音：{sound}
 
@@ -522,7 +522,16 @@ def _assemble_video_prompt(sh: dict, is_first: bool = False) -> str:
         for i, b in enumerate(beats) if isinstance(b, dict)
     ) or "（无节拍，按剧情自然表演）"
     dialogue = (sh.get("dialogue") or "").strip()
-    sound = "；".join(x for x in [dialogue, sh.get("soundscape"), sh.get("bgm")] if x) or "（无对白，环境声按场景）"
+    segs = [
+        s for s in (sh.get("dialogue_segments") or [])
+        if isinstance(s, dict) and (s.get("text") or "").strip()
+    ]
+    if segs:
+        # H3 只播报 <d> 内的台词，标签写在标签外，避免把“台词/对白”念出来
+        dialogue = " ".join(f"<d>[Chinese] {s['text'].strip()}</d>" for s in segs)
+    elif dialogue:
+        dialogue = f"<d>[Chinese] {dialogue}</d>"
+    sound = "；".join(x for x in [dialogue, sh.get("soundscape"), sh.get("bgm")] if x) or "环境声按场景"
     template_name = "video_prompt_first" if is_first else "video_prompt_body"
     template = get_prompt(template_name)
     return template.format(
@@ -547,9 +556,12 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     分集规划按锁定集规则合并：locked=true 保留原规划，locked=false 用新解析覆盖。
     返回落库统计。调用方负责事务提交。
     """
+    from types import SimpleNamespace
+
     from app.models import AssetRef, Character, Job, Prop, PropShotState, Scene, SceneEpisode, Shot
     from app.models.audio import AudioSegment
     from app.models import ids as id_gen
+    from app.services.prompt_compiler import normalize_clip_dialogue
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -742,6 +754,18 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             _shot_props = sh.get("props")
             if _shot_props is not None and not isinstance(_shot_props, list):
                 _shot_props = None
+            # 视频提示词对白标签统一：解析阶段 LLM 可能仍写「台词：第N段“…”」，
+            # 落库前用与生成阶段同一套规范化逻辑收敛为 (Sx) <d>[Chinese] 台词</d>，
+            # 避免只能等到提交生成时才被改写、页面上看到的仍是旧写法。
+            _video_prompt = sh.get("video_prompt") or _assemble_video_prompt(sh, _is_first_shot)
+            _video_prompt = normalize_clip_dialogue(
+                SimpleNamespace(
+                    dialogue=sh.get("dialogue"),
+                    dialogue_segments=segments,
+                    soundscape=sh.get("soundscape"),
+                ),
+                _video_prompt or "",
+            )
             fields = dict(
                 character_id=char_id,
                 # 剧本标注的本镜涉及道具（道具名数组）：生命周期推导与连续性校验依赖此字段，
@@ -751,7 +775,7 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                 dialogue_segments=segments,
                 shot_kind=sh.get("shot_kind") or "visual",
                 image_prompt=sh.get("image_prompt"),
-                video_prompt=sh.get("video_prompt") or _assemble_video_prompt(sh, _is_first_shot),
+                video_prompt=_video_prompt,
                 shot_type=sh.get("shot_type"), camera_angle=sh.get("camera_angle"),
                 camera_movement=sh.get("camera_movement"), transition=sh.get("transition"),
                 shot_purpose=sh.get("shot_purpose"), emotion=sh.get("emotion") or "neutral",

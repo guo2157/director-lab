@@ -378,6 +378,19 @@ def test_shot_video_blocked_without_confirmed_storyboard(db, tmp_path):
     assert any(i["code"] == "storyboard_not_approved" for i in compiled.blocking_issues)
 
 
+def test_shot_video_without_reference_uses_text_only_skeleton(db, tmp_path):
+    from app.services.prompt_compiler import compile_shot_video
+
+    project = _project(db, tmp_path)
+    scene = _scene(db, project, tmp_path)
+    shot = _shot(db, scene)
+    compiled = compile_shot_video(db, shot.id, workflow=_workflow({"fps": 24}))
+    prompt = compiled.positive_prompt
+    assert "identity is locked by reference images only" not in prompt
+    assert "No reference image is bound to this shot" in prompt
+    assert "No storyboard reference image is bound to this shot" in prompt
+
+
 def test_shot_video_continuity_binds_source_shot_and_file(db, tmp_path):
     from app.services.prompt_compiler import compile_shot_video
 

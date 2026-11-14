@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import string
 from dataclasses import dataclass, field
@@ -896,6 +897,143 @@ def _append_slot(slots: list[dict], declared_param_map: dict, param: str, *,
     })
 
 
+def _norm_path(value: str | None) -> str:
+    if not value:
+        return ""
+    return os.path.normcase(os.path.abspath(str(value)))
+
+
+def _is_continuity_source_frame(db: Session, shot: Shot, file_path: str) -> bool:
+    """跨集首帧来自合成视频解码帧，不登记为 Asset；与连续性记录逐路径比对。"""
+    from app.models import EpisodeContinuity
+
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return False
+    target = _norm_path(file_path)
+    rows = (
+        db.query(EpisodeContinuity)
+        .filter(
+            EpisodeContinuity.project_id == scene.project_id,
+            EpisodeContinuity.episode == shot.episode,
+        )
+        .all()
+    )
+    return any(row.source_frame_path and _norm_path(row.source_frame_path) == target for row in rows)
+
+
+def audit_reference_slots(db: Session, shot: Shot, media: dict | None) -> list[dict]:
+    """生成前校验参考图槽位职责，防止身份图与尾帧图串位（硬门禁）。
+
+    规则（对应 Prompt 参考图职责整改）：
+    - 角色身份槽（ref_identity/ref_character_N…）只能放本镜主体角色的定妆图；
+      非主体角色身份图进入身份槽 → identity_reference_leak，必须阻断；
+    - 时序槽（ref_prev_frame / first_frame）只能放尾帧：上一镜实际尾帧资产，
+      或跨集连续性记录里的末帧解码帧；放分镜图/定妆图同样阻断；
+    - ref_image 只能放当前镜头的分镜图，不允许用其他镜头或其他类型资产顶替。
+
+    返回 blocking_issues 结构；调用方应按硬错误处理，不静默降级。
+    """
+    issues: list[dict] = []
+    if not media or not isinstance(media, dict):
+        return issues
+    scene = db.get(Scene, shot.scene_id)
+    if scene is None:
+        return issues
+    project_id = scene.project_id
+
+    wanted = {_norm_path(path): path for path in media.values() if path}
+    assets: dict[str, Asset] = {}
+    if wanted:
+        for asset in db.query(Asset).filter(Asset.project_id == project_id).all():
+            key = _norm_path(asset.file_path)
+            if key and key in wanted:
+                assets[key] = asset
+    chars = db.query(Character).filter(Character.project_id == project_id).all()
+    portrait_owner = {c.portrait_asset_id: c for c in chars if c.portrait_asset_id}
+    subject_ids = {c.id for c in _shot_characters(db, shot)}
+    from app.services.ref_inject import is_character_slot
+
+    for slot, path in media.items():
+        if not path:
+            continue
+        asset = assets.get(_norm_path(path))
+        if is_character_slot(slot):
+            owner = portrait_owner.get(asset.id) if asset is not None else None
+            if owner is None:
+                issues.append(_issue(
+                    "reference_asset_type_mismatch",
+                    f"槽位 {slot} 只能注入角色定妆图，当前文件不是本项目任何角色的定妆图",
+                    slot_key=slot,
+                ))
+            elif owner.id not in subject_ids:
+                issues.append(_issue(
+                    "identity_reference_leak",
+                    f"角色『{owner.name}』不是本镜主体角色，禁止作为身份参考注入 {slot}",
+                    slot_key=slot, entity_id=owner.id,
+                ))
+        elif slot in ("ref_prev_frame", "first_frame"):
+            if asset is None:
+                if not _is_continuity_source_frame(db, shot, str(path)):
+                    issues.append(_issue(
+                        "reference_asset_type_mismatch",
+                        f"槽位 {slot} 只能放上一镜实际尾帧，当前文件未登记为尾帧资产",
+                        slot_key=slot,
+                    ))
+                continue
+            if asset.asset_type != "last_frame":
+                issues.append(_issue(
+                    "reference_asset_type_mismatch",
+                    f"槽位 {slot} 只能对应尾帧资产，实际为 {asset.asset_type}",
+                    slot_key=slot, asset_id=asset.id,
+                ))
+                continue
+            if slot == "ref_prev_frame":
+                prev = _previous_shot(db, shot)
+                if prev is not None and prev.last_frame_asset_id and asset.id != prev.last_frame_asset_id:
+                    issues.append(_issue(
+                        "reference_slot_mismatch",
+                        "槽位 ref_prev_frame 只能使用上一镜实际尾帧，不能替换为其他尾帧",
+                        slot_key=slot, asset_id=asset.id,
+                    ))
+        elif slot == "ref_image" and asset is not None:
+            if asset.asset_type != "keyframe":
+                issues.append(_issue(
+                    "reference_asset_type_mismatch",
+                    f"槽位 ref_image 应放当前镜头分镜图，实际为 {asset.asset_type}",
+                    slot_key=slot, asset_id=asset.id,
+                ))
+                continue
+            job = db.get(Job, asset.source_job_id) if asset.source_job_id else None
+            if job is not None and job.shot_id and job.shot_id != shot.id:
+                issues.append(_issue(
+                    "reference_slot_mismatch",
+                    "槽位 ref_image 注入了其他镜头的分镜图，构图基准会串镜",
+                    slot_key=slot, asset_id=asset.id, source_shot_id=job.shot_id,
+                ))
+
+    # 同一张图不得承担多个职责：重复绑定会让模型把尾帧当构图/身份用，
+    # 也是「上一镜画面叠加到当前画面」的直接成因。
+    seen_paths: dict[str, str] = {}
+    for slot, path in media.items():
+        if not path:
+            continue
+        key = _norm_path(path)
+        if key in seen_paths:
+            first = seen_paths[key]
+            extra = ""
+            if {first, slot} & {"ref_prev_frame", "ref_image"}:
+                extra = "；上一镜尾帧不能同时充当本镜分镜图，否则会出现叠化/虚影"
+            issues.append(_issue(
+                "reference_slot_duplicate",
+                f"同一张参考图被同时绑定到 {first} 和 {slot}，两个槽位职责不同，请改用对应资产{extra}",
+                slot_key=slot, duplicate_slot=first,
+            ))
+        else:
+            seen_paths[key] = slot
+    return issues
+
+
 def _assert_unique_slots(slots: list[dict], blocking: list[dict]) -> None:
     seen: set[str] = set()
     for slot in slots:
@@ -1300,6 +1438,354 @@ def _build_shot_dialogue(shot: Shot, characters: list) -> str:
     return "no dialogue"
 
 
+# 『对白与声音』分段定位（兼容 【对白与声音】/对白与声音：/【环境声】三种写法）
+_DIALOGUE_SECTION_RE = re.compile(r"【?对白与声音】?\s*[:：]?|【环境声】\s*[:：]?")
+# 声音描述关键词：从历史段落里仅保留这类句子，避免台词与标签一起被朗读
+_SOUND_KEYWORDS = ("环境声", "背景音", "音效", "音乐", "BGM", "bgm", "氛围", "人群声", "现场声", "白噪音")
+# 历史对白写法里的引号台词：“……” / "……"
+_QUOTE_RE = re.compile(r"[“\"]([^”\"]*)[”\"]")
+_NO_VOICE_LINE = "无任何人声对白、旁白或口型动作"
+
+
+def _h3_dialogue_text(shot: Shot) -> str:
+    """按结构化 dialogue_segments 生成 H3 播报串：只有 <d> 内是台词。"""
+    segs = [
+        s for s in (shot.dialogue_segments or [])
+        if isinstance(s, dict) and (s.get("text") or "").strip()
+    ]
+    if not segs:
+        text = (shot.dialogue or "").strip().replace("\n", " ")
+        return f"(S1) says: <d>[Chinese] {text}</d>" if text else ""
+    order: list[str] = []
+    for seg in segs:
+        key = str(seg.get("character_id") or seg.get("speaker_id") or seg.get("speaker") or "")
+        if key and key not in order:
+            order.append(key)
+    parts: list[str] = []
+    for seg in segs:
+        key = str(seg.get("character_id") or seg.get("speaker_id") or seg.get("speaker") or "")
+        index = order.index(key) + 1 if key in order else 1
+        text = seg["text"].strip().replace("\n", " ")
+        # 姓名不写进对白行：H3 会把「姓名 (S1) says:」里的姓名当成台词念出来，
+        # 且容易出现念错音；说话人身份由【身份约束】段承担，这里只保留 (Sx) ID
+        parts.append(f"(S{index}) says: <d>[Chinese] {text}</d>")
+    return " ".join(parts)
+
+
+def _soundscape_hint(block: str, shot: Shot) -> str:
+    """从原『对白与声音』段里取出环境声/音乐描述，取不到就返回空。"""
+    value = (shot.soundscape or "").strip()
+    if value:
+        return value
+    quotes_end = max(block.rfind("”"), block.rfind('"'))
+    tail = block[quotes_end + 1:] if quotes_end >= 0 else block
+    hits = [tail.find(k) for k in _SOUND_KEYWORDS if k in tail]
+    if not hits:
+        return ""
+    text = tail[min(hits):].strip().strip("；;。 ")
+    # “背景音乐”会被“背景音”这类短关键词截成“乐”，长度异常时退回整段
+    return text if len(text) > 2 else tail.strip().strip("；;。 ")
+
+
+def _speaker_order(segs: list[dict]) -> list[str]:
+    order: list[str] = []
+    for seg in segs:
+        key = str(seg.get("character_id") or seg.get("speaker_id") or seg.get("speaker") or "")
+        if key and key not in order:
+            order.append(key)
+    return order
+
+
+def _tagged_dialogue_block(block: str, shot: Shot) -> str:
+    """按结构化台词就地改写历史『对白与声音』段。
+
+    历史写法「@角色 台词：第1段“……”语气……」→
+    「(S1) <d>[Chinese] ……</d>」，只把引号台词换成 <d> 标签并删掉
+    「台词/第N段/@角色」标签；<d> 之外的语气说明由 _strip_tone_after_tag
+    统一剥除，避免被当成台词念出；已是 <d> 格式的段落原样返回，保证幂等。
+    """
+    if "<d>" in block:
+        # 已有 <d> 的旧提示词补上官方 says 语法，保证 <d> 是唯一播报源
+        return _ensure_says_before_tag(block, shot)
+    segs = [
+        s for s in (shot.dialogue_segments or [])
+        if isinstance(s, dict) and (s.get("text") or "").strip()
+    ]
+    if not segs:
+        return ""
+    if not _QUOTE_RE.search(block):
+        return _h3_dialogue_text(shot)
+    order = _speaker_order(segs)
+    rebuilt = block
+    for seg in segs:
+        key = str(seg.get("character_id") or seg.get("speaker_id") or seg.get("speaker") or "")
+        index = order.index(key) + 1 if key in order else 1
+        text = seg["text"].strip().replace("\n", " ")
+        match = _QUOTE_RE.search(rebuilt)
+        tagged = f"(S{index}) says: <d>[Chinese] {text}</d>"
+        if match is None:
+            rebuilt = f"{rebuilt} {tagged}"
+            continue
+        rebuilt = f"{rebuilt[:match.start()]}{tagged}{rebuilt[match.end():]}"
+    # 清掉说话人/段落标签：H3 只认 <d>，标签留在段外会被当作描述甚至念出来
+    rebuilt = re.sub(r"@[^\s，。；、：:]+", "", rebuilt)
+    rebuilt = re.sub(r"(?:台词|对白)\s*[:：]", "", rebuilt)
+    rebuilt = re.sub(r"第[0-9一二三四五六七八九十]+段\s*", "", rebuilt)
+    rebuilt = re.sub(r"^\s*[；;，,。]\s*", "", rebuilt)
+    rebuilt = re.sub(r"[；;]\s*[；;]+", "；", rebuilt)
+    rebuilt = re.sub(r"\s{2,}", " ", rebuilt)
+    return rebuilt.strip().strip("；; ")
+
+
+def _sound_only(block: str) -> str:
+    """无对白镜头：从原段落里剔除“无对白/没有对白”等字样，只保留声音描述。"""
+    text = re.sub(r"^\s*[；;。、,，]*\s*(?:无对白|没有对白|无台词|no\s+dialogue)\s*", "", block, flags=re.I)
+    text = re.sub(r"^(?:对白|台词)\s*[:：]\s*", "", text)
+    return text.strip().strip("；;。 ")
+
+
+# 「【输出】时长5秒，16:9横画幅，24fps」这类技术规格行：画幅、帧数与时长
+# 由工作流节点参数（width/height/length）直接注入，写进提示词反而会与项目
+# 实际画幅冲突（例如项目 9:16 却在提示词里写 16:9），统一剥掉
+_OUTPUT_SPEC_RE = re.compile(r"(?m)^[ \t]*(?:【输出】|输出\s*[:：])[^\n]*\n?")
+
+
+def _strip_output_spec(text: str) -> str:
+    """剥掉提示词里的输出规格行（时长/画幅/帧率），只保留画面与声音描述。"""
+    cleaned = _OUTPUT_SPEC_RE.sub("", text or "")
+    return re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
+
+
+# 对白标签之后的表演提示（如「</d>语气温和；」）会被 H3 当作台词念出来，
+# 语气/情绪只保留在结构化 dialogue_segments.emotion 与画面表情描述里，提示词必须剥掉
+_TONE_AFTER_TAG_RE = re.compile(
+    r"</d>\s*[，,、；;：:]?\s*"
+    r"[（(]?\s*(?:以|用)?(?:语气|语调|口吻|嗓音|声音|语速|情绪)"
+    r"(?:(?!环境声|音效|背景音|人声|旁白)[^；;。\n<）)]){0,24}"
+    r"(?:[）)]?[；;。]|[）)]|(?=\s*(?:\(S\d\)|<d>|环境声|音效|背景音|人声|旁白|$)))"
+)
+
+
+def _strip_tone_after_tag(text: str) -> str:
+    """剥掉 <d> 标签后的语气说明，避免模型把“语气温和”当台词念出来。"""
+    cleaned = _TONE_AFTER_TAG_RE.sub("</d>", text or "")
+    return re.sub(r"</d>[ \t]*?(?=\(S\d\))", "</d> ", cleaned)
+
+
+# H3 官方对白语法是「(S1) says: <d>[Chinese] 台词</d>」；只有 (S1) 而没有 says 时，
+# 模型不把 <d> 当作唯一播报来源，容易自行补台词
+_SPEAKER_BEFORE_TAG_RE = re.compile(r"\((S\d)\)(?:\s*says)?\s*[:：]?\s*(?=<d>)")
+# 对白行里写在 (Sx) 前面的角色姓名会被 H3 当成台词念出来（常念错音），
+# 说话人身份由【身份约束】段承担，这里把姓名剥掉
+_NAME_BEFORE_SPEAKER_RE = re.compile(
+    r"(?:^|(?<=[\s，。；：、]))"
+    r"[^\s，。；：、<>《》()（）]{1,10}[ \t]+"
+    r"(?=\((?:S\d)(?:\s*,\s*S\d)*\)\s*(?:says)?\s*[:：]?\s*<d>)"
+)
+
+
+def _ensure_says_before_tag(text: str, shot: Shot | None = None) -> str:
+    """收敛对白行：「姓名 (Sx) says: <d>」→「(Sx) says: <d>」，姓名不参与播报。"""
+    cleaned = _NAME_BEFORE_SPEAKER_RE.sub("", text or "")
+    return _SPEAKER_BEFORE_TAG_RE.sub(lambda m: f"({m.group(1)}) says: ", cleaned)
+
+
+# 有对白镜头的动作描述里只要出现「抱怨」「开口」「问话」这类说话行为，
+# H3 就会在 <d> 台词之外再自创一段角色台词（用户听到的“莫名其妙台词”）。
+# 说话行为只由 <d> 表达，这些表述统一改写成不带发声的神情/视线描述。
+_SPEECH_ACTION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"问出[^，。；;、\n]{0,10}"), "露出疑惑神情"),
+    (re.compile(r"(?:喃喃自语|自言自语|嘟囔|嘀咕|念叨|吐槽)[^，。；;、\n]{0,10}"), "垂下眼"),
+    (re.compile(r"(?<![不别勿禁没])抱怨[^，。；;、\n]{0,10}"), "面露无奈"),
+    (re.compile(r"(?<![不别勿禁没])(?:扬声|喊叫|大喊|尖叫|嚷)[^，。；;、\n]{0,10}"), "眉头一紧"),
+    (re.compile(r"(?:说道|说出|说：|说:)[^，。；;、\n]{0,10}"), "看向对方"),
+    (re.compile(r"(?<![不别勿禁没])(?:回答|答道|回应|反问)"), "点头"),
+    (re.compile(r"问话"), "蹙眉"),
+    (re.compile(r"(?<![不别勿禁没])开口"), "抿唇"),
+)
+_D_TAG_SPLIT_RE = re.compile(r"(<d>.*?</d>)", re.S)
+
+
+def _despine_speech_actions(text: str) -> str:
+    """改写动作描述里的说话类表述，避免 H3 自创 <d> 之外的台词。
+
+    <d></d> 内的台词原文不动；返回结果可能出现“并面露无奈”这类拼接，
+    因此顺带收敛重复标点。
+    """
+    parts = _D_TAG_SPLIT_RE.split(text or "")
+    for i, part in enumerate(parts):
+        if part.startswith("<d>"):
+            continue
+        for pattern, repl in _SPEECH_ACTION_RULES:
+            part = pattern.sub(repl, part)
+        part = re.sub(r"[，,]{2,}", "，", part)
+        part = re.sub(r"([。；;])[，,、]*", r"\1", part)
+        parts[i] = part
+    return "".join(parts)
+
+
+# 显式约束：H3 只播报 <d> 内的台词且只播一次，<d> 之外不得出现人声
+_DIALOGUE_LOCK_LINE = (
+    "【台词约束】只播报 <d></d> 内的台词，每句仅一次；"
+    "不得新增、改写、重复或自创任何台词、旁白、人声，"
+    "也不得念出角色姓名、称呼或说话人标签，<d> 之外不出现说话声。"
+)
+
+
+def _ensure_dialogue_lock(text: str) -> str:
+    """追加/刷新台词约束行（旧版本留下的约束行就版本地替换，避免重复叠加）。"""
+    if re.search(r"(?m)^[ \t]*【台词约束】", text or ""):
+        return re.sub(r"(?m)^[ \t]*【台词约束】[^\n]*", _DIALOGUE_LOCK_LINE, text, count=1)
+    return f"{text.rstrip()}\n{_DIALOGUE_LOCK_LINE}"
+
+
+# H3 三段式里的声音字段起点：画面描述与声音字段需分开处理
+_SOUNDSCAPE_LINE_RE = re.compile(r"(?m)^[ \t]*(?:overall_soundscape|non_diegetic_music)\s*[:：]")
+
+
+def _split_sound_fields(text: str) -> tuple[str, str]:
+    """按第一个声音字段行把提示词切成（画面描述, 声音字段）。"""
+    match = _SOUNDSCAPE_LINE_RE.search(text or "")
+    if match is None:
+        return text or "", ""
+    return text[:match.start()], text[match.start():]
+
+
+def normalize_clip_dialogue(shot: Shot, prompt: str) -> str:
+    """把分镜视频提示词的『对白与声音』段改成 H3 可播报格式。
+
+    历史模板与解析产物常写成「@角色 台词：第1段“……”语气……」，
+    H3 会把「台词」「对白」「第N段」等标签一起念出来。这里以结构化
+    dialogue_segments 为唯一播报来源重建该段：<d> 内只有台词原文，
+    标签与声音描述留在 <d> 外；<d> 之外的语气说明一并剥除。
+    """
+    text = _ensure_says_before_tag(_strip_tone_after_tag(_strip_output_spec(prompt or "")), shot)
+    if not text.strip():
+        return text
+    dialogue = _h3_dialogue_text(shot)
+    match = _DIALOGUE_SECTION_RE.search(text)
+    if match is None:
+        # 没有分段时：已有 <d> 保持原样；否则把对白单独补成可播报段
+        if "<d>" in text or not dialogue:
+            return text
+        return f"{text}\n\n【对白与声音】{dialogue}"
+    rest = text[match.end():]
+    end = re.search(r"\n\s*(?:【|输出\s*[:：])", rest)
+    block = rest[:end.start()] if end else rest
+    tail_text = rest[end.start():] if end else ""
+    if not dialogue:
+        # 无对白镜头：去掉“无对白/对白”这类字样，只留环境声描述，
+        # 否则 H3 会按对白段的口吻凭空生成人声
+        sound = _sound_only(block) or (shot.soundscape or "").strip()
+        head = text[:match.start()]
+        if not sound:
+            result = f"{head}{tail_text}".strip()
+        else:
+            result = f"{head}【环境声】{sound}{tail_text}"
+        # 再明确禁止人声，避免模型把声音描述理解成对白去配音
+        if "【禁止】" in result:
+            if _NO_VOICE_LINE in result:
+                return result
+            return re.sub(
+                r"(【禁止】)([^\n]*)",
+                lambda m: f"{m.group(1)}{m.group(2).rstrip('。；; ')}；{_NO_VOICE_LINE}",
+                result,
+                count=1,
+            )
+        return f"{result}【禁止】{_NO_VOICE_LINE}。"
+    rebuilt = _tagged_dialogue_block(block, shot)
+    if not rebuilt:
+        sound = _soundscape_hint(block, shot)
+        rebuilt = dialogue
+        if sound:
+            if any(k in sound for k in ("环境声", "背景音", "音效", "音乐", "氛围")):
+                rebuilt = f"{rebuilt} {sound}"
+            else:
+                rebuilt = f"{rebuilt} 环境声：{sound}"
+    return f"{text[:match.start()]}【对白与声音】{rebuilt}{tail_text}"
+
+
+_H3_HEADER = "integrated_multimodal_description:"
+_SOUND_PREFIX_RE = re.compile(r"^(?:环境声|背景音|音效|音乐|BGM)\s*(?:为|是|：|:)?\s*")
+
+
+def _clip_soundscape(block: str, shot: Shot) -> str:
+    """从历史声音段里提取纯音效描述（去掉“环境声：”等前缀）。"""
+    value = (shot.soundscape or "").strip()
+    if value:
+        return value
+    text = block
+    # 段里含 <d> 对白时，声音描述在最后一句台词之后：先丢掉台词与语气，
+    # 否则整段对白会被当成 overall_soundscape 再播报一遍
+    if "</d>" in text:
+        text = text[text.rfind("</d>") + len("</d>"):]
+        # 按整句保留含声音关键词的描述，不能从“音乐”这类词中间截断，
+        # 否则「旋转木马的音乐与转盘机械声」会变成「与转盘机械声」
+        sentences = [s.strip() for s in re.split(r"[。；;！？!?\n]", text) if s.strip()]
+        text = "；".join(s for s in sentences if any(k in s for k in _SOUND_KEYWORDS))
+    # 该段可能已是纯声音描述（【环境声】之后），只需剥掉标签前缀，
+    # 不能再按关键词截断：“背景音乐”会被“背景音”截成“乐”
+    text = text.strip().strip("；;。、,， ")
+    text = _SOUND_PREFIX_RE.sub("", text).strip().strip("；;。 ")
+    if text:
+        return text
+    if not _h3_dialogue_text(shot):
+        return _sound_only(block)
+    return ""
+
+
+def to_h3_clip_prompt(shot: Shot, prompt: str) -> str:
+    """把分镜视频提示词整理成 MiniMax H3 规定的三段式结构。
+
+    H3 只从 integrated_multimodal_description / overall_soundscape /
+    non_diegetic_music 读取画面、声音与音乐。历史中文分段写法
+    （【对白与声音】【环境声】）直接下发时，对白与音效不一定会被模型采纳，
+    表现为生成的音轨不按提示词说话。这里保留原有画面描述，把对白收敛为
+    (Sx) <d>[Chinese] 台词</d>，声音与音乐分别落到官方字段。
+    """
+    text = normalize_clip_dialogue(shot, prompt or "")
+    if not text.strip():
+        return text
+    if _H3_HEADER in text:
+        text = _strip_output_spec(text)
+        # 有对白的镜头：动作描述里的说话类表述会被 H3 演成额外台词，
+        # 统一改写并在画面描述末尾补一条“只播 <d> 内台词”的约束
+        if _h3_dialogue_text(shot):
+            head, sound_fields = _split_sound_fields(text)
+            text = _ensure_dialogue_lock(_despine_speech_actions(head)) + sound_fields
+        # 已是三段式的提示词也要补齐声音字段：缺 overall_soundscape 时
+        # H3 没有任何环境音约束，会用自创人声/台词填满整段时长
+        if not re.search(r"(?m)^\s*overall_soundscape\s*[:：]", text):
+            sound = _clip_soundscape("", shot) or "场景环境声与动作音效，与画面动作同步"
+            text = f"{text.rstrip()}\n\noverall_soundscape: {sound}"
+        if not re.search(r"(?m)^\s*non_diegetic_music\s*[:：]", text):
+            text = f"{text.rstrip()}\n\nnon_diegetic_music: N/A"
+        return text
+    dialogue = _h3_dialogue_text(shot)
+    sound = ""
+    match = _DIALOGUE_SECTION_RE.search(text)
+    if match is not None:
+        rest = text[match.end():]
+        end = re.search(r"\n\s*(?:【|输出\s*[:：])", rest)
+        block = rest[:end.start()] if end else rest
+        tail_text = rest[end.start():] if end else ""
+        sound = _clip_soundscape(block, shot)
+        body = f"{text[:match.start()]}{tail_text}".strip()
+    else:
+        body = text.strip()
+    if dialogue:
+        body = _despine_speech_actions(body)
+        body = f"{body}\n{dialogue}" if body else dialogue
+        body = _ensure_dialogue_lock(body)
+    else:
+        body = f"{body}\nDialogue: no dialogue." if body else "Dialogue: no dialogue."
+    return (
+        f"{_H3_HEADER}\n{body}\n\n"
+        f"overall_soundscape: {sound or '场景环境声与动作音效，与画面动作同步'}\n\n"
+        f"non_diegetic_music: N/A"
+    )
+
+
 def compile_shot_video(db: Session, shot_id: str, *,
                        workflow: Workflow | None = None) -> CompiledPrompt:
     """编译分镜视频提示词：延续已审核分镜图，连续性来源显式绑定到镜头与文件。"""
@@ -1467,6 +1953,11 @@ def compile_shot_video(db: Session, shot_id: str, *,
     _assert_unique_slots(slots, blocking)
 
     # 构建参考绑定文字描述（注入提示词，让 H3 知道每张参考图的用途）
+    # 按实际绑定的参考图类型切换提示词骨架（T2VA / I2VA / Ref2VA）：
+    # 只有分镜图才能定义构图与空间，只有参考图才能锁定身份；
+    # 无任何参考图时禁止断言「identity is locked by reference images only」。
+    has_storyboard_ref = any(s["role"] == "storyboard_reference" for s in slots)
+    has_identity_ref = any(s["role"] == "character_identity_reference" for s in slots)
     ref_parts: list[str] = []
     for s in slots:
         if s["role"] == "character_identity_reference":
@@ -1482,31 +1973,44 @@ def compile_shot_video(db: Session, shot_id: str, *,
                 "Prop reference image defines shape, color and material"
             )
         elif s["role"] == "previous_shot_last_frame":
+            # 只做时序/空间连续性参考。旧措辞「match lighting, position and state」会被模型
+            # 理解成把上一镜融进当前画面，是"尾帧虚影/叠化"的主要来源。
+            content_source = (
+                "All visible content must come from the storyboard reference image"
+                if has_storyboard_ref else
+                "All visible content must come from the textual description below"
+            )
             ref_parts.append(
-                "Previous shot last frame provides continuity: match lighting, position and state"
+                "Previous shot last frame is temporal/spatial continuity reference only — "
+                "never reproduce, overlay, blend, double-expose or use it as the current shot's "
+                "first frame or background; no ghosting, translucent silhouettes or residue from it. "
+                f"{content_source}"
             )
     ref_bindings = "; ".join(ref_parts) or "No reference images bound, generate from text description only"
-    # 参考图是否真的绑定：决定空间锁定句与站位锚点的措辞，
-    # 避免出现「无参考图」却仍断言「以分镜图锁定空间」的同段矛盾。
-    reference_bound = bool(ref_parts)
-    if reference_bound:
+    if has_storyboard_ref:
         continuity_lock = (
             "This video must continue the approved storyboard reference image: keep every character's "
             "identity, face, body, costume, colors, props and scene structure exactly consistent in "
             "every frame — character identity is locked by reference images only, do not generate any "
             "character based on name."
         )
+    elif has_identity_ref:
+        continuity_lock = (
+            "Keep every character's identity, face, body, costume and colors exactly consistent with "
+            "the bound reference images in every frame — do not generate any character based on name. "
+            "Scene structure must stay coherent with the textual description."
+        )
     else:
         continuity_lock = (
-            "Keep every character's identity, face, body, costume and colors exactly consistent in "
-            "every frame — character identity is locked by reference images only, do not generate any "
-            "character based on name. Scene structure must stay coherent with the textual description."
+            "No reference image is bound to this shot: generate every character strictly from the "
+            "textual description, keep face, body, costume and colors consistent throughout the whole "
+            "shot, and do not add characters, props or scene elements that are not described."
         )
     position_specs, _standable_items, _opening_blocking, _gaze_targets = _build_position_specs(
         shot, characters, scene
     )
-    screen_geography = _build_screen_geography(characters, reference_bound=reference_bound)
-    if reference_bound:
+    screen_geography = _build_screen_geography(characters, reference_bound=has_storyboard_ref)
+    if has_storyboard_ref:
         spatial_lock = (
             "Spatial layout is derived from the storyboard reference image: keep every character's "
             "exact position relative to scene objects, facing direction, depth and distance — do not "
@@ -1514,9 +2018,9 @@ def compile_shot_video(db: Session, shot_id: str, *,
         )
     else:
         spatial_lock = (
-            "No reference image is bound to this shot: derive the spatial layout strictly from the "
-            "textual description below, keeping each character in a stable, distinct position for "
-            "the whole shot."
+            "No storyboard reference image is bound to this shot: derive the spatial layout strictly "
+            "from the textual description below, keeping each character in a stable, distinct position "
+            "for the whole shot."
         )
 
     mapping = {

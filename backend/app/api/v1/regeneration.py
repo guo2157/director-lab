@@ -9,8 +9,8 @@
 - POST /api/assets/{asset_id}/adopt：采用候选版本
 - GET  /api/shots/{shot_id}/impact：更换尾帧/参考图后受影响的后续镜头
 
-约束：重新生成结果一律先落候选版本（validity=candidate），采用后才切换为 current，
-不覆盖原始文件、已审核版本或正在被其他任务使用的参考版本。
+约束：分镜重新生成（分镜图/视频）结果直接作为 current 产物替换当前版本，
+旧版本转 superseded 供追溯；候选版本接口仅保留给资产库的角色/场景/道具重绘。
 """
 from datetime import datetime, timezone
 
@@ -22,6 +22,7 @@ from app.core.database import get_db
 from app.models import Asset, AssetRef, Character, Job, JobInputRef, Project, Prop, Scene, Shot, Workflow, ids
 from app.services import errors
 from app.services import regeneration as regen
+from app.services import regen_workspace as ws
 
 router = APIRouter(prefix="/api", tags=["regeneration"])
 
@@ -162,42 +163,38 @@ def _job_out(job: Job, snapshot: dict | None = None) -> dict:
 
 
 def _system_refs_for_clip(db: Session, shot: Shot) -> list[dict]:
-    """clip 目标的系统参考：本镜分镜图（参考图语义）与上一镜尾帧（帧约束语义）。
+    """系统槽位（上一镜尾帧/本镜分镜图）统一由 regen_workspace 实时解析。"""
+    return ws.system_clip_refs(db, shot)
 
-    两类语义必须区分：ref_image 是本镜构图参考，ref_prev_frame 是上一镜尾帧约束。
-    """
-    from app.services.shot_chain import resolve_prev_frame
 
-    refs: list[dict] = []
-    keyframe = _current_asset(db, shot.id, "keyframe")
-    if keyframe is not None and keyframe.file_path:
-        refs.append({
-            "slot_param": "ref_image",
-            "input_key": "ref_images.ref_image_1",
-            "asset_id": keyframe.id,
-            "asset_version": keyframe.version,
-            "asset_type": keyframe.asset_type,
-            "role": "keyframe",
-            "required": False,
-            "file_path": keyframe.file_path,
-            "semantic": "reference",
-            "enabled": True,
-        })
-    frame = resolve_prev_frame(db, shot)
-    if frame is not None:
-        refs.append({
-            "slot_param": "ref_prev_frame",
-            "input_key": "ref_images.ref_image_0",
-            "asset_id": frame["asset_id"],
-            "asset_version": frame["version"],
-            "asset_type": "frame",
-            "role": "prev_frame",
-            "required": bool(shot.requires_prev_frame),
-            "file_path": frame["file_path"],
-            "semantic": "frame_constraint",
-            "enabled": True,
-        })
-    return refs
+def _prompt_version_payload(params: dict) -> dict:
+    """最终下发提示词指纹：重新生成 / 手工编辑后仍能区分提示词版本。"""
+    import hashlib
+
+    text = str(params.get("prompt") or "")
+    return {"fingerprint": hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]}
+
+
+def _assert_reference_slots(db: Session, shot: Shot, target: str, params: dict) -> None:
+    """参考图槽位职责硬校验（身份槽只允许主体角色、时序槽只允许尾帧）。"""
+    if target not in ("keyframe", "clip"):
+        return
+    from app.services.prompt_compiler import audit_reference_slots
+
+    issues = audit_reference_slots(db, shot, params.get("__media__") or {})
+    if issues:
+        raise errors.AppError(
+            "reference_slot_mismatch",
+            "；".join(i.get("message", "") for i in issues if i.get("message"))
+            + "。已阻止生成，请检查参考图槽位绑定",
+            409,
+            reference_issues=issues,
+        )
+
+
+def _merge_system_refs(existing: list[dict], system_refs: list[dict]) -> list[dict]:
+    """用实时系统参考覆盖同槽位快照绑定。"""
+    return ws.merge_system_refs(existing, system_refs)
 
 
 @router.get("/shots/{shot_id}/regenerate/config")
@@ -215,10 +212,9 @@ def get_regenerate_config(
     config = regen.build_base_config(db, base_asset)
 
     if target == "clip":
-        existing = {r["slot_param"] for r in config["refs"]}
-        for ref in _system_refs_for_clip(db, shot):
-            if ref["slot_param"] not in existing:
-                config["refs"].append(ref)
+        # 系统槽位（上一镜尾帧/本镜分镜图）必须以当前生效产物为准，
+        # 不能沿用基础版本任务快照里的旧绑定，否则工作台与详情页显示的资产不一致
+        config["refs"] = _merge_system_refs(config["refs"], _system_refs_for_clip(db, shot))
 
     # 默认模式仅允许改提示词，其余选项在界面上置灰并给出原因
     config["editable"] = {
@@ -234,7 +230,7 @@ def get_regenerate_config(
 
 @router.post("/shots/{shot_id}/regenerate/workbench", status_code=202)
 def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
-    """按指定模式提交重新生成任务，结果先落候选版本。"""
+    """按指定模式提交重新生成任务，结果直接替换当前生效产物。"""
     shot = _get_shot(db, shot_id)
     target = payload.get("target", "keyframe")
     if target not in _TARGET_ASSET_TYPE:
@@ -271,6 +267,14 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     prompt = payload.get("prompt")
     if prompt is None:
         prompt = (base_config.get("prompt") or {}).get("rendered") or ""
+    if target == "clip" and prompt:
+        # 与工作台提交一致：先质检再收敛为 H3 三段式，避免历史中文对白段直接下发
+        from app.services.prompt_compiler import to_h3_clip_prompt
+        from app.services.prompt_qc import apply_clip_qc
+
+        prompt = apply_clip_qc(db, shot, prompt)[0]
+        prompt = to_h3_clip_prompt(shot, prompt)
+        db.info.pop("prompt_qc_last", None)
     negative = payload.get("negative_prompt")
     if negative is None:
         negative = (base_config.get("negative_prompt") or {}).get("rendered") or ""
@@ -279,10 +283,8 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     if target == "clip":
         system_refs = _system_refs_for_clip(db, shot)
         if mode == regen.MODE_INHERIT_PROMPT_ONLY:
-            refs = list(base_config.get("refs") or []) + [
-                r for r in system_refs
-                if r["slot_param"] not in {x["slot_param"] for x in (base_config.get("refs") or [])}
-            ]
+            # 沿用原配置时系统槽位仍取当前生效产物，不能用旧任务快照里的过期尾帧
+            refs = _merge_system_refs(list(base_config.get("refs") or []), system_refs)
         elif refs is not None:
             provided = {r.get("slot_param") for r in refs}
             refs = list(refs) + [r for r in system_refs if r["slot_param"] not in provided]
@@ -319,6 +321,7 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     media = regen.snapshot_to_media(snapshot)
     if media:
         params["__media__"] = media
+    _assert_reference_slots(db, shot, target, params)
 
     job_type = "generate_keyframe" if target == "keyframe" else f"generate_{target}"
     job = Job(
@@ -337,6 +340,7 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
             "mode": mode,
             "snapshot": snapshot,
             "workflow_version": workflow.version,
+            "prompt_version": _prompt_version_payload(params),
             "params": params,
             "generation_mode": mode,
             "base_asset_id": base_asset.id,
@@ -411,7 +415,10 @@ def post_validate(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
     refs = payload.get("refs")
     if target == "clip":
         system_refs = _system_refs_for_clip(db, shot)
-        if refs is not None:
+        if refs is None:
+            # 未显式传参考时沿用基础配置，但系统槽位必须换成当前生效资产
+            refs = _merge_system_refs(list(base_config.get("refs") or []), system_refs)
+        else:
             provided = {r.get("slot_param") for r in refs}
             refs = list(refs) + [r for r in system_refs if r["slot_param"] not in provided]
     # refs 校验失败（槽位/资产/类型）直接返回错误，不进入一致性校验
@@ -740,6 +747,33 @@ def get_regenerate_workspace(
             "rendered": _video_prompt,
             "editable": _video_prompt,
         }
+        # 参考图按视频生成的真实口径重建：分镜图本体 + 角色定妆图 + 道具锚定图。
+        # 直接沿用分镜图任务的参考清单会漏掉分镜图本身，并混入视频不使用的场景图。
+        base_config["refs"] = regen.build_clip_refs_from_keyframe(db, shot, base_asset)
+        base_config["snapshot_complete"] = True
+        base_config["incomplete_reasons"] = []
+        base_config["locked"] = {**base_config.get("locked", {}), "refs": False, "params": False}
+        # 基础快照来自图片工作流，直接沿用会让 ref_image 落到图片槽位（显示为未映射）；
+        # 改用能接收分镜图的视频工作流，与真实出视频时的选择口径一致
+        from app.api.v1.generate import _find_ref_capable_video_workflow
+
+        video_wf = _find_ref_capable_video_workflow(db)
+        if video_wf is not None:
+            base_config["workflow"] = {
+                "id": video_wf.id,
+                "name": video_wf.name,
+                "type": video_wf.workflow_type,
+                "version": video_wf.version,
+            }
+    if target == "clip":
+        # 串联生成的第 N 镜首帧来自第 N-1 镜实际尾帧（ref_images.ref_image_0）。
+        # 基础快照可能是旧任务，里面的尾帧/分镜图绑定已过期，这里用实时解析结果覆盖，
+        # 保证工作台与镜头/视频详情显示的是同一张资产；槽位顺序与工作流一致，首帧在最前。
+        base_config = dict(base_config)
+        refs = list(base_config.get("refs") or [])
+        refs = _merge_system_refs(refs, _system_refs_for_clip(db, shot))
+        refs.sort(key=lambda r: 0 if r.get("slot_param") == "ref_prev_frame" else 1)
+        base_config["refs"] = refs
     workflow = _ws_load_workflow(db, shot, target, {}, base_config)
     saved = ws.load_saved_config(db, shot.id, target)
     data = ws.build_workspace(
@@ -759,6 +793,22 @@ def get_regenerate_workspace(
         # keyframe 表示该镜头尚无分镜视频，参考图与正文来自分镜图快照
         "fallback_from": fallback_from,
     }
+    if target == "clip":
+        # 串联生成的首帧衔接状态：ready=上一镜尾帧可作本镜首帧；
+        # missing=上一镜还没有尾帧，需先生成上一镜视频；not_applicable=集内首镜
+        from app.services.shot_chain import previous_shot, resolve_prev_frame
+
+        prev_shot = previous_shot(db, shot)
+        data["chain_frame"] = {
+            "prev_shot_id": prev_shot.id if prev_shot is not None else None,
+            "status": (
+                "not_applicable"
+                if prev_shot is None
+                else "ready"
+                if resolve_prev_frame(db, shot) is not None
+                else "missing"
+            ),
+        }
     return data
 
 
@@ -901,7 +951,7 @@ def post_regenerate_workspace_generate(
 ) -> dict:
     """按工作台配置提交重新生成任务。
 
-    - 结果先落候选版本，不改写当前生效视频
+    - 结果直接替换当前生效视频（旧版本转 superseded），无候选版本环节
     - 生成参数严格来自本次冻结快照
     - 提交成功后把本份配置保存为工作台草稿，便于下次继续编辑
     """
@@ -929,10 +979,25 @@ def post_regenerate_workspace_generate(
     final_prompt = payload.get("final_prompt")
     if final_prompt is None:
         final_prompt = (base_config.get("prompt") or {}).get("rendered") or ""
+    if target == "clip" and final_prompt:
+        # 工作台提交的提示词来自前端编辑态，可能仍是历史写法（台词：第N段“…”）。
+        # 这里与其它出视频入口统一走质检 + 对白规范化，保证下发给 H3 的是
+        # (Sx) <d>[Chinese] 台词</d>，而不是会被一起念出来的标签文本。
+        from app.services.prompt_compiler import to_h3_clip_prompt
+        from app.services.prompt_qc import apply_clip_qc
+
+        final_prompt = apply_clip_qc(db, shot, final_prompt)[0]
+        final_prompt = to_h3_clip_prompt(shot, final_prompt)
+        db.info.pop("prompt_qc_last", None)
+        payload = dict(payload, final_prompt=final_prompt)
     negative = payload.get("negative_prompt")
     if negative is None:
         negative = (base_config.get("negative_prompt") or {}).get("rendered") or ""
     parameters = dict(payload.get("parameters") or {})
+    if target == "clip":
+        # 档位工作流自带画幅与帧数（5s/10s）：换档时以新档位为准覆盖基础版本的同名参数，
+        # 用户显式填写的参数优先级最高
+        parameters = {**regen.tier_generation_params(workflow), **parameters}
     snapshot = regen.assemble_snapshot(
         db,
         mode=regen.MODE_FULL_RECONFIGURE,
@@ -977,6 +1042,7 @@ def post_regenerate_workspace_generate(
             "mode": regen.MODE_FULL_RECONFIGURE,
             "snapshot": snapshot,
             "workflow_version": workflow.version,
+            "prompt_version": _prompt_version_payload(params),
             "params": params,
             "generation_mode": regen.MODE_FULL_RECONFIGURE,
             "base_asset_id": base_asset.id,
@@ -1017,11 +1083,15 @@ def post_regenerate_workspace_generate(
     if target == "clip":
         from app.api.v1.generate import _inject_prev_shot_frame
         info = _inject_prev_shot_frame(db, shot, target, params)
+        _assert_reference_slots(db, shot, target, params)
         snap_now = dict(job.input_snapshot or {})
         snap_now["prev_frame"] = info
         snap_now["injected_media"] = dict(params.get("__media__") or {})
+        snap_now["prompt_version"] = _prompt_version_payload(params)
         job.input_snapshot = snap_now
         job.params = params
+    else:
+        _assert_reference_slots(db, shot, target, params)
     # 保存本份配置为工作台草稿，便于下次继续编辑（不影响本次已冻结的快照）
     saved_row = _ws_upsert_config(
         db,
@@ -1031,6 +1101,10 @@ def post_regenerate_workspace_generate(
         workflow=workflow,
         payload=payload,
     )
+    # 视频提示词以本次提交的 H3 版本为准回写镜头：覆盖旧提示词、只保留这一份，
+    # 保证详情页展示与后续重新生成使用的都是最新修改后的内容
+    if target == "clip" and final_prompt:
+        shot.video_prompt = final_prompt
     db.commit()
     out = _job_out(job, snapshot)
     out["workspace_config_id"] = saved_row.id

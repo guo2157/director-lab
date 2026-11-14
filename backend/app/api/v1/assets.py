@@ -38,6 +38,8 @@ def _get_asset(db: Session, asset_id: str) -> Asset:
 
 
 def _to_out(a: Asset) -> dict:
+    # 替换上传原地覆盖文件，URL 不变会导致浏览器继续用旧缓存图，追加 updated_at 版本戳
+    stamp = int(a.updated_at.timestamp()) if a.updated_at else 0
     return {
         "id": a.id,
         "project_id": a.project_id,
@@ -47,8 +49,8 @@ def _to_out(a: Asset) -> dict:
         "parent_id": a.parent_id,
         "file_path": a.file_path,
         "thumb_path": a.thumb_path,
-        "url": f"/api/assets/{a.id}/file",
-        "thumb_url": f"/api/assets/{a.id}/file?thumb=true" if a.thumb_path else None,
+        "url": f"/api/assets/{a.id}/file?v={stamp}",
+        "thumb_url": f"/api/assets/{a.id}/file?thumb=true&v={stamp}" if a.thumb_path else None,
         "source_job_id": a.source_job_id,
         "ref_count": a.ref_count,
         "locked": bool(a.locked),
