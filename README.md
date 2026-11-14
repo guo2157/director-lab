@@ -15,11 +15,11 @@
 <img src="https://img.shields.io/badge/ComfyUI-Self--Hosted-orange?style=flat-square" alt="ComfyUI">
 </p>
 
-<a href="assets/readme/gallery/video/demo-final.mp4">
+<a href="https://github.com/user-attachments/assets/0838916c-3ce9-4791-80ba-39aefc2b0119">
   <img src="assets/readme/gallery/video/demo-final-preview.gif" width="270" alt="Director-Lab 最终成片预览">
 </a>
 
-<sub>示例项目《游乐场》成片 · 点击封面在 GitHub 内置播放器中在线播放 2:12 完整成片 · 26 个镜头自动串联</sub>
+<sub>示例项目《游乐场》成片 · 点击封面在线播放 2:12 完整成片 · 26 个镜头自动串联</sub>
 
 </div>
 
@@ -291,7 +291,7 @@ flowchart TD
 <tr>
 <td align="center" width="33%"><img src="assets/readme/gallery/storyboards/shot-12.webp" alt="分镜参考图"><br><sub>① 分镜参考图</sub></td>
 <td align="center" width="33%"><img src="assets/readme/gallery/video/demo-final-poster.jpg" alt="视频帧"><br><sub>② H3 生成的视频帧</sub></td>
-<td align="center" width="33%"><a href="assets/readme/gallery/video/demo-final.mp4"><img src="assets/readme/gallery/video/demo-final-preview.gif" alt="最终成片动图"><br><sub>③ 最终成片（点击在线播放）</sub></a></td>
+<td align="center" width="33%"><a href="https://github.com/user-attachments/assets/0838916c-3ce9-4791-80ba-39aefc2b0119"><img src="assets/readme/gallery/video/demo-final-preview.gif" alt="最终成片动图"><br><sub>③ 最终成片（点击在线播放）</sub></a></td>
 </tr>
 </table>
 
@@ -299,18 +299,18 @@ flowchart TD
 
 ### 完整成片 · 在线播放
 
-GitHub 会过滤 README 中的 `<video>` 标签，无法直接内嵌播放器。点击封面或下面的链接，会打开仓库文件页，由 GitHub 内置播放器在线播放，无需下载：
+GitHub 会过滤 README 中的 `<video>` 标签，无法内嵌播放器。点击下方封面或播放按钮，会在新标签页用浏览器播放器在线播放，无需下载：
 
 <div align="center">
-<a href="assets/readme/gallery/video/demo-final.mp4">
+<a href="https://github.com/user-attachments/assets/0838916c-3ce9-4791-80ba-39aefc2b0119">
   <img src="assets/readme/gallery/video/demo-final-poster.jpg" width="300" alt="《游乐场》完整成片封面">
 </a>
 
 <br>
 
-<a href="assets/readme/gallery/video/demo-final.mp4"><b>▶ 在线播放 2:12 完整成片</b></a>
+<a href="https://github.com/user-attachments/assets/0838916c-3ce9-4791-80ba-39aefc2b0119"><b>▶ 在线播放 2:12 完整成片</b></a>
 
-<sub>540×960 · H.264 + AAC · 9.2 MB · 原始导出为 720×1280、57.7 MB</sub>
+<sub>540×960 · H.264 + AAC · 原始导出为 720×1280、57.7 MB · 也可以从仓库下载 <a href="assets/readme/gallery/video/demo-final.mp4">demo-final.mp4</a></sub>
 </div>
 
 ## 技术架构
