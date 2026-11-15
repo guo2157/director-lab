@@ -21,6 +21,12 @@
 
 <sub>示例项目《游乐场》成片 · 点击封面在 Gitee 查看 2:12 完整成片 · 26 个镜头自动串联</sub>
 
+<p>
+<a href="https://github.com/guo2157/director-lab/releases/latest"><img src="https://img.shields.io/badge/Windows-下载%20DirectorLab.exe-38bdf8?style=flat-square&amp;logo=windows&amp;logoColor=white" alt="Windows 免安装版"></a>
+</p>
+
+<sub>单文件 exe，免安装、免配置 Python / Node / ffmpeg，双击即可在浏览器中使用</sub>
+
 </div>
 
 ---
@@ -364,6 +370,33 @@ flowchart TD
 
 ## 快速开始
 
+### Windows 免安装版（推荐个人电脑使用）
+
+在 [Releases](https://github.com/guo2157/director-lab/releases/latest) 下载 `DirectorLab.exe`（约 195 MB），双击即可运行，无需安装 Python、Node.js、ffmpeg 或数据库。
+
+| 项目 | 说明 |
+| --- | --- |
+| 启动方式 | 双击 exe，自动在 `127.0.0.1:8765` 启动服务并打开默认浏览器 |
+| 端口占用 | 8765 被占用时自动顺延到下一个空闲端口 |
+| 数据目录 | `%APPDATA%\DirectorLab`（数据库、上传素材、成片），升级或替换 exe 不丢数据 |
+| 启动日志 | `%APPDATA%\DirectorLab\logs\desktop.log` |
+| 系统要求 | Windows 10 / 11 x64 |
+
+首次启动会直接打开「设置」页，需要完成两项配置后才能生成内容：
+
+1. **ComfyUI**：填写可访问的 `http://<IP>:<端口>`（例如同一台机器上的 `http://127.0.0.1:8188`），点击「测试连通性」确认；
+2. **语言模型**：填写 OpenAI 兼容服务的 Base URL、API Key 与模型名。
+
+> exe 本身不依赖本机环境，但图片、视频、配音生成依赖可访问的 ComfyUI 与 LLM 服务；两者都不可用时仍可浏览、编辑剧本并做本地导出。
+
+需要自行打包时（Windows，已装 Python 3.11+ 与 Node.js 20+）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+```
+
+产物为 `dist_desktop\DirectorLab.exe`；排查启动问题时可用 `$env:DLAB_DESKTOP_CONSOLE="1"` 生成带控制台的 `DirectorLabConsole.exe`。
+
 ### 使用 AutoDL 镜像（推荐）
 
 镜像 `director-lab` 已内置本仓库、ComfyUI 渲染底座与 AutoDL 一键部署脚本，无需手动安装依赖：
@@ -552,6 +585,8 @@ director-lab/
 │   ├── series/              # 系列 / 多集连续性设计与实现报告
 │   └── img/                 # 历史页面截图
 ├── assets/readme/           # 本 README 使用的截图、作品与视频
+├── scripts/                 # 一键部署 / 打包脚本（含 Windows exe 构建）
+├── dist_desktop/            # Windows exe 打包产物（构建生成，不入库）
 └── README.md
 ```
 

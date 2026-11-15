@@ -43,6 +43,11 @@ uvicorn.log
 *.tgz
 *.zip
 
+# 桌面打包产物
+dist_desktop/
+build/
+backend/packaging/bin/
+
 # 编辑器临时文件
 *.orcaterm-tmp-file-change-*
 .bak_*/

@@ -5,10 +5,13 @@
 - 长耗时操作返回 202 + job 对象（阶段 4 实现）
 """
 from contextlib import asynccontextmanager
+from pathlib import Path
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1 import (
@@ -89,10 +92,45 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def _frontend_dist() -> Path | None:
+    """前端构建产物目录：打包后位于 _MEIPASS/frontend_dist，开发时用 frontend/dist。"""
+    candidates = []
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        candidates.append(Path(bundle) / "frontend_dist")
+    candidates.append(Path(__file__).resolve().parents[2] / "frontend" / "dist")
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate
+    return None
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    """托管前端单页应用：静态资源直出，其余路径回退 index.html 交给 vue-router。"""
+    dist = _frontend_dist()
+    if dist is None:
+        return
+    dist_root = dist.resolve()
+    assets_dir = dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            raise StarletteHTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "接口不存在"},
+            )
+        target = (dist / full_path).resolve()
+        if full_path and target.is_file() and dist_root in target.parents:
+            return FileResponse(target)
+        return FileResponse(dist / "index.html")
+
+
 def create_app() -> FastAPI:
     cfg = get_settings()
     app = FastAPI(title=cfg.app_name, debug=cfg.debug, lifespan=lifespan)
-
     app.include_router(projects.router)
     app.include_router(agent.router)
     app.include_router(assets.router)
@@ -147,6 +185,8 @@ def create_app() -> FastAPI:
         )
 
     # /api/health 由 settings.health_router 统一提供（含 database/comfyui/worker/disk 分项状态）
+
+    _mount_frontend(app)
 
     return app
 

@@ -130,10 +130,12 @@ def derive_progress(db: Session, project: Project) -> tuple[int, int, str]:
             return shot_total, shot_done, "clips"
 
     # 规则 8/9：音频检查与音画容差（音频中间态按不具备处理）
+    # H3 VA 的音轨内嵌在 clip 中、不产生 audio 资产，必须复用镜头完成度口径判定
+    from app.services.shot_state import shot_audio_ready
+
     for s in shots:
         if s.shot_kind in ("dialogue", "narration"):
-            audio_ok = _shot_has_current_asset(db, s.id, "audio")
-            if not audio_ok:
+            if not shot_audio_ready(db, s, has_clip=True):
                 return shot_total, shot_done, "audio"
             if s.av_sync_delta is not None and s.status == "review":
                 return shot_total, shot_done, "audio"
@@ -145,7 +147,7 @@ def derive_progress(db: Session, project: Project) -> tuple[int, int, str]:
         db.query(Composition)
         .filter(
             Composition.project_id == project.id,
-            Composition.status == "succeeded",
+            Composition.status.in_(("done", "succeeded")),
             Composition.stale.is_(False),
         )
         .order_by(Composition.created_at.desc())
@@ -155,7 +157,7 @@ def derive_progress(db: Session, project: Project) -> tuple[int, int, str]:
         return shot_total, shot_done, "compose"
     exp = (
         db.query(Export)
-        .filter(Export.composition_id == comp.id, Export.status == "succeeded")
+        .filter(Export.composition_id == comp.id, Export.status.in_(("done", "succeeded")))
         .first()
     )
     if exp is None:
