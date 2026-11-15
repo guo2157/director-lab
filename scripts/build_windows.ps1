@@ -66,6 +66,18 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller 打包失败" }
 
 $ExeName = if ($env:DLAB_DESKTOP_CONSOLE -eq "1") { "DirectorLabConsole.exe" } else { "DirectorLab.exe" }
 $Exe = Join-Path $DistPath $ExeName
+
+Write-Host "[5/5] 拷贝使用手册与提示词模板 ..."
+$DocsDir = Join-Path $Repo "sales\xianyu\delivery"
+if (Test-Path $DocsDir) {
+    Get-ChildItem $DocsDir -File | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $DistPath $_.Name) -Force
+        Write-Host "  + $($_.Name)"
+    }
+} else {
+    Write-Warning "未找到 $DocsDir，跳过手册与模板"
+}
+
 Write-Host ""
 Write-Host "构建完成：$Exe"
 Write-Host "首次运行会在 %APPDATA%\DirectorLab 下创建数据库与媒体目录，未配置 ComfyUI 时自动打开设置页。"
