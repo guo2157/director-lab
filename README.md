@@ -25,7 +25,7 @@
 <a href="https://github.com/guo2157/director-lab/releases/latest"><img src="https://img.shields.io/badge/Windows-下载%20DirectorLab.exe-38bdf8?style=flat-square&amp;logo=windows&amp;logoColor=white" alt="Windows 免安装版"></a>
 </p>
 
-<sub>单文件 exe，免安装、免配置 Python / Node / ffmpeg，双击即可在浏览器中使用</sub>
+<sub>单文件 exe，免安装、免配置 Python / Node / ffmpeg，双击即可在浏览器中使用 · 版本按 v主.次.补丁 归档</sub>
 
 </div>
 
@@ -372,7 +372,9 @@ flowchart TD
 
 ### Windows 免安装版（推荐个人电脑使用）
 
-在 [Releases](https://github.com/guo2157/director-lab/releases/latest) 下载 `DirectorLab.exe`（约 195 MB），双击即可运行，无需安装 Python、Node.js、ffmpeg 或数据库。
+在 [Releases](https://github.com/guo2157/director-lab/releases) 页面选择需要的版本（版本号采用 `v主.次.补丁` 格式，`latest` 始终指向最新稳定版），下载附件 `DirectorLab.exe`（约 195 MB）后双击运行，无需安装 Python、Node.js、ffmpeg 或数据库。
+
+> 历史版本会保留在 Releases 列表中，可按版本号回退；数据存放在 `%APPDATA%\DirectorLab`，回退 exe 不影响已有项目。
 
 | 项目 | 说明 |
 | --- | --- |

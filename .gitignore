@@ -64,3 +64,5 @@ backend/scripts/_kf_status.py
 backend/scripts/_fix_*.py
 backend/scripts/_repair_*.py
 backend/scripts/_test_rewrite_refs.py
+
+sales/xianyu/raw/*.png
