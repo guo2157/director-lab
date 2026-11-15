@@ -20,6 +20,7 @@ import {
 import {
   createEpisode,
   getContinuityOverview,
+  getEpisode,
   getSeries,
   getSeriesBible,
   listEpisodes,
@@ -28,6 +29,7 @@ import {
   listStoryEvents,
   saveSeriesBible,
 } from '@/api/series'
+import type { SeriesEpisode } from '@/types/series'
 
 const route = useRoute()
 const router = useRouter()
@@ -105,6 +107,114 @@ const CONTINUITY_LABEL: Record<string, string> = {
   needs_review: '待人工确认',
 }
 
+/** 剧集当前所处的下一步（用于列表按钮与引导文案，避免用户猜） */
+type EpisodeStep = 'write' | 'analyzing' | 'review' | 'produce' | 'producing' | 'done'
+
+function episodeStep(ep: SeriesEpisode): EpisodeStep {
+  if (!ep.script_current_version_id) {
+    return ep.script_status === 'analyzing' ? 'analyzing' : 'write'
+  }
+  if (ep.script_status === 'awaiting_review' || ep.script_status === 'draft') return 'review'
+  if (ep.script_status === 'confirmed') {
+    if (ep.production_status === 'completed') return 'done'
+    if (ep.production_status === 'not_started') return 'produce'
+    return 'producing'
+  }
+  return 'write'
+}
+
+const EPISODE_STEP_LABEL: Record<EpisodeStep, string> = {
+  write: '下一步：续写生成剧本',
+  analyzing: '剧本生成中',
+  review: '下一步：审核并确认剧本',
+  produce: '下一步：进入制作',
+  producing: '制作进行中',
+  done: '已完成',
+}
+
+/** 当前需要处理的第一集（按集号升序），没有则 null */
+const focusEpisode = computed<SeriesEpisode | null>(
+  () => episodes.value.find((ep) => episodeStep(ep) !== 'done') ?? null,
+)
+
+const hasBibleContent = computed(() => {
+  const content = bible.value?.content
+  return Boolean(content && Object.keys(content).length > 0)
+})
+
+const workflowSteps = computed(() => {
+  const anyScript = episodes.value.some((ep) => Boolean(ep.script_current_version_id))
+  const anyConfirmed = (series.value?.confirmed_script_count ?? 0) > 0
+  const anyProducing = episodes.value.some((ep) => ep.production_status !== 'not_started')
+  return [
+    {
+      title: '系列设定',
+      description: hasBibleContent.value ? '设定已完善' : '内容为空，建议补充',
+      // 创建系列时必定建立 Bible V1，设定内容不是续写的阻断项，故该步始终视为就绪
+      status: 'finish',
+    },
+    {
+      title: '续写生成剧本',
+      description: anyScript ? '已有剧本草稿' : '填写要求，等待 AI 生成',
+      status: anyScript ? 'finish' : 'process',
+    },
+    {
+      title: '审核并确认',
+      description: anyConfirmed ? '已确认正式剧情' : '确认后写入剧情事实',
+      status: anyConfirmed ? 'finish' : anyScript ? 'process' : 'wait',
+    },
+    {
+      title: '进入制作',
+      description: anyProducing ? '已进入单集生产' : '解析、资产、分镜、视频、配音、成片',
+      status: anyProducing ? 'finish' : anyConfirmed ? 'process' : 'wait',
+    },
+  ] as const
+})
+
+const nextAction = computed<{ label: string; hint: string; cta: string; run: () => void }>(() => {
+  const ep = focusEpisode.value
+  if (!ep) {
+    return {
+      label: episodes.value.length === 0 ? '续写第 1 集' : '续写下一集',
+      hint: '填写本集创作要求后提交，系统会自动建立生产项目并生成剧本草稿。先在「系列设定」补充人物与世界观，生成会更稳定。',
+      cta: episodes.value.length === 0 ? '续写第 1 集' : '续写下一集',
+      run: () => goContinue(),
+    }
+  }
+  const step = episodeStep(ep)
+  const no = `第 ${ep.episode_number} 集`
+  if (step === 'write') {
+    return {
+      label: `续写${no}剧本`,
+      hint: '填写本集创作要求后提交，系统会自动建立生产项目并生成剧本草稿。',
+      cta: `续写${no}`,
+      run: () => goContinue(ep.id),
+    }
+  }
+  if (step === 'analyzing') {
+    return {
+      label: `${no}剧本生成中`,
+      hint: '后台任务正在生成剧本，可在任务中心查看进度，完成后回来审核。',
+      cta: '查看任务进度',
+      run: () => void router.push({ name: 'jobs' }),
+    }
+  }
+  if (step === 'review') {
+    return {
+      label: `审核${no}剧本`,
+      hint: '剧本草稿已生成，确认后才会写入正式剧情事实与连续性快照。',
+      cta: `审核${no}`,
+      run: () => goReview(ep.id),
+    }
+  }
+  return {
+    label: `进入${no}制作`,
+    hint: '剧本已确认，进入单集工作台：剧本 → 解析 → 资产 → 分镜图 → 视频 → 配音 → 合片。',
+    cta: `进入${no}制作`,
+    run: () => void goWorkspace(ep),
+  }
+})
+
 const createEpisodeMutation = useMutation({
   mutationFn: () => createEpisode(seriesId.value, {}),
   onSuccess: (ep) => {
@@ -163,12 +273,27 @@ function goReview(episodeId: string) {
   void router.push({ name: 'episode-review', params: { id: episodeId } })
 }
 
-function goWorkspace(projectId: string | null) {
-  if (!projectId) {
-    message.warning('该剧集尚未绑定生产项目，先完成续写生成剧本')
+async function goWorkspace(ep: SeriesEpisode) {
+  if (ep.project_id) {
+    void router.push({ name: 'script', params: { id: ep.project_id } })
     return
   }
-  void router.push({ name: 'script', params: { id: projectId } })
+  // 列表可能来自缓存：进入制作前回源确认一次项目绑定，避免误报「尚未绑定生产项目」
+  try {
+    const fresh = await getEpisode(ep.id)
+    if (fresh.project_id) {
+      void queryClient.invalidateQueries({ queryKey: ['series-episodes', seriesId.value] })
+      void router.push({ name: 'script', params: { id: fresh.project_id } })
+      return
+    }
+    if (fresh.script_status === 'awaiting_review') {
+      message.warning('剧本还在审核中：先确认剧本，再进入制作')
+      return
+    }
+  } catch {
+    /* 回源失败时按下方提示处理 */
+  }
+  message.warning('还差一步：先「续写本集」提交创作要求，系统会建立生产项目并生成剧本')
 }
 </script>
 
@@ -182,7 +307,10 @@ function goWorkspace(projectId: string | null) {
 
       <template v-else-if="series">
         <header class="detail-head">
-          <div>
+          <div class="head-main">
+            <n-button text size="tiny" class="back-link" @click="router.push({ name: 'series-list' })">
+              ← 全部系列
+            </n-button>
             <h1>{{ series.name }}</h1>
             <p class="sub">{{ series.description || '暂无简介' }}</p>
             <div class="meta">
@@ -197,11 +325,44 @@ function goWorkspace(projectId: string | null) {
           </div>
           <n-space>
             <n-button type="primary" @click="goContinue()">续写下一集</n-button>
-            <n-button @click="createEpisodeMutation.mutate()" :loading="createEpisodeMutation.isPending.value">
+            <n-button
+              title="只创建占位剧集，不生成剧本；建议直接用「续写下一集」"
+              @click="createEpisodeMutation.mutate()"
+              :loading="createEpisodeMutation.isPending.value"
+            >
               仅新建空剧集
             </n-button>
           </n-space>
         </header>
+
+        <section class="flow-panel">
+          <div class="flow-rail" role="list" aria-label="创作流程">
+            <div
+              v-for="(step, idx) in workflowSteps"
+              :key="idx"
+              class="flow-step"
+              :class="`is-${step.status}`"
+              role="listitem"
+            >
+              <span class="flow-index">{{ String(idx + 1).padStart(2, '0') }}</span>
+              <div class="flow-body">
+                <span class="flow-title">{{ step.title }}</span>
+                <span class="flow-desc">{{ step.description }}</span>
+              </div>
+            </div>
+          </div>
+          <p v-if="!hasBibleContent" class="bible-tip">
+            系列设定内容为空（不阻断续写）：补充人物、世界观与风格后，续写与分镜一致性会明显更好。
+            <n-button text size="tiny" type="primary" @click="openBibleEditor">现在补充</n-button>
+          </p>
+          <div class="next-action">
+            <div class="next-text">
+              <b class="next-label">下一步：{{ nextAction.label }}</b>
+              <p class="hint">{{ nextAction.hint }}</p>
+            </div>
+            <n-button type="primary" @click="nextAction.run">{{ nextAction.cta }}</n-button>
+          </div>
+        </section>
 
         <section class="stat-row">
           <div class="stat"><b>{{ series.episode_count }}</b><span>剧集总数</span></div>
@@ -213,13 +374,19 @@ function goWorkspace(projectId: string | null) {
 
         <n-tabs type="line" animated>
           <n-tab-pane name="episodes" tab="剧集列表">
-            <n-empty v-if="episodes.length === 0" description="还没有剧集，点击右上角续写第一集" />
+            <n-empty v-if="episodes.length === 0" description="还没有剧集：点「续写第 1 集」，填写要求后自动生成剧本并建立生产项目">
+              <template #extra>
+                <n-button type="primary" size="small" @click="goContinue()">续写第 1 集</n-button>
+              </template>
+            </n-empty>
             <div v-else class="episode-list">
               <div v-for="ep in episodes" :key="ep.id" class="episode-row">
+                <span class="ep-no">{{ String(ep.episode_number).padStart(2, '0') }}</span>
                 <div class="ep-main">
                   <div class="ep-title">
-                    第 {{ ep.episode_number }} 集
                     <span v-if="ep.title" class="ep-name">{{ ep.title }}</span>
+                    <span v-else class="ep-name">第 {{ ep.episode_number }} 集</span>
+                    <span class="ep-next">{{ EPISODE_STEP_LABEL[episodeStep(ep)] }}</span>
                   </div>
                   <p class="ep-synopsis">{{ ep.synopsis || '暂无简介' }}</p>
                 </div>
@@ -236,9 +403,36 @@ function goWorkspace(projectId: string | null) {
                   </n-tag>
                 </div>
                 <div class="ep-actions">
-                  <n-button size="small" @click="goContinue(ep.id)">续写</n-button>
-                  <n-button size="small" @click="goReview(ep.id)">审核</n-button>
-                  <n-button size="small" quaternary @click="goWorkspace(ep.project_id)">进入制作</n-button>
+                  <n-button
+                    v-if="episodeStep(ep) === 'analyzing'"
+                    size="small"
+                    @click="router.push({ name: 'jobs' })"
+                  >生成中 · 查看进度</n-button>
+                  <n-button
+                    v-else-if="episodeStep(ep) === 'write'"
+                    size="small"
+                    type="primary"
+                    @click="goContinue(ep.id)"
+                  >续写本集</n-button>
+                  <n-button
+                    v-else-if="episodeStep(ep) === 'review'"
+                    size="small"
+                    type="primary"
+                    @click="goReview(ep.id)"
+                  >审核确认</n-button>
+                  <n-button
+                    v-else
+                    size="small"
+                    type="primary"
+                    @click="goWorkspace(ep)"
+                  >{{ ep.production_status === 'not_started' ? '进入制作' : '继续制作' }}</n-button>
+                  <n-button
+                    v-if="ep.script_status !== 'confirmed'"
+                    size="small"
+                    quaternary
+                    @click="goContinue(ep.id)"
+                  >重新续写</n-button>
+                  <n-button v-else size="small" quaternary @click="goReview(ep.id)">查看剧本</n-button>
                 </div>
               </div>
             </div>
@@ -352,87 +546,252 @@ function goWorkspace(projectId: string | null) {
 
 <style scoped>
 .series-detail-page {
-  padding: 24px;
-  max-width: 1100px;
+  max-width: 1180px;
   margin: 0 auto;
+  padding: var(--sp-6) var(--sp-8) var(--sp-16);
 }
+
+/* 头部：标题用衬线，信息按栏线排布 */
 .detail-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
+  gap: var(--sp-6);
+  flex-wrap: wrap;
+}
+.head-main {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+.back-link {
+  margin-bottom: var(--sp-2);
+  color: var(--text-tertiary);
+}
+.back-link:hover {
+  color: var(--brand-hover);
 }
 .detail-head h1 {
-  margin: 0 0 6px;
-  font-size: 22px;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
 }
 .sub {
-  color: #666;
-  margin: 0 0 8px;
+  margin: var(--sp-2) 0 0;
+  max-width: 62ch;
   font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
 }
 .meta {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  font-size: 12px;
-  color: #888;
   align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
+.meta > span + span {
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--border-subtle);
+}
+
+/* 创作流程：四段横向轨道，用栏线分隔；只有当前段被点亮 */
+.flow-panel {
+  margin-top: var(--sp-6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.flow-rail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.flow-step {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  padding: var(--sp-4) var(--sp-4) var(--sp-4) var(--sp-5);
+  border-left: 1px solid var(--border-subtle);
+  border-top: 2px solid transparent;
+}
+.flow-step:first-child {
+  border-left: 0;
+}
+.flow-step.is-wait {
+  opacity: 0.55;
+}
+.flow-step.is-process {
+  border-top-color: var(--brand-primary);
+}
+.flow-index {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 20px;
+  color: var(--text-tertiary);
+}
+.flow-step.is-finish .flow-index {
+  color: var(--brand-primary);
+}
+.flow-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.flow-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.flow-step.is-process .flow-title {
+  color: var(--brand-hover);
+}
+.flow-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.bible-tip {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-sunken);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.bible-tip .n-button {
+  margin-left: 6px;
+}
+
+/* 下一步：全页唯一的强调块，左侧青瓷竖线 + 抬高底色 */
+.next-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--border-strong);
+  border-left: 2px solid var(--brand-primary);
+  background: var(--bg-elevated);
+}
+.next-text {
+  min-width: 0;
+}
+.next-label {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.next-text .hint {
+  margin: 4px 0 0;
+  max-width: 62ch;
+}
+.hint {
+  margin: 0 0 var(--sp-2);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+
+/* 统计：账本式单行，用竖线分栏，不做卡片 */
 .stat-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 12px;
-  margin: 18px 0;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: var(--sp-6) 0 var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .stat {
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
-  border-radius: 8px;
-  padding: 12px;
-  text-align: center;
+  padding: var(--sp-4) var(--sp-5);
+  border-left: 1px solid var(--border-subtle);
+}
+.stat:first-child {
+  padding-left: 0;
+  border-left: 0;
 }
 .stat b {
   display: block;
-  font-size: 20px;
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
 }
 .stat span {
+  display: block;
+  margin-top: 2px;
   font-size: 12px;
-  color: #888;
+  color: var(--text-tertiary);
 }
+
+/* 剧集：连续账本行，分隔线组织层级，不再逐行套卡片 */
 .episode-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  border-top: 1px solid var(--border-subtle);
 }
 .episode-row {
-  border: 1px solid #eee;
-  border-radius: 8px;
-  padding: 12px;
   display: flex;
-  gap: 12px;
   align-items: center;
+  gap: var(--sp-4);
   flex-wrap: wrap;
+  padding: var(--sp-4) var(--sp-2) var(--sp-4) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--transition-fast);
+}
+.episode-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+.ep-no {
+  flex: 0 0 44px;
+  align-self: flex-start;
+  padding-top: 1px;
+  padding-left: var(--sp-3);
+  border-left: 2px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-tertiary);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.episode-row:hover .ep-no {
+  border-left-color: var(--brand-primary);
+  color: var(--brand-hover);
 }
 .ep-main {
   flex: 1 1 260px;
   min-width: 200px;
 }
 .ep-title {
-  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
   font-size: 14px;
 }
 .ep-name {
-  font-weight: 400;
-  color: #666;
-  margin-left: 6px;
-  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ep-next {
+  font-size: 12px;
+  color: var(--brand-hover);
 }
 .ep-synopsis {
+  display: -webkit-box;
   margin: 4px 0 0;
-  color: #888;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.55;
+  color: var(--text-tertiary);
 }
 .ep-tags {
   display: flex;
@@ -442,55 +801,93 @@ function goWorkspace(projectId: string | null) {
 .ep-actions {
   display: flex;
   gap: 6px;
+  margin-left: auto;
 }
-.hint {
-  color: #888;
+
+/* 其余标签页 */
+.json-block {
+  margin: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
-  margin: 0 0 8px;
-}
-.json-block {
-  background: #f6f6f6;
-  padding: 12px;
-  border-radius: 6px;
-  font-size: 12px;
+  color: var(--text-secondary);
   max-height: 420px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
-  margin: 0;
 }
 .cont-row {
   display: flex;
-  gap: 18px;
+  gap: var(--sp-5);
   flex-wrap: wrap;
   font-size: 13px;
+  color: var(--text-secondary);
 }
 .mt12 {
-  margin-top: 12px;
+  margin-top: var(--sp-3);
 }
 .ev-meta {
   font-size: 12px;
-  color: #999;
+  color: var(--text-tertiary);
 }
 .thread-list,
 .asset-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
+  gap: var(--sp-3);
 }
 .thread-head,
 .asset-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .state-box {
-  padding: 40px;
+  padding: var(--sp-10);
   text-align: center;
+  color: var(--text-secondary);
 }
 .state-box.error {
-  color: #d03050;
+  color: var(--danger);
+}
+
+@media (max-width: 900px) {
+  .series-detail-page {
+    padding: var(--sp-4) var(--sp-4) var(--sp-12);
+  }
+  .detail-head h1 {
+    font-size: 26px;
+  }
+  .flow-rail {
+    grid-template-columns: 1fr 1fr;
+  }
+  .flow-step:nth-child(3) {
+    border-left: 0;
+  }
+  .flow-step:nth-child(n + 3) {
+    border-top: 1px solid var(--border-subtle);
+  }
+  .stat-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .stat {
+    padding-left: var(--sp-4);
+    border-left: 1px solid var(--border-subtle);
+  }
+  .stat:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .stat:nth-child(n + 3) {
+    border-top: 1px solid var(--border-subtle);
+  }
+  .ep-actions {
+    margin-left: 0;
+  }
 }
 </style>

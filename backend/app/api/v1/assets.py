@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.core.config import get_settings
+from app.core.config import get_settings, stored_path
 from app.core.database import get_db
 from app.models import Asset, AssetRef, Character, Job, Prop, Scene, Shot, ids
 from app.models.enums import ASSET_TYPE
@@ -109,7 +109,7 @@ def get_asset_file(asset_id: str, thumb: bool = False, db: Session = Depends(get
     path_str = a.file_path
     if thumb and a.thumb_path:
         path_str = a.thumb_path
-    path = Path(path_str)
+    path = stored_path(path_str)
     if not path.exists():
         raise errors.AppError("asset_file_missing", "资产文件不存在或已被清理", 404)
     import mimetypes
@@ -226,8 +226,8 @@ def export_assets(payload: dict, db: Session = Depends(get_db)):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for aid in asset_ids:
             a = _get_asset(db, aid)
-            if a.file_path and Path(a.file_path).exists():
-                zf.write(a.file_path, arcname=Path(a.file_path).name)
+            if a.file_path and stored_path(a.file_path).exists():
+                zf.write(stored_path(a.file_path), arcname=stored_path(a.file_path).name)
     buf.seek(0)
     return StreamingResponse(
         buf,
@@ -563,7 +563,7 @@ async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(g
     suffix = Path(file.filename or "").suffix or ".bin"
     _check_file_type(asset.asset_type, suffix)
     # 原地覆盖：文件路径固定不变，直接写原 file_path
-    dest = Path(asset.file_path)
+    dest = stored_path(asset.file_path)
     if not dest.is_absolute():
         # file_path 为相对后端工作目录的存储口径（data/media/xxx），按原样解析
         if not dest.exists():

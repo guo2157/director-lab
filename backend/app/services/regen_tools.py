@@ -18,6 +18,7 @@
 import time
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from app.core.config import stored_path
 from app.models import Asset, Job, Project
 from app.services.agent_tools import ToolError, ToolResult
 from app.services.pipeline_state import PipelineStateError, assert_action_allowed, get_pipeline_status
@@ -139,7 +140,7 @@ def tool_replace_asset(db: Session, project_id: str, asset_id: str, file_path: s
     if asset.locked:
         raise ToolError("asset_locked", "资产已锁定，请先解锁再替换")
     from pathlib import Path
-    src = Path(file_path)
+    src = stored_path(file_path)
     if not src.is_file():
         raise ToolError("file_not_found", f"替换文件不存在：{file_path}")
     # 复用 API 层实现（含文件类型校验、原地覆盖、缩略图重生成、闸口联动）

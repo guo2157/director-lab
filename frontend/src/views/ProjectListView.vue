@@ -11,6 +11,7 @@ import {
   NInput,
   NModal,
   NProgress,
+  NSelect,
   NTag,
   useDialog,
   useMessage,
@@ -273,9 +274,9 @@ const formModel = ref<{ name: string; aspect_ratio: AspectRatio; creation_type: 
 const seriesForm = ref<{
   name: string
   description: string
-  genre: string
-  style: string
-  target_audience: string
+  genre: string | null
+  style: string | null
+  target_audience: string | null
 }>({
   name: '',
   description: '',
@@ -290,6 +291,25 @@ const styleOptionsQuery = useQuery({
   staleTime: 5 * 60 * 1000,
 })
 const styleOptions = computed(() => styleOptionsQuery.data.value)
+/** 系列表单下拉选项：与单集项目的风格配置共用后端选项，避免人工填写口径不一致 */
+const seriesGenreOptions = computed(() =>
+  (styleOptions.value?.genre_groups ?? []).map((g) => ({
+    type: 'group' as const,
+    label: g.group,
+    key: g.group,
+    children: g.tags.map((t) => ({ label: t, value: t })),
+  })),
+)
+const seriesStyleOptions = computed(() =>
+  (styleOptions.value?.visual_styles ?? []).map((s) => ({ label: s.label, value: s.label })),
+)
+const seriesAudienceOptions = computed(() =>
+  (styleOptions.value?.target_audiences ?? []).map((a) => ({ label: a.label, value: a.label })),
+)
+const seriesStyleHint = computed(() => {
+  const key = seriesForm.value.style
+  return (styleOptions.value?.visual_styles ?? []).find((s) => s.label === key)?.description ?? ''
+})
 const showStyleConfig = ref(false)
 const styleConfig = ref<StyleConfig | null>(null)
 function toggleStyleConfig(v: boolean) {
@@ -371,10 +391,10 @@ async function handleCreateSeries() {
   }
   const payload: SeriesCreatePayload = {
     name: seriesForm.value.name.trim(),
-    description: seriesForm.value.description.trim() || null,
-    genre: seriesForm.value.genre.trim() || null,
-    style: seriesForm.value.style.trim() || null,
-    target_audience: seriesForm.value.target_audience.trim() || null,
+    description: (seriesForm.value.description ?? '').trim() || null,
+    genre: (seriesForm.value.genre ?? '').trim() || null,
+    style: (seriesForm.value.style ?? '').trim() || null,
+    target_audience: (seriesForm.value.target_audience ?? '').trim() || null,
   }
   mutateCreateSeries(payload)
 }
@@ -650,26 +670,35 @@ async function handleCreateSeries() {
         </n-form-item>
         <div class="form-row">
           <n-form-item label="题材类型" path="genre" class="form-row-item">
-            <n-input
+            <n-select
               v-model:value="seriesForm.genre"
-              placeholder="例如：儿童成长 / 奇幻冒险"
-              maxlength="64"
+              :options="seriesGenreOptions"
+              placeholder="选择题材类型"
+              filterable
+              clearable
             />
           </n-form-item>
           <n-form-item label="目标受众" path="target_audience" class="form-row-item">
-            <n-input
+            <n-select
               v-model:value="seriesForm.target_audience"
-              placeholder="例如：6-10 岁儿童"
-              maxlength="64"
+              :options="seriesAudienceOptions"
+              placeholder="选择目标受众"
+              filterable
+              clearable
             />
           </n-form-item>
         </div>
         <n-form-item label="整体风格" path="style">
-          <n-input
-            v-model:value="seriesForm.style"
-            placeholder="例如：温暖治愈的手绘风格"
-            maxlength="200"
-          />
+          <div class="series-style-field">
+            <n-select
+              v-model:value="seriesForm.style"
+              :options="seriesStyleOptions"
+              placeholder="选择整体视觉风格"
+              filterable
+              clearable
+            />
+            <div v-if="seriesStyleHint" class="series-style-hint">{{ seriesStyleHint }}</div>
+          </div>
         </n-form-item>
       </n-form>
 
@@ -1253,6 +1282,18 @@ async function handleCreateSeries() {
 }
 .form-row-item {
   flex: 1;
+  min-width: 0;
+}
+.series-style-field {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.series-style-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
 }
 /* ===== 系列引导（已弃用，保留占位防样式漂移）===== */
 /* 新建作品弹窗内的可选风格配置折叠区 */

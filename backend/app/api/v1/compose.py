@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import get_settings, stored_path
 from app.core.database import get_db
 from app.models import Composition, Export, Job, Project, Scene, Shot
 from app.models import ids
@@ -228,7 +228,7 @@ def _resolve_media_file(file_path: str) -> Path | None:
       预览页直接拼 /api/media/ 会变成 data/media/data/media/... 导致 400）
     """
     media_dir = Path(get_settings().media_dir).resolve()
-    raw = Path(file_path)
+    raw = stored_path(file_path)
     candidates: list[Path] = []
     if raw.is_absolute():
         candidates.append(raw)

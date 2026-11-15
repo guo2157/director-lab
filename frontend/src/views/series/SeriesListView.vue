@@ -158,103 +158,133 @@ function onSearch() {
 
 <style scoped>
 .series-list-page {
-  padding: 24px;
-  max-width: 1200px;
+  max-width: 1180px;
   margin: 0 auto;
+  padding: var(--sp-6) var(--sp-8) var(--sp-16);
 }
 .page-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  padding-bottom: var(--sp-4);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.head-text {
+  flex: 1 1 420px;
+  min-width: 0;
 }
 .page-head h1 {
-  font-size: 22px;
-  margin: 0 0 6px;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
 }
 .page-head p {
-  margin: 0;
-  color: #666;
+  margin: var(--sp-2) 0 0;
+  max-width: 68ch;
   font-size: 13px;
-  max-width: 720px;
   line-height: 1.6;
+  color: var(--text-secondary);
 }
 .filters {
   display: flex;
-  gap: 10px;
-  margin-bottom: 18px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-5);
   flex-wrap: wrap;
 }
 .state-box {
-  padding: 40px;
+  padding: var(--sp-10);
   text-align: center;
-  color: #666;
+  color: var(--text-secondary);
 }
 .state-box.error {
-  color: #d03050;
+  color: var(--danger);
 }
 .series-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  gap: var(--sp-3);
 }
+/* 系列卡：像片盒一样以边框和左侧细线区分，悬停只换边线颜色，不加阴影 */
 .series-card {
-  border: 1px solid #eee;
-  border-radius: 10px;
-  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-4) var(--sp-4) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
   cursor: pointer;
-  transition: box-shadow 0.15s, border-color 0.15s;
-  background: #fff;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
 }
 .series-card:hover {
-  border-color: #d0d0d0;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+  border-left-color: var(--brand-primary);
 }
 .card-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .card-head h2 {
-  font-size: 16px;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-primary);
 }
 .desc {
-  color: #666;
-  font-size: 13px;
-  margin: 10px 0;
-  min-height: 36px;
-  line-height: 1.5;
   display: -webkit-box;
+  min-height: 36px;
+  margin: var(--sp-2) 0 var(--sp-3);
+  overflow: hidden;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
-  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
 }
 .stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12px;
-  color: #888;
-  margin-bottom: 12px;
-}
-.stats span {
-  background: #f6f6f6;
-  padding: 2px 8px;
-  border-radius: 10px;
+  gap: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 .card-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
+  margin-top: auto;
 }
 .pager {
-  margin-top: 20px;
   display: flex;
   justify-content: center;
+  margin-top: var(--sp-5);
+}
+
+@media (max-width: 900px) {
+  .series-list-page {
+    padding: var(--sp-4) var(--sp-4) var(--sp-12);
+  }
+  .page-head h1 {
+    font-size: 24px;
+  }
+  .series-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

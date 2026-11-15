@@ -215,12 +215,17 @@ function goBack() {
 }
 
 function goWorkspace() {
-  const projectId = episode.value?.project_id
-  if (!projectId) {
-    message.warning('该剧集尚未绑定生产项目，先完成续写生成剧本')
+  const ep = episode.value
+  if (!ep) return
+  if (!ep.project_id) {
+    message.warning(
+      ep.script_status === 'awaiting_review'
+        ? '剧本还在审核中：先确认剧本，再进入制作'
+        : '还差一步：先回到续写提交创作要求，系统会自动建立生产项目并生成剧本',
+    )
     return
   }
-  void router.push({ name: 'script', params: { id: projectId } })
+  void router.push({ name: 'script', params: { id: ep.project_id } })
 }
 
 function goContinue() {
@@ -374,109 +379,144 @@ onMounted(async () => {
 
 <style scoped>
 .episode-review-page {
-  padding: 24px;
-  max-width: 1100px;
+  max-width: 1180px;
   margin: 0 auto;
+  padding: var(--sp-6) var(--sp-8) var(--sp-16);
 }
 .page-head {
-  margin-bottom: 16px;
+  padding-bottom: var(--sp-4);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .page-title {
-  font-size: 20px;
-  margin: 8px 0 4px;
+  margin: var(--sp-2) 0 var(--sp-1);
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
 }
 .hint {
-  color: #888;
-  font-size: 12px;
   margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
 }
 .section-card {
-  margin-bottom: 16px;
+  margin-bottom: var(--sp-4);
 }
 .state-box {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px;
-  color: #666;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
   font-size: 13px;
+  color: var(--text-secondary);
 }
 .state-box.error {
-  color: #d03050;
+  color: var(--danger);
 }
 .title-row {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
 }
 .episode-no {
-  font-size: 13px;
-  color: #888;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 .episode-title {
   font-size: 16px;
   font-weight: 600;
+  color: var(--text-primary);
 }
+/* 版本列表：左侧细线表示当前选中，不用浅色底块 */
 .version-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 .version-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid #eee;
-  border-radius: 6px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-left: 2px solid var(--border-subtle);
+  border-radius: var(--radius);
   cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.version-item:hover {
+  background: var(--bg-elevated);
 }
 .version-item.active {
-  border-color: #2080f0;
-  background: #f5faff;
+  border-color: var(--border-strong);
+  border-left-color: var(--brand-primary);
+  background: var(--bg-elevated);
 }
 .version-badge {
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
 }
 .block-title {
+  margin: var(--sp-2) 0 var(--sp-1);
   font-size: 13px;
   font-weight: 600;
-  margin: 8px 0 4px;
+  color: var(--text-primary);
 }
 .script-block {
-  background: #fafafa;
-  border: 1px solid #eee;
-  border-radius: 6px;
-  padding: 10px;
+  margin: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
   font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
   max-height: 360px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  margin: 0;
 }
 .issue-item {
-  border: 1px solid #eee;
-  border-radius: 6px;
-  padding: 8px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius);
 }
 .issue-type {
+  font-family: var(--font-mono);
   font-size: 12px;
-  color: #666;
+  color: var(--text-tertiary);
 }
 .issue-msg {
-  font-size: 13px;
   margin: 4px 0;
+  font-size: 13px;
+  color: var(--text-primary);
 }
 .field-label {
   font-size: 12px;
-  color: #666;
+  color: var(--text-secondary);
 }
 .result-block {
-  border: 1px solid #d7f0d8;
-  background: #f7fff7;
-  border-radius: 6px;
-  padding: 8px;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--state-success);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+@media (max-width: 900px) {
+  .episode-review-page {
+    padding: var(--sp-4) var(--sp-4) var(--sp-12);
+  }
+  .page-title {
+    font-size: 23px;
+  }
 }
 </style>

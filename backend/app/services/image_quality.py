@@ -25,6 +25,8 @@
 """
 from pathlib import Path
 
+from app.core.config import stored_path
+
 # 文件大小下限（字节）：低于此值视为可疑产物
 _MIN_FILE_BYTES = 4_096
 # 图片最短边下限（像素）
@@ -172,7 +174,7 @@ def check_image_quality(file_path: str, *, asset_type: str | None = None) -> dic
     checks: dict = {}
 
     # --- 第一层：文件与技术检查 ---
-    p = Path(file_path)
+    p = stored_path(file_path)
     checks["file_exists"] = p.exists()
     if not p.exists():
         return {"passed": False, "issues": ["文件不存在"], "checks": checks}

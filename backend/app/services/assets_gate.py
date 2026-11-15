@@ -22,7 +22,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import get_settings, stored_path
 from app.models import Asset, Character, Job, Project, Prop, Scene
 
 # 就绪状态（由后端计算，禁止前端直传）
@@ -93,7 +93,7 @@ def _media_file_exists(file_path: str | None) -> bool:
     """
     if not file_path:
         return False
-    p = Path(file_path)
+    p = stored_path(file_path)
     if not p.is_absolute():
         if p.exists():
             return True

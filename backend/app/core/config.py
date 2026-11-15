@@ -88,6 +88,16 @@ _settings_cache: Settings | None = None
 _runtime_settings_mtime: float | None = None
 
 
+def stored_path(value: str | Path) -> Path:
+    """把数据库/配置里的存储路径转成本机可用的 Path。
+
+    Windows 下写入的 file_path 会带反斜杠（data\\media\\xxx.png），
+    在 Linux 部署时 Path 不把反斜杠当分隔符，会导致图片/视频 404。
+    统一替换为正斜杠（Windows 同样接受正斜杠）。
+    """
+    return Path(str(value).replace("\\", "/"))
+
+
 def get_settings() -> Settings:
     """获取全局配置（进程内缓存）。
 

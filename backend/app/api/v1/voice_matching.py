@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import stored_path
 from app.core.database import get_db
 from app.models import ids
 from app.models.audio import AudioSegment, VoiceLibrary, VoiceProfile
@@ -142,7 +143,7 @@ def preview_system_voice(
     signature = hashlib.sha256(sig_src.encode("utf-8")).hexdigest()
     if not bool(_payload.get("force")) and v.preview_asset_id:
         cached = db.get(Asset, v.preview_asset_id)
-        if cached and cached.file_path and Path(cached.file_path).exists():
+        if cached and cached.file_path and stored_path(cached.file_path).exists():
             return {
                 "cached": True,
                 "voice_code": v.voice_code,

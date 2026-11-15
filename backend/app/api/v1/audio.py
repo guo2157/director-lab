@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func as sa_func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import stored_path
 from app.core.database import get_db
 from app.models import ids
 from app.models.audio import AudioReview, AudioSegment, VoiceProfile
@@ -570,7 +571,7 @@ def preview_voice(voice_profile_id: str, payload: dict | None = None, db: Sessio
     _force = bool(_payload.get("force"))
     if not _force and vp.preview_asset_id and vp.preview_signature == preview_signature:
         _cached = db.get(Asset, vp.preview_asset_id)
-        _cached_path = Path(_cached.file_path) if (_cached and _cached.file_path) else None
+        _cached_path = stored_path(_cached.file_path) if (_cached and _cached.file_path) else None
         if _cached_path is not None and _cached_path.exists():
             return {
                 "cached": True,
@@ -653,7 +654,7 @@ def get_voice_preview_cache(
     preview_signature = hashlib.sha256(_sig_src.encode("utf-8")).hexdigest()
     if vp.preview_asset_id and vp.preview_signature == preview_signature:
         _cached = db.get(Asset, vp.preview_asset_id)
-        _cached_path = Path(_cached.file_path) if (_cached and _cached.file_path) else None
+        _cached_path = stored_path(_cached.file_path) if (_cached and _cached.file_path) else None
         # 文件被清理过则视为未命中，避免返回死链
         if _cached_path is not None and _cached_path.exists():
             return {

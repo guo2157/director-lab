@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import get_settings, stored_path
 from app.core import database as _db
 from app.integrations.comfyui import ComfyUIClient, ComfyUIError
 from app.integrations import comfyui_pool
@@ -150,7 +150,7 @@ def _overwrite_asset_file(asset: Asset, content: bytes) -> str:
     """
     from pathlib import Path
 
-    dest = Path(asset.file_path)
+    dest = stored_path(asset.file_path)
     if not dest.is_absolute() and not dest.exists():
         dest = Path(get_settings().media_dir) / dest
     dest.parent.mkdir(parents=True, exist_ok=True)

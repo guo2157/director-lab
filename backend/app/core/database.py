@@ -15,12 +15,14 @@ def _set_sqlite_pragma(dbapi_conn, _):
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    # API 与 worker 并发写库时，默认 5s 的锁等待会直接抛 database is locked
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 
 def make_engine(database_url: str | None = None):
     url = database_url or get_settings().database_url
-    engine = create_engine(url, connect_args={"check_same_thread": False})
+    engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
     event.listen(engine, "connect", _set_sqlite_pragma)
     return engine
 

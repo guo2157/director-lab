@@ -954,34 +954,6 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
         <h1 class="page-title">分镜图</h1>
       </div>
     </header>
-    <div class="gate-banner" :class="{ ok: reviewApproved, bad: reviewRejected }">
-      <span class="gate-badge">{{ reviewApproved ? '✓' : '⏳' }}</span>
-      <span
-        class="status-tag"
-        :class="reviewApproved ? 'is-succeeded' : reviewRejected ? 'is-failed' : 'is-pending'"
-      >{{ reviewApproved ? '审核已通过' : reviewRejected ? '审核已驳回' : '待审核' }}</span>
-      <span class="gate-text">
-        {{ reviewApproved
-          ? '公共资产已通过人工审核，可生成分镜图；分镜图逐镜确认无误后进入分镜看板生成视频'
-          : reviewRejected
-            ? '公共资产审核被驳回：请返回资产库修改或替换资产后重新提交审核'
-            : '公共资产尚未通过人工审核：请先在资产库完成审核，才能生成分镜图' }}
-      </span>
-      <n-button size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
-      <n-button size="small" quaternary @click="scenesQuery.refetch()">刷新</n-button>
-      <n-button
-        size="small"
-        type="primary"
-        secondary
-        :disabled="!selectedList.length"
-        :loading="batchConfirming"
-        @click="handleBatchConfirm"
-      >批量审核通过（{{ selectedList.length }}）</n-button>
-      <n-button size="small" type="primary" :disabled="!allConfirmed" @click="router.push(`/project/${projectId}/storyboard`)">
-        去分镜看板
-      </n-button>
-    </div>
-
     <input ref="fileInputRef" type="file" accept="image/*" class="hidden-file" @change="onReplaceFileChange" />
 
     <!-- 生成总体进度：全片 X/Y、正在生成哪几镜、失败项、是否全部完成 -->
@@ -1031,6 +1003,34 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
           </span>
         </span>
       </div>
+    </div>
+
+    <div class="gate-banner" :class="{ ok: reviewApproved, bad: reviewRejected }">
+      <span class="gate-badge">{{ reviewApproved ? '✓' : '⏳' }}</span>
+      <span
+        class="status-tag"
+        :class="reviewApproved ? 'is-succeeded' : reviewRejected ? 'is-failed' : 'is-pending'"
+      >{{ reviewApproved ? '审核已通过' : reviewRejected ? '审核已驳回' : '待审核' }}</span>
+      <span class="gate-text">
+        {{ reviewApproved
+          ? '公共资产已通过人工审核，可生成分镜图；分镜图逐镜确认无误后进入分镜看板生成视频'
+          : reviewRejected
+            ? '公共资产审核被驳回：请返回资产库修改或替换资产后重新提交审核'
+            : '公共资产尚未通过人工审核：请先在资产库完成审核，才能生成分镜图' }}
+      </span>
+      <n-button size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
+      <n-button size="small" quaternary @click="scenesQuery.refetch()">刷新</n-button>
+      <n-button
+        size="small"
+        type="primary"
+        secondary
+        :disabled="!selectedList.length"
+        :loading="batchConfirming"
+        @click="handleBatchConfirm"
+      >批量审核通过（{{ selectedList.length }}）</n-button>
+      <n-button size="small" type="primary" :disabled="!allConfirmed" @click="router.push(`/project/${projectId}/storyboard`)">
+        去分镜看板
+      </n-button>
     </div>
 
     <div class="summary-bar">
@@ -1392,7 +1392,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   padding: 10px 14px;
@@ -1409,6 +1409,22 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 }
 .gate-badge { font-size: 14px; }
 .gate-text { font-size: 13px; color: var(--text-primary); margin-right: auto; }
+
+/* 进度条下方一行：审核状态 + 说明在左，操作按钮在右 */
+.gate-badge,
+.gate-banner .status-tag,
+.gate-banner .n-button {
+  flex-shrink: 0;
+}
+.gate-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .gate-banner {
+    flex-wrap: wrap;
+  }
+}
 
 /* ===== 生成总体进度面板 ===== */
 .gen-panel {

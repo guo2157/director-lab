@@ -11,6 +11,8 @@ import logging
 import subprocess
 from pathlib import Path
 
+from app.core.config import stored_path
+
 logger = logging.getLogger("director-lab.thumbnail")
 
 THUMB_MAX_SIZE = 400
@@ -54,7 +56,7 @@ def make_video_thumb(src: Path, dst: Path) -> bool:
 
 def make_thumb(file_path: str, asset_stem: str) -> str | None:
     """按产物类型生成缩略图，返回缩略图路径或 None（失败/不适用）。"""
-    src = Path(file_path)
+    src = stored_path(file_path)
     if not src.exists():
         return None
     ext = src.suffix.lower()

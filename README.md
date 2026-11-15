@@ -364,6 +364,45 @@ flowchart TD
 
 ## 快速开始
 
+### 使用 AutoDL 镜像（推荐）
+
+镜像 `director-lab` 已内置本仓库、ComfyUI 渲染底座与 AutoDL 一键部署脚本，无需手动安装依赖：
+
+| 路径 | 内容 |
+| --- | --- |
+| `/root/director-lab` | 本项目源码（前后端、`backend/.venv`、已构建的 `frontend/dist`） |
+| `/root/ComfyUI` | ComfyUI 0.45.0（`models` 指向 `/root/sysmodels`） |
+| `/root/setup/autodl_comfyui_qwen21_h3_setup.py` | H3 / Qwen-Image / Qwen3-TTS 模型一键下载与校验脚本 |
+| `/root/setup/start_comfy.sh` | 启动 ComfyUI（`127.0.0.1:8188`） |
+| `/root/setup/start_director.sh` | 启动后端 API、调度 worker 并写入运行时配置 |
+
+启动全部服务：
+
+```bash
+bash /root/setup/start_comfy.sh
+bash /root/setup/start_director.sh
+```
+
+| 服务 | 地址 | 说明 |
+| --- | --- | --- |
+| 前端工作台 | `http://127.0.0.1:6006` | nginx 托管 `frontend/dist`，也对应 AutoDL 控制台「自定义服务 6006」 |
+| 后端 API | `http://127.0.0.1:8000` | nginx 将 `/api` 反代到该地址 |
+| ComfyUI | `http://127.0.0.1:8188` | 仅本机可访问，由 Director-Lab 调用 |
+
+首次使用如需下载模型，可执行 `/root/setup/step_download_h3.sh` 与 `/root/setup/step_download_qwen.sh`（或 `python /root/setup/autodl_comfyui_qwen21_h3_setup.py all --groups h3 qwen tts`）。
+
+#### 必须配置 ComfyUI 地址
+
+镜像启动后，Director-Lab 不会自动猜测渲染服务地址，**需要手动配置 ComfyUI 地址后才能生成图片、视频和配音**：
+
+1. 打开工作台，进入「设置 → ComfyUI」；
+2. 新增实例，地址填写 `http://127.0.0.1:8188`（ComfyUI 与 Director-Lab 在同一台机器时）；
+3. 点击「测试连通性」，返回延迟即表示配置正确；保存后立即生效，无需重启。
+
+> 如果 ComfyUI 部署在另一台机器，请填写该机器的 `http://<IP>:<端口>`，并确保 Director-Lab 后端能够访问该地址。
+
+镜像内未预置任何 LLM 凭据，请同时在「设置 → 语言模型」填写自己的 OpenAI 兼容服务（Base URL、API Key、模型名），剧本评估、解析和分镜规划才能正常运行。
+
 ### 环境要求
 
 - Python ≥ 3.11
