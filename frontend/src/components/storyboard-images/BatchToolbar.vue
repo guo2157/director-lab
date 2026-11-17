@@ -177,7 +177,7 @@ watch(
   flex: 1;
   min-width: var(--sp-2);
 }
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .spacer {
     display: none;
   }

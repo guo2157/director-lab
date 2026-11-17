@@ -834,7 +834,7 @@ function statusTagClass(status: string) {
     align-items: start;
   }
 }
-@media (max-width: 800px) {
+@media (max-width: 768px) {
   .compose-grid { grid-template-columns: minmax(0, 1fr); }
   .col-records { grid-template-columns: minmax(0, 1fr); }
   .video-frame { max-width: 360px; }

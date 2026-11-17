@@ -211,7 +211,7 @@ const statusLabel = computed(() => {
   gap: var(--sp-2);
   flex-wrap: wrap;
 }
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .detail-grid {
     grid-template-columns: 1fr;
     gap: var(--sp-4);

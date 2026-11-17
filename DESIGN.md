@@ -81,10 +81,11 @@
 | --- | --- | --- |
 | `--text-primary` | `#e6ecee` | 正文、标题 |
 | `--text-secondary` | `#93a5ac` | 辅助说明、元信息 |
-| `--text-tertiary` | `#5a6c74` | 占位符、时间戳、极弱信息 |
-| `--text-disabled` | `= --text-tertiary` | 禁用 |
+| `--text-tertiary` | `#7f929a` | 占位符、时间戳、次级元信息 |
+| `--text-disabled` | `#5a6c74` | 禁用态（WCAG 豁免，不用于可读文字） |
+| `--danger-text` | `#f07a68` | 小号错误文字；`--state-danger` 只用于描边、图标、大块填充 |
 
-对比度要求：`text-primary` / `text-secondary` 在 `bg-base`、`bg-panel` 上均 ≥ 4.5:1；
+对比度要求（`npm run check:contrast` 实测）：全部文本令牌在四档背景（base / panel / elevated / sunken）上均 ≥ 4.5:1；`--text-disabled` 为禁用态豁免；`--state-danger` 属非文本用途，不参与文本门禁。原要求参考：
 `text-tertiary` 仅用于非关键信息，不承载操作。
 
 ---
@@ -175,12 +176,20 @@
 
 ## 10. 验收
 
+### 门禁命令（每次提交前必须通过）
 ```bash
 cd frontend
-npm run check:colors          # 查看各文件硬编码色值数量
-npm run check:colors:strict   # 门槛：hex 必须为 0
+npm run check:colors:strict       # 硬编码色值：hex / rgba 字面量必须为 0
+npm run check:breakpoints:strict  # 响应式断点：只允许 1100 / 768 / 480（min-width 可用 769 / 1101）
+npm run check:contrast:strict     # 对比度：全部文本令牌在四档背景上 >= 4.5:1（禁用态豁免）
+npm run build                     # vue-tsc 类型检查 + 产物构建
 ```
 
-- 阶段 1 基线：hex 400 处 / rgba 165 处（25 个文件）
-- 阶段 2 结束目标：hex 0 处；rgba 字面量 0 处（全部走语义令牌）
-- 新增或重写页面时，`check:colors:strict` 必须通过
+### 当前状态（2026-11-17 核对）
+- 硬编码色值：hex 0 处 / rgba 0 处（基线曾为 hex 400 / rgba 165，25 个文件）
+- 断点：已收敛至 3 档（1100 / 768 / 480），`check:breakpoints` 全绿
+- 对比度：`--text-tertiary` 最低 4.71、`--danger-text` 最低 5.58，全部达标
+- 确认框：危险操作统一走 `components/ui/ConfirmDialog.vue`（命令式封装 `composables/useConfirmDialog.ts`，App.vue 挂载 `GlobalConfirmDialog`），禁止直接调 `useDialog`
+- 图标：统一使用 `@vicons/ionicons5`（尺寸 13/14/16/22，颜色继承 `currentColor`）；禁止 emoji / 文字符号当图标；图标按钮必须带 `aria-label`
+- 图片：列表缩略图一律 `loading="lazy"`，内容图必须有有意义的 `alt`；列表视频 `preload="metadata"`
+- 顶栏入口：作品 / 任务中心 / 设置；导演台入口有意移除，经右侧 AI 助手面板进入

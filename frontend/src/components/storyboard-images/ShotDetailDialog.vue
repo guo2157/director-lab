@@ -327,13 +327,13 @@ function onReplace() {
   color: var(--text-tertiary);
 }
 
-@media (max-width: 980px) {
+@media (max-width: 768px) {
   .dg {
     grid-template-columns: 1fr;
     gap: var(--sp-4);
   }
 }
-@media (min-width: 981px) {
+@media (min-width: 769px) {
   .dg-aside {
     position: sticky;
     top: 0;

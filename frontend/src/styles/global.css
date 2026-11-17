@@ -27,6 +27,8 @@
 
   /* 语义色 */
   --danger: #e04e39;
+  /* 小号错误文字专用（深色背景上 ≥5.5:1）；--danger / --state-danger 仅用于描边、图标、填充 */
+  --danger-text: #f07a68;
   --brand-error: var(--danger);
   --state-success: #57c98a;
   --state-warning: #d9a03c;
@@ -60,8 +62,9 @@
   /* 文本层级 */
   --text-primary: #e6ecee;
   --text-secondary: #93a5ac;
-  --text-tertiary: #5a6c74;
-  --text-disabled: var(--text-tertiary);
+  --text-tertiary: #7f929a;
+  /* 原 text-tertiary，仅用于禁用态（WCAG 豁免） */
+  --text-disabled: #5a6c74;
 
   /* 字体 */
   --font-display: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'STSong', serif;
@@ -334,7 +337,7 @@ body {
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .page {
     padding: var(--sp-4) var(--sp-4) var(--sp-12);
   }

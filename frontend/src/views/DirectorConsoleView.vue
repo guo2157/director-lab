@@ -746,7 +746,7 @@ onMounted(() => {
 }
 
 /* 响应式：窄屏自动收起右栏，避免挤压聊天主区 */
-@media (max-width: 960px) {
+@media (max-width: 1100px) {
   .expand-btn.right {
     display: none;
   }

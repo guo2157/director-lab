@@ -333,7 +333,7 @@ kbd {
   font-weight: 600;
   letter-spacing: 0.01em;
 }
-@media (max-width: 1020px) {
+@media (max-width: 768px) {
   .detail-grid {
     grid-template-columns: 1fr;
     gap: var(--sp-4);

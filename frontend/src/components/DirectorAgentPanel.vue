@@ -537,7 +537,7 @@ onBeforeUnmount(() => {
 }
 
 /* ── 响应式 ── */
-@media (max-width: 1024px) {
+@media (max-width: 1100px) {
   .agent-drawer {
     min-width: 280px;
     max-width: min(600px, 52vw);

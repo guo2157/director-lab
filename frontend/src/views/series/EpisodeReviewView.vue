@@ -511,7 +511,7 @@ onMounted(async () => {
   background: var(--bg-sunken);
 }
 
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .episode-review-page {
     padding: var(--sp-4) var(--sp-4) var(--sp-12);
   }

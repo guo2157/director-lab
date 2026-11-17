@@ -9,10 +9,15 @@
     "preview": "vite preview",
     "check:colors": "node scripts/check-colors.mjs",
     "check:colors:json": "node scripts/check-colors.mjs --json",
-    "check:colors:strict": "node scripts/check-colors.mjs --fail-on 0"
+    "check:colors:strict": "node scripts/check-colors.mjs --fail-on 0",
+    "check:breakpoints": "node scripts/check-breakpoints.mjs",
+    "check:breakpoints:strict": "node scripts/check-breakpoints.mjs --fail",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:contrast:strict": "node scripts/check-contrast.mjs --fail"
   },
   "dependencies": {
     "@tanstack/vue-query": "^5.62.0",
+    "@vicons/ionicons5": "^0.13.0",
     "axios": "^1.7.9",
     "naive-ui": "^2.40.1",
     "pinia": "^2.3.0",

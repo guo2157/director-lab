@@ -122,7 +122,7 @@ function setMode(m: ViewMode) {
 }
 
 onMounted(() => {
-  const mq = window.matchMedia('(min-width: 1080px)')
+  const mq = window.matchMedia('(min-width: 1101px)')
   wide.value = mq.matches
   mq.addEventListener('change', (e) => {
     wide.value = e.matches

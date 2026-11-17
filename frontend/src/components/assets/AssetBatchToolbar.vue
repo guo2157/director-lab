@@ -156,7 +156,7 @@ watch(someChecked, (v) => {
   font-size: 12px;
   color: var(--state-danger);
 }
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .batch-bar {
     flex-wrap: wrap;
   }
