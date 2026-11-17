@@ -283,11 +283,11 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 12px 18px;
   background: var(--brand-primary);
-  color: #06201d;
+  color: var(--text-on-brand);
   border: 0;
   border-radius: 28px;
   cursor: pointer;
-  box-shadow: 0 4px 18px rgba(53, 179, 166, 0.35);
+  box-shadow: 0 4px 18px var(--brand-line);
   font-family: var(--font-ui);
   font-size: 14px;
   font-weight: 600;
@@ -296,7 +296,7 @@ onBeforeUnmount(() => {
 
 .agent-fab:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 22px rgba(53, 179, 166, 0.48);
+  box-shadow: 0 6px 22px var(--brand-line);
 }
 
 .agent-fab:active {
@@ -565,7 +565,7 @@ onBeforeUnmount(() => {
     min-width: 0;
     z-index: 150;
     border-left: 0;
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-lg);
   }
   .agent-resizer {
     display: none;

@@ -520,42 +520,42 @@ function _posLabel(p: Record<string, any> | null | undefined) {
 
 <style scoped>
 .regen-workbench { display: flex; flex-direction: column; gap: 8px; }
-.wb-loading { padding: 24px; text-align: center; color: #999; font-size: 13px; }
+.wb-loading { padding: 24px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
 .wb-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.wb-continuity { border: 1px solid #ffd591; background: #fffbe6; border-radius: 4px; padding: 8px 10px; }
+.wb-continuity { border: 1px solid var(--warning-line); background: var(--warning-soft); border-radius: 4px; padding: 8px 10px; }
 .wb-continuity-title { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 .wb-continuity-item { display: flex; gap: 6px; font-size: 12px; line-height: 1.7; align-items: flex-start; }
-.wb-validation { border: 1px solid #ffccc7; background: #fff2f0; border-radius: 4px; padding: 8px 10px; }
+.wb-validation { border: 1px solid var(--danger-line); background: var(--danger-soft); border-radius: 4px; padding: 8px 10px; }
 .wb-v-item { display: flex; gap: 6px; font-size: 12px; line-height: 1.8; align-items: flex-start; }
-.wb-v-error span { color: #cf1322; }
-.wb-v-warn span { color: #d46b08; }
+.wb-v-error span { color: var(--state-danger); }
+.wb-v-warn span { color: var(--state-warning); }
 .wb-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.wb-table th, .wb-table td { border-bottom: 1px solid #f0f0f0; padding: 6px 8px; text-align: left; vertical-align: middle; }
-.wb-table th { background: #fafafa; font-weight: 600; color: #666; }
+.wb-table th, .wb-table td { border-bottom: 1px solid var(--border-subtle); padding: 6px 8px; text-align: left; vertical-align: middle; }
+.wb-table th { background: var(--bg-elevated); font-weight: 600; color: var(--text-secondary); }
 .wb-slot { font-family: monospace; font-size: 12px; }
-.wb-mono { font-family: monospace; color: #888; }
-.wb-empty { text-align: center; color: #bbb; padding: 12px; }
-.wb-hint-line { font-size: 12px; color: #999; margin: 4px 0 8px; }
+.wb-mono { font-family: monospace; color: var(--text-tertiary); }
+.wb-empty { text-align: center; color: var(--text-tertiary); padding: 12px; }
+.wb-hint-line { font-size: 12px; color: var(--text-tertiary); margin: 4px 0 8px; }
 .wb-add-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
-.wb-section-title { font-size: 12px; font-weight: 600; color: #333; margin: 10px 0 4px; }
+.wb-section-title { font-size: 12px; font-weight: 600; color: var(--text-primary); margin: 10px 0 4px; }
 .wb-prompt-section { margin-bottom: 8px; }
-.wb-params { background: #fafafa; border: 1px solid #f0f0f0; border-radius: 4px; padding: 8px; font-size: 11px; max-height: 200px; overflow: auto; }
-.wb-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 8px; border-top: 1px solid #f0f0f0; }
+.wb-params { background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 8px; font-size: 11px; max-height: 200px; overflow: auto; }
+.wb-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
 .wb-props { margin-top: 10px; }
-.wb-prop-item { font-size: 12px; color: #666; line-height: 1.8; }
-.wb-hint { font-size: 11px; color: #999; font-weight: normal; }
+.wb-prop-item { font-size: 12px; color: var(--text-secondary); line-height: 1.8; }
+.wb-hint { font-size: 11px; color: var(--text-tertiary); font-weight: normal; }
 /* 顶部镜头标识与提示词/参考图概览：与镜头详情同序（先提示词后参考图） */
-.wb-shot-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 2px 0 4px; border-bottom: 1px solid #f0f0f0; }
-.wb-shot-title { font-size: 15px; font-weight: 600; color: #1f2937; }
+.wb-shot-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 2px 0 4px; border-bottom: 1px solid var(--border-subtle); }
+.wb-shot-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .wb-shot-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .wb-detail-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
 @media (max-width: 900px) { .wb-detail-grid { grid-template-columns: minmax(0, 1fr); } }
-.wb-panel { border: 1px solid #f0f0f0; border-radius: 6px; padding: 10px 12px; background: #fcfcfc; }
+.wb-panel { border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; background: var(--bg-elevated); }
 .wb-ref-list { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow: auto; }
-.wb-ref-card { display: flex; gap: 10px; align-items: center; background: #fff; border: 1px solid #f0f0f0; border-radius: 6px; padding: 6px; }
-.wb-ref-thumb { width: 72px; height: 48px; object-fit: cover; border-radius: 4px; background: #f5f5f5; flex: none; }
-.wb-ref-empty { display: flex; align-items: center; justify-content: center; color: #bbb; font-size: 11px; text-align: center; }
+.wb-ref-card { display: flex; gap: 10px; align-items: center; background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 6px; }
+.wb-ref-thumb { width: 72px; height: 48px; object-fit: cover; border-radius: 4px; background: var(--bg-elevated); flex: none; }
+.wb-ref-empty { display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .wb-ref-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.wb-ref-slot { font-family: monospace; font-size: 12px; color: #555; }
-.wb-ref-name { font-size: 12px; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-ref-slot { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+.wb-ref-name { font-size: 12px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

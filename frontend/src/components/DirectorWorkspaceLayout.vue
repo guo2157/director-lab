@@ -248,7 +248,7 @@ function onResizeStart(e: MouseEvent) {
     top: var(--app-header-height, 52px);
     bottom: 0;
     z-index: 100;
-    box-shadow: 4px 0 16px rgba(0,0,0,.15);
+    box-shadow: var(--shadow-lg);
   }
 
   .workspace-sidebar.collapsed {

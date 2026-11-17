@@ -30,7 +30,32 @@
   --brand-error: var(--danger);
   --state-success: #57c98a;
   --state-warning: #d9a03c;
+  --state-danger: var(--danger);
+  --state-generating: #ff8a72;
   --accent-amber: #c79a3b;
+
+  /* 语义色派生层：同色相的低透明度填充与描边。
+     页面里禁止手写 rgba()，一律引用这里的 soft / line 令牌。 */
+  --brand-soft: rgba(53, 179, 166, 0.1);
+  --brand-line: rgba(53, 179, 166, 0.28);
+  --success-soft: rgba(87, 201, 138, 0.1);
+  --success-line: rgba(87, 201, 138, 0.26);
+  --warning-soft: rgba(217, 160, 60, 0.1);
+  --warning-line: rgba(217, 160, 60, 0.26);
+  --danger-soft: rgba(224, 78, 57, 0.1);
+  --danger-line: rgba(224, 78, 57, 0.3);
+  --neutral-soft: rgba(147, 165, 172, 0.08);
+  --neutral-line: rgba(147, 165, 172, 0.24);
+  --muted-soft: rgba(90, 108, 116, 0.12);
+  --muted-line: rgba(90, 108, 116, 0.3);
+
+  /* 交互覆盖层：用透明度叠在任意背景层级上，不引入新底色 */
+  --overlay-hover: rgba(230, 236, 238, 0.045);
+  --overlay-active: rgba(230, 236, 238, 0.08);
+  --overlay-selected: rgba(53, 179, 166, 0.08);
+  --scrim: rgba(10, 17, 19, 0.72);
+  /* 视频/图片预览的黑场：唯一允许的纯黑，仅用于媒体播放区letterbox */
+  --media-backdrop: #000000;
 
   /* 文本层级 */
   --text-primary: #e6ecee;
@@ -73,6 +98,10 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: 150ms var(--ease-out);
   --transition-base: 220ms var(--ease-out);
+
+  /* 焦点环：键盘可见焦点，不允许页面自行定义 outline 颜色 */
+  --focus-ring: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--brand-hover);
+  --selection-bg: rgba(53, 179, 166, 0.28);
 }
 
 /* ===== 基础重置 ===== */
@@ -100,7 +129,7 @@ body {
 }
 
 ::selection {
-  background: rgba(53, 179, 166, 0.28);
+  background: var(--selection-bg);
   color: #ffffff;
 }
 
@@ -193,28 +222,28 @@ body {
 
 .status-tag.is-pending {
   color: var(--state-warning);
-  background: rgba(217, 160, 60, 0.1);
-  border-color: rgba(217, 160, 60, 0.26);
+  background: var(--warning-soft);
+  border-color: var(--warning-line);
 }
 .status-tag.is-running {
   color: var(--brand-hover);
-  background: rgba(53, 179, 166, 0.1);
-  border-color: rgba(53, 179, 166, 0.28);
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
 }
 .status-tag.is-succeeded {
   color: var(--state-success);
-  background: rgba(87, 201, 138, 0.1);
-  border-color: rgba(87, 201, 138, 0.26);
+  background: var(--success-soft);
+  border-color: var(--success-line);
 }
 .status-tag.is-failed {
   color: var(--danger);
-  background: rgba(224, 78, 57, 0.1);
-  border-color: rgba(224, 78, 57, 0.3);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
 }
 .status-tag.is-generating {
-  color: #ff8a72;
-  background: rgba(224, 78, 57, 0.1);
-  border-color: rgba(224, 78, 57, 0.32);
+  color: var(--state-generating);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
   animation: status-tag-pulse 1.6s ease-in-out infinite;
 }
 @keyframes status-tag-pulse {
@@ -228,13 +257,13 @@ body {
 }
 .status-tag.is-locked {
   color: var(--text-secondary);
-  background: rgba(147, 165, 172, 0.08);
-  border-color: rgba(147, 165, 172, 0.24);
+  background: var(--neutral-soft);
+  border-color: var(--neutral-line);
 }
 .status-tag.is-stale {
   color: var(--text-tertiary);
-  background: rgba(90, 108, 116, 0.12);
-  border-color: rgba(90, 108, 116, 0.3);
+  background: var(--muted-soft);
+  border-color: var(--muted-line);
 }
 
 /* ===== 统一卡片：以边框分隔，不堆阴影 ===== */
@@ -279,6 +308,19 @@ body {
 :focus-visible {
   outline: 2px solid var(--brand-hover);
   outline-offset: 2px;
+}
+
+/* 仅供读屏使用的标题/文案：视觉上不占位，语义保留 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

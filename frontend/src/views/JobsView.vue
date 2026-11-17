@@ -127,9 +127,9 @@ const runningJobs = computed<Job[]>(() =>
 
 // --- Labels & colors ---
 const statusColors: Record<string, string> = {
-  queued: '#3B82F6', running: '#3B82F6', chained_wait: '#A855F7',
-  submission_unknown: '#F59E0B', succeeded: '#22C55E',
-  failed: '#EF4444', lost: '#EF4444', cancelled: '#9CA3AF',
+  queued: 'var(--brand-primary)', running: 'var(--brand-primary)', chained_wait: 'var(--text-secondary)',
+  submission_unknown: 'var(--state-warning)', succeeded: 'var(--state-success)',
+  failed: 'var(--state-danger)', lost: 'var(--state-danger)', cancelled: 'var(--text-secondary)',
 }
 const statusLabels: Record<string, string> = {
   queued: '排队中', running: '执行中', chained_wait: '等待前序',
@@ -147,21 +147,77 @@ function isEnvError(job: Job): boolean {
   return job.retryable === true
 }
 
+/** 时间列：只留月-日 时:分:秒，年份对任务中心没意义 */
+function fmtTime(iso?: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/** 耗时：有 finished_at 才算，未结束显示运行时长 */
+function fmtDuration(job: Job): string {
+  const start = new Date(job.created_at).getTime()
+  const end = job.finished_at ? new Date(job.finished_at).getTime() : Date.now()
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return '—'
+  const sec = Math.round((end - start) / 1000)
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  if (m < 60) return `${m}m${String(s).padStart(2, '0')}s`
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
+}
+
+/** 状态筛选：与统计卡片共用同一个 statusFilter */
+const statusTabs = [
+  { label: '全部状态', value: '' },
+  { label: '排队中', value: 'queued' },
+  { label: '执行中', value: 'running' },
+  { label: '成功', value: 'succeeded' },
+  { label: '失败', value: 'failed' },
+  { label: '已取消', value: 'cancelled' },
+]
+
 // --- Table ---
-const columns = computed<DataTableColumns<Job>>(() => [
-  { title: '归属', key: 'project_name', width: 220, ellipsis: { tooltip: true },
+/** 当前页是否存在可操作任务：全成功时「操作」列整列都是 '-'，直接隐藏 */
+const hasActionable = computed(() =>
+  (jobsQuery.data.value?.items ?? []).some((j) =>
+    ['failed', 'lost', 'queued', 'running', 'chained_wait', 'submission_unknown'].includes(j.status),
+  ),
+)
+
+const columns = computed<DataTableColumns<Job>>(() => {
+  const cols: DataTableColumns<Job> = [
+  { title: '归属', key: 'project_name', minWidth: 240, ellipsis: { tooltip: true },
     render: (row) => jobContext(row) },
-  { title: '类型', key: 'job_type', width: 80,
+  { title: '类型', key: 'job_type', width: 76,
     render: (row) => typeLabels[row.job_type] || row.job_type },
-  { title: '状态', key: 'status', width: 100,
-    render: (row) =>
-      h(NTag, { size: 'small', round: true, color: { color: statusColors[row.status], textColor: '#fff' } },
-        { default: () => statusLabels[row.status] || row.status }) },
-  { title: '目标', key: 'target_id', width: 130, ellipsis: { tooltip: true } },
-  { title: '尝试', key: 'attempts', width: 60 },
-  { title: '创建时间', key: 'created_at', width: 160,
-    render: (row) => new Date(row.created_at).toLocaleString() },
-  { title: '操作', key: 'actions', width: 110,
+  // 状态列兼带重试次数与进度：进度条只对执行中有意义
+  { title: '状态', key: 'status', width: 132,
+    render: (row) => {
+      const tag = h(NTag, {
+        size: 'small',
+        round: true,
+        color: { color: statusColors[row.status], textColor: 'var(--text-primary)' },
+      }, { default: () => statusLabels[row.status] || row.status })
+      const extra: Array<ReturnType<typeof h>> = []
+      if ((row.attempts ?? 1) > 1) {
+        extra.push(h('span', { class: 'cell-note' }, `第 ${row.attempts} 次`))
+      }
+      if (row.status === 'running' && row.progress != null) {
+        extra.push(h('span', { class: 'cell-note' }, `${row.progress}%`))
+      }
+      if (!extra.length) return tag
+      return h('span', { class: 'cell-status' }, [tag, ...extra])
+    } },
+  { title: '耗时', key: 'duration', width: 82,
+    render: (row) => fmtDuration(row) },
+  { title: '创建时间', key: 'created_at', width: 116,
+    render: (row) => fmtTime(row.created_at) },
+  ]
+  if (!hasActionable.value) return cols
+  cols.push({ title: '操作', key: 'actions', width: 92,
     render: (row) => {
       if (row.status === 'failed' || row.status === 'lost') {
         if (isEnvError(row)) {
@@ -179,8 +235,9 @@ const columns = computed<DataTableColumns<Job>>(() => [
       }
       return '-'
     },
-  },
-])
+  })
+  return cols
+})
 
 </script>
 
@@ -228,15 +285,24 @@ const columns = computed<DataTableColumns<Job>>(() => [
                   @click="setType(t.value)"
                 >{{ t.label }}</button>
               </div>
-              <n-tag
-                v-if="statusFilter"
-                size="small"
-                round
-                closable
-                :color="{ color: statusColors[statusFilter], textColor: '#fff' }"
-                @close="setStatus('')"
-              >状态：{{ statusLabels[statusFilter] || statusFilter }}</n-tag>
               <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
+            </div>
+            <!-- 状态筛选：类型与状态两条独立轴，避免只能靠统计卡片点进去 -->
+            <div class="filter-row is-status">
+              <div class="type-tabs">
+                <button
+                  v-for="s in statusTabs"
+                  :key="s.value"
+                  type="button"
+                  class="status-tab"
+                  :class="{ active: statusFilter === s.value }"
+                  @click="setStatus(s.value)"
+                >{{ s.label }}</button>
+              </div>
+              <span class="result-hint">
+                共 {{ jobsQuery.data.value?.total ?? 0 }} 个任务
+                · 每页 {{ pageSize }} 条
+              </span>
             </div>
           </div>
 
@@ -264,9 +330,11 @@ const columns = computed<DataTableColumns<Job>>(() => [
             v-else
             :columns="columns"
             :data="jobsQuery.data.value?.items || []"
+            :row-key="(row: Job) => row.id"
             :bordered="false"
             :single-line="false"
             size="small"
+            :max-height="'calc(100vh - 430px)'"
             :pagination="{
               page: page,
               pageSize: pageSize,
@@ -315,7 +383,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .sse-indicator.on .sse-dot {
   background: var(--state-success);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+  box-shadow: 0 0 0 3px var(--success-line);
 }
 .sse-indicator.off .sse-dot {
   background: var(--state-warning);
@@ -370,7 +438,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .status-tab.active {
   background: var(--brand-primary);
-  color: #fff;
+  color: var(--text-primary);
 }
 .filter-row {
   display: flex;
@@ -409,19 +477,19 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .running-card.selected {
   border-color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.08);
+  background: var(--brand-soft);
 }
 .running-pulse {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #3B82F6;
+  background: var(--brand-primary);
   animation: running-pulse 1.6s ease-in-out infinite;
   flex-shrink: 0;
 }
 @keyframes running-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
-  50% { opacity: 0.6; box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); }
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--brand-line); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 5px var(--brand-soft); }
 }
 .running-type {
   font-size: 13px;
@@ -463,5 +531,34 @@ const columns = computed<DataTableColumns<Job>>(() => [
     flex-direction: column;
     align-items: stretch;
   }
+}
+.filter-row.is-status {
+  margin-top: var(--sp-2);
+}
+.result-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+/* 状态列内的次要信息（重试次数 / 进度） */
+:deep(.cell-status) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+:deep(.cell-note) {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+/* 表格：行高收紧一档，长列表一屏多看几条 */
+:deep(.n-data-table-td) {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+:deep(.n-data-table-th) {
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 </style>

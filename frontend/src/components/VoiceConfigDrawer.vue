@@ -425,7 +425,7 @@ onBeforeUnmount(stopPreviewPoll)
   background: color-mix(in srgb, var(--brand-primary) 7%, transparent);
   border: 1px solid color-mix(in srgb, var(--brand-primary) 26%, transparent);
 }
-.hero-empty { background: rgba(128, 128, 128, 0.06); border-style: dashed; border-color: rgba(128, 128, 128, 0.25); }
+.hero-empty { background: var(--neutral-soft); border-style: dashed; border-color: var(--neutral-line); }
 .hero-avatar {
   width: 52px; height: 52px; flex: 0 0 52px; border-radius: var(--radius-lg);
   display: flex; align-items: center; justify-content: center;
@@ -433,7 +433,7 @@ onBeforeUnmount(stopPreviewPoll)
   background: var(--brand-primary);
   box-shadow: none;
 }
-.hero-avatar.muted { background: rgba(128, 128, 128, 0.35); color: var(--text-primary); }
+.hero-avatar.muted { background: var(--neutral-line); color: var(--text-primary); }
 .hero-main { flex: 1; min-width: 0; }
 .hero-cap { font-size: 12px; color: var(--text-secondary); }
 .hero-name { font-size: 20px; font-weight: 700; line-height: 1.3; }
@@ -443,9 +443,9 @@ onBeforeUnmount(stopPreviewPoll)
 
 /* 表单面板 */
 .panel {
-  border: 1px solid rgba(128, 128, 128, 0.16); border-radius: 14px;
+  border: 1px solid var(--neutral-soft); border-radius: 14px;
   padding: 14px; display: flex; flex-direction: column; gap: 12px;
-  background: rgba(128, 128, 128, 0.02);
+  background: var(--neutral-soft);
 }
 .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .panel-title { font-size: 13px; font-weight: 700; }
@@ -456,7 +456,7 @@ onBeforeUnmount(stopPreviewPoll)
 .speaker-card {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
   padding: 9px 10px; border-radius: 10px; cursor: pointer; text-align: left;
-  border: 1.5px solid rgba(128, 128, 128, 0.2);
+  border: 1.5px solid var(--neutral-line);
   background: transparent; transition: all 0.16s ease;
 }
 .speaker-card:hover {
@@ -476,8 +476,8 @@ onBeforeUnmount(stopPreviewPoll)
   display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 999px;
   font-size: 10px; font-weight: 600; line-height: 15px; vertical-align: 1px;
 }
-.sp-gender.is-female { color: #db2777; background: rgba(219, 39, 119, 0.12); }
-.sp-gender.is-male { color: #2563eb; background: rgba(37, 99, 235, 0.12); }
+.sp-gender.is-female { color: var(--accent-amber); background: var(--warning-soft); }
+.sp-gender.is-male { color: var(--brand-primary); background: var(--brand-soft); }
 .sp-desc {
   font-size: 10px; line-height: 1.35; opacity: 0.66;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -487,19 +487,19 @@ onBeforeUnmount(stopPreviewPoll)
 
 /* 试听进度区 */
 .preview-box {
-  border: 1px solid rgba(128, 128, 128, 0.18); border-radius: 12px;
+  border: 1px solid var(--neutral-soft); border-radius: 12px;
   padding: 10px 12px; margin-bottom: 16px;
   display: flex; flex-direction: column; gap: 8px;
-  background: rgba(128, 128, 128, 0.03);
+  background: var(--neutral-soft);
 }
-.preview-box.is-error { border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.05); }
+.preview-box.is-error { border-color: var(--danger-line); background: var(--danger-soft); }
 /* 缓存命中态：绿色描边区分「已生成过」与「刚合成」 */
-.preview-box.is-cached { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.05); }
+.preview-box.is-cached { border-color: var(--success-line); background: var(--success-soft); }
 .hero-actions { display: flex; align-items: center; gap: 6px; }
 .preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .preview-title { font-size: 12px; font-weight: 700; }
 .preview-job { font-size: 11px; opacity: 0.55; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.preview-err { margin: 0; font-size: 11px; line-height: 1.5; color: #ef4444; }
+.preview-err { margin: 0; font-size: 11px; line-height: 1.5; color: var(--state-danger); }
 .preview-audio { width: 100%; height: 32px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 12px; font-weight: 600; opacity: 0.82; }

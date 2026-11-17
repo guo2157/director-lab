@@ -204,13 +204,13 @@ watch(expandedTrack, () => {
   gap: 6px;
 }
 .progress-row {
-  border: 1px solid var(--divider-color, #e5e5e5);
+  border: 1px solid var(--divider-color);
   border-radius: 6px;
   padding: 8px 10px;
   cursor: pointer;
 }
 .progress-row.active {
-  border-color: var(--primary-color, #18a058);
+  border-color: var(--primary-color);
 }
 .row-head {
   display: flex;
@@ -223,7 +223,7 @@ watch(expandedTrack, () => {
 }
 .row-total {
   font-size: 12px;
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
 }
 .row-status {
   margin-top: 6px;
@@ -236,7 +236,7 @@ watch(expandedTrack, () => {
 }
 .detail-block {
   margin-top: 10px;
-  border-top: 1px dashed var(--divider-color, #e5e5e5);
+  border-top: 1px dashed var(--divider-color);
   padding-top: 10px;
 }
 .detail-title {
@@ -246,10 +246,10 @@ watch(expandedTrack, () => {
 }
 .detail-total {
   font-weight: 400;
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
 }
 .detail-row {
-  border: 1px solid var(--divider-color, #e5e5e5);
+  border: 1px solid var(--divider-color);
   border-radius: 6px;
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -268,7 +268,7 @@ watch(expandedTrack, () => {
   font-weight: 600;
 }
 .detail-ep {
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
 }
 .detail-text {
   flex: 1;
@@ -278,11 +278,11 @@ watch(expandedTrack, () => {
   white-space: nowrap;
 }
 .detail-dur {
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
 }
 .detail-note {
   font-size: 12px;
-  color: var(--warning-color, #f0a020);
+  color: var(--warning-color);
   margin-top: 4px;
 }
 .detail-actions {

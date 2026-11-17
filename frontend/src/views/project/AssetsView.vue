@@ -1,21 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import {
-  NButton, NSpace, NSpin, NEmpty, NTag, NDrawer, NDrawerContent,
-  NInput, NTooltip, NModal, NAlert, NCheckbox, NProgress, useMessage, useDialog,
-  NImage, NDropdown,
-} from 'naive-ui'
+import { NTab, NTabs, useDialog, useMessage } from 'naive-ui'
 import {
   listAssets, deleteAsset, lockAsset, unlockAsset,
-  replaceAsset, regenerateAsset, getAssetRegenerateConfig,
+  replaceAsset, getAssetRegenerateConfig,
 } from '@/api/assets'
-import type { AssetRegenerateConfig } from '@/api/assets'
 import type { Asset } from '@/types/asset'
-import { fetchCandidates, adoptCandidate } from '@/api/regeneration'
-import type { CandidateAsset } from '@/api/regeneration'
-import { getJob } from '@/api/jobs'
 import { listCharacters, listProps, listScenes } from '@/api/script'
 import { getProject, reviewProjectAssets } from '@/api/projects'
 import { generateCharacterPortrait, generatePropAnchor, generateSceneBaseline } from '@/api/storyboard'
@@ -25,6 +17,19 @@ import type { AssetGenerationJob, AssetGenerationProgress } from '@/types/genera
 import VoiceConfigDrawer from '@/components/VoiceConfigDrawer.vue'
 import VoiceMatchPanel from '@/components/VoiceMatchPanel.vue'
 import { listCharacterVoices } from '@/api/audio'
+import AssetStatusBar from '@/components/assets/AssetStatusBar.vue'
+import AssetBatchToolbar from '@/components/assets/AssetBatchToolbar.vue'
+import AssetCard from '@/components/assets/AssetCard.vue'
+import AssetDetailModal from '@/components/assets/AssetDetailModal.vue'
+import AssetReplaceModal from '@/components/assets/AssetReplaceModal.vue'
+import AssetRegenDrawer from '@/components/assets/AssetRegenDrawer.vue'
+import EmptyState from '@/components/ui/EmptyState.vue'
+import ErrorRetry from '@/components/ui/ErrorRetry.vue'
+import SkeletonList from '@/components/ui/SkeletonList.vue'
+import {
+  ASSET_KIND_LABELS, ASSET_UNIT_LABELS,
+  type AssetCardItem, type AssetKind, type BatchProgressView,
+} from '@/components/assets/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -56,18 +61,16 @@ const reviewMutation = useMutation({
   onError: (e: any) => message.error(`审核失败: ${e?.message ?? e}`),
 })
 
-// --- Category tree ---
+// --- 分类标签页 ---
 // 分类值必须与后端权威枚举 enums.ASSET_TYPE 完全一致，否则后端过滤条件永远无匹配
 // 资产库只负责项目级公共资产；分镜图/分镜视频属于集级资产，已独立到分镜图与分镜看板页面
-// 一级分类：全部（角色+场景+道具合集）/ 角色 / 场景 / 道具（资产库只负责基础资产管理）
-const categories = [
-  { label: '全部', value: '' },
+const tabs: Array<{ label: string; value: AssetKind | 'voice' }> = [
   { label: '角色', value: 'character' },
   { label: '场景', value: 'scene' },
   { label: '道具', value: 'prop' },
   { label: '音色', value: 'voice' },
 ]
-const activeCategory = ref('')
+const activeCategory = ref<AssetKind | 'voice'>('character')
 const keyword = ref('')
 const ALL_PAGE_SIZE = 100
 
@@ -126,11 +129,11 @@ const deleteMutation = useMutation({
   onError: (e: any) => message.error(`删除失败: ${e?.message ?? e}`),
 })
 
-// --- Drawer ---
-const drawerVisible = ref(false)
+// --- 详情弹窗 ---
+const detailVisible = ref(false)
 const activeAsset = ref<Asset | null>(null)
-const drawerPrompt = ref('')
-const drawerPromptVersion = ref('')
+const detailPrompt = ref('')
+const detailPromptVersion = ref('')
 
 async function copyText(text: string) {
   try {
@@ -141,19 +144,19 @@ async function copyText(text: string) {
   }
 }
 
-async function openDrawer(asset: Asset) {
+async function openDetail(asset: Asset) {
   activeAsset.value = asset
-  drawerVisible.value = true
-  drawerPrompt.value = ''
-  drawerPromptVersion.value = ''
+  detailVisible.value = true
+  detailPrompt.value = ''
+  detailPromptVersion.value = ''
   // 展示用：可重新生成的资产附带提示词（只读展示，读取失败不影响详情）
   if (canRegenerate(asset)) {
     try {
       const cfg = await getAssetRegenerateConfig(asset.id)
-      drawerPrompt.value = cfg.prompt || ''
-      drawerPromptVersion.value = cfg.asset_prompt_version || ''
+      detailPrompt.value = cfg.prompt || ''
+      detailPromptVersion.value = cfg.asset_prompt_version || ''
     } catch {
-      drawerPrompt.value = ''
+      detailPrompt.value = ''
     }
   }
 }
@@ -171,49 +174,20 @@ async function refreshAll() {
 // --- 上传替换 ---
 const replaceVisible = ref(false)
 const replaceTarget = ref<Asset | null>(null)
-const replaceFileObj = ref<File | null>(null)
-const replacePreview = ref<string | null>(null)
 const replaceBusy = ref(false)
 
-/** 资产图片 URL 追加版本参数：替换/更新后 updated_at 变化，URL 随之变化，避免浏览器缓存旧图 */
-function assetImgUrl(asset: Asset): string {
-  const base = asset.thumb_url || asset.url || ''
-  if (!base) return ''
-  const sep = base.includes('?') ? '&' : '?'
-  return `${base}${sep}v=${encodeURIComponent(asset.updated_at)}`
-}
-
 function openReplace(asset: Asset) {
-  drawerVisible.value = false
+  detailVisible.value = false
   replaceTarget.value = asset
-  replaceFileObj.value = null
-  if (replacePreview.value) {
-    URL.revokeObjectURL(replacePreview.value)
-    replacePreview.value = null
-  }
   replaceVisible.value = true
 }
 
-function onReplaceFileChange(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  replaceFileObj.value = file
-  if (replacePreview.value) URL.revokeObjectURL(replacePreview.value)
-  replacePreview.value = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
-  input.value = ''
-}
-/** 替换弹窗文件选择框引用：程序化触发（label 包裹 n-button 不会转发点击，与页面上方上传按钮同款修复） */
-const replaceFileInputRef = ref<HTMLInputElement | null>(null)
-function triggerReplaceFileSelect() {
-  replaceFileInputRef.value?.click()
-}
-
-async function confirmReplace() {
-  if (!replaceTarget.value || !replaceFileObj.value) return
+async function confirmReplace(file: File) {
+  const target = replaceTarget.value
+  if (!target) return
   replaceBusy.value = true
   try {
-    const res = await replaceAsset(replaceTarget.value.id, replaceFileObj.value)
+    const res = await replaceAsset(target.id, file)
     message.success('替换成功，图片内容已更新（名称与位置保持不变）')
     if (res.affected_shots?.length) {
       message.info(`${res.affected_shots.length} 个引用镜头已标记待重做`)
@@ -241,25 +215,25 @@ async function confirmReplace() {
   }
 }
 
-// --- 重新生成（角色/场景/道具：可改提示词，结果落候选版本） ---
+// --- 重新生成（角色/场景/道具：可改提示词，结果落候选版本；逻辑在 AssetRegenDrawer 内） ---
 const REGEN_TYPES = ['character', 'scene', 'prop']
 function canRegenerate(asset: Asset): boolean {
   return REGEN_TYPES.includes(asset.asset_type)
 }
 
-// --- 卡片更多操作下拉（锁定/删除收进菜单，删除保留二次确认） ---
-function cardMenuOptions(asset: Asset) {
-  return [
-    { label: asset.locked ? '解锁' : '锁定', key: 'lock' },
-    {
-      label: '删除',
-      key: 'delete',
-      disabled: asset.locked,
-      props: { style: 'color: var(--danger, #ef4444);' },
-    },
-  ]
+const regenVisible = ref(false)
+const regenAsset = ref<Asset | null>(null)
+
+function openRegenerate(asset: Asset) {
+  detailVisible.value = false
+  regenAsset.value = asset
+  regenVisible.value = true
 }
-function onCardMenu(key: string | number, asset: Asset) {
+
+// --- 卡片更多操作下拉（锁定/删除收进菜单，删除保留二次确认） ---
+function onCardMenu(key: string, item: AssetCardItem) {
+  const asset = item.asset
+  if (!asset) return
   if (key === 'lock') {
     lockMutation.mutate({ id: asset.id, lock: !asset.locked })
   } else if (key === 'delete') {
@@ -273,191 +247,9 @@ function onCardMenu(key: string | number, asset: Asset) {
   }
 }
 
-const regenVisible = ref(false)
-const regenAsset = ref<Asset | null>(null)
-const regenLoading = ref(false)
-const regenPrompt = ref('')
-const regenNegative = ref('')
-const regenPromptVersion = ref('')
-const regenSubmitting = ref(false)
-const regenJobStatus = ref('')
-const regenErrorMsg = ref('')
-const regenCandidates = ref<CandidateAsset[]>([])
-const adoptingId = ref<string | null>(null)
-let regenTimer: number | null = null
+// --- 拖拽资产（供分镜槽位绑定）：拖动逻辑在 AssetCard 内实现 ---
 
-function stopRegenPoll() {
-  if (regenTimer !== null) {
-    window.clearInterval(regenTimer)
-    regenTimer = null
-  }
-}
-
-async function loadCandidates(assetId: string) {
-  try {
-    const res = await fetchCandidates(assetId)
-    regenCandidates.value = res?.candidates ?? []
-  } catch {
-    regenCandidates.value = []
-  }
-}
-
-function startRegenPoll(jobId: string) {
-  stopRegenPoll()
-  regenTimer = window.setInterval(async () => {
-    try {
-      const job = await getJob(jobId)
-      regenJobStatus.value = job.status
-      if (['succeeded', 'failed', 'lost', 'cancelled'].includes(job.status)) {
-        stopRegenPoll()
-        if (job.status === 'succeeded') {
-          message.success('重新生成完成，请在下方候选版本中确认采用')
-          if (regenAsset.value) {
-            await loadCandidates(regenAsset.value.id)
-            await refreshAll()
-          }
-        } else {
-          regenErrorMsg.value = (job as any).error_msg || `任务${job.status}`
-        }
-      }
-    } catch {
-      stopRegenPoll()
-    }
-  }, 3000)
-}
-
-async function openRegenerate(asset: Asset) {
-  drawerVisible.value = false
-  regenAsset.value = asset
-  regenVisible.value = true
-  regenLoading.value = true
-  regenErrorMsg.value = ''
-  regenJobStatus.value = ''
-  regenCandidates.value = []
-  stopRegenPoll()
-  try {
-    const cfg: AssetRegenerateConfig = await getAssetRegenerateConfig(asset.id)
-    regenPrompt.value = cfg.prompt
-    regenNegative.value = cfg.negative_prompt
-    regenPromptVersion.value = cfg.asset_prompt_version
-    await loadCandidates(asset.id)
-  } catch (e: any) {
-    regenErrorMsg.value = e?.message ?? '读取重新生成配置失败'
-  } finally {
-    regenLoading.value = false
-  }
-}
-
-async function submitRegenerate() {
-  if (!regenAsset.value) return
-  regenSubmitting.value = true
-  regenErrorMsg.value = ''
-  try {
-    const res = await regenerateAsset(regenAsset.value.id, {
-      prompt: regenPrompt.value,
-      negative_prompt: regenNegative.value,
-      idempotency_key: `asset_regen_${regenAsset.value.id}_${Date.now()}`,
-    })
-    regenJobStatus.value = res.status
-    message.success('重新生成任务已提交，正在生成（进度见页面顶部进度面板）')
-    startRegenPoll(res.job_id)
-    // 重新生成同样属于资产图生产：让顶部进度面板也跟踪它，用户不打开抽屉也能看到进度
-    await assetProgress.start({ notifyOnComplete: true })
-  } catch (e: any) {
-    regenErrorMsg.value = e?.message ?? '提交失败'
-  } finally {
-    regenSubmitting.value = false
-  }
-}
-
-async function adoptRegenCandidate(candidateId: string) {
-  adoptingId.value = candidateId
-  try {
-    await adoptCandidate(candidateId)
-    message.success('已采用该候选版本')
-    await refreshAll()
-    if (regenAsset.value) await loadCandidates(regenAsset.value.id)
-  } catch (e: any) {
-    message.error(`采用失败: ${e?.message ?? e}`)
-  } finally {
-    adoptingId.value = null
-  }
-}
-
-const assetTypeLabels: Record<string, string> = {
-  character: '角色', scene: '场景', prop: '道具',
-  keyframe: '分镜图', clip: '视频', audio: '音频', last_frame: '末帧',
-  reference: '参考图', first_frame: '首帧', end_frame: '末帧',
-}
-
-// --- 卡片状态点（生成状态角标） ---
-const statusDotClass = (status?: string | null): string => {
-  const s = (status ?? '').toLowerCase()
-  if (['done', 'ready', 'success', 'completed', 'active'].includes(s)) return 'ok'
-  if (['fail', 'failed', 'error'].includes(s)) return 'err'
-  if (['pending', 'processing', 'generating', 'running', 'queued'].includes(s)) return 'busy'
-  return 'idle'
-}
-const statusLabel = (status?: string | null): string => status || '未知状态'
-
-// --- 统一 status-tag 样式映射（global.css：.status-tag 及 is-* 变体） ---
-const ASSET_STATUS_LABELS: Record<string, string> = {
-  pending: '待处理', current: '当前版本', stale: '已过期', archived: '已归档',
-}
-const assetStatusLabel = (status?: string | null): string =>
-  ASSET_STATUS_LABELS[(status ?? '').toLowerCase()] || statusLabel(status)
-const assetStatusTagClass = (status?: string | null): string => {
-  const s = (status ?? '').toLowerCase()
-  if (s === 'current') return 'is-succeeded'
-  if (s === 'stale') return 'is-stale'
-  if (s === 'archived') return 'is-locked'
-  return 'is-pending'
-}
-const reviewStatusTagClass = (status: string): string =>
-  status === 'approved' ? 'is-succeeded' : status === 'rejected' ? 'is-failed' : 'is-pending'
-const reviewStatusTagLabel = (status: string): string =>
-  status === 'approved' ? '审核通过' : status === 'rejected' ? '已驳回' : '待审核'
-
-// --- 拖拽资产（供分镜槽位绑定） ---
-function handleAssetDragStart(e: DragEvent, asset: Asset) {
-  if (!e.dataTransfer) return
-  e.dataTransfer.setData('application/x-asset-id', asset.id)
-  e.dataTransfer.setData('text/plain', asset.id)
-  e.dataTransfer.effectAllowed = 'copy'
-}
-
-// --- 自适应卡片网格（ResizeObserver 动态列数） ---
-const gridRef = ref<HTMLElement | null>(null)
-const gridWidth = ref(0)
-const MIN_CARD_WIDTH = 200
-const MAX_CARD_WIDTH = 320
-const GRID_GAP = 12
-let gridObserver: ResizeObserver | null = null
-onMounted(() => {
-  // 刷新页面/再次进入时也要能看到当前生成进度（有在途任务才轮询）
-  void assetProgress.bootstrap()
-  if (!gridRef.value) return
-  gridObserver = new ResizeObserver((entries) => {
-    for (const entry of entries) gridWidth.value = entry.contentRect.width
-  })
-  gridObserver.observe(gridRef.value)
-})
-onBeforeUnmount(() => {
-  gridObserver?.disconnect()
-  gridObserver = null
-  stopRegenPoll()
-  if (replacePreview.value) URL.revokeObjectURL(replacePreview.value)
-})
-const assetGridStyle = computed(() => {
-  if (!gridWidth.value) return undefined
-  const gap = GRID_GAP
-  const maxColsByMin = Math.max(1, Math.floor((gridWidth.value + gap) / (MIN_CARD_WIDTH + gap)))
-  const idealCols = Math.max(1, Math.round((gridWidth.value + gap) / (MAX_CARD_WIDTH + gap)))
-  const cols = Math.min(Math.max(idealCols, 1), maxColsByMin)
-  return { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: `${gap}px` }
-})
-
-/** 资产分组展示：「全部」时按角色/场景/道具分组一次展示，具体分类时单组展示，不使用下拉切换 */
+// --- 资产分组展示 ---
 /** 按实体名去重：同一实体只保留版本最新的一条，避免历史版本/重复行在同一分类里出现两张卡 */
 function dedupeAssetsByName(items: Asset[]) {
   const seen = new Map<string, Asset>()
@@ -473,18 +265,6 @@ function dedupeAssetsByName(items: Asset[]) {
   }
   return Array.from(seen.values())
 }
-const assetGroups = computed(() => {
-  const items = dedupeAssetsByName(assetsQuery.data.value?.items || [])
-  const defs = [
-    { type: 'character', label: '角色' },
-    { type: 'scene', label: '场景' },
-    { type: 'prop', label: '道具' },
-  ]
-  const groups = defs.map((d) => ({ ...d, items: items.filter((a) => a.asset_type === d.type) }))
-  // 具体分类只展示该分类分组，避免其它分类以 0 计数形式出现在页面上
-  if (!activeCategory.value) return groups
-  return groups.filter((g) => g.type === activeCategory.value)
-})
 
 // --- 资产齐全度检查（角色/场景/道具参考图生成进度） ---
 /** 通用全量拉取：循环翻页直到取满 total（角色/场景/道具均展示全部条目） */
@@ -503,17 +283,17 @@ async function fetchAllPages<T>(
   }
 }
 
-const { data: charsData } = useQuery({
+const { data: charsData, isLoading: charsLoading, isError: charsError } = useQuery({
   queryKey: ['characters', projectId],
   queryFn: () => fetchAllPages((p) => listCharacters(projectId.value, p)),
   enabled: computed(() => !!projectId.value),
 })
-const { data: scenesData } = useQuery({
+const { data: scenesData, isLoading: scenesLoading, isError: scenesError } = useQuery({
   queryKey: ['scenes', projectId],
   queryFn: () => fetchAllPages((p) => listScenes(projectId.value, { ...p, include_shots: false })),
   enabled: computed(() => !!projectId.value),
 })
-const { data: propsData } = useQuery({
+const { data: propsData, isLoading: propsLoading, isError: propsError } = useQuery({
   queryKey: ['props', projectId],
   queryFn: () => fetchAllPages((p) => listProps(projectId.value, p)),
   enabled: computed(() => !!projectId.value),
@@ -522,8 +302,7 @@ const readiness = computed(() => {
   const cs = charsData.value?.items ?? []
   const ss = (scenesData.value?.items ?? []) as Array<{ baseline_asset_id?: string | null }>
   const ps = (propsData.value?.items ?? []) as Array<{ anchor_asset_id?: string | null }>
-  // 与页面展示口径保持一致：制作资产区列出全部角色/场景/道具，齐全度亦按全部统计
-  // （道具不再按 anchor_required 过滤，否则页面上「已生成 8/8」与横幅「3/3」自相矛盾）
+  // 与页面展示口径保持一致：卡片网格列出全部角色/场景/道具，齐全度亦按全部统计
   const total = cs.length + ss.length + ps.length
   const done =
     cs.filter((c) => !!c.portrait_asset_id).length +
@@ -532,15 +311,6 @@ const readiness = computed(() => {
   return { total, done, all: total > 0 && done === total }
 })
 
-// --- 生成进度（后端聚合：正在生成什么 / 批量进度 / 是否全部完成） ---
-/** 本次会话提交的资产生成任务：用于「刚才这批」的进度条与失败重试 */
-interface SubmittedAsset {
-  id: string
-  name: string
-  kind: 'character' | 'scene' | 'prop'
-  unit: string
-}
-const submittedAssets = ref<SubmittedAsset[]>([])
 // --- 音色配置抽屉（音频模块改造：角色资产增加音色配置入口） ---
 const voiceDrawerShow = ref(false)
 const voiceDrawerCharacterId = ref<string | null>(null)
@@ -550,24 +320,29 @@ function openVoiceConfig(it: { id: string; name: string }) {
   voiceDrawerCharacterName.value = it.name
   voiceDrawerShow.value = true
 }
-/** 资产库卡片按实体名称匹配角色实体（资产表不存 entity_id，name 即实体名） */
-function characterOfAsset(asset: { name?: string }) {
-  if (!asset.name) return null
-  const cs = (charsData.value?.items ?? []) as Array<{ id: string; name: string }>
-  return cs.find((c) => c.name === asset.name) ?? null
+/** 角色实体按名称索引（资产表不存 entity_id，name 即实体名） */
+const characterByName = computed(() => {
+  const map = new Map<string, { id: string; name: string }>()
+  for (const c of (charsData.value?.items ?? []) as Array<{ id: string; name: string }>) {
+    map.set(c.name, c)
+  }
+  return map
+})
+function characterOfName(name?: string) {
+  if (!name) return null
+  return characterByName.value.get(name) ?? null
 }
-
 function openVoiceConfigOfAsset(asset: { name?: string }) {
-  const ch = characterOfAsset(asset)
+  const ch = characterOfName(asset.name)
   if (!ch) {
-    message.warning('未匹配到对应角色实体，请在制作资产区该角色卡片上配置音色')
+    message.warning('未匹配到对应角色实体，请稍后重试')
     return
   }
   openVoiceConfig({ id: ch.id, name: ch.name })
 }
 /** 音色变更后递增，用于触发卡片音色名重新拉取 */
 const voiceQuerySeed = ref(0)
-/** 角色音色名映射：按角色实体 ID 聚合，供卡片底部音色条展示当前音色 */
+/** 角色音色名映射：按角色实体 ID 聚合，供卡片音色条展示当前音色 */
 const voiceNameQuery = useQuery({
   queryKey: computed(() => ['character-voices', projectId.value, voiceQuerySeed.value]),
   queryFn: async () => {
@@ -593,8 +368,8 @@ const voiceNameQuery = useQuery({
   },
   enabled: computed(() => !!projectId.value && (charsData.value?.items ?? []).length > 0),
 })
-function voiceNameOfAsset(asset: { name?: string }) {
-  const ch = characterOfAsset(asset)
+function voiceNameOf(name?: string) {
+  const ch = characterOfName(name)
   if (!ch) return ''
   return voiceNameQuery.data.value?.[ch.id] || ''
 }
@@ -604,6 +379,16 @@ watch(voiceDrawerShow, (show) => {
   voiceQuerySeed.value += 1
   queryClient.invalidateQueries({ queryKey: ['character-voices', projectId.value] })
 })
+
+// --- 生成进度（后端聚合：正在生成什么 / 批量进度 / 是否全部完成） ---
+/** 本次会话提交的资产生成任务：用于「刚才这批」的进度条与失败重试 */
+interface SubmittedAsset {
+  id: string
+  name: string
+  kind: AssetKind
+  unit: string
+}
+const submittedAssets = ref<SubmittedAsset[]>([])
 const submittedJobIds = ref<string[]>([])
 
 const assetProgress = useGenerationProgress<AssetGenerationProgress>({
@@ -620,7 +405,7 @@ const assetProgress = useGenerationProgress<AssetGenerationProgress>({
 /** 资产图分组统计（角色/场景/道具）：模板里安全遍历，避免 Partial 记录取值可能为空 */
 const progressGroups = computed(() => {
   const groups = assetProgress.data.value?.groups ?? {}
-  const defs: Array<{ kind: 'character' | 'scene' | 'prop'; label: string }> = [
+  const defs: Array<{ kind: AssetKind; label: string }> = [
     { kind: 'character', label: '角色定妆图' },
     { kind: 'scene', label: '场景基准图' },
     { kind: 'prop', label: '道具锚定图' },
@@ -643,7 +428,7 @@ const inflightGroups = computed(() => {
     .filter((g) => g.items.length > 0)
 })
 
-/** 在途任务 → 卡片/分组可直接查询的状态 */
+/** 在途任务 → 卡片可直接查询的状态 */
 const inflightById = computed(() => {
   const map = new Map<string, AssetGenerationJob>()
   for (const job of assetProgress.data.value?.inflight ?? []) map.set(job.entity_id, job)
@@ -703,7 +488,7 @@ function formatTime(iso?: string | null): string {
   if (Number.isNaN(d.getTime())) return ''
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
-/** 顶部生成状态：优先展示「正在生成什么」，其次展示「上次全部完成」 */
+/** 顶部状态条的一句话：优先展示「正在生成什么」，其次展示「上次全部完成」 */
 const assetGenHeadline = computed(() => {
   const p = assetProgress.data.value
   const inflightCount = p?.inflight_count ?? 0
@@ -720,7 +505,7 @@ const assetGenHeadline = computed(() => {
   if (!projectReadiness.value.total) return '解析完成后此处展示待生成的资产'
   return `待生成：还有 ${projectReadiness.value.total - projectReadiness.value.done} 个资产图未生成`
 })
-/** 项目级齐全度（后端权威口径，不受左侧分类筛选影响）：进度面板与审核闸口都用它 */
+/** 项目级齐全度（后端权威口径，不受标签页切换影响）：状态条与审核闸口都用它 */
 const projectReadiness = computed(() => {
   const p = assetProgress.data.value
   if (p) return { total: p.total, done: p.done, all: p.all_done }
@@ -739,7 +524,8 @@ const failedEntities = computed(() => {
 })
 /** 失败实体 ID 集：批量 chip 与重试按钮共用 */
 const failedEntityIds = computed(() => new Set(failedEntities.value.map((f) => f.entity_id)))
-// --- 制作资产区（公共资产生成：角色定妆图/场景基准图/道具锚定图） ---
+
+// --- 制作资产（公共资产生成：角色定妆图/场景基准图/道具锚定图） ---
 const craftingId = ref<string | null>(null)
 const batchCrafting = ref(false)
 // --- 制作资产勾选批量生成：勾选多个/全选后批量触发 ---
@@ -748,17 +534,6 @@ function toggleCraft(id: string, checked: boolean) {
   const set = new Set(selectedCraftIds.value)
   if (checked) set.add(id)
   else set.delete(id)
-  selectedCraftIds.value = [...set]
-}
-function isGroupAllSelected(grp: { items: { id: string }[] }) {
-  return grp.items.length > 0 && grp.items.every((i) => selectedCraftIds.value.includes(i.id))
-}
-function toggleGroupAll(grp: { items: { id: string }[] }, checked: boolean) {
-  const set = new Set(selectedCraftIds.value)
-  for (const it of grp.items) {
-    if (checked) set.add(it.id)
-    else set.delete(it.id)
-  }
   selectedCraftIds.value = [...set]
 }
 const genPortrait = useMutation({
@@ -776,7 +551,6 @@ const genBaseline = useMutation({
   onSuccess: () => {
     message.success('场景基准图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
-    // 公共资产变更会使审核结论失效（后端回退为 pending），同步刷新审核状态
     queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
   },
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
@@ -786,17 +560,17 @@ const genAnchor = useMutation({
   onSuccess: () => {
     message.success('道具锚定图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['props', projectId] })
-    // 公共资产变更会使审核结论失效（后端回退为 pending），同步刷新审核状态
     queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
   },
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
 })
+
 interface CraftItem {
   id: string
   name: string
   prompt: string
   done: boolean
-  kind: 'character' | 'scene' | 'prop'
+  kind: AssetKind
 }
 const craftGroups = computed(() => {
   const cs = (charsData.value?.items ?? []) as Array<{ id: string; name: string; description?: string; portrait_asset_id?: string | null }>
@@ -804,36 +578,102 @@ const craftGroups = computed(() => {
   const ps = (propsData.value?.items ?? []) as Array<{ id: string; name: string; description?: string; anchor_asset_id?: string | null }>
   return [
     {
-      type: 'character', label: '角色', unit: '定妆图',
+      type: 'character' as AssetKind, label: '角色', unit: '定妆图',
       items: cs.map((c) => ({ id: c.id, name: c.name, prompt: c.description ?? '', done: !!c.portrait_asset_id, kind: 'character' as const })) as CraftItem[],
     },
     {
-      type: 'scene', label: '场景', unit: '基准图',
+      type: 'scene' as AssetKind, label: '场景', unit: '基准图',
       items: ss.map((s) => ({ id: s.id, name: s.title ?? s.id, prompt: s.description ?? '', done: !!s.baseline_asset_id, kind: 'scene' as const })) as CraftItem[],
     },
     {
-      type: 'prop', label: '道具', unit: '锚定图',
+      type: 'prop' as AssetKind, label: '道具', unit: '锚定图',
       items: ps.map((p) => ({ id: p.id, name: p.name, prompt: p.description ?? '', done: !!p.anchor_asset_id, kind: 'prop' as const })) as CraftItem[],
     },
   ]
 })
-/** 当前分类下可见的制作资产分组：「全部」时展示角色/场景/道具全部分组，否则仅展示当前分类的条目 */
-const visibleCraftGroups = computed(() => {
-  if (!activeCategory.value) return craftGroups.value
-  return craftGroups.value.filter((g) => g.type === activeCategory.value)
+
+/** 每个标签页的实体数量（标签上的计数，一眼看出这一分类有几件事要做） */
+const tabCounts = computed<Record<string, number>>(() => {
+  const map: Record<string, number> = {}
+  for (const g of craftGroups.value) map[g.type] = g.items.length
+  return map
 })
-/** 制作资产区副标题：随当前分类收敛，仅描述当前分类需要生成的图片类型 */
-const craftSubText = computed(() => {
-  const unitMap: Record<string, string> = {
-    character: '角色定妆图',
-    scene: '场景基准图',
-    prop: '道具锚定图',
+
+/** 资产按「类型::名称」索引：卡片用图片、详情、替换、重生成，都基于这一张表 */
+const assetByKey = computed(() => {
+  const map = new Map<string, Asset>()
+  for (const a of dedupeAssetsByName(assetsQuery.data.value?.items || [])) {
+    map.set(`${a.asset_type}::${a.name || a.id}`, a)
   }
-  const head = activeCategory.value
-    ? (unitMap[activeCategory.value] ?? '')
-    : '角色定妆图 / 场景基准图 / 道具锚定图'
-  return `${head}（项目级公共资产，按名称绑定供分镜引用）`
+  return map
 })
+
+/** 当前标签的卡片：一个实体一张卡（实体描述 + 已绑定资产），再补上没有对应实体的历史资产 */
+const cardItems = computed<AssetCardItem[]>(() => {
+  const tab = activeCategory.value
+  if (tab === 'voice') return []
+  const group = craftGroups.value.find((g) => g.type === tab)
+  const items: AssetCardItem[] = []
+  for (const it of group?.items ?? []) {
+    items.push({
+      key: `${tab}:${it.id}`,
+      kind: tab,
+      entityId: it.id,
+      name: it.name,
+      desc: it.prompt,
+      done: it.done,
+      asset: assetByKey.value.get(`${tab}::${it.name}`) ?? null,
+    })
+  }
+  const entityNames = new Set((group?.items ?? []).map((i) => i.name))
+  for (const asset of assetByKey.value.values()) {
+    if (asset.asset_type !== tab) continue
+    if (entityNames.has(asset.name || '')) continue
+    items.push({
+      key: `${tab}:asset:${asset.id}`,
+      kind: tab,
+      entityId: null,
+      name: asset.name || asset.id,
+      desc: '',
+      done: true,
+      asset,
+    })
+  }
+  return items
+})
+
+/** 只有绑定了脚本实体的卡片能勾选批量生成（孤立资产只能单张替换/重生成） */
+const selectableIds = computed(() => cardItems.value.filter((i) => i.entityId).map((i) => i.entityId as string))
+function toggleAll(checked: boolean) {
+  const set = new Set(selectedCraftIds.value)
+  for (const id of selectableIds.value) {
+    if (checked) set.add(id)
+    else set.delete(id)
+  }
+  selectedCraftIds.value = [...set]
+}
+/** 切换标签页时丢弃上一个标签的勾选，避免「已选 3 个」与实际可见卡片不符 */
+watch(activeCategory, () => {
+  selectedCraftIds.value = []
+})
+
+const scopeLabel = computed(() => {
+  const tab = activeCategory.value
+  if (tab === 'voice') return ''
+  return `${ASSET_KIND_LABELS[tab]}${ASSET_UNIT_LABELS[tab]}`
+})
+
+/** 本批进度：工具栏内联展示 */
+const batchView = computed<BatchProgressView | null>(() => {
+  const b = batchProgress.value
+  if (!b) return null
+  return { total: b.total, done: b.done, running: b.running, failed: b.failed, percent: b.percent }
+})
+/** 当前标签下失败的实体数：决定是否露出「重试」 */
+const failedInTab = computed(
+  () => cardItems.value.filter((i) => i.entityId && failedEntityIds.value.has(i.entityId)).length,
+)
+
 /** 提交批次：记录本次提交的资产与任务 ID，用于批次进度条与失败重试 */
 function trackSubmitted(items: CraftItem[], jobIds: string[]) {
   const unitMap: Record<string, string> = { character: '定妆图', scene: '基准图', prop: '锚定图' }
@@ -863,7 +703,7 @@ async function handleCraft(it: CraftItem) {
 
 async function handleBatchCraft() {
   // 仅对勾选的制作资产批量触发：名称、占位路径、提示词均以库中定义为准
-  const picked = visibleCraftGroups.value
+  const picked = craftGroups.value
     .flatMap((g) => g.items)
     .filter((i) => selectedCraftIds.value.includes(i.id))
   if (!picked.length) {
@@ -892,7 +732,7 @@ async function handleBatchCraft() {
     }
     if (submittedItems.length) {
       trackSubmitted(submittedItems, jobIds)
-      message.success(`已提交 ${submittedItems.length} 个图生成任务，正在生成：见上方批次进度`)
+      message.success(`已提交 ${submittedItems.length} 个图生成任务，进度见上方工具栏`)
       // 提交后立即建基线并开始轮询，全部结束后统一提示
       await assetProgress.start({ notifyOnComplete: true })
     }
@@ -911,7 +751,7 @@ async function retryFailedCraft() {
   )
   const targets = submittedAssets.value.filter((s) => failedIds.has(s.id))
   if (!targets.length) return
-  const all = visibleCraftGroups.value.flatMap((g) => g.items)
+  const all = craftGroups.value.flatMap((g) => g.items)
   const picked = targets
     .map((t) => all.find((i) => i.id === t.id && i.kind === t.kind))
     .filter((i): i is CraftItem => Boolean(i))
@@ -953,409 +793,190 @@ function clearBatch() {
   submittedAssets.value = []
   submittedJobIds.value = []
 }
+
+// --- 加载 / 错误 / 空态 ---
+const loading = computed(
+  () => assetsQuery.isLoading.value || charsLoading.value || scenesLoading.value || propsLoading.value,
+)
+const loadError = computed(() => {
+  if (assetsQuery.isError.value) return errMsg(assetsQuery.error.value)
+  if (charsError.value || scenesError.value || propsError.value) return '角色/场景/道具数据加载失败，请重试'
+  return ''
+})
+async function retryLoad() {
+  await Promise.all([
+    assetsQuery.refetch(),
+    queryClient.refetchQueries({ queryKey: ['characters', projectId] }),
+    queryClient.refetchQueries({ queryKey: ['scenes', projectId] }),
+    queryClient.refetchQueries({ queryKey: ['props', projectId] }),
+  ])
+}
+
+const activeKindLabel = computed(() =>
+  activeCategory.value === 'voice' ? '音色' : ASSET_KIND_LABELS[activeCategory.value],
+)
+const emptyTitle = computed(() =>
+  readiness.value.total ? `暂无${activeKindLabel.value}` : '还没有可制作的资产',
+)
+const emptyDesc = computed(() =>
+  readiness.value.total
+    ? '该分类下还没有实体，回到解析页补充后再回来生成。'
+    : '解析完成并确认角色、场景、道具后，这里会按分类列出每个资产与成品图。',
+)
+
+// --- 卡片交互 ---
+function onCardOpen(item: AssetCardItem) {
+  if (item.asset) void openDetail(item.asset)
+}
+function onCardGenerate(item: AssetCardItem) {
+  const entityId = item.entityId
+  const craft = craftGroups.value.flatMap((g) => g.items).find((i) => i.id === entityId)
+  if (craft) void handleCraft(craft)
+  else message.warning('该资产没有对应的脚本实体，请使用重新生成')
+}
+function onCardReplace(item: AssetCardItem) {
+  if (item.asset) openReplace(item.asset)
+}
+function onCardRegenerate(item: AssetCardItem) {
+  if (item.asset) openRegenerate(item.asset)
+}
+function onCardVoice(item: AssetCardItem) {
+  if (item.kind === 'character') openVoiceConfigOfAsset({ name: item.name })
+}
+
+const craftingIdFor = (item: AssetCardItem) => craftingId.value === item.entityId
+
+onMounted(() => {
+  // 刷新页面/再次进入时也要能看到当前生成进度（有在途任务才轮询）
+  void assetProgress.bootstrap()
+})
 </script>
 
 <template>
-  <div class="assets-page">
-    <header class="page-header">
-      <div class="header-left">
-        <h1 class="page-title">资产库</h1>
-      </div>
-    </header>
-    <div class="assets-layout">
-      <!-- Category tree -->
-      <div class="category-tree">
-        <div
-          v-for="cat in categories"
-          :key="cat.value"
-          class="category-item"
-          :class="{ active: activeCategory === cat.value }"
-          @click="activeCategory = cat.value"
-        >
-          {{ cat.label }}
-        </div>
-      </div>
+  <div class="page assets-page">
+    <!-- 一条状态条：进度 + 审核状态 + 下一步主按钮 -->
+    <AssetStatusBar
+      eyebrow="资产库 · 项目级公共资产"
+      title="资产库"
+      :headline="assetGenHeadline"
+      :done="projectReadiness.done"
+      :total="projectReadiness.total"
+      :all-done="projectReadiness.all"
+      :review-status="assetsReviewStatus"
+      :review-text="reviewStatusText"
+      :groups="progressGroups"
+      :inflight-count="assetProgress.inflightCount.value"
+      :reviewing="reviewMutation.isPending.value"
+      :loading="assetProgress.loading.value"
+      @approve="reviewMutation.mutate('approve')"
+      @reject="reviewMutation.mutate('reject')"
+      @next="router.push(`/project/${projectId}/storyboard-images`)"
+      @refresh="assetProgress.refresh()"
+    />
 
-      <!-- Main content -->
-      <div class="assets-main">
-        <!-- 生成进度面板：说明正在生成哪类图（角色/场景/道具）、批量进度、是否全部完成 -->
-        <div class="gen-panel" :class="{ done: projectReadiness.all && !assetProgress.hasInflight.value, fail: failedEntities.length > 0 }">
-          <div class="gen-head">
-            <span class="gen-badge">{{ assetProgress.hasInflight.value ? '⏳' : projectReadiness.all ? '✓' : '•' }}</span>
-            <span class="gen-title">{{ assetGenHeadline }}</span>
-            <span class="gen-nums">
-              {{ projectReadiness.done }}/{{ projectReadiness.total }} 已完成（{{ projectReadiness.total ? Math.round((projectReadiness.done / projectReadiness.total) * 100) : 0 }}%）
-            </span>
-            <n-button size="tiny" quaternary :loading="assetProgress.loading.value" @click="assetProgress.refresh()">刷新进度</n-button>
-            <n-button size="small" quaternary @click="router.push(`/project/${projectId}/parse`)">返回解析页</n-button>
-          </div>
-          <n-progress
-            type="line"
-            :percentage="projectReadiness.total ? Math.round((projectReadiness.done / projectReadiness.total) * 100) : 0"
-            :height="8"
-            :border-radius="4"
-            :show-indicator="false"
-            :color="projectReadiness.all ? 'var(--state-success, #22c55e)' : 'var(--brand-primary)'"
-            rail-color="var(--border-subtle, #e5e7eb)"
-            class="gen-bar"
-          />
-          <div class="gen-groups">
-            <span
-              v-for="g in progressGroups"
-              :key="g.kind"
-              class="gen-group"
-              :class="{ ok: g.total > 0 && g.done === g.total }"
-            >{{ g.label }} {{ g.done }}/{{ g.total }}</span>
-          </div>
+    <!-- 批量操作：固定在标签页上方，滚动时不跑掉 -->
+    <AssetBatchToolbar
+      v-if="activeCategory !== 'voice'"
+      :scope-label="scopeLabel"
+      :total="selectableIds.length"
+      :selected="selectedCraftIds.length"
+      :batch-loading="batchCrafting"
+      :inflight-count="assetProgress.inflightCount.value"
+      :batch="batchView"
+      :retrying="retryingFailed"
+      :failed-count="failedInTab"
+      @toggle-all="toggleAll"
+      @batch-generate="handleBatchCraft"
+      @retry-failed="retryFailedCraft"
+      @clear-batch="clearBatch"
+    />
 
-          <!-- 正在生成什么：按类型分组列出条目、状态与百分比 -->
-          <div v-if="inflightGroups.length" class="gen-inflight">
-            <div v-for="g in inflightGroups" :key="g.kind" class="gen-inflight-group">
-              <span class="gen-inflight-kind">{{ g.label }}{{ g.unit }}·{{ g.items.length }} 个</span>
-              <div class="gen-inflight-items">
-                <span v-for="job in g.items" :key="job.job_id" class="gen-inflight-item">
-                  <span class="gen-inflight-name">{{ job.entity_name }}</span>
-                  <span class="gen-inflight-state" :class="job.status">
-                    {{ inflightText(job) }}
-                    <template v-if="job.status === 'running' && job.progress != null">
-                      <n-progress
-                        type="line"
-                        :percentage="job.progress"
-                        :height="3"
-                        :border-radius="2"
-                        :show-indicator="false"
-                        class="gen-mini-bar"
-                      />
-                    </template>
-                  </span>
-                </span>
-              </div>
-            </div>
-          </div>
-          <div v-else-if="!projectReadiness.all && assetProgress.data.value?.last_completed_at" class="gen-done-hint">
-            最近一次生成完成于 {{ formatTime(assetProgress.data.value?.last_completed_at) }}
-          </div>
+    <n-tabs
+      :value="activeCategory"
+      type="line"
+      size="medium"
+      class="assets-tabs"
+      @update:value="(v: string) => (activeCategory = v as AssetKind | 'voice')"
+    >
+      <n-tab v-for="t in tabs" :key="t.value" :name="t.value">
+        {{ t.label }}<span v-if="t.value !== 'voice'" class="tab-count">{{ tabCounts[t.value] ?? 0 }}</span>
+      </n-tab>
+    </n-tabs>
 
-          <!-- 本次提交批次进度：本次提交 N 个 / 生成中 / 已完成 / 失败 -->
-          <div v-if="batchProgress" class="batch-panel">
-            <div class="batch-head">
-              <span class="batch-title">本批任务进度</span>
-              <span class="batch-nums">
-                共 {{ batchProgress.total }} 个 · 已完成 {{ batchProgress.done }} · 生成中 {{ batchProgress.running }}<template v-if="batchProgress.failed"> · 失败 {{ batchProgress.failed }}</template>
-              </span>
-              <n-button size="tiny" quaternary @click="clearBatch">收起</n-button>
-            </div>
-            <n-progress
-              type="line"
-              :percentage="batchProgress.percent"
-              :height="6"
-              :border-radius="3"
-              :show-indicator="false"
-              :status="batchProgress.failed && !batchProgress.running ? 'error' : 'default'"
-              rail-color="var(--border-subtle, #e5e7eb)"
-            />
-            <div class="batch-items">
-              <span
-                v-for="s in submittedAssets"
-                :key="s.id"
-                class="batch-chip"
-                :class="{
-                  running: submittedInflightIds.includes(s.id),
-                  fail: failedEntityIds.has(s.id),
-                }"
-              >{{ s.name }}</span>
-            </div>
-          </div>
+    <!-- 音色：匹配面板自带流程，不叠加卡片网格 -->
+    <VoiceMatchPanel v-if="activeCategory === 'voice'" :project-id="projectId" />
 
-          <!-- 失败项：明确列出失败原因，提供一键重试 -->
-          <div v-if="failedEntities.length" class="gen-failed">
-            <span class="gen-failed-title">最近生成失败 {{ failedEntities.length }} 个：</span>
-            <span v-for="f in failedEntities" :key="f.job_id" class="gen-failed-item">
-              {{ f.entity_name }}（{{ f.error_msg || '未知原因' }}）
-            </span>
-            <n-button v-if="batchProgress" size="tiny" type="warning" :loading="retryingFailed" @click="retryFailedCraft">重试失败项</n-button>
-          </div>
-        </div>
-        <!-- 人工审核闸口：资产库出图完毕后必须人工确认，通过后才放行分镜图 -->
-        <div class="readiness-banner" :class="{ done: assetsReviewStatus === 'approved' }">
-          <span class="readiness-badge">{{ assetsReviewStatus === 'approved' ? '✓' : '⏳' }}</span>
-          <span class="status-tag" :class="reviewStatusTagClass(assetsReviewStatus)">{{ reviewStatusTagLabel(assetsReviewStatus) }}</span>
-          <span class="readiness-text">{{ reviewStatusText }}</span>
-          <n-button
-            size="small"
-            type="primary"
-            :disabled="!projectReadiness.all"
-            :loading="reviewMutation.isPending.value"
-            @click="reviewMutation.mutate('approve')"
-          >审核通过</n-button>
-          <n-button
-            size="small"
-            quaternary
-            :disabled="assetsReviewStatus !== 'approved'"
-            :loading="reviewMutation.isPending.value"
-            @click="reviewMutation.mutate('reject')"
-          >驳回返工</n-button>
-          <n-button
-            size="small"
-            type="primary"
-            :disabled="assetsReviewStatus !== 'approved'"
-            @click="router.push(`/project/${projectId}/storyboard-images`)"
-          >去分镜图 →</n-button>
-        </div>
-        <!-- 角色音色智能匹配（独立 tab：音色库展示/批量匹配/试听/确认/锁定） -->
-        <VoiceMatchPanel v-if="activeCategory === 'voice'" :project-id="projectId" />
-        <!-- 制作资产区（公共资产生成；音色匹配 tab 下隐藏） -->
-        <div v-if="activeCategory !== 'voice'" class="craft-section">
-          <div class="craft-head">
-            <span class="craft-title">制作资产区</span>
-            <span class="craft-sub">{{ craftSubText }}</span>
-            <n-button
-              size="medium"
-              type="primary"
-              :loading="batchCrafting"
-              :disabled="!selectedCraftIds.length"
-              @click="handleBatchCraft"
-            >
-              {{ assetProgress.hasInflight.value ? `生成中 ${assetProgress.inflightCount.value} 个 · 批量生成（${selectedCraftIds.length}）` : `批量生成（${selectedCraftIds.length}）` }}
-            </n-button>
-          </div>
-          <div class="craft-body">
-          <div v-for="grp in visibleCraftGroups" :key="grp.type" class="craft-group">
-            <div class="craft-group-head">
-              <n-checkbox
-                :checked="isGroupAllSelected(grp)"
-                :disabled="!grp.items.length"
-                @update:checked="(v: boolean) => toggleGroupAll(grp, v)"
-              >全选</n-checkbox>
-              <span class="craft-group-label">{{ grp.label }}（{{ grp.items.length }}）</span>
-              <span class="craft-group-done">{{ grp.items.filter((i) => i.done).length }}/{{ grp.items.length }} 已生成</span>
-            </div>
-            <!-- 当前分类：展示该分类需要生成的图片卡片 -->
-            <div v-if="grp.items.length" class="craft-grid">
-              <div
-                v-for="it in grp.items"
-                :key="it.id"
-                class="craft-card"
-                :class="{ done: it.done, inflight: !!inflightById.get(it.id), failed: failedEntityIds.has(it.id) }"
-              >
-                <div class="craft-card-head">
-                  <n-checkbox
-                    :checked="selectedCraftIds.includes(it.id)"
-                    @update:checked="(v: boolean) => toggleCraft(it.id, v)"
-                    @click.stop
-                  />
-                  <span class="craft-card-name">{{ it.name }}</span>
-                  <!-- 生成中的卡片直接显示排队/百分比，不必再点开才知道进度 -->
-                  <n-tag v-if="inflightById.get(it.id)" size="tiny" type="info" :bordered="false">
-                    {{ inflightText(inflightById.get(it.id)) }}
-                  </n-tag>
-                  <n-tag v-else-if="failedEntityIds.has(it.id)" size="tiny" type="error" :bordered="false">生成失败</n-tag>
-                  <n-tag v-else-if="it.done" size="tiny" type="success" :bordered="false">已生成</n-tag>
-                  <n-button
-                    v-else
-                    size="tiny"
-                    quaternary
-                    type="primary"
-                    :loading="craftingId === it.id"
-                    :disabled="!!inflightById.get(it.id)"
-                    @click="handleCraft(it)"
-                  >生成{{ grp.unit }}</n-button>
-                  <!-- 音色配置入口：仅角色卡片显示（音频模块改造） -->
-                  <n-button
-                    v-if="it.kind === 'character'"
-                    size="tiny"
-                    quaternary
-                    title="音色配置"
-                    @click.stop="openVoiceConfig(it)"
-                  >音色</n-button>
-                </div>
-                <p class="craft-card-prompt" :title="it.prompt">{{ it.prompt || '暂无提示词描述' }}</p>
-              </div>
-            </div>
-            <n-empty v-else size="small" :description="`暂无${grp.label}`" />
-          </div>
-          </div>
-          <n-empty v-if="!readiness.total" size="small" description="解析完成后此处展示角色/场景/道具实体" />
-        </div>
-        <!-- Toolbar：独立上传入口已移除（单独上传的角色/场景/道具资产无法绑定实体参考关系，
-             资产图统一走角色/场景/道具卡片的生成入口，替换走资产卡片的『上传替换』） -->
+    <ErrorRetry
+      v-else-if="loadError"
+      title="资产加载失败"
+      :message="loadError"
+      @retry="retryLoad"
+    />
 
-        <!-- Upload drop zone（音色匹配 tab 下隐藏） -->
-        <div v-if="activeCategory !== 'voice'" class="drop-zone">
-          <n-spin v-if="assetsQuery.isLoading.value" class="page-loading" />
-          <div v-else-if="assetsQuery.isError.value" class="state-block">
-            <p class="state-text">资产加载失败：{{ errMsg(assetsQuery.error.value) }}</p>
-            <n-button secondary @click="() => assetsQuery.refetch()">重试</n-button>
-          </div>
-          <n-empty v-else-if="assetsQuery.data.value?.items?.length === 0" description="暂无资产" />
-          <!-- 按分类分组一次展示：「全部」为角色/场景/道具三组，具体分类为单组 -->
-          <div v-else ref="gridRef" class="asset-groups">
-            <div v-for="grp in assetGroups" :key="grp.type" class="asset-group">
-              <div class="asset-group-head">
-                <span class="asset-group-label">{{ grp.label }}</span>
-                <span class="asset-group-count">{{ grp.items.length }}</span>
-              </div>
-              <div class="asset-grid" :style="assetGridStyle">
-            <div
-              v-for="(asset, idx) in grp.items"
-              :key="asset.id"
-              class="asset-card"
-              :class="{ 'is-portrait': asset.asset_type === 'character' }"
-              :style="{ animationDelay: `${idx * 0.05}s` }"
-              draggable="true"
-              @dragstart="handleAssetDragStart($event, asset)"
-              @click="openDrawer(asset)"
-            >
-              <div class="asset-thumb">
-                <img v-if="asset.thumb_url || asset.url" :src="assetImgUrl(asset)" alt="" />
-                <div v-else class="thumb-placeholder">
-                  <span>{{ assetTypeLabels[asset.asset_type] || asset.asset_type }}</span>
-                </div>
-                <div v-if="asset.locked" class="lock-icon">🔒</div>
-                <div class="status-dot" :class="statusDotClass(asset.status)" :title="statusLabel(asset.status)"></div>
-              </div>
-              <div class="asset-info">
-                <div class="asset-name" :title="asset.name || asset.id">{{ asset.name || asset.id.split('_').slice(1).join('_') || asset.id }}</div>
-                <div class="asset-meta">
-                  <n-tag size="tiny" round>{{ assetTypeLabels[asset.asset_type] || asset.asset_type }}</n-tag>
-                </div>
-              </div>
-              <!-- 音色入口（角色专属）：独立成行独占卡片底部，避免与右上小图标挤在一起 -->
-              <button
-                v-if="asset.asset_type === 'character'"
-                type="button"
-                class="asset-voice-bar"
-                @click.stop="openVoiceConfigOfAsset(asset)"
-              >
-                <span class="avb-icon">🎙</span>
-                <span class="avb-label">音色配置</span>
-                <span class="avb-value">{{ voiceNameOfAsset(asset) || '未设置' }}</span>
-                <span class="avb-arrow">›</span>
-              </button>
-              <div class="asset-actions" @click.stop>
-                <n-tooltip>
-                  <template #trigger>
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :disabled="asset.locked"
-                      @click="openReplace(asset)"
-                    >⬆</n-button>
-                  </template>
-                  {{ asset.locked ? '锁定状态不可替换' : '上传替换' }}
-                </n-tooltip>
-                <n-tooltip>
-                  <template #trigger>
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :disabled="asset.locked || !canRegenerate(asset)"
-                      @click="openRegenerate(asset)"
-                    >✨</n-button>
-                  </template>
-                  {{ canRegenerate(asset)
-                    ? (asset.locked ? '锁定状态不可重新生成' : '重新生成（可改提示词）')
-                    : '分镜图/视频请在分镜看板重新生成' }}
-                </n-tooltip>
-                <n-dropdown
-                  trigger="click"
-                  :options="cardMenuOptions(asset)"
-                  @select="onCardMenu($event, asset)"
-                >
-                  <n-button size="small" quaternary title="更多操作（锁定 / 删除）">⋯</n-button>
-                </n-dropdown>
-              </div>
-            </div>
-          </div>
-            </div>
-          </div>
-        </div>
+    <SkeletonList
+      v-else-if="loading"
+      variant="card"
+      :rows="6"
+      :columns="4"
+      height="220px"
+    />
 
-      </div>
+    <EmptyState
+      v-else-if="!cardItems.length"
+      :title="emptyTitle"
+      :description="emptyDesc"
+      :action-text="readiness.total ? '' : '去解析页'"
+      @action="router.push(`/project/${projectId}/parse`)"
+    />
+
+    <div v-else class="card-grid">
+      <AssetCard
+        v-for="item in cardItems"
+        :key="item.key"
+        :item="item"
+        :selectable="!!item.entityId"
+        :selected="selectedCraftIds.includes(item.entityId ?? '')"
+        :inflight-text="item.entityId ? inflightText(inflightById.get(item.entityId)) : ''"
+        :failed="!!item.entityId && failedEntityIds.has(item.entityId)"
+        :voice-name="item.kind === 'character' ? voiceNameOf(item.name) : ''"
+        :class="{ 'is-busy': craftingIdFor(item) }"
+        @open="onCardOpen(item)"
+        @generate="onCardGenerate(item)"
+        @replace="onCardReplace(item)"
+        @regenerate="onCardRegenerate(item)"
+        @voice="onCardVoice(item)"
+        @menu="(key: string) => onCardMenu(key, item)"
+        @update:selected="(v: boolean) => item.entityId && toggleCraft(item.entityId, v)"
+      />
     </div>
 
-    <!-- Drawer -->
-    <n-modal
-      v-model:show="drawerVisible"
-      preset="card"
-      title="资产详情"
-      closable
-      :bordered="false"
-      :style="{ width: 'min(1080px, 92vw)' }"
-      :content-style="{ maxHeight: 'calc(85vh - 56px)', overflowY: 'auto' }"
-    >
-      <template v-if="activeAsset">
-        <div class="detail-grid">
-          <div class="drawer-preview">
-            <n-image
-              v-if="activeAsset.url"
-              :src="assetImgUrl(activeAsset)"
-              object-fit="contain"
-              class="drawer-preview-img"
-            />
-            <div v-else class="preview-placeholder">暂无预览</div>
-          </div>
-          <div class="detail-body">
-          <n-space vertical :size="16">
-            <div class="drawer-title-row">
-              <span class="drawer-asset-name">{{ activeAsset.name || activeAsset.id }}</span>
-              <span class="status-tag" :class="assetStatusTagClass(activeAsset.status)">{{ assetStatusLabel(activeAsset.status) }}</span>
-              <span v-if="activeAsset.locked" class="status-tag is-locked">已锁定</span>
-            </div>
-            <div class="drawer-meta">
-              <div><span class="field-label">ID：</span>{{ activeAsset.id }}</div>
-              <div><span class="field-label">类型：</span>{{ assetTypeLabels[activeAsset.asset_type] || activeAsset.asset_type }}</div>
-              <div v-if="typeof activeAsset.reference_count === 'number'"><span class="field-label">引用次数：</span>{{ activeAsset.reference_count }}</div>
-            </div>
-            <div v-if="drawerPrompt" class="drawer-section">
-              <div class="drawer-section-head">
-                <span class="drawer-section-title">生成提示词</span>
-                <span v-if="drawerPromptVersion" class="drawer-prompt-version">v{{ drawerPromptVersion }}</span>
-                <n-button size="tiny" quaternary @click="copyText(drawerPrompt)">复制</n-button>
-              </div>
-              <div class="drawer-prompt">{{ drawerPrompt }}</div>
-            </div>
-            <n-space :size="8">
-              <n-button size="small" :disabled="activeAsset.locked" @click="openReplace(activeAsset)">上传替换</n-button>
-              <n-button size="small" type="primary" :disabled="activeAsset.locked || !canRegenerate(activeAsset)" @click="openRegenerate(activeAsset)">重新生成</n-button>
-              <n-button size="small" quaternary @click="lockMutation.mutate({ id: activeAsset.id, lock: !activeAsset.locked })">{{ activeAsset.locked ? '解锁' : '锁定' }}</n-button>
-            </n-space>
-          </n-space>
-          </div>
-        </div>
-      </template>
-    </n-modal>
+    <!-- 资产详情（点卡片才出现） -->
+    <AssetDetailModal
+      v-model:show="detailVisible"
+      :asset="activeAsset"
+      :prompt="detailPrompt"
+      :prompt-version="detailPromptVersion"
+      @replace="activeAsset && openReplace(activeAsset)"
+      @regenerate="activeAsset && openRegenerate(activeAsset)"
+      @toggle-lock="activeAsset && lockMutation.mutate({ id: activeAsset.id, lock: !activeAsset.locked })"
+      @copy="copyText"
+    />
 
-    <!-- 上传替换确认弹窗 -->
-    <n-modal v-model:show="replaceVisible" preset="card" style="width: 640px" title="上传替换资产">
-      <template v-if="replaceTarget">
-        <div class="replace-card">
-          <div class="replace-card-label">{{ replaceTarget.name }}</div>
-          <div class="replace-card-preview">
-            <input ref="replaceFileInputRef" type="file" accept="image/*,video/*" style="display:none" @change="onReplaceFileChange" />
-            <div v-if="replacePreview" class="replace-preview-wrap">
-              <img :src="replacePreview" alt="" />
-              <n-button size="tiny" secondary class="replace-repick" @click="triggerReplaceFileSelect">重新选择</n-button>
-            </div>
-            <div v-else class="replace-pick">
-              <n-button size="small" secondary @click="triggerReplaceFileSelect">选择文件</n-button>
-            </div>
-          </div>
-        </div>
-        <div v-if="replaceFileObj" class="replace-file-name">已选择：{{ replaceFileObj.name }}</div>
-        <n-alert type="info" :bordered="false" style="margin-top: 12px">
-          上传的图片将直接替换当前图片内容，资产名称与文件位置保持不变。引用该资产的镜头会被标记为待重做，但不会自动触发任务。
-        </n-alert>
-      </template>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="replaceVisible = false">取消</n-button>
-          <n-button type="primary" :loading="replaceBusy" :disabled="!replaceFileObj" @click="confirmReplace">
-            确认替换
-          </n-button>
-        </n-space>
-      </template>
-    </n-modal>
+    <!-- 上传替换 -->
+    <AssetReplaceModal
+      v-model:show="replaceVisible"
+      :target="replaceTarget"
+      :busy="replaceBusy"
+      @confirm="confirmReplace"
+    />
+
+    <!-- 重新生成：提示词 + 候选版本 -->
+    <AssetRegenDrawer
+      v-model:show="regenVisible"
+      :asset="regenAsset"
+      @refresh="refreshAll"
+      @submitted="assetProgress.start({ notifyOnComplete: true })"
+    />
 
     <!-- 音色配置抽屉（音频模块改造） -->
     <VoiceConfigDrawer
@@ -1363,372 +984,34 @@ function clearBatch() {
       :character-id="voiceDrawerCharacterId"
       :character-name="voiceDrawerCharacterName"
     />
-    <!-- 重新生成抽屉：可编辑提示词 + 候选采纳 -->
-    <n-drawer v-model:show="regenVisible" :width="'min(560px, 100vw)'" @after-leave="stopRegenPoll">
-      <n-drawer-content title="重新生成资产图" closable>
-        <template v-if="regenAsset">
-          <n-spin v-if="regenLoading" class="page-loading" />
-          <n-space v-else vertical :size="12">
-            <div class="regen-base">
-              <img
-                v-if="regenAsset.thumb_url || regenAsset.url"
-                :src="regenAsset.thumb_url || regenAsset.url"
-                alt=""
-                class="regen-base-img"
-              />
-              <div class="regen-base-info">
-                <div class="regen-base-name">{{ regenAsset.name || regenAsset.id }}</div>
-                <div class="regen-base-meta">
-                  {{ assetTypeLabels[regenAsset.asset_type] || regenAsset.asset_type }} · 当前 v{{ regenAsset.version }}
-                </div>
-              </div>
-            </div>
-
-            <n-alert v-if="regenErrorMsg" type="error" :bordered="false">{{ regenErrorMsg }}</n-alert>
-
-            <div class="regen-field">
-              <div class="regen-label">
-                提示词
-                <span v-if="regenPromptVersion" class="regen-tag">模板 v{{ regenPromptVersion }}</span>
-              </div>
-              <n-input
-                v-model:value="regenPrompt"
-                type="textarea"
-                :autosize="{ minRows: 6, maxRows: 14 }"
-                placeholder="描述该资产的外观与画面要求"
-              />
-            </div>
-
-            <div class="regen-field">
-              <div class="regen-label">负面提示词</div>
-              <n-input
-                v-model:value="regenNegative"
-                type="textarea"
-                :autosize="{ minRows: 2, maxRows: 6 }"
-                placeholder="不希望出现的元素"
-              />
-            </div>
-
-            <div class="regen-locked">
-              参考图与工作流沿用原生成配置，不可在此修改，以保证资产风格与分镜一致性。
-            </div>
-
-            <n-space align="center">
-              <n-button type="primary" :loading="regenSubmitting" @click="submitRegenerate">提交重新生成</n-button>
-              <n-tag
-                v-if="regenJobStatus"
-                size="small"
-                :type="regenJobStatus === 'succeeded' ? 'success' : (regenJobStatus === 'failed' ? 'error' : 'info')"
-              >任务状态：{{ regenJobStatus }}</n-tag>
-            </n-space>
-
-            <div class="version-section">
-              <div class="section-title">候选版本（采纳后才会替换当前生效版本）</div>
-              <n-empty v-if="!regenCandidates.length" size="small" description="暂无候选版本，提交重新生成后在此确认" />
-              <div v-else class="candidate-grid">
-                <div v-for="c in regenCandidates" :key="c.asset_id" class="candidate-card">
-                  <div class="candidate-thumb">
-                    <img :src="`/api/assets/${c.asset_id}/file?thumb=true`" alt="" />
-                  </div>
-                  <div class="candidate-meta">
-                    <span class="candidate-ver">v{{ c.version }}</span>
-                    <n-button
-                      size="tiny"
-                      type="primary"
-                      :loading="adoptingId === c.asset_id"
-                      @click="adoptRegenCandidate(c.asset_id)"
-                    >采用</n-button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </n-space>
-        </template>
-      </n-drawer-content>
-    </n-drawer>
   </div>
 </template>
 
 <style scoped>
-/* 上传替换弹窗 */
-.replace-row { display: flex; align-items: center; gap: 12px; }
-.replace-card { flex: 1; min-width: 0; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 8px; }
-.replace-card-label { font-size: 12px; color: var(--text-secondary, #64748b); margin-bottom: 6px; }
-.replace-card-preview { height: 190px; display: flex; align-items: center; justify-content: center; background: var(--bg-elevated, #f8fafc); border-radius: 8px; overflow: hidden; }
-.replace-card-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.replace-pick { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
-.replace-preview-wrap { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
-.replace-repick { position: absolute; bottom: 8px; right: 8px; }
-.replace-arrow { font-size: 18px; color: var(--text-secondary, #64748b); }
-.replace-file-name { font-size: 12px; color: var(--text-secondary, #64748b); margin-top: 10px; }
-/* 重新生成抽屉 */
-.regen-base { display: flex; align-items: center; gap: 10px; }
-.regen-base-img { width: 88px; height: 88px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border-subtle, #e5e7eb); }
-.regen-base-info { min-width: 0; }
-.regen-base-name { font-size: 14px; font-weight: 600; color: var(--text-primary, #333); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.regen-base-meta { font-size: 12px; color: var(--text-secondary, #64748b); }
-.regen-field { display: flex; flex-direction: column; gap: 6px; }
-.regen-label { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); display: flex; align-items: center; gap: 8px; }
-.regen-tag { font-size: 11px; font-weight: 400; color: var(--text-secondary, #64748b); }
-.regen-locked { font-size: 12px; color: var(--text-secondary, #64748b); background: var(--bg-elevated, #f8fafc); border-radius: 8px; padding: 8px 10px; line-height: 1.6; }
-.candidate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-.candidate-card { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; overflow: hidden; }
-.candidate-thumb { height: 120px; background: var(--bg-elevated, #f8fafc); display: flex; align-items: center; justify-content: center; }
-.candidate-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.candidate-meta { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; }
-.candidate-ver { font-size: 12px; color: var(--text-secondary, #64748b); }
-.readiness-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); }
-.readiness-banner.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
-.readiness-badge { font-size: 14px; }
-.readiness-text { font-size: 13px; color: var(--text-primary, #333); margin-right: auto; }
-
-/* ===== 生成进度面板 ===== */
-.gen-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border: 1px solid var(--border-subtle, #e5e7eb);
-  border-radius: 10px;
-  padding: 10px 14px;
-  margin-bottom: 12px;
-  background: var(--bg-panel, #fff);
-}
-.gen-panel.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
-.gen-panel.fail { border-color: rgba(239, 68, 68, 0.35); }
-.gen-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.gen-badge { font-size: 14px; }
-.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
-.gen-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-left: auto; }
-.gen-bar { width: 100%; }
-.gen-groups { display: flex; gap: 8px; flex-wrap: wrap; }
-.gen-group {
-  font-size: 11px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--bg-elevated, #f1f5f9);
-  color: var(--text-secondary, #64748b);
-}
-.gen-group.ok { background: rgba(34, 197, 94, 0.12); color: #15803d; }
-.gen-inflight { display: flex; flex-direction: column; gap: 6px; }
-.gen-inflight-group { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
-.gen-inflight-kind {
-  flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--brand-primary);
-  padding-top: 2px;
-}
-.gen-inflight-items { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
-.gen-inflight-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--bg-elevated, #f8fafc);
-  border: 1px solid var(--border-subtle, #e5e7eb);
-}
-.gen-inflight-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gen-inflight-state { color: #b45309; display: inline-flex; align-items: center; gap: 6px; }
-.gen-inflight-state.running { color: var(--brand-primary); }
-.gen-inflight-state.queued { color: var(--text-secondary, #64748b); }
-.gen-mini-bar { width: 54px; }
-.gen-done-hint { font-size: 12px; color: #15803d; }
-.batch-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-top: 1px dashed var(--border-subtle, #e5e7eb);
-  padding-top: 8px;
-}
-.batch-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.batch-title { font-size: 12px; font-weight: 600; color: var(--text-primary, #333); }
-.batch-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-right: auto; }
-.batch-items { display: flex; gap: 6px; flex-wrap: wrap; }
-.batch-chip {
-  font-size: 11px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--bg-elevated, #f1f5f9);
-  color: var(--text-secondary, #64748b);
-  border: 1px solid transparent;
-}
-.batch-chip.running { background: rgba(53, 179, 166, 0.12); color: #4338ca; border-color: rgba(53, 179, 166, 0.3); }
-.batch-chip.fail { background: rgba(239, 68, 68, 0.1); color: #b91c1c; border-color: rgba(239, 68, 68, 0.3); }
-.gen-failed { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #b91c1c; }
-.gen-failed-title { font-weight: 600; }
-.gen-failed-item { color: #b45309; }
-.craft-card.inflight { border-color: rgba(53, 179, 166, 0.45); background: rgba(53, 179, 166, 0.05); }
-.craft-card.failed { border-color: rgba(239, 68, 68, 0.4); }
 .assets-page {
-  padding: 16px; min-height: calc(100vh - var(--app-header-height, 56px));
-  /* 设计令牌（局部，暗色主题变量化预留） */
-  --asset-card-radius: 12px;
-  --asset-thumb-height: 160px;
-  --asset-portrait-thumb-width: 120px;
-  --asset-gap: 12px;
-  --asset-enter-duration: 0.3s;
+  min-width: 0;
 }
-.state-block {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 48px 24px;
+.assets-tabs {
+  margin-bottom: var(--sp-4);
 }
-.state-text {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 14px;
+.tab-count {
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  background: var(--muted-soft);
+  border-radius: var(--radius-sm);
 }
-.assets-layout { display: flex; gap: 16px; }
-.category-tree { width: 200px; flex-shrink: 0; }
-.category-item {
-  padding: 8px 12px; cursor: pointer; border-radius: 8px; font-size: 14px; color: var(--text-secondary);
-  transition: all 0.2s; margin-bottom: 4px;
-}
-.category-item:hover { background: var(--bg-elevated); color: var(--text-primary); }
-.category-item.active { background: var(--brand-primary); color: var(--text-on-brand, #fff); }
-.assets-main { flex: 1; min-width: 0; }
-.craft-section { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); display: flex; flex-direction: column; gap: 10px; }
-.craft-card.category-card { cursor: pointer; transition: border-color 0.2s; }
-.craft-card.category-card:hover { border-color: var(--brand-primary); }
-.craft-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.craft-title { font-size: 14px; font-weight: 600; color: var(--text-primary, #333); }
-.craft-sub { font-size: 12px; color: var(--text-secondary, #64748b); margin-right: auto; }
-.craft-body { display: flex; gap: 12px; align-items: stretch; flex-wrap: wrap; }
-.craft-group { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.craft-group-head { display: flex; align-items: center; justify-content: space-between; }
-.craft-group-label { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
-.craft-group-done { font-size: 12px; color: var(--text-secondary, #64748b); }
-.craft-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
-.craft-card { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-.craft-card.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.04); }
-.craft-card-head { display: flex; align-items: center; gap: 8px; }
-.craft-card-name { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.craft-card-prompt { font-size: 12px; color: var(--text-secondary, #64748b); line-height: 1.5; margin: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.upload-btn { cursor: pointer; }
-.drop-zone { min-height: 400px; border: 2px dashed transparent; border-radius: 12px; }
-.page-loading { display: flex; justify-content: center; padding: 80px 0; }
-.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--asset-gap); }
-.asset-groups { display: flex; flex-direction: column; gap: 20px; }
-.asset-group { display: flex; flex-direction: column; gap: 8px; }
-.asset-group-head { display: flex; align-items: center; gap: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border-subtle, #e5e7eb); }
-.asset-group-label { font-size: 14px; font-weight: 600; color: var(--text-primary, #333); }
-.asset-group-count { font-size: 12px; color: var(--text-secondary, #64748b); }
-.asset-group-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--asset-gap); }
-.asset-card {
-  background: var(--bg-panel); border-radius: var(--asset-card-radius); overflow: hidden; cursor: pointer;
-  border: 1px solid var(--border-subtle); transition: border-color 0.2s; position: relative;
-  animation: asset-card-in var(--asset-enter-duration) ease both;
-}
-.asset-card:hover { border-color: var(--brand-primary); }
-@keyframes asset-card-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-/* 角色卡片横向布局：缩略图左 + 信息右 */
-/* 角色卡片：网格三列（缩略图/信息/操作），底部音色条横跨整行 */
-.asset-card.is-portrait { display: grid; grid-template-columns: var(--asset-portrait-thumb-width) minmax(0, 1fr) auto; align-items: stretch; }
-.asset-card.is-portrait .asset-thumb { width: var(--asset-portrait-thumb-width); height: auto; flex-shrink: 0; }
-.asset-card.is-portrait .asset-thumb img { object-fit: cover; }
-.asset-card.is-portrait .asset-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
-.asset-card.is-portrait .asset-actions { position: static; align-self: center; padding: 0 8px 0 0; }
-.asset-thumb { width: 100%; height: var(--asset-thumb-height); position: relative; background: var(--bg-elevated); }
-.asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
-.thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }
-.lock-icon { position: absolute; top: 6px; left: 6px; font-size: 14px; }
-.status-dot { position: absolute; bottom: 6px; left: 6px; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--bg-panel, #fff); }
-.status-dot.ok { background: var(--state-success, #22c55e); }
-.status-dot.busy { background: #f0a020; animation: status-pulse 1.2s ease-in-out infinite; }
-.status-dot.err { background: #d03050; }
-.status-dot.idle { background: #c2c8d0; }
-@keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.asset-info { padding: 8px 12px; }
-.asset-name { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.asset-meta { display: flex; align-items: center; gap: 8px; }
-.asset-actions { position: absolute; bottom: 6px; right: 6px; display: flex; gap: 4px; }
-/* 卡片底部音色入口：整行独占，作为角色卡片的次级操作条 */
-.asset-voice-bar {
-  display: flex; align-items: center; gap: 6px;
-  width: 100%; margin: 0; padding: 8px 10px;
-  border: none; border-top: 1px solid var(--border-subtle, #e5e7eb);
-  border-radius: 0 0 var(--asset-card-radius) var(--asset-card-radius);
-  background: var(--bg-elevated); color: var(--text-secondary);
-  font-size: 12px; line-height: 1; text-align: left; cursor: pointer;
-  transition: background 0.2s, color 0.2s;
-}
-.asset-voice-bar:hover { background: var(--brand-primary); color: #fff; }
-.asset-voice-bar:hover .avb-value { color: rgba(255, 255, 255, 0.85); }
-.avb-icon { font-size: 13px; }
-.avb-label { font-weight: 600; flex-shrink: 0; }
-.avb-value {
-  flex: 1; min-width: 0; text-align: right;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--text-tertiary, #94a3b8);
-}
-.avb-arrow { font-size: 14px; opacity: 0.6; flex-shrink: 0; }
-.asset-card.is-portrait .asset-voice-bar { grid-column: 1 / -1; }
-/* 居中大弹窗：左图右文，窄屏回落单列 */
-.detail-grid {
+.card-grid {
   display: grid;
-  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
-  gap: 24px;
-  align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--sp-4);
 }
-.detail-body { min-width: 0; }
-.drawer-preview { margin-bottom: 0; }
-@media (max-width: 900px) {
-  .detail-grid { grid-template-columns: 1fr; gap: 16px; }
-  .drawer-preview { margin-bottom: 8px; }
-}
-.preview-img { width: 100%; border-radius: 8px; }
-.preview-placeholder { width: 100%; height: 200px; background: var(--bg-elevated); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); }
-.field-label { color: var(--text-secondary); font-size: 13px; }
-.version-section { margin-top: 8px; }
-.section-title { font-size: 14px; color: var(--text-primary); margin-bottom: 8px; font-weight: 500; }
-.version-list { display: flex; flex-direction: column; gap: 8px; }
-.version-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--bg-elevated); border-radius: 8px; }
-.version-num { font-size: 13px; color: var(--brand-primary); font-weight: 600; min-width: 32px; }
-.version-date { font-size: 12px; color: var(--text-secondary); flex: 1; }
-@media (max-width: 768px) {
-  .assets-layout { flex-direction: column; }
-  .category-tree { width: 100%; display: flex; gap: 8px; overflow-x: auto; }
-  .category-item { margin-bottom: 0; white-space: nowrap; }
-  .asset-grid, .asset-group-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-  .craft-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
-}
-@media (max-width: 480px) {
-  .asset-grid, .asset-group-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
-}
-
-/* 详情抽屉：大图预览、元信息、提示词与版本记录 */
-.drawer-preview-img { width: 100%; max-height: 460px; display: block; }
-.drawer-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.drawer-asset-name { font-size: 16px; font-weight: 600; color: var(--text-primary); }
-.drawer-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 6px 16px; font-size: 13px; color: var(--text-secondary); }
-.drawer-section { border-top: 1px solid var(--border-subtle); padding-top: 12px; }
-.drawer-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.drawer-section-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.drawer-prompt-version { font-size: 12px; color: var(--text-tertiary); }
-.drawer-prompt { font-size: 13px; line-height: 1.6; color: var(--text-secondary); background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 10px 12px; white-space: pre-wrap; word-break: break-word; }
-.drawer-empty { font-size: 13px; color: var(--text-tertiary); }
-
-/* 弹窗标题接入页面衬线标题体系 */
-:deep(.n-card-header__main) {
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-/* 宽屏两栏时左栏吸附，右栏长内容滚动时画面保持可见 */
-@media (min-width: 981px) {
-  .detail-grid .drawer-preview {
-    position: sticky;
-    top: 0;
+@media (max-width: 640px) {
+  .card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: var(--sp-3);
   }
 }
 </style>

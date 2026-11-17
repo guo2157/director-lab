@@ -79,17 +79,20 @@ function goStep(key: string) {
 </script>
 
 <template>
-  <nav class="flow-nav">
+  <nav class="flow-nav" aria-label="剧本阶段流程">
     <template v-for="(s, i) in steps" :key="s.key">
-      <span v-if="i > 0" class="flow-sep">/</span>
-      <span
+      <span v-if="i > 0" class="flow-sep" aria-hidden="true">/</span>
+      <button
+        type="button"
         class="flow-step"
         :class="{ active: activeKey === s.key, done: stepDone[s.key], disabled: !reachable(s.key) }"
+        :disabled="!reachable(s.key)"
+        :aria-current="activeKey === s.key ? 'step' : undefined"
         @click="goStep(s.key)"
       >
-        <span v-if="stepDone[s.key]" class="step-check">✓</span>
+        <span v-if="stepDone[s.key]" class="step-check" aria-hidden="true">✓</span>
         {{ s.label }}
-      </span>
+      </button>
     </template>
   </nav>
 </template>
@@ -109,6 +112,9 @@ function goStep(key: string) {
 .flow-step {
   cursor: pointer;
   padding: 2px 8px;
+  border: none;
+  background: none;
+  font: inherit;
   border-radius: 6px;
   transition: background 0.15s, color 0.15s;
   display: inline-flex;
@@ -118,6 +124,10 @@ function goStep(key: string) {
 .flow-step:hover:not(.disabled) {
   background: var(--bg-elevated);
   color: var(--text-primary);
+}
+.flow-step:focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
 }
 .flow-step.active {
   color: var(--brand-primary);
