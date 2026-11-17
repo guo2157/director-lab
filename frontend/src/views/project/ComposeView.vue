@@ -348,6 +348,13 @@ const exportMutation = useMutation({
   },
 })
 
+/** 记录里只显示文件名：服务器绝对路径对用户没意义，完整路径放 title */
+function baseName(p?: string | null): string {
+  if (!p) return ''
+  const parts = p.split(/[\\/]/).filter(Boolean)
+  return parts[parts.length - 1] || p
+}
+
 function handleExport() {
   if (!exportCompositionId.value) {
     message.warning('请选择合成版本')
@@ -544,9 +551,9 @@ function statusTagClass(status: string) {
               <template #trigger>
                 <n-button
                   type="primary"
-                  secondary
                   :loading="exportMutation.isPending.value"
                   :disabled="!exportCompositionId"
+                  :title="exportCompositionId ? '导出当前合成版本为 MP4' : '请先选择一个已完成的合成版本'"
                 >导出 MP4</n-button>
               </template>
               确认使用当前选择的合成版本导出 MP4？
@@ -646,8 +653,12 @@ function statusTagClass(status: string) {
                   @click.stop="handleDownload(exp.id)"
                 >下载</n-button>
               </div>
-              <div v-if="exp.abs_path || exp.file_path" class="record-path" :title="exp.abs_path || exp.file_path">
-                {{ exp.abs_path || exp.file_path }}
+              <div
+                v-if="(exp.abs_path || exp.file_path) && baseName(exp.abs_path || exp.file_path) !== exp.file_name"
+                class="record-path"
+                :title="exp.abs_path || exp.file_path"
+              >
+                {{ baseName(exp.abs_path || exp.file_path) }}
               </div>
             </div>
           </div>
@@ -672,11 +683,19 @@ function statusTagClass(status: string) {
   display: grid;
   grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(300px, 380px);
   gap: var(--sp-4);
-  align-items: start;
+  /* 三栏等高：预览最高，记录列吃掉剩余高度，底部不再参差 */
+  align-items: stretch;
 }
 .col-preview,
 .col-forms,
 .col-records { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.col-forms .panel-card { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.col-forms :deep(.n-card__content) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.col-forms .form-actions { margin-top: auto; }
+.col-records { min-height: 0; }
+.col-records .panel-card { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.col-records :deep(.n-card__content) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.col-records .record-list { flex: 1; min-height: 0; overflow-y: auto; }
 
 .panel-card {
   --n-color: var(--bg-panel);
@@ -725,7 +744,25 @@ function statusTagClass(status: string) {
   margin-bottom: var(--sp-2);
 }
 .form-actions { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
-.form-hint { font-size: 12px; color: var(--text-tertiary); }
+.form-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+/* 禁用态也要看得见：灰底 + 描边，别只剩一行几乎与背景同色的字 */
+.form-actions :deep(.n-button--disabled),
+.form-actions :deep(.n-button:disabled) {
+  opacity: 1;
+  color: var(--text-tertiary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
 .job-alert { margin-top: var(--sp-3); }
 
 .record-list { display: flex; flex-direction: column; gap: var(--sp-2); }
