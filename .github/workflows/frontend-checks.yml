@@ -1,0 +1,42 @@
+name: frontend-checks
+
+on:
+  push:
+    paths:
+      - 'frontend/**'
+      - 'DESIGN.md'
+      - '.github/workflows/frontend-checks.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'DESIGN.md'
+
+jobs:
+  design-gates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: 硬编码色值门禁（hex / rgba 必须为 0）
+        run: npm run check:colors:strict
+
+      - name: 断点收敛门禁（只允许 1100 / 768 / 480）
+        run: npm run check:breakpoints:strict
+
+      - name: 对比度门禁（文本令牌四档背景 >= 4.5:1）
+        run: npm run check:contrast:strict
+
+      - name: 类型检查与构建
+        run: npm run build
