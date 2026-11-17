@@ -1,32 +1,37 @@
 <script setup lang="ts">
 /**
- * 分镜图详情弹窗：左边大图，右边三段（参考图 → 重新生成工作台 → 生成操作）。
+ * 分镜图详情弹窗：左栏大图 + 常驻主操作，右栏三段（提示词 → 参考图 → 重新生成方式）。
  * 状态、槽位推导与提交都在 useKeyframeRegen 里，本组件只做组织与展示。
+ *
+ * 布局原则（DESIGN.md「主操作不进折叠」）：
+ *   · 「重新生成 / 替换上传」贴在图上，滚到任何位置都能点到；
+ *   · 提示词按段落完整展示，不塞进 textarea 也不折成摘要，要改才进编辑态。
  */
 import { computed } from 'vue'
-import { NButton, NImage, NInput, NModal, NSpace, NSpin, NTag, NUpload, useMessage } from 'naive-ui'
+import { NButton, NImage, NInput, NModal, NSpace, NSpin, NUpload, useMessage } from 'naive-ui'
 import type { Shot } from '@/types/script'
 import { useKeyframeRegen } from '@/composables/useKeyframeRegen'
 import { shotStatus } from './types'
 import KeyframeRefList from './KeyframeRefList.vue'
+import PromptPanel from './PromptPanel.vue'
 import RegenWorkbench from './RegenWorkbench.vue'
+import ShotPreviewPanel from './ShotPreviewPanel.vue'
 
-const props = withDefaults(
-  defineProps<{
-    projectId: string
-    reviewApproved: boolean
-    scenes: Array<{ id: string; title: string; baseline_asset_id?: string | null }>
-    /** 全片镜号 */
-    seqOf: (shot: Shot) => number
-  }>(),
-  {},
-)
+const props = defineProps<{
+  projectId: string
+  reviewApproved: boolean
+  scenes: Array<{ id: string; title: string; baseline_asset_id?: string | null }>
+  /** 全片镜号 */
+  seqOf: (shot: Shot) => number
+}>()
 
 const emit = defineEmits<{
   /** 提交成功后：页面建立轮询基线 */
   submitted: []
   /** 尚未出图的镜头：走原生成链路（页面处理） */
   'first-generate': [shot: Shot, prompt: string]
+  /** 替换上传：交给页面弹本地文件选择（保持卡片与详情同一套逻辑） */
+  replace: [shot: Shot]
 }>()
 
 const message = useMessage()
@@ -70,7 +75,7 @@ const {
   onFirstGenerate: (shot, prompt) => emit('first-generate', shot, prompt),
 })
 
-defineExpose({ open: openDetail })
+defineExpose({ open: openDetail, visible: detailVisible })
 
 const heroUrl = computed(() => {
   const kf = detailShot.value?.current_assets?.keyframe
@@ -81,8 +86,19 @@ const heroTitle = computed(() => {
   if (!shot) return ''
   return shot.title || `镜头 ${props.seqOf(shot)}`
 })
-const heroStatus = computed(() => (detailShot.value ? shotStatus(detailShot.value).label : ''))
+const heroSeq = computed(() => (detailShot.value ? props.seqOf(detailShot.value) : 0))
+const heroStatus = computed(() => {
+  const shot = detailShot.value
+  return shot ? shotStatus(shot) : { kind: 'stale' as const, label: '待生成' }
+})
+const locked = computed(() => Boolean(detailShot.value?.current_assets?.keyframe?.locked))
+const confirmed = computed(() => Boolean(detailShot.value?.keyframe_confirmed))
+const hasKeyframe = computed(() => Boolean(detailShot.value?.current_assets?.keyframe))
 const boundCount = computed(() => regenRefs.value.length)
+
+function onReplace() {
+  if (detailShot.value) emit('replace', detailShot.value)
+}
 </script>
 
 <template>
@@ -92,49 +108,59 @@ const boundCount = computed(() => regenRefs.value.length)
     title="分镜图详情"
     closable
     :bordered="false"
-    :style="{ width: 'min(1120px, 93vw)' }"
-    :content-style="{ maxHeight: 'calc(85vh - 56px)', overflowY: 'auto' }"
+    :style="{ width: 'min(1180px, 94vw)' }"
+    :content-style="{ maxHeight: 'calc(88vh - 56px)', overflowY: 'auto' }"
   >
     <template v-if="detailShot">
-      <div class="detail-grid">
-        <div class="detail-hero">
-          <n-image
-            v-if="heroUrl"
-            :src="heroUrl"
-            :preview-src="heroUrl"
-            class="detail-img"
-            object-fit="contain"
-            alt="分镜图"
+      <div class="dg">
+        <aside class="dg-aside">
+          <ShotPreviewPanel
+            :url="heroUrl"
+            :title="heroTitle"
+            :seq="heroSeq"
+            :status-kind="heroStatus.kind"
+            :status-label="heroStatus.label"
+            :has-keyframe="hasKeyframe"
+            :locked="locked"
+            :confirmed="confirmed"
+            :can-generate="reviewApproved"
+            :generating="regenSubmitting"
+            :validating="regenValidating"
+            @generate="detailGenerate(detailShot)"
+            @replace="onReplace"
+            @validate="runRegenValidation"
           />
-          <div v-else class="detail-empty">该镜头尚未生成分镜图</div>
-          <div class="detail-meta">
-            <span class="detail-name">{{ heroTitle }}</span>
-            <span class="detail-status">{{ heroStatus }}</span>
-            <n-tag v-if="detailShot.current_assets?.keyframe?.locked" size="tiny" type="warning">已锁定</n-tag>
-            <n-tag v-if="detailShot.keyframe_confirmed" size="tiny" type="success">已确认</n-tag>
-          </div>
-        </div>
+        </aside>
 
-        <div class="detail-body">
-          <section class="detail-section">
-            <div class="detail-section-head">
-              <span class="detail-section-index">1</span>
-              <span class="detail-section-name">生成参考图</span>
-              <span class="detail-section-hint">当前生图工作流 {{ kfMaxRefs }} 个参考槽位</span>
-            </div>
-            <KeyframeRefList :items="kfRefList" :loading="kfRefsLoading" :max-refs="kfMaxRefs" />
-            <div class="detail-source-hint">
-              真实入参＝实际提交的图；按槽位推导＝按引用与槽位会传入；无可用槽位＝本次不传；图未生成＝需先到资产库补齐。
-            </div>
+        <div class="dg-main">
+          <section class="dg-sec">
+            <header class="dg-sec-head">
+              <span class="dg-sec-idx">1</span>
+              <span class="dg-sec-name">提示词</span>
+              <span class="dg-sec-hint">改动只影响本镜</span>
+            </header>
+            <PromptPanel v-model="regenPrompt" @copied="message.success('已复制提示词')" />
           </section>
 
-          <section class="detail-section">
-            <div class="detail-section-head">
-              <span class="detail-section-index">2</span>
-              <span class="detail-section-name">重新生成工作台</span>
-            </div>
+          <section class="dg-sec">
+            <header class="dg-sec-head">
+              <span class="dg-sec-idx">2</span>
+              <span class="dg-sec-name">生成参考图</span>
+              <span class="dg-sec-hint">当前工作流 {{ kfMaxRefs }} 个槽位</span>
+            </header>
+            <KeyframeRefList :items="kfRefList" :loading="kfRefsLoading" :max-refs="kfMaxRefs" />
+            <p class="dg-note">
+              真实入参＝实际提交的图；按槽位推导＝按引用与槽位会传入；无可用槽位＝本次不传；图未生成＝需先到资产库补齐。
+            </p>
+          </section>
+
+          <section class="dg-sec is-last">
+            <header class="dg-sec-head">
+              <span class="dg-sec-idx">3</span>
+              <span class="dg-sec-name">重新生成方式</span>
+              <span class="dg-sec-hint">沿用当前提示词，或连参考图一起改</span>
+            </header>
             <RegenWorkbench
-              v-model:prompt="regenPrompt"
               v-model:mode="regenMode"
               :mode-options="regenModeOptions"
               :rows="regenRefRows"
@@ -145,27 +171,6 @@ const boundCount = computed(() => regenRefs.value.length)
               @pick="openAssetPicker"
               @remove="removeRegenRef"
             />
-          </section>
-
-          <section class="detail-section">
-            <div class="detail-section-head">
-              <span class="detail-section-index">3</span>
-              <span class="detail-section-name">生成操作</span>
-            </div>
-            <div v-if="!reviewApproved" class="detail-gate">公共资产尚未通过人工审核，暂不可生成分镜图。</div>
-            <div class="detail-actions">
-              <n-button v-if="detailShot.current_assets?.keyframe" :loading="regenValidating" @click="runRegenValidation">
-                校验
-              </n-button>
-              <n-button
-                type="primary"
-                :disabled="!reviewApproved || !!detailShot.current_assets?.keyframe?.locked"
-                :loading="regenSubmitting"
-                @click="detailGenerate(detailShot)"
-              >
-                {{ detailShot.current_assets?.keyframe ? '重新生成分镜图' : '生成分镜图' }}
-              </n-button>
-            </div>
           </section>
         </div>
       </div>
@@ -219,67 +224,43 @@ const boundCount = computed(() => regenRefs.value.length)
 </template>
 
 <style scoped>
-/* 居中大弹窗：左图右文，窄屏回落单列 */
-.detail-grid {
+/* 左图右文：左栏 sticky，滚动右栏时主操作常在视野内 */
+.dg {
   display: grid;
-  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 400px) minmax(0, 1fr);
   gap: var(--sp-6);
   align-items: start;
 }
-.detail-body {
+.dg-aside {
   min-width: 0;
 }
-.detail-img {
-  width: 100%;
-  border-radius: var(--radius-lg);
-  background: var(--bg-sunken);
-  display: block;
-}
-.detail-img :deep(img) {
-  width: 100%;
-  max-height: 480px;
-  object-fit: contain;
-  display: block;
-}
-.detail-empty {
-  padding: var(--sp-8) var(--sp-4);
-  border: 1px dashed var(--border-subtle);
-  border-radius: var(--radius-lg);
-  text-align: center;
-  font-size: 13px;
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-}
-.detail-meta {
+.dg-main {
   display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-top: var(--sp-2);
-  flex-wrap: wrap;
+  flex-direction: column;
+  min-width: 0;
 }
-.detail-name {
-  font-size: 14px;
-  font-weight: 600;
-}
-.detail-status {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-.detail-section {
+.dg-sec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
   padding: var(--sp-4) 0;
   border-bottom: 1px solid var(--border-subtle);
 }
-.detail-section:last-of-type {
-  border-bottom: none;
-  padding-bottom: var(--sp-1);
+.dg-sec:first-child {
+  padding-top: 0;
 }
-.detail-section-head {
+.dg-sec.is-last {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.dg-sec-head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-bottom: var(--sp-3);
+  flex-wrap: wrap;
 }
-.detail-section-index {
+.dg-sec-idx {
+  flex: none;
   width: 18px;
   height: 18px;
   border-radius: var(--radius-sm);
@@ -288,35 +269,25 @@ const boundCount = computed(() => regenRefs.value.length)
   font-size: 11px;
   line-height: 18px;
   text-align: center;
-  flex-shrink: 0;
 }
-.detail-section-name {
+.dg-sec-name {
   font-size: 14px;
   font-weight: 600;
+  color: var(--text-primary);
 }
-.detail-section-hint {
+.dg-sec-hint {
   margin-left: auto;
   font-size: 11px;
   color: var(--text-tertiary);
 }
-.detail-source-hint {
-  margin-top: var(--sp-2);
+.dg-note {
+  margin: 0;
   font-size: 11px;
   line-height: 1.6;
   color: var(--text-tertiary);
 }
-.detail-gate {
-  margin-bottom: var(--sp-2);
-  padding: var(--sp-2) var(--sp-2);
-  border-radius: var(--radius-lg);
-  background: var(--warning-soft);
-  font-size: 12px;
-  color: var(--accent-amber);
-}
-.detail-actions {
-  display: flex;
-  gap: var(--sp-2);
-}
+
+/* 资产选择器 */
 .picker-list {
   display: flex;
   flex-direction: column;
@@ -335,7 +306,7 @@ const boundCount = computed(() => regenRefs.value.length)
   transition: border-color var(--transition-fast), background var(--transition-fast);
 }
 .picker-item:hover {
-  border-color: var(--brand-primary);
+  border-color: var(--brand-line);
   background: var(--bg-elevated);
 }
 .picker-meta {
@@ -355,27 +326,28 @@ const boundCount = computed(() => regenRefs.value.length)
   font-size: 13px;
   color: var(--text-tertiary);
 }
+
 @media (max-width: 980px) {
-  .detail-grid {
+  .dg {
     grid-template-columns: 1fr;
     gap: var(--sp-4);
   }
 }
 @media (min-width: 981px) {
-  .detail-hero {
+  .dg-aside {
     position: sticky;
     top: 0;
   }
 }
 @media (max-width: 768px) {
-  .detail-section {
+  .dg-sec {
     padding: var(--sp-3) 0;
   }
-  .detail-section-name {
+  .dg-sec-name {
     font-size: 13px;
   }
-  .detail-actions :deep(.n-button) {
-    flex: 1;
+  .dg-sec-hint {
+    display: none;
   }
 }
 :deep(.n-card-header__main) {

@@ -242,10 +242,6 @@ function handleGenerate(shot: Shot) {
   generateMutation.mutate({ shotId: shot.id, params })
 }
 
-function onPromptInput(shot: Shot, value: string) {
-  promptDraft.value[shot.id] = value
-}
-
 // 勾选与批量出图
 const selectedIds = ref<Record<string, boolean>>({})
 const selectedList = computed(() => allShots.value.filter((s) => selectedIds.value[s.id]))
@@ -267,9 +263,8 @@ function toggleSelectAll(checked: boolean) {
 }
 
 function refreshAll() {
-  for (const sc of scenesQuery.data.value?.items ?? []) {
-    void loadSceneShots(sc.id, sc.episodes?.[0] ?? 1)
-  }
+  const jobs = (scenesQuery.data.value?.items ?? []).map((sc) => loadSceneShots(sc.id, sc.episodes?.[0] ?? 1))
+  return Promise.all(jobs)
 }
 
 const batchMutation = useMutation({
@@ -376,7 +371,12 @@ async function onReplaceFileChange(e: Event) {
   try {
     await replaceAsset(kf.asset_id, file)
     message.success('已替换该镜分镜图')
-    refreshAll()
+    await refreshAll()
+    // 详情弹窗开着时同步刷新，避免停留在替换前的旧图
+    if (dialogRef.value?.visible) {
+      const updated = allShots.value.find((s) => s.id === target.id)
+      if (updated) dialogRef.value?.open(updated)
+    }
   } catch (err: any) {
     message.error(`替换失败: ${err?.message ?? err}`)
   } finally {
@@ -618,7 +618,6 @@ function onFirstGenerate(shot: Shot, prompt: string) {
             @unconfirm="handleUnconfirm(shot, g.scene.id, g.episode)"
             @lock="handleToggleLock(shot)"
             @replace="pickReplace(shot)"
-            @update:prompt="(v) => onPromptInput(shot, v)"
           />
         </div>
       </section>
@@ -633,6 +632,7 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       :seq-of="shotGlobalSeq"
       @submitted="trackAfterSubmit"
       @first-generate="onFirstGenerate"
+      @replace="pickReplace"
     />
   </div>
 </template>
@@ -793,14 +793,15 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   color: var(--text-tertiary);
 }
 
-/* 宽屏 4 列 → 1440 以下 2 列 → 900 以下单列；竖屏项目用窄列避免卡片过高 */
+/* 宽屏 4 列 → 1440 以下 2 列 → 900 以下单列；竖屏项目用窄列避免卡片过高，
+   但列宽下限 196px：卡底「重新生成 / 替换上传 / ⋯」三个按钮不能再被截断 */
 .shots-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
 }
 .shots-grid.portrait {
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
 }
 @media (max-width: 1440px) {
   .shots-grid {

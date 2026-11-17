@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
- * 重新生成工作台（纯展示）：模式、参考图槽位、正向提示词、预检结果。
- * 状态与提交都在 useKeyframeRegen 里，这里只负责渲染与抛出用户意图。
+ * 重新生成方式（纯展示）：模式 + 参考图槽位 + 预检结果。
+ * 提示词已独立成 PromptPanel（详情右栏第 1 段），这里只管「传哪些图、怎么传」。
+ * 状态与提交都在 useKeyframeRegen 里，本组件只渲染并抛出用户意图。
  */
-import { NAlert, NButton, NImage, NInput, NRadioButton, NRadioGroup, NTag } from 'naive-ui'
+import { NAlert, NButton, NImage, NRadioButton, NRadioGroup, NTag } from 'naive-ui'
 import type { ValidateResult } from '@/api/regeneration'
 
 interface WorkbenchRow {
@@ -16,22 +17,17 @@ interface WorkbenchRow {
   label: string
 }
 
-withDefaults(
-  defineProps<{
-    prompt: string
-    mode: string
-    modeOptions: Array<{ label: string; value: string }>
-    rows: WorkbenchRow[]
-    slotsCount: number
-    boundCount: number
-    editable: boolean
-    validation: ValidateResult | null
-  }>(),
-  {},
-)
+defineProps<{
+  mode: string
+  modeOptions: Array<{ label: string; value: string }>
+  rows: WorkbenchRow[]
+  slotsCount: number
+  boundCount: number
+  editable: boolean
+  validation: ValidateResult | null
+}>()
 
 const emit = defineEmits<{
-  'update:prompt': [string]
   'update:mode': [string]
   pick: [string]
   remove: [string]
@@ -41,7 +37,10 @@ const emit = defineEmits<{
 <template>
   <div class="wb">
     <div class="wb-head">
-      <span class="wb-title">参考图槽位（{{ boundCount }}/{{ slotsCount }} 已绑定）</span>
+      <span class="wb-title">
+        参考图槽位
+        <b class="wb-count">{{ boundCount }}/{{ slotsCount }}</b>
+      </span>
       <n-radio-group :value="mode" size="small" @update:value="(v: string) => emit('update:mode', v)">
         <n-radio-button v-for="opt in modeOptions" :key="opt.value" :value="opt.value">
           {{ opt.label }}
@@ -51,24 +50,24 @@ const emit = defineEmits<{
 
     <div class="wb-list">
       <div v-for="row in rows" :key="row.slot_param" class="wb-item" :class="{ empty: !row.asset_id }">
-        <div class="wb-no">Image {{ row.image_no ?? '—' }}</div>
+        <span class="wb-no">Image {{ row.image_no ?? '—' }}</span>
         <n-image
           v-if="row.asset_id"
           :src="`/api/assets/${row.asset_id}/file`"
-          :width="52"
-          :height="52"
+          :width="44"
+          :height="44"
           object-fit="cover"
           class="wb-thumb"
-          :img-props="{ style: 'width:52px;height:52px;object-fit:cover;border-radius:var(--radius)' }"
+          :img-props="{ style: 'width:44px;height:44px;object-fit:cover;border-radius:var(--radius-sm)' }"
         />
         <div v-else class="wb-thumb wb-thumb-empty">空槽位</div>
         <div class="wb-meta">
           <div class="wb-name">
-            {{ row.asset_name || row.label }}
+            <span class="wb-name-text">{{ row.asset_name || row.label }}</span>
             <n-tag size="tiny" :bordered="false">{{ row.label }}</n-tag>
             <n-tag v-if="row.required" size="tiny" type="warning" :bordered="false">必需</n-tag>
           </div>
-          <div class="wb-sub">槽位 {{ row.slot_param }} · 输入位置 {{ row.input_key ?? '—' }}</div>
+          <div class="wb-sub">{{ row.slot_param }} · 输入位置 {{ row.input_key ?? '—' }}</div>
         </div>
         <div v-if="editable" class="wb-actions">
           <n-button size="tiny" secondary @click="emit('pick', row.slot_param)">
@@ -87,27 +86,19 @@ const emit = defineEmits<{
         </div>
       </div>
     </div>
-    <div v-if="!editable" class="wb-hint">切换到『修改参考图』模式后可新增、替换或移除参考图。</div>
 
-    <div class="wb-title">正向提示词</div>
-    <n-input
-      :value="prompt"
-      type="textarea"
-      :rows="6"
-      placeholder="分镜图提示词（Image 编号与上方参考图槽位对应）"
-      @update:value="(v: string) => emit('update:prompt', v)"
-    />
-    <div class="wb-hint">提示词中的 &lt;imageN&gt; 编号与上方参考图槽位严格对应；提交前会自动校验一致性。</div>
+    <p v-if="!editable" class="wb-hint">
+      当前为「沿用当前」：按提示词里的引用与槽位自动推导要传的图。要换图请切到「修改参考图」。
+    </p>
 
     <template v-if="validation">
-      <div class="wb-title">校验结果</div>
-      <n-alert v-if="validation.errors.length" type="error" :bordered="false">
-        <div v-for="e in validation.errors" :key="e.message">✗ {{ e.message }}</div>
+      <n-alert v-if="validation.errors.length" type="error" :bordered="false" title="校验未通过">
+        <div v-for="e in validation.errors" :key="e.message">{{ e.message }}</div>
       </n-alert>
-      <n-alert v-else-if="validation.warnings.length" type="warning" :bordered="false">
-        <div v-for="w in validation.warnings" :key="w.message">⚠ {{ w.message }}</div>
+      <n-alert v-else-if="validation.warnings.length" type="warning" :bordered="false" title="校验有警告">
+        <div v-for="w in validation.warnings" :key="w.message">{{ w.message }}</div>
       </n-alert>
-      <n-alert v-else type="success" :bordered="false">✓ 校验通过，可以提交生成</n-alert>
+      <n-alert v-else type="success" :bordered="false" title="校验通过，可以提交生成" />
     </template>
   </div>
 </template>
@@ -123,21 +114,23 @@ const emit = defineEmits<{
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
-  margin-bottom: var(--sp-1);
 }
 .wb-title {
-  margin: var(--sp-2) 0 var(--sp-1);
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
 }
-.wb-head .wb-title {
-  margin: 0;
+.wb-count {
+  margin-left: 4px;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--text-tertiary);
 }
+/* 槽位可能多达 9 个：宽栏两列排，避免一长串把右栏撑到要滚两屏 */
 .wb-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: var(--sp-1) var(--sp-2);
 }
 .wb-item {
   display: flex;
@@ -146,14 +139,19 @@ const emit = defineEmits<{
   padding: var(--sp-2);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
+  transition: border-color var(--transition-fast);
+}
+.wb-item:hover {
+  border-color: var(--border-strong);
 }
 .wb-item.empty {
   border-style: dashed;
-  opacity: 0.75;
+  background: var(--bg-sunken);
 }
 .wb-no {
-  min-width: 64px;
-  font-size: 12px;
+  flex: none;
+  min-width: 58px;
+  font-size: 11px;
   font-family: var(--font-mono);
   color: var(--text-tertiary);
 }
@@ -162,10 +160,14 @@ const emit = defineEmits<{
   background: var(--bg-sunken);
 }
 .wb-thumb-empty {
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
   color: var(--text-tertiary);
 }
 .wb-meta {
@@ -179,9 +181,16 @@ const emit = defineEmits<{
   flex-wrap: wrap;
   font-size: 13px;
 }
+.wb-name-text {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .wb-sub {
   margin-top: 2px;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: 10px;
   color: var(--text-tertiary);
 }
 .wb-actions {
@@ -189,8 +198,19 @@ const emit = defineEmits<{
   gap: 6px;
 }
 .wb-hint {
+  margin: 0;
   font-size: 11px;
   line-height: 1.6;
   color: var(--text-tertiary);
+}
+
+@media (max-width: 768px) {
+  .wb-item {
+    flex-wrap: wrap;
+  }
+  .wb-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 </style>

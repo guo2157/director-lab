@@ -3,16 +3,16 @@
  * 分镜图卡片：缩略图为主体，状态角标压在图上。
  *
  * 信息分层（按 DESIGN.md「内容优先」）：
- *   图 → 镜号 + 标题 → 目标画面摘要（2 行）→ 元信息一行 → 主操作
- * 结构化提示词段落（任务/参考图职责/必须保持/禁止…）不铺在卡上，
- * 只把【目标画面】作为摘要，其余压成 chip，全文在详情弹窗里看。
+ *   图 → 镜号 + 标题 → 一行画面摘要 → 常驻操作条（ShotCardActions）
+ * 提示词全文、任务类型、参考图数量都在详情弹窗里看——卡片只留一行摘要，
+ * 不在每张卡上堆条件标签。
  */
 import { computed } from 'vue'
-import { NDropdown } from 'naive-ui'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import type { Shot } from '@/types/script'
 import { shotStatus, shotThumbUrl } from './types'
 import { promptDigest } from './promptSummary'
+import ShotCardActions from './ShotCardActions.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -51,7 +51,6 @@ const emit = defineEmits<{
   unconfirm: []
   lock: []
   replace: []
-  'update:prompt': [string]
 }>()
 
 const thumbUrl = computed(() => shotThumbUrl(props.shot))
@@ -59,43 +58,22 @@ const locked = computed(() => Boolean(props.shot.current_assets?.keyframe?.locke
 const hasKeyframe = computed(() => Boolean(props.shot.current_assets?.keyframe))
 const status = computed(() => shotStatus(props.shot, { inflightText: props.inflightText, failed: props.failed }))
 const title = computed(() => props.shot.title || `镜头 ${props.seq}`)
-const digest = computed(() => promptDigest(props.prompt))
 const primaryLabel = computed(() => {
   if (props.inflightText) return props.inflightText
   return hasKeyframe.value ? '重新生成' : '生成分镜图'
 })
 
-/** 低频操作全部收进下拉：确认 / 取消确认 / 锁定 / 替换上传 / 详情 */
-const menuOptions = computed(() => {
-  const items: Array<Record<string, unknown>> = []
-  if (hasKeyframe.value && !props.shot.keyframe_confirmed) {
-    items.push({ label: '确认分镜图', key: 'confirm' })
-  }
-  if (props.shot.keyframe_confirmed) {
-    items.push({ label: '取消确认', key: 'unconfirm' })
-  }
-  if (hasKeyframe.value) {
-    items.push({ label: locked.value ? '解锁' : '锁定', key: 'lock' })
-  }
-  if (hasKeyframe.value && !locked.value) {
-    items.push({ label: '替换上传', key: 'replace' })
-  }
-  items.push({ type: 'divider', key: 'd1' })
-  items.push({ label: '查看大图与提示词', key: 'open' })
-  return items
+/** 卡片摘要：只取【目标画面】一行；其余结构化段落进详情看 */
+const summary = computed(() => {
+  const raw = (props.prompt || '').trim()
+  if (!raw) return ''
+  const digest = promptDigest(raw)
+  if (digest.body) return digest.body
+  return digest.structured ? '结构化提示词：任务与画面要求见详情' : raw.replace(/\s+/g, ' ')
 })
 
 function onPick(e: Event) {
   emit('select', (e.target as HTMLInputElement).checked)
-}
-
-function onMenu(key: string | number) {
-  const k = String(key)
-  if (k === 'confirm') emit('confirm')
-  else if (k === 'unconfirm') emit('unconfirm')
-  else if (k === 'lock') emit('lock')
-  else if (k === 'replace') emit('replace')
-  else if (k === 'open') emit('open')
 }
 </script>
 
@@ -108,7 +86,9 @@ function onMenu(key: string | number) {
       'is-failed': failed,
       'is-blank': !hasKeyframe,
     }"
+    tabindex="0"
     @click="emit('open')"
+    @keydown.enter.prevent="emit('open')"
   >
     <div class="sb-thumb">
       <img v-if="thumbUrl" :src="thumbUrl" :alt="`镜 ${seq} 分镜图`" loading="lazy" />
@@ -133,38 +113,27 @@ function onMenu(key: string | number) {
         <h3 class="sb-title" :title="title">{{ title }}</h3>
       </div>
 
-      <p v-if="failedMessage" class="sb-error" :title="failedMessage">失败原因：{{ failedMessage }}</p>
+      <p v-if="failedMessage" class="sb-error" :title="failedMessage">失败：{{ failedMessage }}</p>
 
-      <!-- 摘要区独立于卡片点击：查看全文不应在卡内展开，统一进详情 -->
-      <div class="sb-prompt" @click.stop>
-        <p v-if="digest.body" class="sb-summary" :title="digest.body">{{ digest.body }}</p>
-        <p v-else class="sb-summary is-empty">
-          {{ prompt ? '提示词为纯结构化要求，点开查看全文' : '尚未生成分镜图提示词' }}
-        </p>
-
-        <div class="sb-meta">
-          <span v-if="digest.task" class="sb-chip" :title="digest.task">{{ digest.task }}</span>
-          <span v-if="digest.refCount" class="sb-chip">参考图 {{ digest.refCount }}</span>
-          <span class="sb-chars">{{ digest.chars }} 字</span>
-          <button type="button" class="sb-link" @click="emit('open')">查看全文</button>
-        </div>
-      </div>
+      <p v-if="summary" class="sb-summary" :title="summary">{{ summary }}</p>
+      <p v-else class="sb-summary is-empty">尚未生成分镜图提示词</p>
     </div>
 
-    <footer class="sb-actions" @click.stop>
-      <button
-        type="button"
-        class="sb-act is-primary"
-        :disabled="!canGenerate || locked || !!inflightText || busy"
-        :title="canGenerate ? primaryLabel : '需先通过公共资产人工审核'"
-        @click="emit('generate')"
-      >
-        {{ primaryLabel }}
-      </button>
-      <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
-        <button type="button" class="sb-act is-icon" aria-label="更多操作" title="更多操作">⋯</button>
-      </n-dropdown>
-    </footer>
+    <ShotCardActions
+      :has-keyframe="hasKeyframe"
+      :locked="locked"
+      :confirmed="!!shot.keyframe_confirmed"
+      :inflight-text="inflightText"
+      :can-generate="canGenerate"
+      :busy="busy"
+      :primary-label="primaryLabel"
+      @generate="emit('generate')"
+      @replace="emit('replace')"
+      @confirm="emit('confirm')"
+      @unconfirm="emit('unconfirm')"
+      @lock="emit('lock')"
+      @open="emit('open')"
+    />
   </article>
 </template>
 
@@ -178,14 +147,17 @@ function onMenu(key: string | number) {
   border-radius: var(--radius-lg);
   overflow: hidden;
   cursor: pointer;
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 .sb-card:hover {
   border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
 }
-.sb-card.is-selected {
-  border-color: var(--brand-line);
+.sb-card:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
+.sb-card.is-selected,
 .sb-card.is-inflight {
   border-color: var(--brand-line);
 }
@@ -209,7 +181,7 @@ function onMenu(key: string | number) {
   transition: opacity var(--transition-fast);
 }
 .sb-card:hover .sb-thumb img {
-  opacity: 0.92;
+  opacity: 0.94;
 }
 .sb-thumb-empty {
   position: absolute;
@@ -222,6 +194,7 @@ function onMenu(key: string | number) {
 }
 .sb-thumb-hint {
   font-size: 12px;
+  line-height: 1.5;
   color: var(--text-tertiary);
 }
 
@@ -283,10 +256,10 @@ function onMenu(key: string | number) {
 .sb-body {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: 6px;
   flex: 1;
   min-width: 0;
-  padding: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
 }
 .sb-head {
   display: flex;
@@ -326,124 +299,18 @@ function onMenu(key: string | number) {
   overflow: hidden;
 }
 
-/* 摘要：正文用界面字体扫描，不用等宽；等宽只留给字数这类数字 */
-.sb-prompt {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
-}
+/* 摘要只留一行：正文用界面字体扫描，等宽只留给镜号这类数字 */
 .sb-summary {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.65;
+  min-height: 20px;
+  font-size: 12.5px;
+  line-height: 1.6;
   color: var(--text-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sb-summary.is-empty {
   color: var(--text-tertiary);
-}
-.sb-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  flex-wrap: wrap;
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--text-tertiary);
-}
-.sb-chip {
-  max-width: 12em;
-  padding: 0 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-secondary);
-  background: var(--neutral-soft);
-  border: 1px solid var(--neutral-line);
-  border-radius: var(--radius-sm);
-}
-.sb-chars {
-  font-family: var(--font-mono);
-}
-.sb-meta .sb-chip,
-.sb-meta .sb-chars {
-  opacity: 0.7;
-  transition: opacity var(--transition-fast);
-}
-.sb-card:hover .sb-meta .sb-chip,
-.sb-card:hover .sb-meta .sb-chars {
-  opacity: 1;
-}
-.sb-link {
-  margin-left: auto;
-  padding: 0;
-  font-family: inherit;
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--text-tertiary);
-  background: none;
-  border: 0;
-  border-bottom: 1px solid transparent;
-  cursor: pointer;
-  transition: color var(--transition-fast), border-color var(--transition-fast);
-}
-.sb-link:hover {
-  color: var(--brand-hover);
-  border-bottom-color: var(--brand-line);
-}
-
-.sb-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-2) var(--sp-3);
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-sunken);
-}
-.sb-act {
-  padding: 2px var(--sp-3);
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 20px;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
-}
-.sb-act:hover:not(:disabled) {
-  color: var(--brand-hover);
-  border-color: var(--brand-line);
-}
-.sb-act:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.sb-act.is-primary {
-  flex: 1;
-  min-width: 0;
-  font-weight: 500;
-  color: var(--text-on-brand);
-  background: var(--brand-primary);
-  border-color: var(--brand-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sb-act.is-primary:hover:not(:disabled) {
-  color: var(--text-on-brand);
-  background: var(--brand-hover);
-  border-color: var(--brand-hover);
-}
-.sb-act.is-icon {
-  flex: none;
-  min-width: 28px;
-  font-size: 14px;
-  line-height: 20px;
 }
 </style>
