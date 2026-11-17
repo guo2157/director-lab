@@ -545,6 +545,8 @@ const scenes = computed<SceneWithShots[]>(
   () => (scenesData.value?.items as SceneWithShots[] | undefined) ?? [],
 )
 const hasResults = computed(() => scenes.value.length > 0)
+/** 解析出的镜头总数：场景接口直接带 shot_count */
+const totalShots = computed(() => scenes.value.reduce((n, sc) => n + (sc.shot_count ?? 0), 0))
 const { data: charactersData } = useQuery({
   queryKey: computed(() => ['characters', projectId.value]),
   queryFn: () => listCharacters(projectId.value, { page_size: 100 }),
@@ -722,9 +724,48 @@ const props = computed(() => propsData.value?.items ?? [])
           </div>
         </div>
 
-        <NEmpty v-if="flow.parseJobId || parseDone" description="" />
+        <!-- 解析结果总览：场景 / 角色 / 道具（有结果就展示，不再用空占位） -->
+        <section v-if="hasResults" class="result-panel">
+          <header class="result-head">
+            <h3 class="result-title">解析结果</h3>
+            <span class="result-meta">
+              {{ scenes.length }} 场景 · {{ totalShots }} 镜 · {{ characters.length }} 角色 · {{ props.length }} 道具
+            </span>
+            <span class="result-spacer" />
+            <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/storyboard-images`)">
+              去分镜图 →
+            </NButton>
+          </header>
+          <div class="result-cols">
+            <div class="result-col">
+              <div class="result-col-head">场景</div>
+              <ol class="result-scenes">
+                <li v-for="sc in scenes" :key="sc.id">
+                  <span class="rs-seq">#{{ sc.seq }}</span>
+                  <span class="rs-title" :title="sc.title">{{ sc.title }}</span>
+                  <span class="rs-count">{{ sc.shot_count ?? 0 }} 镜</span>
+                </li>
+              </ol>
+            </div>
+            <div class="result-col">
+              <div class="result-col-head">角色</div>
+              <div class="result-chips">
+                <span v-for="c in characters" :key="c.id" class="result-chip">{{ c.name }}</span>
+                <span v-if="!characters.length" class="result-none">无</span>
+              </div>
+            </div>
+            <div class="result-col">
+              <div class="result-col-head">道具</div>
+              <div class="result-chips">
+                <span v-for="pr in props" :key="pr.id" class="result-chip">{{ pr.name }}</span>
+                <span v-if="!props.length" class="result-none">无</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <NEmpty v-else-if="flow.selectedEpisodes.length" description="请点击『解析选中』提交任务" />
-        <NEmpty v-else description="Agent 将自动完成评估与解析，请稍候" />
+        <NEmpty v-else-if="!parseDone" description="Agent 将自动完成评估与解析，请稍候" />
       </div>
     </div>
   </section>
@@ -824,5 +865,103 @@ const props = computed(() => propsData.value?.items ?? [])
   .candidate-bar-text { min-width: 0; word-break: break-word; }
   .parse-done-stats { flex-wrap: wrap; gap: 16px; }
   .parse-done-actions { margin-left: 0; width: 100%; }
+}
+
+/* 解析结果总览：场景清单 + 角色 / 道具 chips */
+.result-panel {
+  margin-top: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+.result-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.result-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.result-meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.result-spacer { flex: 1; }
+.result-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-4);
+}
+.result-col { min-width: 0; }
+.result-col-head {
+  margin-bottom: 6px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+.result-scenes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 216px;
+  overflow-y: auto;
+}
+.result-scenes li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: 12.5px;
+  line-height: 1.9;
+}
+.rs-seq {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.rs-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.rs-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.result-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.result-chip {
+  padding: 1px var(--sp-2);
+  font-size: 11.5px;
+  line-height: 19px;
+  color: var(--text-secondary);
+  background: var(--neutral-soft);
+  border: 1px solid var(--neutral-line);
+  border-radius: var(--radius-sm);
+}
+.result-none {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+@media (max-width: 900px) {
+  .result-cols { grid-template-columns: 1fr; }
+  .result-scenes { max-height: none; }
 }
 </style>
