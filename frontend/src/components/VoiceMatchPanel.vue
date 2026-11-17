@@ -372,7 +372,7 @@ watch(matched, (v) => {
   gap: 8px;
 }
 .voice-card {
-  border: 1px solid var(--divider-color, #e5e5e5);
+  border: 1px solid var(--divider-color);
   border-radius: 6px;
   padding: 8px 10px;
 }
@@ -382,7 +382,7 @@ watch(matched, (v) => {
 }
 .voice-desc {
   font-size: 12px;
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
   margin: 4px 0 6px;
   min-height: 16px;
 }
@@ -393,7 +393,7 @@ watch(matched, (v) => {
   margin-top: 12px;
 }
 .match-row {
-  border: 1px solid var(--divider-color, #e5e5e5);
+  border: 1px solid var(--divider-color);
   border-radius: 6px;
   padding: 8px 10px;
   margin-top: 8px;
@@ -408,15 +408,15 @@ watch(matched, (v) => {
   font-weight: 600;
 }
 .voice-name {
-  color: var(--primary-color, #18a058);
+  color: var(--primary-color);
 }
 .score {
   font-size: 12px;
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
 }
 .match-reason {
   font-size: 12px;
-  color: var(--text-color-2, #666);
+  color: var(--text-color-2);
   margin: 4px 0 6px;
 }
 .match-actions {
@@ -426,10 +426,10 @@ watch(matched, (v) => {
 .alts {
   margin-top: 6px;
   font-size: 12px;
-  color: var(--text-color-2, #666);
+  color: var(--text-color-2);
 }
 .alts-title {
-  color: var(--text-color-3, #999);
+  color: var(--text-color-3);
 }
 .alt-item {
   margin-right: 12px;

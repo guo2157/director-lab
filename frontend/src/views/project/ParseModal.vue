@@ -164,8 +164,8 @@ function handleSubmit() {
   margin: 0 0 12px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: rgba(240, 160, 32, 0.1);
-  color: #b8860b;
+  background: var(--warning-soft);
+  color: var(--accent-amber);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -181,16 +181,16 @@ function handleSubmit() {
 .quick-chip {
   padding: 3px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  border: 1px solid var(--neutral-line);
   background: transparent;
-  color: #64748b;
+  color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
 }
 .quick-chip.active {
   border-color: var(--brand-primary);
   color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.08);
+  background: var(--brand-soft);
 }
 .quick-chip.static {
   cursor: default;
@@ -204,12 +204,12 @@ function handleSubmit() {
 }
 .form-label {
   font-size: 12px;
-  color: #64748b;
+  color: var(--text-secondary);
 }
 .parse-range-hint {
   margin-top: 10px;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--text-secondary);
 }
 .modal-footer {
   display: flex;

@@ -127,9 +127,9 @@ const runningJobs = computed<Job[]>(() =>
 
 // --- Labels & colors ---
 const statusColors: Record<string, string> = {
-  queued: '#3B82F6', running: '#3B82F6', chained_wait: '#A855F7',
-  submission_unknown: '#F59E0B', succeeded: '#22C55E',
-  failed: '#EF4444', lost: '#EF4444', cancelled: '#9CA3AF',
+  queued: 'var(--brand-primary)', running: 'var(--brand-primary)', chained_wait: 'var(--text-secondary)',
+  submission_unknown: 'var(--state-warning)', succeeded: 'var(--state-success)',
+  failed: 'var(--state-danger)', lost: 'var(--state-danger)', cancelled: 'var(--text-secondary)',
 }
 const statusLabels: Record<string, string> = {
   queued: '排队中', running: '执行中', chained_wait: '等待前序',
@@ -155,7 +155,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
     render: (row) => typeLabels[row.job_type] || row.job_type },
   { title: '状态', key: 'status', width: 100,
     render: (row) =>
-      h(NTag, { size: 'small', round: true, color: { color: statusColors[row.status], textColor: '#fff' } },
+      h(NTag, { size: 'small', round: true, color: { color: statusColors[row.status], textColor: 'var(--text-primary)' } },
         { default: () => statusLabels[row.status] || row.status }) },
   { title: '目标', key: 'target_id', width: 130, ellipsis: { tooltip: true } },
   { title: '尝试', key: 'attempts', width: 60 },
@@ -233,7 +233,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
                 size="small"
                 round
                 closable
-                :color="{ color: statusColors[statusFilter], textColor: '#fff' }"
+                :color="{ color: statusColors[statusFilter], textColor: 'var(--text-primary)' }"
                 @close="setStatus('')"
               >状态：{{ statusLabels[statusFilter] || statusFilter }}</n-tag>
               <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
@@ -315,7 +315,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .sse-indicator.on .sse-dot {
   background: var(--state-success);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+  box-shadow: 0 0 0 3px var(--success-line);
 }
 .sse-indicator.off .sse-dot {
   background: var(--state-warning);
@@ -370,7 +370,7 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .status-tab.active {
   background: var(--brand-primary);
-  color: #fff;
+  color: var(--text-primary);
 }
 .filter-row {
   display: flex;
@@ -409,19 +409,19 @@ const columns = computed<DataTableColumns<Job>>(() => [
 }
 .running-card.selected {
   border-color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.08);
+  background: var(--brand-soft);
 }
 .running-pulse {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #3B82F6;
+  background: var(--brand-primary);
   animation: running-pulse 1.6s ease-in-out infinite;
   flex-shrink: 0;
 }
 @keyframes running-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
-  50% { opacity: 0.6; box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); }
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--brand-line); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 5px var(--brand-soft); }
 }
 .running-type {
   font-size: 13px;

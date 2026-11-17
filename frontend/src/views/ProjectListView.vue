@@ -724,8 +724,8 @@ async function handleCreateSeries() {
 </template>
 <style scoped>
 .project-list-page {
-  --text-primary: #e5e7eb;
-  --text-secondary: #9ca3af;
+
+
   min-height: calc(100vh - var(--app-header-height, 56px));
   padding: 24px;
   max-width: 1440px;
@@ -759,9 +759,9 @@ async function handleCreateSeries() {
   color: var(--text-secondary);
 }
 .stat-chip.stat-active {
-  color: #34d399;
-  border-color: rgba(52, 211, 153, 0.35);
-  background: rgba(52, 211, 153, 0.08);
+  color: var(--state-success);
+  border-color: var(--success-line);
+  background: var(--success-soft);
 }
 /* Tab 切换 */
 .tab-switch {
@@ -785,7 +785,7 @@ async function handleCreateSeries() {
 }
 .tab-btn.active {
   background: var(--brand-primary);
-  color: #fff;
+  color: var(--text-primary);
 }
 .header-actions {
   display: flex;
@@ -808,7 +808,7 @@ async function handleCreateSeries() {
 }
 .series-card:hover {
   border-color: var(--brand-primary);
-  box-shadow: 0 2px 12px rgba(53, 179, 166, 0.12);
+  box-shadow: 0 2px 12px var(--brand-soft);
 }
 .series-card .card-head {
   display: flex;
@@ -854,8 +854,8 @@ async function handleCreateSeries() {
   gap: 16px;
   padding: 12px 16px;
   margin-bottom: 20px;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid var(--warning-line);
+  background: var(--warning-soft);
   border-radius: 8px;
 }
 .banner-text {
@@ -902,7 +902,7 @@ async function handleCreateSeries() {
 .filter-chip.active {
   border-color: var(--brand-primary);
   color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.12);
+  background: var(--brand-soft);
 }
 .sort-group {
   display: flex;
@@ -929,7 +929,7 @@ async function handleCreateSeries() {
 }
 .sort-btn.active {
   color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.12);
+  background: var(--brand-soft);
 }
 .state-block {
   display: flex;
@@ -967,7 +967,7 @@ async function handleCreateSeries() {
 }
 .launch-card:hover {
   border-color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.06);
+  background: var(--brand-soft);
   color: var(--brand-primary);
 }
 .launch-plus {
@@ -988,7 +988,7 @@ async function handleCreateSeries() {
   border-radius: 14px;
   overflow: hidden;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-lg);
   transition:
     box-shadow 0.2s ease,
     border-color 0.2s ease,
@@ -1012,7 +1012,7 @@ async function handleCreateSeries() {
 }
 .project-card:hover {
   border-color: var(--brand-primary);
-  box-shadow: 0 2px 8px rgba(53, 179, 166, 0.15);
+  box-shadow: 0 2px 8px var(--brand-soft);
   transform: translateY(-2px);
 }
 .cover {
@@ -1025,18 +1025,18 @@ async function handleCreateSeries() {
 .cover-char {
   font-size: 44px;
   font-weight: 700;
-  color: rgba(255, 255, 255, 0.9);
-  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  color: var(--overlay-active);
+  text-shadow: 0 2px 8px var(--overlay-active);
   user-select: none;
 }
 .cover-9-16 {
-  background: #17332f;
+  background: var(--overlay-selected);
 }
 .cover-16-9 {
-  background: #142a2e;
+  background: var(--bg-panel);
 }
 .cover-1-1 {
-  background: #1a2b30;
+  background: var(--bg-elevated);
 }
 .status-tag {
   position: absolute;
@@ -1049,7 +1049,7 @@ async function handleCreateSeries() {
   bottom: 8px;
   font-size: 12px;
   line-height: 18px;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--overlay-active);
   letter-spacing: 0.5px;
 }
 .card-body {
@@ -1165,7 +1165,7 @@ async function handleCreateSeries() {
 }
 .ratio-card.active {
   border-color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.12);
+  background: var(--brand-soft);
 }
 .ratio-shape {
   display: block;
@@ -1215,7 +1215,7 @@ async function handleCreateSeries() {
 }
 .type-card.active {
   border-color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.12);
+  background: var(--brand-soft);
 }
 .type-name {
   font-size: 14px;
@@ -1246,19 +1246,19 @@ async function handleCreateSeries() {
   gap: 4px;
   padding: 14px;
   text-align: left;
-  background: var(--bg-elevated, #f8fafc);
-  border: 1.5px solid var(--border-subtle, #e5e7eb);
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--border-subtle);
   border-radius: 10px;
   cursor: pointer;
-  color: var(--text-primary, #111827);
+  color: var(--text-primary);
   transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 .create-type-card:hover {
-  border-color: var(--border-strong, #cbd5e1);
+  border-color: var(--border-strong);
 }
 .create-type-card.active {
   border-color: var(--brand-primary);
-  background: rgba(53, 179, 166, 0.1);
+  background: var(--brand-soft);
 }
 .ct-icon {
   font-size: 22px;
@@ -1268,12 +1268,12 @@ async function handleCreateSeries() {
   margin-top: 6px;
   font-size: 15px;
   font-weight: 600;
-  color: var(--text-primary, #111827);
+  color: var(--text-primary);
 }
 .ct-desc {
   font-size: 12px;
   line-height: 18px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-secondary);
 }
 /* ===== 系列表单两列 ===== */
 .form-row {
@@ -1300,7 +1300,7 @@ async function handleCreateSeries() {
 .style-section {
   margin-top: 4px;
   padding-top: 12px;
-  border-top: 1px solid var(--border-subtle, #e5e7eb);
+  border-top: 1px solid var(--border-subtle);
 }
 .style-toggle {
   display: flex;
@@ -1310,8 +1310,8 @@ async function handleCreateSeries() {
   width: 100%;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid var(--border-subtle, #e5e7eb);
-  background: var(--bg-elevated, #f8fafc);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
   cursor: pointer;
   text-align: left;
   transition: border-color 0.15s;
@@ -1352,13 +1352,13 @@ async function handleCreateSeries() {
 /* 删除确认弹窗：确认按钮使用危险色（danger var(--danger)） */
 .n-dialog.danger-dialog .n-button--primary-type {
   --n-color: var(--danger) !important;
-  --n-color-hover: #f87171 !important;
-  --n-color-pressed: #dc2626 !important;
-  --n-color-focus: #f87171 !important;
-  --n-text-color: #ffffff !important;
-  --n-text-color-hover: #ffffff !important;
-  --n-text-color-pressed: #ffffff !important;
-  --n-text-color-focus: #ffffff !important;
+  --n-color-hover: var(--state-danger) !important;
+  --n-color-pressed: var(--state-danger) !important;
+  --n-color-focus: var(--state-danger) !important;
+  --n-text-color: var(--text-primary) !important;
+  --n-text-color-hover: var(--text-primary) !important;
+  --n-text-color-pressed: var(--text-primary) !important;
+  --n-text-color-focus: var(--text-primary) !important;
   --n-border: 1px solid transparent !important;
   --n-border-hover: 1px solid transparent !important;
   --n-border-pressed: 1px solid transparent !important;

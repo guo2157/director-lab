@@ -692,7 +692,7 @@ function statusTagClass(status: string) {
   width: 100%;
   aspect-ratio: var(--preview-ratio, 9 / 16);
   min-height: 180px;
-  background: #000;
+  background: var(--media-backdrop);
   border-radius: var(--radius);
   display: flex;
   align-items: center;
@@ -704,7 +704,7 @@ function statusTagClass(status: string) {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  background: #000;
+  background: var(--media-backdrop);
   display: block;
 }
 .video-error { margin-top: var(--sp-3); }
@@ -739,7 +739,7 @@ function statusTagClass(status: string) {
 }
 .record-item.is-plain { cursor: default; }
 .record-item:hover { border-color: var(--border-strong); }
-.record-item.active { border-color: var(--brand-primary); background: rgba(53, 179, 166, 0.08); }
+.record-item.active { border-color: var(--brand-primary); background: var(--brand-soft); }
 .record-item.stale { opacity: 0.55; }
 .record-head {
   display: flex;

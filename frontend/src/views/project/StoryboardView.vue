@@ -557,7 +557,7 @@ function getShotStatus(shot: Shot): StatusInfo {
     const pct = progressJob?.progress ?? clipProgressByShot.value.get(shot.id)
     return {
       label: typeof pct === 'number' ? `视频生成中 ${pct}%` : '视频生成中',
-      color: '#3B82F6',
+      color: 'var(--brand-primary)',
     }
   }
 
@@ -569,24 +569,24 @@ function getShotStatus(shot: Shot): StatusInfo {
   if (ca?.clip) {
     const con = shot.consistency
     if (con) {
-      if (con.verdict === 'passed') return { label: '已完成', color: '#22C55E' }
-      if (con.verdict === 'review') return { label: '待审核', color: '#F59E0B' }
-      if (con.verdict === 'failed') return { label: '待重做', color: '#EAB308' }
+      if (con.verdict === 'passed') return { label: '已完成', color: 'var(--state-success)' }
+      if (con.verdict === 'review') return { label: '待审核', color: 'var(--state-warning)' }
+      if (con.verdict === 'failed') return { label: '待重做', color: 'var(--state-warning)' }
     }
-    return { label: '已完成', color: '#22C55E' }
+    return { label: '已完成', color: 'var(--state-success)' }
   }
 
   // 还没有视频：显示排队/等前序（带队列名次），失败优先提示重试，否则待生成
   if (failedClipByShot.value.has(shot.id)) {
-    return { label: '视频生成失败', color: '#EF4444' }
+    return { label: '视频生成失败', color: 'var(--state-danger)' }
   }
   if (jobStatus === 'queued') {
     const rank = progressJob?.queue_rank
-    return { label: rank ? `排队第 ${rank} 位` : '视频排队中', color: '#94A3B8' }
+    return { label: rank ? `排队第 ${rank} 位` : '视频排队中', color: 'var(--text-secondary)' }
   }
   if (jobStatus === 'chained_wait') {
     const rank = progressJob?.queue_rank
-    return { label: rank ? `等待前序（第 ${rank} 位）` : '等待前序镜头完成', color: '#A855F7' }
+    return { label: rank ? `等待前序（第 ${rank} 位）` : '等待前序镜头完成', color: 'var(--text-secondary)' }
   }
   return { label: '待生成视频', color: 'var(--text-tertiary)' }
 }
@@ -891,8 +891,8 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         :height="8"
         :border-radius="4"
         :show-indicator="false"
-        :color="clipProgress.data.value?.all_done ? 'var(--state-success, #22c55e)' : 'var(--brand-primary)'"
-        rail-color="var(--border-subtle, #e5e7eb)"
+        :color="clipProgress.data.value?.all_done ? 'var(--state-success)' : 'var(--brand-primary)'"
+        rail-color="var(--border-subtle)"
         class="gen-bar"
       />
       <div class="gen-sub">
@@ -1053,7 +1053,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           <div class="drawer-hero">
             <div class="hero-head">
               <span class="section-name">镜头视频</span>
-              <n-tag size="small" :bordered="false" :color="{ color: getShotStatus(activeShot).color, textColor: '#fff' }">
+              <n-tag size="small" :bordered="false" :color="{ color: getShotStatus(activeShot).color, textColor: 'var(--text-primary)' }">
                 {{ getShotStatus(activeShot).label }}
               </n-tag>
             </div>
@@ -1083,7 +1083,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               <n-tag size="small" :bordered="false">{{ shotKindLabels[activeShot.shot_kind] }}</n-tag>
               <span class="brief-item">第 {{ activeShot.episode }} 集 · 第 {{ shotGlobalSeq(activeShot) }} 镜（全片第 {{ shotGlobalSeq(activeShot) }} 镜）</span>
               <span class="brief-item">{{ activeShot.duration }} 秒</span>
-              <n-tag size="small" :bordered="false" :color="{ color: getShotStatus(activeShot).color, textColor: '#fff' }">
+              <n-tag size="small" :bordered="false" :color="{ color: getShotStatus(activeShot).color, textColor: 'var(--text-primary)' }">
                 {{ getShotStatus(activeShot).label }}
               </n-tag>
             </div>
@@ -1290,7 +1290,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     >
       <div style="margin: 12px 0 4px">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px">
-          <span style="font-size: 13px; color: #666">视频档位</span>
+          <span style="font-size: 13px; color: var(--text-secondary)">视频档位</span>
           <n-select
             v-model:value="clipTier"
             :options="clipTierOptions"
@@ -1302,13 +1302,13 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           <div style="display: flex; flex-direction: column; gap: 12px">
             <n-radio value="independent">
               独立生成（并行）
-              <div style="font-size: 12px; color: #999; margin-top: 2px">
+              <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px">
                 各镜头互不依赖，不使用上一镜尾帧，多 ComfyUI 实例可并行生成，速度快
               </div>
             </n-radio>
             <n-radio value="chained">
               链式生成（串行）
-              <div style="font-size: 12px; color: #999; margin-top: 2px">
+              <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px">
                 按镜头顺序逐镜生成，下一镜首帧取上一镜实际尾帧，画面衔接更连贯，耗时较长
               </div>
             </n-radio>
@@ -1338,36 +1338,36 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .episode-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .episode-label { font-size: 13px; color: var(--text-secondary); }
-.episode-chip { border: 1px solid var(--border-subtle, #e5e7eb); background: var(--bg-panel, #fff); border-radius: 999px; padding: 6px 16px; font-size: 14px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
+.episode-chip { border: 1px solid var(--border-subtle); background: var(--bg-panel); border-radius: 999px; padding: 6px 16px; font-size: 14px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
 .episode-chip:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
-.episode-chip.active { background: rgba(53, 179, 166, 0.1); border-color: var(--brand-primary); color: var(--brand-primary); font-weight: 600; }
-.gate-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-panel, #fff); }
-.gate-banner.ok { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
+.episode-chip.active { background: var(--brand-soft); border-color: var(--brand-primary); color: var(--brand-primary); font-weight: 600; }
+.gate-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-panel); }
+.gate-banner.ok { border-color: var(--success-line); background: var(--success-soft); }
 
 /* ===== 视频生成总体进度面板 ===== */
 .gen-panel {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid var(--border-subtle, #e5e7eb);
+  border: 1px solid var(--border-subtle);
   border-radius: 10px;
   padding: 10px 14px;
   margin-bottom: 12px;
-  background: var(--bg-panel, #fff);
+  background: var(--bg-panel);
 }
-.gen-panel.done { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); }
-.gen-panel.fail { border-color: rgba(239, 68, 68, 0.35); }
+.gen-panel.done { border-color: var(--success-line); background: var(--success-soft); }
+.gen-panel.fail { border-color: var(--danger-line); }
 .gen-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .gen-badge { font-size: 14px; }
-.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #333); }
-.gen-nums { font-size: 12px; color: var(--text-secondary, #64748b); margin-left: auto; }
+.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.gen-nums { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
 .gen-bar { width: 100%; }
 .gen-sub { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
-.gen-state { color: var(--text-secondary, #64748b); }
-.gen-state.queued { color: #b45309; }
+.gen-state { color: var(--text-secondary); }
+.gen-state.queued { color: var(--state-warning); }
 .gen-state.running { color: var(--brand-primary); }
-.gen-state.ok { color: #15803d; font-weight: 500; }
-.gen-state.fail { color: #b91c1c; }
+.gen-state.ok { color: var(--state-success); font-weight: 500; }
+.gen-state.fail { color: var(--state-danger); }
 .gen-inflight { display: flex; gap: 6px; flex-wrap: wrap; }
 .gen-inflight-item {
   display: inline-flex;
@@ -1376,16 +1376,16 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 6px;
-  background: var(--bg-elevated, #f8fafc);
-  border: 1px solid var(--border-subtle, #e5e7eb);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
 }
-.gen-inflight-name { color: var(--text-primary, #333); }
-.gen-inflight-state { color: var(--text-secondary, #64748b); }
+.gen-inflight-name { color: var(--text-primary); }
+.gen-inflight-state { color: var(--text-secondary); }
 .gen-inflight-state.running { color: var(--brand-primary); }
 .gen-inflight-state.chained_wait { color: var(--accent-amber); }
 .gen-inflight-more { font-size: 11px; color: var(--text-tertiary); align-self: center; }
 .gate-badge { font-size: 14px; }
-.gate-text { font-size: 13px; color: var(--text-primary, #333); margin-right: auto; }
+.gate-text { font-size: 13px; color: var(--text-primary); margin-right: auto; }
 .page-loading {
   display: flex;
   justify-content: center;
@@ -1446,7 +1446,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   top: 6px;
   left: 6px;
   z-index: 2;
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--overlay-active);
   border-radius: 4px;
   padding: 2px;
 }
@@ -1480,7 +1480,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
-  color: var(--text-on-brand, #fff);
+  color: var(--text-on-brand);
   white-space: nowrap;
 }
 .shot-info {
@@ -1525,7 +1525,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .preview-video {
   width: 100%;
   border-radius: 8px;
-  background: #000;
+  background: var(--media-backdrop);
   display: block;
 }
 .preview-placeholder {
@@ -1561,11 +1561,11 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .tier-label {
   font-size: 13px;
-  color: var(--text-secondary, #666);
+  color: var(--text-secondary);
 }
 .tier-hint {
   font-size: 12px;
-  color: var(--text-tertiary, #999);
+  color: var(--text-tertiary);
 }
 
 /* ===== 镜头详情抽屉分区 ===== */
@@ -1580,20 +1580,20 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .hero-empty {
   padding: 28px 16px;
-  border: 1px dashed var(--border-subtle, #e5e7eb);
+  border: 1px dashed var(--border-subtle);
   border-radius: 10px;
   text-align: center;
-  background: var(--bg-elevated, #fafafa);
+  background: var(--bg-elevated);
 }
 .hero-empty-title {
   font-size: 13px;
-  color: var(--text-secondary, #666);
+  color: var(--text-secondary);
   margin-bottom: 6px;
 }
 .hero-empty-hint {
   font-size: 12px;
   line-height: 1.6;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .ref-list {
   display: flex;
@@ -1605,9 +1605,9 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   align-items: center;
   gap: 12px;
   padding: 8px;
-  border: 1px solid var(--border-subtle, #e5e7eb);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: var(--bg-panel, #fff);
+  background: var(--bg-panel);
 }
 .ref-item-meta {
   flex: 1;
@@ -1616,7 +1616,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .ref-item-name {
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-primary, #333);
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1624,20 +1624,20 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .ref-item-role {
   margin-top: 3px;
   font-size: 11px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .ref-item-req {
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(245, 158, 11, 0.12);
-  color: #b45309;
+  background: var(--warning-soft);
+  color: var(--state-warning);
 }
 .ref-item-slot {
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: var(--bg-elevated, #f5f7fa);
+  background: var(--bg-elevated);
   font-family: monospace;
   font-size: 10px;
 }
@@ -1647,10 +1647,10 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--border-subtle, #e5e7eb);
+  border: 1px dashed var(--border-subtle);
   border-radius: 6px;
   font-size: 11px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
   flex-shrink: 0;
 }
 .ref-tag {
@@ -1661,37 +1661,37 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   font-weight: 400;
 }
 .ref-tag.ok {
-  background: rgba(34, 197, 94, 0.12);
-  color: #15803d;
+  background: var(--success-soft);
+  color: var(--state-success);
 }
 .ref-tag.plan {
-  background: rgba(53, 179, 166, 0.12);
-  color: #4338ca;
+  background: var(--brand-soft);
+  color: var(--brand-deep);
 }
 .ref-tag.warn {
-  background: rgba(245, 158, 11, 0.14);
-  color: #b45309;
+  background: var(--warning-soft);
+  color: var(--state-warning);
 }
 .ref-item-input {
   margin-top: 2px;
   font-size: 10px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
   font-family: monospace;
 }
 .ref-source-hint {
   margin-top: 8px;
   font-size: 11px;
   line-height: 1.6;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .ref-count {
   margin-left: auto;
   font-size: 12px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .drawer-section {
   padding: 14px 0;
-  border-bottom: 1px solid var(--divider-color, #efeff5);
+  border-bottom: 1px solid var(--divider-color);
 }
 .drawer-section:last-of-type {
   border-bottom: none;
@@ -1708,7 +1708,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   height: 18px;
   border-radius: 50%;
   background: var(--brand-primary);
-  color: #fff;
+  color: var(--text-primary);
   font-size: 11px;
   line-height: 18px;
   text-align: center;
@@ -1717,7 +1717,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .section-name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary, #333);
+  color: var(--text-primary);
 }
 .shot-brief {
   display: flex;
@@ -1728,7 +1728,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .brief-item {
   font-size: 12px;
-  color: var(--text-secondary, #666);
+  color: var(--text-secondary);
 }
 .field {
   margin-bottom: 12px;
@@ -1745,14 +1745,14 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .field-badge {
   padding: 1px 6px;
   border-radius: 4px;
-  background: rgba(53, 179, 166, 0.12);
-  color: #4338ca;
+  background: var(--brand-soft);
+  color: var(--brand-deep);
   font-size: 10px;
   line-height: 16px;
 }
 .field-badge.soft {
-  background: var(--bg-elevated, #f5f7fa);
-  color: var(--text-tertiary, #909399);
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
 }
 .field-head :deep(.n-button) {
   margin-left: auto;
@@ -1761,22 +1761,22 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   margin-top: 4px;
   font-size: 11px;
   line-height: 1.5;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .panel-hint {
   padding: 12px;
-  border: 1px dashed var(--border-subtle, #e5e7eb);
+  border: 1px dashed var(--border-subtle);
   border-radius: 8px;
   font-size: 12px;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .gate-hint {
   margin-bottom: 10px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(245, 158, 11, 0.1);
+  background: var(--warning-soft);
   font-size: 12px;
-  color: #b45309;
+  color: var(--state-warning);
 }
 .section-foot {
   display: flex;
@@ -1790,13 +1790,13 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   min-width: 0;
   font-size: 11px;
   line-height: 1.5;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 .action-hint {
   margin-top: 8px;
   font-size: 11px;
   line-height: 1.5;
-  color: var(--text-tertiary, #909399);
+  color: var(--text-tertiary);
 }
 @media (max-width: 768px) {
   .drawer-section { padding: 12px 0; }
@@ -1870,15 +1870,15 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .ref-binding-table th,
 .ref-binding-table td {
-  border-bottom: 1px solid var(--border-color, #e8e8e8);
+  border-bottom: 1px solid var(--border-color);
   padding: 6px 8px;
   text-align: left;
   vertical-align: middle;
 }
 .ref-binding-table th {
-  background: var(--bg-elevated, #fafafa);
+  background: var(--bg-elevated);
   font-weight: 600;
-  color: #666;
+  color: var(--text-secondary);
 }
 .ref-binding-table .wb-slot {
   font-family: monospace;
@@ -1886,24 +1886,24 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .ref-binding-table .wb-mono {
   font-family: monospace;
-  color: #888;
+  color: var(--text-tertiary);
   font-size: 11px;
 }
 .ref-binding-table .wb-imgno {
   display: inline-block;
   margin-left: 4px;
   padding: 0 4px;
-  background: #f0f0f0;
+  background: var(--border-subtle);
   border-radius: 3px;
   font-size: 10px;
-  color: #666;
+  color: var(--text-secondary);
 }
 .ref-binding-table .wb-thumb {
   width: 44px;
   height: 28px;
   object-fit: cover;
   border-radius: 3px;
-  background: #f0f0f0;
+  background: var(--border-subtle);
   display: block;
 }
 .wb-add-row {
@@ -1914,7 +1914,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .wb-hint-line {
   font-size: 12px;
-  color: #999;
+  color: var(--text-tertiary);
   margin: 4px 0 8px;
 }
 </style>

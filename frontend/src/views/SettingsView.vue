@@ -648,7 +648,7 @@ const downloadWorkflow = (wf: Workflow) => {
 .nav-header {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-secondary);
   padding: 8px 12px 10px;
   letter-spacing: 1px;
 }
@@ -666,11 +666,11 @@ const downloadWorkflow = (wf: Workflow) => {
   background: var(--bg-elevated);
 }
 .nav-item.active {
-  background: var(--brand-primary, #4f6ef7);
-  color: #fff;
+  background: var(--brand-primary);
+  color: var(--text-primary);
 }
 .nav-item.active .nav-desc {
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--overlay-active);
 }
 .nav-text { min-width: 0; }
 .nav-label {
@@ -931,7 +931,7 @@ const downloadWorkflow = (wf: Workflow) => {
   background: var(--bg-elevated);
 }
 .llm-mini-card.active {
-  border-color: rgba(24, 160, 88, 0.55);
+  border-color: var(--success-line);
 }
 .llm-mini-head {
   display: flex;

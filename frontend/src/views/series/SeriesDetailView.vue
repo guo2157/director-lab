@@ -747,7 +747,7 @@ async function goWorkspace(ep: SeriesEpisode) {
   transition: background var(--transition-fast);
 }
 .episode-row:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--overlay-hover);
 }
 .ep-no {
   flex: 0 0 44px;

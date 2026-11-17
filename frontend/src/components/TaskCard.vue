@@ -116,9 +116,9 @@ n      v-if="downloadUrl"
 .task-card {
   margin-top: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--n-border-color, #e0e0e6);
+  border: 1px solid var(--n-border-color);
   border-radius: 8px;
-  background: var(--n-color, #fafafc);
+  background: var(--n-color);
   font-size: 13px;
 }
 .task-card-header {
@@ -138,23 +138,23 @@ n      v-if="downloadUrl"
   display: flex;
   gap: 12px;
   margin-top: 4px;
-  color: #888;
+  color: var(--text-tertiary);
   font-size: 12px;
 }
 .task-card-error-code {
-  color: #d03050;
+  color: var(--state-danger);
 }
 .task-card-progress {
   margin-top: 8px;
   height: 4px;
   border-radius: 2px;
-  background: #e8e8ee;
+  background: var(--border-subtle);
   overflow: hidden;
 }
 .task-card-progress-bar {
   height: 100%;
   border-radius: 2px;
-  background: #2080f0;
+  background: var(--brand-primary);
   transition: width 0.3s ease;
 }
 .task-card-stages {
@@ -168,16 +168,16 @@ n      v-if="downloadUrl"
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #666;
+  color: var(--text-secondary);
 }
 .task-stage[data-status='succeeded'] {
-  color: #18a058;
+  color: var(--state-success);
 }
 .task-stage[data-status='failed'] {
-  color: #d03050;
+  color: var(--state-danger);
 }
 .task-stage[data-status='running'] {
-  color: #2080f0;
+  color: var(--brand-primary);
 }
 .task-stage-dot {
   width: 6px;
@@ -195,8 +195,8 @@ n      v-if="downloadUrl"
   margin-top: 8px;
   padding: 6px 8px;
   border-radius: 4px;
-  background: #fdf0f2;
-  color: #d03050;
+  background: var(--danger-soft);
+  color: var(--state-danger);
   font-size: 12px;
   word-break: break-all;
 }
@@ -212,17 +212,17 @@ n      v-if="downloadUrl"
   font-size: 12px;
 }
 .task-card-result-key {
-  color: #888;
+  color: var(--text-tertiary);
   min-width: 96px;
 }
 .task-card-result-value {
-  color: #333;
+  color: var(--text-primary);
   word-break: break-all;
 }
 .task-card-download {
   display: inline-block;
   margin-top: 8px;
-  color: #2080f0;
+  color: var(--brand-primary);
   font-size: 12px;
   text-decoration: none;
 }

@@ -168,7 +168,7 @@ function goStep(key: string) {
 
 .step-hit:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--overlay-hover);
 }
 
 .step-index {
@@ -197,7 +197,7 @@ function goStep(key: string) {
 .rail-step.is-done .step-index {
   color: var(--brand-primary);
   border-color: var(--brand-deep);
-  background: rgba(53, 179, 166, 0.08);
+  background: var(--brand-soft);
 }
 
 .rail-step.is-done .step-label {

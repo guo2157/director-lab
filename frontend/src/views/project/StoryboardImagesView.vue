@@ -973,8 +973,8 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
         :height="8"
         :border-radius="4"
         :show-indicator="false"
-        :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success, #22c55e)' : 'var(--brand-primary)'"
-        rail-color="var(--border-subtle, #e5e7eb)"
+        :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success)' : 'var(--brand-primary)'"
+        rail-color="var(--border-subtle)"
         class="gen-bar"
       />
       <div class="gen-sub">
@@ -1400,12 +1400,12 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   background: var(--bg-panel);
 }
 .gate-banner.ok {
-  border-color: rgba(87, 201, 138, 0.32);
-  background: rgba(87, 201, 138, 0.07);
+  border-color: var(--success-line);
+  background: var(--success-soft);
 }
 .gate-banner.bad {
-  border-color: rgba(224, 78, 57, 0.34);
-  background: rgba(224, 78, 57, 0.07);
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
 }
 .gate-badge { font-size: 14px; }
 .gate-text { font-size: 13px; color: var(--text-primary); margin-right: auto; }
@@ -1437,8 +1437,8 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   margin-bottom: 12px;
   background: var(--bg-panel);
 }
-.gen-panel.done { border-color: rgba(87, 201, 138, 0.32); background: rgba(87, 201, 138, 0.07); }
-.gen-panel.fail { border-color: rgba(224, 78, 57, 0.34); }
+.gen-panel.done { border-color: var(--success-line); background: var(--success-soft); }
+.gen-panel.fail { border-color: var(--danger-line); }
 .gen-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .gen-badge { font-size: 14px; }
 .gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
@@ -1470,7 +1470,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   font-size: 11px;
   color: var(--danger);
   line-height: 1.5;
-  background: rgba(224, 78, 57, 0.1);
+  background: var(--danger-soft);
   border-radius: var(--radius);
   padding: 4px 8px;
   display: -webkit-box;
@@ -1480,7 +1480,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 }
 .thumb-generating { color: var(--brand-primary); font-size: 12px; }
 .shot-card.is-generating { border-color: var(--brand-primary); background: var(--brand-glow); }
-.shot-card.is-failed { border-color: rgba(224, 78, 57, 0.42); }
+.shot-card.is-failed { border-color: var(--danger-line); }
 .summary-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .page-loading { display: block; margin: var(--sp-12) auto; }
 .state-block { display: flex; flex-direction: column; align-items: center; gap: var(--sp-3); padding: var(--sp-12) var(--sp-6); }
@@ -1524,10 +1524,10 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
 /* 覆盖层只承载勾选与状态标记，不拦截图片点击，否则缩略图的大图预览点不出来 */
 .thumb-overlay { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; align-items: center; justify-content: space-between; z-index: 2; pointer-events: none; }
 .thumb-overlay > * { pointer-events: auto; }
-.select-box { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: var(--radius); background: rgba(10, 17, 19, 0.62); backdrop-filter: blur(2px); cursor: pointer; transition: background var(--transition-fast); }
-.select-box:hover { background: rgba(10, 17, 19, 0.82); }
+.select-box { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: var(--radius); background: var(--scrim); backdrop-filter: blur(2px); cursor: pointer; transition: background var(--transition-fast); }
+.select-box:hover { background: var(--scrim); }
 .select-box :deep(.select-box-cb) { pointer-events: none; }
-.select-box.checked { background: rgba(10, 17, 19, 0.82); }
+.select-box.checked { background: var(--scrim); }
 /* ===== 镜头详情（分镜图） ===== */
 .detail-hero { margin-bottom: 4px; }
 .detail-img { width: 100%; border-radius: var(--radius-lg); background: var(--bg-sunken); display: block; }
@@ -1591,7 +1591,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
-  background: rgba(217, 160, 60, 0.12);
+  background: var(--warning-soft);
   color: var(--accent-amber);
 }
 .kf-ref-input { margin-top: 2px; font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
@@ -1608,9 +1608,9 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   color: var(--text-tertiary);
 }
 .kf-tag { margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-sm); font-size: 10px; font-weight: 400; }
-.kf-tag.ok { background: rgba(87, 201, 138, 0.12); color: var(--state-success); }
-.kf-tag.plan { background: rgba(53, 179, 166, 0.12); color: var(--brand-hover); }
-.kf-tag.warn { background: rgba(217, 160, 60, 0.14); color: var(--accent-amber); }
+.kf-tag.ok { background: var(--success-soft); color: var(--state-success); }
+.kf-tag.plan { background: var(--brand-soft); color: var(--brand-hover); }
+.kf-tag.warn { background: var(--warning-soft); color: var(--accent-amber); }
 .detail-source-hint { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary); }
 .detail-hint { margin-top: 6px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary); }
 .detail-hint-block {
@@ -1625,7 +1625,7 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
   margin-bottom: 10px;
   padding: 8px 10px;
   border-radius: var(--radius-lg);
-  background: rgba(217, 160, 60, 0.1);
+  background: var(--warning-soft);
   font-size: 12px;
   color: var(--accent-amber);
 }

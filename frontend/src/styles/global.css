@@ -54,6 +54,8 @@
   --overlay-active: rgba(230, 236, 238, 0.08);
   --overlay-selected: rgba(53, 179, 166, 0.08);
   --scrim: rgba(10, 17, 19, 0.72);
+  /* 视频/图片预览的黑场：唯一允许的纯黑，仅用于媒体播放区letterbox */
+  --media-backdrop: #000000;
 
   /* 文本层级 */
   --text-primary: #e6ecee;

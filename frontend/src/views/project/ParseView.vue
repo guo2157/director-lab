@@ -666,7 +666,7 @@ const props = computed(() => propsData.value?.items ?? [])
           <div class="episode-toolbar">
             <span class="pane-label">集数解析状态</span>
             <span class="episode-count-tag">{{ statusSummary.succeeded }}/{{ statusTotalEpisodes || 0 }} 集完成</span>
-            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag" style="background:rgba(53, 179, 166, 0.08);color:var(--brand-primary,var(--brand-primary));">选中 {{ flow.selectedEpisodes.length }} 集</span>
+            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag" style="background:var(--brand-soft);color:var(--brand-primary,var(--brand-primary));">选中 {{ flow.selectedEpisodes.length }} 集</span>
             <button
               class="quick-chip"
               :class="{ active: showFailedOnly }"
@@ -731,19 +731,19 @@ const props = computed(() => propsData.value?.items ?? [])
 </template>
 
 <style scoped>
-.formatted-result-card { border: 1px solid var(--border-subtle, #e5e7eb); border-radius: 12px; background: var(--bg-panel, #fff); margin-bottom: 12px; overflow: hidden; }
-.formatted-result-head { padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text-primary, #111); border-bottom: 1px solid var(--border-subtle, #e5e7eb); background: rgba(53, 179, 166, 0.04); }
-.formatted-result-body { margin: 0; padding: 16px 20px; font-size: 13px; line-height: 1.8; color: var(--text-primary, #333); white-space: pre-wrap; word-break: break-word; max-height: 600px; overflow-y: auto; font-family: inherit; }
-.parse-done-card { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 14px; padding: 20px 28px; background: rgba(34, 197, 94, 0.06); }
+.formatted-result-card { border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--bg-panel); margin-bottom: 12px; overflow: hidden; }
+.formatted-result-head { padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text-primary); border-bottom: 1px solid var(--border-subtle); background: var(--brand-soft); }
+.formatted-result-body { margin: 0; padding: 16px 20px; font-size: 13px; line-height: 1.8; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; max-height: 600px; overflow-y: auto; font-family: inherit; }
+.parse-done-card { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; border: 1px solid var(--success-line); border-radius: 14px; padding: 20px 28px; background: var(--success-soft); }
 .parse-done-head { display: flex; align-items: center; gap: 8px; }
-.parse-done-badge { width: 26px; height: 26px; border-radius: 50%; background: var(--state-success, #22c55e); color: #fff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.parse-done-badge { width: 26px; height: 26px; border-radius: 50%; background: var(--state-success); color: var(--text-primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .parse-done-badge svg { display: block; }
-.parse-done-title { font-size: 22px; font-weight: 700; letter-spacing: 0.3px; color: var(--text-primary, #333); }
-.parse-done-sub { font-size: 12px; color: var(--text-secondary, #64748b); }
+.parse-done-title { font-size: 22px; font-weight: 700; letter-spacing: 0.3px; color: var(--text-primary); }
+.parse-done-sub { font-size: 12px; color: var(--text-secondary); }
 .parse-done-stats { display: flex; gap: 32px; }
 .parse-done-stat { display: flex; align-items: baseline; gap: 6px; }
-.parse-done-stat-value { font-size: 28px; font-weight: 700; color: var(--text-primary, #e5e7eb); }
-.parse-done-stat-label { font-size: 14px; color: var(--text-secondary, #64748b); }
+.parse-done-stat-value { font-size: 28px; font-weight: 700; color: var(--text-primary); }
+.parse-done-stat-label { font-size: 14px; color: var(--text-secondary); }
 .parse-done-actions { display: flex; gap: 10px; margin-left: auto; }
 .parse-page {
   display: flex;
@@ -757,65 +757,65 @@ const props = computed(() => propsData.value?.items ?? [])
   justify-content: space-between;
   gap: 12px;
   padding: 10px 16px;
-  border-bottom: 1px solid var(--border-subtle, #e5e7eb);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .page-title { font-size: 16px; font-weight: 600; margin: 0; }
-.project-name { font-size: 12px; color: var(--text-secondary, #64748b); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-name { font-size: 12px; color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .page-body { display: flex; flex: 1; min-height: 0; }
 .content-pane { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
 .candidate-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
-.llm-stream-card { margin-bottom: 10px; border: 1px solid rgba(99, 226, 183, 0.35); border-radius: 8px; overflow: hidden; background: rgba(16, 24, 40, 0.6); }
-.llm-stream-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; color: #63e2b7; background: rgba(99, 226, 183, 0.08); }
-.llm-stream-body { max-height: 360px; overflow-y: auto; padding: 14px 16px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; color: rgba(224, 232, 240, 0.9); }
-.candidate-bar.is-running { background: rgba(53, 179, 166, 0.06); }
-.candidate-bar.is-succeeded { background: rgba(34, 197, 94, 0.08); }
-.candidate-bar.is-failed { background: rgba(208, 48, 80, 0.06); }
-.candidate-bar-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--brand-primary); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; }
-.candidate-bar-badge.is-error { background: var(--brand-error, #d03050); }
+.llm-stream-card { margin-bottom: 10px; border: 1px solid var(--success-line); border-radius: 8px; overflow: hidden; background: var(--bg-sunken); }
+.llm-stream-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; color: var(--state-success); background: var(--success-soft); }
+.llm-stream-body { max-height: 360px; overflow-y: auto; padding: 14px 16px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; color: var(--text-primary); }
+.candidate-bar.is-running { background: var(--brand-soft); }
+.candidate-bar.is-succeeded { background: var(--success-soft); }
+.candidate-bar.is-failed { background: var(--danger-soft); }
+.candidate-bar-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--brand-primary); color: var(--text-primary); display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.candidate-bar-badge.is-error { background: var(--brand-error); }
 .candidate-bar-text { flex: 1; }
 .spin-dot { width: 12px; height: 12px; border: 2px solid var(--brand-primary); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.parse-status-panel { border: 1px solid var(--border-subtle, #e0e0e6); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.parse-status-panel { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .episode-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.pane-label { font-size: 16px; font-weight: 600; color: var(--text-primary, #333); }
+.pane-label { font-size: 16px; font-weight: 600; color: var(--text-primary); }
 .episode-count-tag { font-size: 14px; font-weight: 600; color: var(--brand-primary); font-variant-numeric: tabular-nums; }
-.quick-chip { border: 1px solid var(--border-subtle, #e0e0e6); background: none; border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
+.quick-chip { border: 1px solid var(--border-subtle); background: none; border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
 .quick-chip:hover:not(:disabled) { border-color: var(--brand-primary); color: var(--brand-primary); }
-.quick-chip.active { background: rgba(53, 179, 166, 0.1); border-color: var(--brand-primary); color: var(--brand-primary); }
+.quick-chip.active { background: var(--brand-soft); border-color: var(--brand-primary); color: var(--brand-primary); }
 .quick-chip:disabled { opacity: 0.4; cursor: not-allowed; }
 .episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
 .episode-cell { position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
 .episode-cell-no { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
 .episode-cell-meta { font-size: 14px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
-@keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(53, 179, 166, 0.3); } 50% { box-shadow: 0 0 0 4px rgba(53, 179, 166, 0); } }
+@keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--brand-line); } 50% { box-shadow: 0 0 0 4px var(--brand-soft); } }
 .episode-cell.is-running { animation: cell-pulse 1.6s ease-in-out infinite; }
-.episode-cell.is-pending { background: rgba(128, 128, 128, 0.12); color: var(--text-secondary, #888); }
-.episode-cell.is-running { background: rgba(53, 179, 166, 0.15); color: var(--brand-primary); border-color: rgba(53, 179, 166, 0.4); }
-.episode-cell.is-succeeded { background: rgba(34, 197, 94, 0.1); color: var(--state-success, #22c55e); border-color: rgba(34, 197, 94, 0.25); }
-.episode-cell.is-failed { background: rgba(208, 48, 80, 0.12); color: var(--brand-error, #d03050); border-color: rgba(208, 48, 80, 0.4); }
-.episode-cell-retry { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border: none; border-radius: 50%; background: rgba(208, 48, 80, 0.15); color: var(--brand-error, #d03050); font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s ease; }
-.episode-cell-retry:hover:not(:disabled) { background: rgba(208, 48, 80, 0.3); }
+.episode-cell.is-pending { background: var(--neutral-soft); color: var(--text-secondary); }
+.episode-cell.is-running { background: var(--brand-soft); color: var(--brand-primary); border-color: var(--brand-line); }
+.episode-cell.is-succeeded { background: var(--success-soft); color: var(--state-success); border-color: var(--success-line); }
+.episode-cell.is-failed { background: var(--danger-soft); color: var(--brand-error); border-color: var(--danger-line); }
+.episode-cell-retry { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border: none; border-radius: 50%; background: var(--danger-soft); color: var(--brand-error); font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s ease; }
+.episode-cell-retry:hover:not(:disabled) { background: var(--danger-line); }
 .episode-cell-retry:disabled { opacity: 0.4; cursor: not-allowed; }
 .failed-error-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
-.failed-error-card { border: 1px solid rgba(208, 48, 80, 0.25); border-radius: 8px; padding: 8px 10px; background: rgba(208, 48, 80, 0.04); }
+.failed-error-card { border: 1px solid var(--danger-line); border-radius: 8px; padding: 8px 10px; background: var(--danger-soft); }
 .failed-error-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.failed-error-ep { font-size: 13px; font-weight: 600; color: var(--brand-error, #d03050); }
-.failed-error-retry { border: 1px solid rgba(208, 48, 80, 0.3); background: none; border-radius: 4px; padding: 3px 12px; font-size: 12px; color: var(--brand-error, #d03050); cursor: pointer; transition: all 0.15s ease; }
-.failed-error-retry:hover:not(:disabled) { background: rgba(208, 48, 80, 0.1); }
+.failed-error-ep { font-size: 13px; font-weight: 600; color: var(--brand-error); }
+.failed-error-retry { border: 1px solid var(--danger-line); background: none; border-radius: 4px; padding: 3px 12px; font-size: 12px; color: var(--brand-error); cursor: pointer; transition: all 0.15s ease; }
+.failed-error-retry:hover:not(:disabled) { background: var(--danger-soft); }
 .failed-error-retry:disabled { opacity: 0.4; cursor: not-allowed; }
-.failed-error-msg { font-size: 13px; color: var(--text-secondary, #888); line-height: 1.5; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.failed-error-msg { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .failed-error-msg.muted { font-style: italic; }
-.episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary, #888); }
+.episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary); }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.dot.is-pending { background: rgba(128, 128, 128, 0.4); }
+.dot.is-pending { background: var(--neutral-line); }
 .dot.is-running { background: var(--brand-primary); }
-.dot.is-succeeded { background: rgba(34, 197, 94, 0.6); }
-.dot.is-failed { background: var(--brand-error, #d03050); }
+.dot.is-succeeded { background: var(--success-line); }
+.dot.is-failed { background: var(--brand-error); }
 @media (max-width: 768px) {
   .episode-grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
   .page-header { flex-wrap: wrap; }

@@ -222,15 +222,15 @@ function segStatusType(s: AudioSegment): 'default' | 'success' | 'warning' | 'er
 .audio-panel { display: flex; flex-direction: column; gap: 12px; }
 .track-group { display: flex; flex-direction: column; gap: 6px; }
 .track-head { font-size: 13px; font-weight: 600; }
-.seg-item { border: 1px solid rgba(128, 128, 128, 0.16); border-radius: 8px; padding: 8px 10px; }
+.seg-item { border: 1px solid var(--neutral-soft); border-radius: 8px; padding: 8px 10px; }
 .seg-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .seg-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.seg-dur { color: rgba(128, 128, 128, 0.9); font-size: 12px; }
+.seg-dur { color: var(--neutral-line); font-size: 12px; }
 .seg-player { display: block; width: 100%; height: 32px; margin-top: 6px; }
 .seg-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
-.seg-editor { margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(128, 128, 128, 0.2); display: flex; flex-direction: column; gap: 6px; }
+.seg-editor { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--neutral-line); display: flex; flex-direction: column; gap: 6px; }
 .edit-row { display: flex; align-items: center; gap: 8px; }
-.edit-label { font-size: 12px; min-width: 64px; color: rgba(128, 128, 128, 0.95); }
+.edit-label { font-size: 12px; min-width: 64px; color: var(--neutral-line); }
 .edit-actions { display: flex; align-items: center; gap: 8px; }
-.edit-hint { font-size: 11px; color: rgba(128, 128, 128, 0.85); }
+.edit-hint { font-size: 11px; color: var(--neutral-line); }
 </style>

@@ -12,7 +12,7 @@ import type { GlobalThemeOverrides } from 'naive-ui'
 
 const cache = new Map<string, string>()
 
-/** 读取 :root 上的 CSS 变量原始文本（如 `#35b3a6`、`rgba(53, 179, 166, 0.1)`） */
+/** 读取 :root 上的 CSS 变量原始文本（十六进制或透明色均由 global.css 提供） */
 export function token(name: `--${string}`): string {
   const cached = cache.get(name)
   if (cached !== undefined) return cached

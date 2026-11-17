@@ -122,8 +122,8 @@ const dirty = computed(() => {
 .block { display: flex; flex-direction: column; gap: 6px; }
 .block-title { font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
 .block-title em { font-style: normal; font-size: 11px; font-weight: 500; padding: 0 6px; border-radius: 8px; }
-.required { color: #fff; background: var(--brand-primary); }
-.optional { color: var(--text-secondary); background: var(--bg-elevated, #f1f5f9); }
+.required { color: var(--text-primary); background: var(--brand-primary); }
+.optional { color: var(--text-secondary); background: var(--bg-elevated); }
 .block-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .field { flex: 1 1 180px; display: flex; flex-direction: column; gap: 6px; min-width: 160px; }
@@ -134,16 +134,16 @@ const dirty = computed(() => {
 .style-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .style-card {
   text-align: left; cursor: pointer; border-radius: 8px; padding: 8px 10px;
-  border: 1px solid var(--border-subtle, #e5e7eb); background: var(--bg-elevated, #f8fafc);
+  border: 1px solid var(--border-subtle); background: var(--bg-elevated);
   display: flex; flex-direction: column; gap: 4px; transition: border-color 0.15s, box-shadow 0.15s;
 }
 .style-card:hover { border-color: var(--brand-primary); }
-.style-card.active { border-color: var(--brand-primary); box-shadow: 0 0 0 2px rgba(53, 179, 166, 0.15); }
+.style-card.active { border-color: var(--brand-primary); box-shadow: 0 0 0 2px var(--brand-soft); }
 .card-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .card-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
 .counter { font-size: 11px; color: var(--text-tertiary); text-align: right; }
 .footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 4px; }
-.dirty-hint { font-size: 12px; color: var(--brand-warning, #f0a020); }
+.dirty-hint { font-size: 12px; color: var(--brand-warning); }
 .saved-hint { font-size: 12px; color: var(--text-tertiary); }
 .footer-note { font-size: 11px; color: var(--text-tertiary); text-align: right; }
 </style>
