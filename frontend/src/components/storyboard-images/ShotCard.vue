@@ -1,14 +1,18 @@
 <script setup lang="ts">
 /**
- * 分镜图卡片：缩略图为主体（固定 16:9，网格不抖动），状态角标压在图上，
- * 底部只留最高频的一个主操作（重新生成 / 生成），其余收进「更多」。
+ * 分镜图卡片：缩略图为主体，状态角标压在图上。
+ *
+ * 信息分层（按 DESIGN.md「内容优先」）：
+ *   图 → 镜号 + 标题 → 目标画面摘要（2 行）→ 元信息一行 → 主操作
+ * 结构化提示词段落（任务/参考图职责/必须保持/禁止…）不铺在卡上，
+ * 只把【目标画面】作为摘要，其余压成 chip，全文在详情弹窗里看。
  */
 import { computed } from 'vue'
 import { NDropdown } from 'naive-ui'
 import StatusTag from '@/components/ui/StatusTag.vue'
-import PromptEditor from '@/components/ui/PromptEditor.vue'
 import type { Shot } from '@/types/script'
 import { shotStatus, shotThumbUrl } from './types'
+import { promptDigest } from './promptSummary'
 
 const props = withDefaults(
   defineProps<{
@@ -55,6 +59,7 @@ const locked = computed(() => Boolean(props.shot.current_assets?.keyframe?.locke
 const hasKeyframe = computed(() => Boolean(props.shot.current_assets?.keyframe))
 const status = computed(() => shotStatus(props.shot, { inflightText: props.inflightText, failed: props.failed }))
 const title = computed(() => props.shot.title || `镜头 ${props.seq}`)
+const digest = computed(() => promptDigest(props.prompt))
 const primaryLabel = computed(() => {
   if (props.inflightText) return props.inflightText
   return hasKeyframe.value ? '重新生成' : '生成分镜图'
@@ -76,7 +81,7 @@ const menuOptions = computed(() => {
     items.push({ label: '替换上传', key: 'replace' })
   }
   items.push({ type: 'divider', key: 'd1' })
-  items.push({ label: '查看大图与参考图', key: 'open' })
+  items.push({ label: '查看大图与提示词', key: 'open' })
   return items
 })
 
@@ -115,7 +120,7 @@ function onMenu(key: string | number) {
         <input type="checkbox" :checked="selected" :aria-label="`勾选镜 ${seq}`" @change="onPick" />
       </label>
 
-      <span class="sb-badge">
+      <span class="sb-badge" :class="{ 'is-quiet': status.kind === 'succeeded' }">
         <StatusTag :status="status.kind" :label="status.label" />
       </span>
 
@@ -124,22 +129,25 @@ function onMenu(key: string | number) {
 
     <div class="sb-body">
       <div class="sb-head">
-        <span class="sb-seq">镜 {{ seq }}</span>
+        <span class="sb-seq">{{ String(seq).padStart(2, '0') }}</span>
         <h3 class="sb-title" :title="title">{{ title }}</h3>
       </div>
 
       <p v-if="failedMessage" class="sb-error" :title="failedMessage">失败原因：{{ failedMessage }}</p>
 
-      <!-- 提示词区域独立于卡片点击：展开编辑 / 复制不应打开详情弹窗 -->
+      <!-- 摘要区独立于卡片点击：查看全文不应在卡内展开，统一进详情 -->
       <div class="sb-prompt" @click.stop>
-        <PromptEditor
-          :model-value="prompt"
-          label="提示词"
-          :rows="5"
-          :collapsed-lines="2"
-          placeholder="尚未生成分镜图提示词"
-          @update:model-value="(v: string) => emit('update:prompt', v)"
-        />
+        <p v-if="digest.body" class="sb-summary" :title="digest.body">{{ digest.body }}</p>
+        <p v-else class="sb-summary is-empty">
+          {{ prompt ? '提示词为纯结构化要求，点开查看全文' : '尚未生成分镜图提示词' }}
+        </p>
+
+        <div class="sb-meta">
+          <span v-if="digest.task" class="sb-chip" :title="digest.task">{{ digest.task }}</span>
+          <span v-if="digest.refCount" class="sb-chip">参考图 {{ digest.refCount }}</span>
+          <span class="sb-chars">{{ digest.chars }} 字</span>
+          <button type="button" class="sb-link" @click="emit('open')">查看全文</button>
+        </div>
       </div>
     </div>
 
@@ -248,6 +256,15 @@ function onMenu(key: string | number) {
   padding: 1px;
   background: var(--scrim);
   border-radius: var(--radius-sm);
+  transition: opacity var(--transition-fast);
+}
+/* 已完成是常态：26 张卡都挂绿标等于噪声，只在悬停/聚焦时显形 */
+.sb-badge.is-quiet {
+  opacity: 0.55;
+}
+.sb-card:hover .sb-badge.is-quiet,
+.sb-card:focus-within .sb-badge.is-quiet {
+  opacity: 1;
 }
 .sb-lock {
   position: absolute;
@@ -281,6 +298,7 @@ function onMenu(key: string | number) {
   flex: none;
   font-family: var(--font-mono);
   font-size: 11px;
+  letter-spacing: 0.04em;
   color: var(--text-tertiary);
 }
 .sb-title {
@@ -307,13 +325,75 @@ function onMenu(key: string | number) {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-/* 提示词块嵌在卡片里：去掉重复的边框与底色，避免卡片内再套一层卡片 */
-.sb-body :deep(.prompt-editor) {
-  padding: 0;
+
+/* 摘要：正文用界面字体扫描，不用等宽；等宽只留给字数这类数字 */
+.sb-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.sb-summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sb-summary.is-empty {
+  color: var(--text-tertiary);
+}
+.sb-meta {
+  display: flex;
+  align-items: center;
   gap: var(--sp-1);
-  background: transparent;
+  flex-wrap: wrap;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-tertiary);
+}
+.sb-chip {
+  max-width: 12em;
+  padding: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--neutral-soft);
+  border: 1px solid var(--neutral-line);
+  border-radius: var(--radius-sm);
+}
+.sb-chars {
+  font-family: var(--font-mono);
+}
+.sb-meta .sb-chip,
+.sb-meta .sb-chars {
+  opacity: 0.7;
+  transition: opacity var(--transition-fast);
+}
+.sb-card:hover .sb-meta .sb-chip,
+.sb-card:hover .sb-meta .sb-chars {
+  opacity: 1;
+}
+.sb-link {
+  margin-left: auto;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-tertiary);
+  background: none;
   border: 0;
-  border-radius: 0;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.sb-link:hover {
+  color: var(--brand-hover);
+  border-bottom-color: var(--brand-line);
 }
 
 .sb-actions {

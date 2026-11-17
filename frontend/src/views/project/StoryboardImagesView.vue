@@ -504,42 +504,32 @@ function onFirstGenerate(shot: Shot, prompt: string) {
     <!-- 生成总体进度：全片 X/Y、正在生成哪几镜、失败项 -->
     <section class="gen-strip">
       <div class="gen-line">
-        <span class="gen-title">{{ genHeadline }}</span>
-        <span class="gen-nums">
-          分镜图 {{ keyframeShots.length }}/{{ allShots.length }}（{{ progressPercent }}%）· 已确认 {{ confirmedShots.length }}
-        </span>
-        <n-button size="tiny" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
-          刷新进度
-        </n-button>
-        <n-button size="tiny" quaternary @click="refreshAll">刷新镜头</n-button>
-      </div>
-      <n-progress
-        type="line"
-        :percentage="progressPercent"
-        :height="6"
-        :border-radius="3"
-        :show-indicator="false"
-        :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success)' : 'var(--brand-primary)'"
-        rail-color="var(--border-subtle)"
-      />
-      <div class="gen-sub">
+        <n-progress
+          class="gen-bar"
+          type="line"
+          :percentage="progressPercent"
+          :height="6"
+          :border-radius="3"
+          :show-indicator="false"
+          :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success)' : 'var(--brand-primary)'"
+          rail-color="var(--border-subtle)"
+        />
         <span v-if="keyframeProgress.data.value?.inflight_queued" class="gen-state queued">
           排队 {{ keyframeProgress.data.value.inflight_queued }}
         </span>
         <span v-if="keyframeProgress.data.value?.inflight_running" class="gen-state running">
           生成中 {{ keyframeProgress.data.value.inflight_running }}
         </span>
-        <span v-if="allShots.length > 0 && keyframeShots.length === allShots.length" class="gen-state ok">
-          全部分镜图已生成完成<template v-if="keyframeProgress.data.value?.last_completed_at">
-            （最近完成于
-            {{ new Date(keyframeProgress.data.value.last_completed_at).toLocaleTimeString('zh-CN', { hour12: false }) }}）</template>
-        </span>
-        <span v-else class="gen-state">未生成 {{ allShots.length - keyframeShots.length }}</span>
         <span v-if="failedByShot.size" class="gen-state fail">
           最近失败 {{ failedByShot.size }} 张
-          <n-button size="tiny" type="warning" :loading="retryingFailed" @click="retryFailedShots">重试失败镜头</n-button>
+          <n-button size="tiny" type="warning" :loading="retryingFailed" @click="retryFailedShots">重试</n-button>
         </span>
         <span v-if="keyframeProgress.error.value" class="gen-state fail">{{ keyframeProgress.error.value }}</span>
+        <span class="gen-spacer" />
+        <n-button size="tiny" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
+          刷新进度
+        </n-button>
+        <n-button size="tiny" quaternary @click="refreshAll">刷新镜头</n-button>
       </div>
       <!-- 正在生成的镜头明细：场景 + 镜号 + 百分比 -->
       <div v-if="keyframeProgress.data.value?.inflight?.length" class="gen-inflight">
@@ -662,6 +652,14 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+}
+.gen-bar {
+  flex: 1;
+  min-width: 120px;
+}
+.gen-spacer {
+  flex: none;
+  width: var(--sp-2);
 }
 .gen-line {
   display: flex;
