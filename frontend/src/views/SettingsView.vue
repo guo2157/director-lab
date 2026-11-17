@@ -334,7 +334,14 @@ const downloadWorkflow = (wf: Workflow) => {
 
       <!-- Content -->
       <div class="settings-content">
-        <n-spin v-if="settingsQuery.isLoading.value" class="page-loading" />
+        <!-- 首屏骨架：用内容占位，避免右侧空白 + 居中转圈造成的「卡死」观感 -->
+        <div v-if="settingsQuery.isLoading.value" class="settings-skeleton" aria-hidden="true">
+          <div class="sk-item sk-title" />
+          <div class="sk-item sk-subtitle" />
+          <div class="sk-card">
+            <div v-for="i in 5" :key="i" class="sk-item sk-row" />
+          </div>
+        </div>
 
         <!-- ComfyUI -->
         <template v-else-if="activeTab === 'comfyui'">
@@ -900,10 +907,66 @@ const downloadWorkflow = (wf: Workflow) => {
 .summary-text strong {
   color: var(--text-primary);
 }
-.page-loading {
+/* --- 首屏骨架 --- */
+.settings-skeleton {
   display: flex;
-  justify-content: center;
-  padding: 80px 0;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.sk-item {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+}
+.sk-item::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--overlay-hover) 45%,
+    var(--overlay-active) 55%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: sk-slide 1.5s ease-in-out infinite;
+}
+.sk-title {
+  width: 180px;
+  height: 22px;
+  margin-top: 4px;
+}
+.sk-subtitle {
+  width: 340px;
+  max-width: 100%;
+  height: 13px;
+  margin-bottom: var(--sp-3);
+}
+.sk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+.sk-row {
+  height: 44px;
+  background: var(--bg-elevated);
+}
+@keyframes sk-slide {
+  100% {
+    transform: translateX(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-item::after {
+    animation: none;
+    background: var(--overlay-hover);
+  }
 }
 /* --- LLM 多模型小卡片列表布局 --- */
 .llm-card-toolbar {
