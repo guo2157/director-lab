@@ -23,6 +23,7 @@ import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Shot } from '@/types/script'
 import type { KeyframeGenerationJob, KeyframeGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
+import PromptEditor from '@/components/ui/PromptEditor.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -1126,13 +1127,12 @@ function statusOf(shot: Shot): { label: string; type: 'default' | 'warning' | 's
                     :class="statusOf(shot).type === 'success' ? 'is-succeeded' : statusOf(shot).type === 'warning' ? 'is-pending' : 'is-stale'"
                   >{{ statusOf(shot).label }}</span>
                 </div>
-                <n-input
-                  :value="promptDraft[shot.id] ?? shot.image_prompt ?? ''"
-                  type="textarea"
-                  :rows="2"
-                  size="small"
-                  placeholder="分镜图提示词"
-                  @update:value="(v: string) => onPromptInput(shot, v)"
+                <PromptEditor
+                  :model-value="promptDraft[shot.id] ?? shot.image_prompt ?? ''"
+                  label="分镜图提示词"
+                  :rows="6"
+                  placeholder="尚未生成分镜图提示词"
+                  @update:model-value="(v: string) => onPromptInput(shot, v)"
                 />
                 <div v-if="failedByShot.has(shot.id)" class="shot-error" :title="failedByShot.get(shot.id)">
                   失败原因：{{ failedByShot.get(shot.id) }}
