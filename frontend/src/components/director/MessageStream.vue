@@ -6,7 +6,8 @@
  * 「缩略图加载失败」这一处纯 UI 状态（破图即隐藏，不回写数据）。
  */
 import { ref } from 'vue'
-import { NImage } from 'naive-ui'
+import { NIcon, NImage } from 'naive-ui'
+import { PlayCircleOutline } from '@vicons/ionicons5'
 import TaskCard from '@/components/TaskCard.vue'
 import SearchRunCard from './SearchRunCard.vue'
 import type { AgentMessage } from '@/api/agent'
@@ -92,7 +93,7 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
               rel="noopener"
               :title="`${a.name}（${a.asset_type}）`"
             >
-              ▶ {{ a.asset_type }}
+              <n-icon :component="PlayCircleOutline" :size="13" /> {{ a.asset_type }}
             </a>
           </template>
         </div>

@@ -3,6 +3,8 @@
  * 联网搜索执行卡片：展示真实搜索执行记录（来自后端 payload.search，非 LLM 生成）。
  * 进行中时叠加 SSE 快照的阶段与进度，终态后回落到最终记录。
  */
+import { NIcon } from 'naive-ui'
+import { SearchOutline } from '@vicons/ionicons5'
 import type { SearchRecord } from './helpers'
 import { SEARCH_STATUS_TEXT } from './helpers'
 
@@ -19,7 +21,7 @@ withDefaults(
 <template>
   <div class="search-card">
     <div class="search-card-header">
-      <span class="search-card-icon" aria-hidden="true">🔍</span>
+      <span class="search-card-icon" aria-hidden="true"><n-icon :component="SearchOutline" :size="15" /></span>
       <span class="search-card-title">联网搜索</span>
       <span class="search-card-status" :data-status="record.status">
         {{ SEARCH_STATUS_TEXT[record.status] || record.status }}

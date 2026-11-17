@@ -57,7 +57,7 @@ function changeTagType(cat: string): 'default' | 'info' | 'warning' {
         <div v-if="result.checks.missing_dialogues?.length">
           丢失台词：{{ result.checks.missing_dialogues.join(' / ') }}
         </div>
-        <div>优化稿缺失了上述人物或台词。若这是你想要的删改，可点右下角「仍然采用」强制替换。</div>
+        <div>优化稿缺失了上述人物或台词。若这是你想要的删改，可点右下角「采用优化稿」强制替换。</div>
       </div>
       <div v-else-if="result.checks.punct_warnings?.length" class="punct-tip">
         <div>以下台词仅有标点或空白差异，不影响采用：</div>
@@ -102,7 +102,7 @@ function changeTagType(cat: string): 'default' | 'info' | 'warning' {
         <NButton v-if="!result?.checks.blocked" type="primary" :disabled="!result" @click="emit('adopt')">
           采用优化稿
         </NButton>
-        <NButton v-else type="warning" secondary @click="emit('force')">仍然采用</NButton>
+        <NButton v-else type="warning" secondary @click="emit('force')">采用优化稿</NButton>
       </div>
     </template>
   </n-modal>

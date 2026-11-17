@@ -5,7 +5,8 @@
  * 角色卡多一条音色条：音色是角色资产的第二个必配项，不能藏在抽屉里。
  */
 import { computed } from 'vue'
-import { NDropdown } from 'naive-ui'
+import { NDropdown, NIcon } from 'naive-ui'
+import { ChevronForwardOutline, LockClosedOutline, MicOutline } from '@vicons/ionicons5'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import { assetImgUrl } from './assetMedia'
 import { ASSET_KIND_LABELS, ASSET_UNIT_LABELS, type AssetCardItem } from './types'
@@ -94,7 +95,7 @@ function onDragStart(e: DragEvent) {
       <label v-if="selectable" class="a-pick" @click.stop>
         <input type="checkbox" :checked="selected" @change="onPick" />
       </label>
-      <span v-if="locked" class="a-lock" title="已锁定">🔒</span>
+      <span v-if="locked" class="a-lock" title="已锁定"><n-icon :component="LockClosedOutline" :size="13" /></span>
     </div>
 
     <div class="a-body">
@@ -112,10 +113,10 @@ function onDragStart(e: DragEvent) {
       :title="voiceName ? `当前音色：${voiceName}` : '尚未配置音色'"
       @click.stop="emit('voice')"
     >
-      <span class="a-voice-icon" aria-hidden="true">🎙</span>
+      <span class="a-voice-icon" aria-hidden="true"><n-icon :component="MicOutline" :size="14" /></span>
       <span class="a-voice-label">音色</span>
       <span class="a-voice-value">{{ voiceName || '未设置' }}</span>
-      <span class="a-voice-arrow" aria-hidden="true">›</span>
+      <span class="a-voice-arrow" aria-hidden="true"><n-icon :component="ChevronForwardOutline" :size="13" /></span>
     </button>
 
     <footer class="a-actions" @click.stop>

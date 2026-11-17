@@ -4,8 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NButton, NSpin, NEmpty, NTag,
-  NCheckbox, NModal, NRadioGroup, NRadio, NSelect, NProgress, useMessage,
+  NCheckbox, NModal, NRadioGroup, NRadio, NSelect, NProgress, NIcon, useMessage,
 } from 'naive-ui'
+import { Checkmark, Ellipse, TimeOutline } from '@vicons/ionicons5'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots } from '@/api/script'
 import { generateProjectShots } from '@/api/storyboard'
 import { listJobs } from '@/api/jobs'
@@ -565,7 +566,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       }"
     >
       <div class="gen-head">
-        <span class="gen-badge">{{ clipProgress.hasInflight.value ? '⏳' : clipsDoneCount > 0 && clipsDoneCount === (allShots.length || 0) ? '✓' : '•' }}</span>
+        <span class="gen-badge"><n-icon :component="clipProgress.hasInflight.value ? TimeOutline : clipsDoneCount > 0 && clipsDoneCount === (allShots.length || 0) ? Checkmark : Ellipse" :size="14" /></span>
         <span class="gen-title">{{ clipHeadline }}</span>
         <span class="gen-nums">
           视频 {{ clipsDoneCount }}/{{ allShots.length || clipProgress.data.value?.total || 0 }}（{{ clipProgress.data.value?.percent ?? 0 }}%）
@@ -618,7 +619,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     </div>
     <!-- 公共资产齐全度门禁横幅 -->
     <div class="gate-banner" :class="{ ok: readiness.all }">
-      <span class="gate-badge">{{ readiness.all ? '✓' : '⏳' }}</span>
+      <span class="gate-badge"><n-icon :component="readiness.all ? Checkmark : TimeOutline" :size="14" /></span>
       <span class="status-tag" :class="readiness.all ? 'is-succeeded' : 'is-pending'">
         {{ readiness.all ? '资产已齐全' : '资产未齐全' }}
       </span>
@@ -701,7 +702,8 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                   <img
                     v-if="shot.current_assets?.keyframe?.thumb_url || shot.current_assets?.keyframe?.url"
                     :src="shot.current_assets.keyframe!.thumb_url || shot.current_assets.keyframe!.url"
-                    alt="thumbnail"
+                    :alt="`镜头 ${shot.seq ?? shot.id} 分镜图`"
+                    loading="lazy"
                   />
                   <div v-else class="thumb-placeholder">
                     <span>{{ shotKindLabels[shot.shot_kind] }}</span>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NTag } from 'naive-ui'
+import { NIcon, NTag } from 'naive-ui'
+import { CheckmarkCircle, CloseCircle, DownloadOutline, FilmOutline, TimeOutline } from '@vicons/ionicons5'
 import type { TaskCardData } from '@/api/tasks'
 
 const props = defineProps<{
@@ -65,7 +66,7 @@ const downloadUrl = computed(() => {
 <template>
   <div class="task-card" :data-status="view.status">
     <div class="task-card-header">
-      <span class="task-card-icon">🎬</span>
+      <span class="task-card-icon"><n-icon :component="FilmOutline" :size="16" /></span>
       <span class="task-card-title" :title="view.title">{{ view.title }}</span>
       <NTag size="small" :type="statusType" :bordered="false">{{ statusText }}</NTag>
     </div>
@@ -88,9 +89,14 @@ const downloadUrl = computed(() => {
       >
         <span class="task-stage-dot" />
         <span class="task-stage-name">{{ s.stage_name }}</span>
-        <span class="task-stage-status">{{
-          s.status === 'succeeded' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'running' ? `${Math.round(s.progress ?? 0)}%` : '…'
-        }}</span>
+        <span class="task-stage-status">
+          <template v-if="s.status === 'running'">{{ Math.round(s.progress ?? 0) }}%</template>
+          <n-icon
+            v-else
+            :component="s.status === 'succeeded' ? CheckmarkCircle : s.status === 'failed' ? CloseCircle : TimeOutline"
+            :size="14"
+          />
+        </span>
       </div>
     </div>
     <!-- 错误信息 -->
@@ -108,7 +114,7 @@ n      v-if="downloadUrl"
       :href="downloadUrl"
       target="_blank"
       rel="noopener"
-    >⬇ 下载结果</a>
+    ><n-icon :component="DownloadOutline" :size="14" /> 下载结果</a>
   </div>
 </template>
 

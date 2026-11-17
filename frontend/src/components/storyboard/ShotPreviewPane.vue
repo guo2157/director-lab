@@ -48,6 +48,7 @@ const emit = defineEmits<{ navigate: [delta: 1 | -1] }>()
         v-else-if="shot.current_assets?.keyframe?.url || shot.current_assets?.keyframe?.thumb_url"
         :src="shot.current_assets.keyframe!.url || shot.current_assets.keyframe!.thumb_url!"
         :alt="`镜头 ${seq} 分镜图`"
+        loading="lazy"
         class="media-el is-image"
       />
       <EmptyState

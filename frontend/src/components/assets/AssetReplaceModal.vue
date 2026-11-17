@@ -76,7 +76,7 @@ function confirm() {
       <div class="replace-preview">
         <input ref="inputRef" type="file" accept="image/*,video/*" class="replace-input" @change="pickFile" />
         <template v-if="preview">
-          <img :src="preview" alt="" />
+          <img :src="preview" :alt="`替换 ${target.name || target.id} 的预览图`" />
           <n-button size="tiny" secondary class="replace-repick" @click="triggerSelect">重新选择</n-button>
         </template>
         <div v-else class="replace-pick">

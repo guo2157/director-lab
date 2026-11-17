@@ -3,7 +3,8 @@
  * 资产库状态条：一行回答三件事——做到哪了（进度）、能不能往下走（审核状态）、下一步点什么。
  * 主按钮始终只有一个（去分镜图）；审核通过/驳回返工降级为同一条内的次要操作。
  */
-import { NButton, NProgress } from 'naive-ui'
+import { NButton, NIcon, NProgress } from 'naive-ui'
+import { ArrowForwardOutline } from '@vicons/ionicons5'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import type { ProgressGroupView } from './types'
@@ -114,7 +115,7 @@ const reviewLabel = () => {
           :disabled="reviewStatus !== 'approved'"
           @click="emit('next')"
         >
-          去分镜图 →
+          去分镜图 <n-icon :component="ArrowForwardOutline" :size="14" />
         </n-button>
       </template>
     </PageHeader>

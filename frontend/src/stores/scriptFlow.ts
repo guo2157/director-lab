@@ -4,7 +4,7 @@ import type { ScriptEstimate } from '../types/script'
 
 /**
  * 剧本流程共享状态 store
- * 跨页面共享：ScriptView → EstimateView → ParseView
+ * 跨页面共享：ScriptView → ParseView（评估页已下线，评估由 Agent 一体化完成）
  * 流程：剧本保存 → 评估展示 → 解析落库（自动确认当前版本）
  */
 export const useScriptFlowStore = defineStore('scriptFlow', () => {

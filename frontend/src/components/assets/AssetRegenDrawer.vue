@@ -160,7 +160,7 @@ onBeforeUnmount(stopPoll)
     <n-drawer-content title="重新生成资产图" closable>
       <div v-if="asset" class="regen">
         <div class="regen-base">
-          <img v-if="asset.thumb_url || asset.url" :src="asset.thumb_url || asset.url" alt="" class="regen-base-img" />
+          <img v-if="asset.thumb_url || asset.url" :src="asset.thumb_url || asset.url" :alt="`${asset.name || asset.id} 当前图`" class="regen-base-img" />
           <div class="regen-base-info">
             <div class="regen-base-name">{{ asset.name || asset.id }}</div>
             <div class="regen-base-meta">{{ typeLabel }} · 当前 v{{ asset.version }}</div>
@@ -216,7 +216,7 @@ onBeforeUnmount(stopPoll)
             <div v-else class="candidate-grid">
               <div v-for="c in candidates" :key="c.asset_id" class="candidate-card">
                 <div class="candidate-thumb">
-                  <img :src="`/api/assets/${c.asset_id}/file?thumb=true`" alt="" />
+                  <img :src="`/api/assets/${c.asset_id}/file?thumb=true`" :alt="`候选版本 v${c.version}`" loading="lazy" />
                 </div>
                 <div class="candidate-meta">
                   <span class="candidate-ver">v{{ c.version }}</span>

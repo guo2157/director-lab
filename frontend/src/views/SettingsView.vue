@@ -3,8 +3,9 @@ import { ref, computed, watch } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NCard, NButton, NSpin, NInput, NInputNumber, NSelect, NSwitch,
-  NTag, NEmpty, NUpload, NTooltip, NModal, NPopconfirm, useMessage,
+  NTag, NEmpty, NUpload, NTooltip, NModal, NPopconfirm, NIcon, useMessage,
 } from 'naive-ui'
+import { FilmOutline } from '@vicons/ionicons5'
 import type { UploadFileInfo } from 'naive-ui'
 import {
   getSettings, updateSettings, testLlm, listLlmModels,
@@ -607,7 +608,7 @@ const downloadWorkflow = (wf: Workflow) => {
             <p class="page-subtitle">系统信息</p>
           </div>
           <n-card class="settings-card" :bordered="false">
-            <div class="about-brand">🎬</div>
+            <div class="about-brand"><n-icon :component="FilmOutline" :size="40" /></div>
             <h3 class="about-title">Director Lab 漫剧生产系统</h3>
             <div class="about-summary">
               <p class="summary-text">

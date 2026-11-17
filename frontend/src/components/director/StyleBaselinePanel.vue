@@ -3,7 +3,8 @@
  * 风格基线只读摘要（完整编辑在剧本页）。
  * 枚举值的中文展示名由后端 styleOptions 下发，前端不硬编码枚举。
  */
-import { NButton } from 'naive-ui'
+import { NButton, NIcon } from 'naive-ui'
+import { ArrowForwardOutline } from '@vicons/ionicons5'
 import type { StyleConfig, StyleOptions } from '@/types/project'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import SkeletonList from '@/components/ui/SkeletonList.vue'
@@ -31,7 +32,7 @@ function labelOf(
   <div class="style-baseline">
     <div class="style-head">
       <span class="style-caption">当前项目的风格约束</span>
-      <NButton size="tiny" quaternary @click="emit('go', 'script')">去调整 →</NButton>
+      <NButton size="tiny" quaternary @click="emit('go', 'script')">去调整 <n-icon :component="ArrowForwardOutline" :size="13" /></NButton>
     </div>
 
     <SkeletonList v-if="loading && !props.config" variant="row" :rows="4" />

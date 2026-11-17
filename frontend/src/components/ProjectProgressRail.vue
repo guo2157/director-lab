@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
+import { NIcon } from 'naive-ui'
+import { Checkmark } from '@vicons/ionicons5'
 import { getProject } from '@/api/projects'
 
 const props = defineProps<{ projectId: string }>()
@@ -82,7 +84,7 @@ function goStep(key: string) {
         :class="{ 'is-active': activeKey === s.key, 'is-done': stepDone[i] }"
       >
         <button type="button" class="step-hit" @click="goStep(s.key)">
-          <span class="step-index">{{ stepDone[i] ? '✓' : String(i + 1).padStart(2, '0') }}</span>
+          <span class="step-index"><n-icon v-if="stepDone[i]" :component="Checkmark" :size="14" /><template v-else>{{ String(i + 1).padStart(2, '0') }}</template></span>
           <span class="step-label">{{ s.label }}</span>
         </button>
       </li>

@@ -53,7 +53,6 @@ export const PAGE_ROUTES: Record<string, string> = {
   projects: 'projects',
   director: 'director',
   script: 'script',
-  estimate: 'estimate',
   parse: 'parse',
   'storyboard-images': 'storyboard-images',
   storyboard: 'storyboard',
@@ -67,7 +66,6 @@ export const PAGE_ROUTES: Record<string, string> = {
 /** 需要 projectId 的页面 */
 export const PROJECT_REQUIRED_PAGES = new Set([
   'script',
-  'estimate',
   'parse',
   'storyboard-images',
   'storyboard',

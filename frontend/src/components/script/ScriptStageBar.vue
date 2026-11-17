@@ -1,5 +1,7 @@
 <script setup lang="ts">
 /** 四步流程条：初始剧本 → 校验补充 → 保存版本 → 开始分析。纯展示。 */
+import { NIcon } from 'naive-ui'
+import { Checkmark } from '@vicons/ionicons5'
 type SaveVersion = { version: number } | null
 
 defineProps<{
@@ -19,7 +21,7 @@ defineProps<{
       class="stage-item"
       :class="{ active: index === i, done: index > i }"
     >
-      <span class="stage-index">{{ index > i ? '✓' : i + 1 }}</span>
+      <span class="stage-index"><n-icon v-if="index > i" :component="Checkmark" :size="13" /><template v-else>{{ i + 1 }}</template></span>
       <span class="stage-label">{{ s.label }}</span>
       <span v-if="s.key === 'saved' && savedVersion" class="stage-extra">v{{ savedVersion.version }}</span>
     </div>

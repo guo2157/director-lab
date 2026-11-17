@@ -22,12 +22,6 @@ const router = createRouter({
       meta: { title: '剧本' },
     },
     {
-      path: '/project/:id/estimate',
-      name: 'estimate',
-      component: () => import('../views/project/EstimateView.vue'),
-      meta: { title: '评估' },
-    },
-    {
       path: '/project/:id/parse',
       name: 'parse',
       component: () => import('../views/project/ParseView.vue'),

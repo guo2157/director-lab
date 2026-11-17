@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
 import { useScriptFlowStore } from '@/stores/scriptFlow'
 import { getParseStatus } from '@/api/projects'
+import { NIcon } from 'naive-ui'
+import { Checkmark } from '@vicons/ionicons5'
 
 const props = defineProps<{ projectId: string }>()
 const route = useRoute()
@@ -11,12 +13,11 @@ const router = useRouter()
 const flow = useScriptFlowStore()
 
 /**
- * 剧本阶段子流程导航：保存 → 评估 → 解析，禁止跨级跳转。
- * 『评估』原本只由左侧工作区竖列提供入口，竖列移除后并入此处，避免入口丢失。
+ * 剧本阶段子流程导航：剧本 → 解析，禁止跨级跳转。
+ * 『评估』步骤已移除：剧本保存后由 Agent 一体化完成评估与解析，不再单设评估页入口。
  */
 const steps = [
   { key: 'script', label: '剧本' },
-  { key: 'estimate', label: '评估' },
   { key: 'parse', label: '解析' },
 ]
 
@@ -56,18 +57,15 @@ const parseAllSucceeded = computed(() => {
 
 const stepDone = computed<Record<string, boolean>>(() => ({
   script: !!flow.scriptVersionId,
-  // 评估完成：已产出评估结果（刷新后 store 为空，此时靠步骤顺序进入）
-  estimate: !!flow.estimate || !!flow.estimateId,
   parse: !!flow.candidateVersionId || flow.parseConfirmed || parseAllSucceeded.value,
 }))
 
 /** 单一出口：前置步骤完成才可进入下一步 */
 function reachable(key: string): boolean {
   if (key === 'script') return true
-  if (key === 'estimate') return stepDone.value.script
   if (key === 'parse') {
-    // 解析已完成时允许直接回看；否则必须先完成评估
-    return stepDone.value.parse || (stepDone.value.script && stepDone.value.estimate)
+    // 解析已完成时允许直接回看；否则有剧本版本即可进入（评估与解析由 Agent 一体化完成）
+    return stepDone.value.parse || stepDone.value.script
   }
   return false
 }
@@ -90,7 +88,7 @@ function goStep(key: string) {
         :aria-current="activeKey === s.key ? 'step' : undefined"
         @click="goStep(s.key)"
       >
-        <span v-if="stepDone[s.key]" class="step-check" aria-hidden="true">✓</span>
+        <span v-if="stepDone[s.key]" class="step-check" aria-hidden="true"><n-icon :component="Checkmark" :size="13" /></span>
         {{ s.label }}
       </button>
     </template>
