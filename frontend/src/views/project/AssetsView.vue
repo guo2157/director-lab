@@ -1660,14 +1660,14 @@ function clearBatch() {
   font-size: 12px; line-height: 1; text-align: left; cursor: pointer;
   transition: background 0.2s, color 0.2s;
 }
-.asset-voice-bar:hover { background: var(--brand-primary); color: var(--text-primary); }
-.asset-voice-bar:hover .avb-value { color: var(--overlay-active); }
+.asset-voice-bar:hover { background: var(--brand-primary); color: var(--text-on-brand); }
+.asset-voice-bar:hover .avb-value { color: var(--text-on-brand); opacity: 0.8; }
 .avb-icon { font-size: 13px; }
 .avb-label { font-weight: 600; flex-shrink: 0; }
 .avb-value {
   flex: 1; min-width: 0; text-align: right;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 .avb-arrow { font-size: 14px; opacity: 0.6; flex-shrink: 0; }
 .asset-card.is-portrait .asset-voice-bar { grid-column: 1 / -1; }
