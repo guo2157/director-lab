@@ -19,7 +19,7 @@
 | 剧本解析、分镜设计（LLM 层） | docs/PROMPTS.md |
 | 剧本类型、叙事/视觉风格、节奏情绪配置 | docs/STYLE_CONFIG.md |
 | 一致性度量、失效传播 | docs/CONSISTENCY.md |
-| 前端页面、样式、交互 | docs/FRONTEND.md |
+| 前端页面、样式、交互 | docs/FRONTEND.md + DESIGN.md（令牌唯一事实来源：frontend/src/styles/global.css） |
 | Agent 工具注册表、治理模块、意图路由 | docs/API.md §12 + docs/agent/ |
 | 环境搭建、启动、测试、部署 | docs/DEVELOPMENT.md |
 | 验收、测试用例、冒烟 | docs/ACCEPTANCE.md |

@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:colors": "node scripts/check-colors.mjs",
+    "check:colors:json": "node scripts/check-colors.mjs --json",
+    "check:colors:strict": "node scripts/check-colors.mjs --fail-on 0"
   },
   "dependencies": {
     "@tanstack/vue-query": "^5.62.0",
