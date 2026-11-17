@@ -18,7 +18,6 @@ import {
   NEmpty,
   NSpin,
   NTag,
-  useDialog,
   useMessage,
 } from 'naive-ui'
 import {
@@ -33,13 +32,14 @@ import {
 } from '@/api/audio'
 import { getJob } from '@/api/jobs'
 import type { SystemVoice, VoiceMatchItem } from '@/types/audio'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const props = defineProps<{
   projectId: string
 }>()
 
 const message = useMessage()
-const dialog = useDialog()
+const confirmDialog = useConfirmDialog()
 
 
 // ---- 系统音色库 ----
@@ -192,12 +192,13 @@ onBeforeUnmount(() => {
 // ---- 确认 / 锁定 ----
 function confirmCharacter(m: VoiceMatchItem, voiceLibraryId?: string) {
   const hasGenerated = false // 后端在确认接口中放行片段并返回数量；此处仅展示确认意图
-  dialog.info({
+  confirmDialog({
     title: '确认音色',
-    content: `将角色「${m.character_name}」的音色确认为「${m.voice_name}」（匹配度 ${m.match_score}%）。确认后该角色对白将进入生成队列。`,
-    positiveText: '确认',
-    negativeText: '取消',
-    onPositiveClick: async () => {
+    message: `将角色「${m.character_name}」的音色确认为「${m.voice_name}」（匹配度 ${m.match_score}%）。确认后该角色对白将进入生成队列。`,
+    impact: [`角色「${m.character_name}」`, `音色「${m.voice_name}」（匹配度 ${m.match_score}%）`],
+    confirmText: '确认',
+    danger: false,
+    onConfirm: async () => {
       try {
         const r = await confirmVoiceBinding(props.projectId, m.character_id, {
           voice_library_id: voiceLibraryId,
@@ -239,12 +240,13 @@ function confirmAllPending() {
     message.info('没有待确认的角色（已确认或已锁定的角色不受影响）')
     return
   }
-  dialog.warning({
+  confirmDialog({
     title: '批量确认音色',
-    content: `将确认 ${pending.length} 个未锁定角色的音色（已确认/已锁定的角色不会被覆盖）。确认后对应对白将进入生成队列。`,
-    positiveText: '全部确认',
-    negativeText: '取消',
-    onPositiveClick: async () => {
+    message: `将确认 ${pending.length} 个未锁定角色的音色（已确认/已锁定的角色不会被覆盖）。确认后对应对白将进入生成队列。`,
+    impact: pending.map((m) => `「${m.character_name}」→「${m.voice_name}」`),
+    confirmText: `确认 ${pending.length} 个角色`,
+    danger: false,
+    onConfirm: async () => {
       let ok = 0
       let fail = 0
       for (const m of pending) {

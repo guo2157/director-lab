@@ -2,7 +2,8 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { NButton, NEmpty, useDialog, useMessage } from 'naive-ui'
+import { NButton, NEmpty, NIcon, useMessage } from 'naive-ui'
+import { Checkmark, DocumentTextOutline, RefreshOutline } from '@vicons/ionicons5'
 import {
   confirmParseVersion,
   getCurrentScript,
@@ -17,10 +18,11 @@ import { getJob } from '@/api/jobs'
 import type { EpisodeParseStatusItem, Scene, Shot } from '@/types/script'
 import { useScriptFlowStore } from '@/stores/scriptFlow'
 import FlowNav from '@/components/FlowNav.vue'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const route = useRoute()
 const router = useRouter()
-const dialog = useDialog()
+const confirmDialog = useConfirmDialog()
 const message = useMessage()
 const queryClient = useQueryClient()
 const flow = useScriptFlowStore()
@@ -96,15 +98,15 @@ const { mutate: runParse, isPending: parsing } = useMutation({
     queryClient.invalidateQueries({ queryKey: ['parse-status'] })
   },
   onError: (e) => {
-    // 解析前置条件不满足：引导前往评估页完成评估与制作范围确认
+    // 解析前置条件不满足：评估页已下线，改为引导回剧本页重新发起一体化分析
     if (errMsg(e).includes('须先评估')) {
-      dialog.warning({
-        title: '需要先完成评估',
-        content: '解析前须先评估剧本并确认制作范围。是否前往评估页面完成评估？',
-        positiveText: '前往评估',
-        negativeText: '取消',
-        onPositiveClick: () => {
-          void router.push(`/project/${projectId.value}/estimate`)
+      confirmDialog({
+        title: '需要先完成剧本分析',
+        message: '解析前须先完成剧本评估与制作范围确认。请返回剧本页重新发起分析，由 Agent 自动完成评估与解析。',
+        confirmText: '返回剧本',
+        danger: false,
+        onConfirm: () => {
+          void router.push(`/project/${projectId.value}/script`)
         },
       })
       return
@@ -138,11 +140,12 @@ function handleParse() {
   }
   const todoCount = todoRanges.reduce((n, r) => n + (r.end - r.start + 1), 0)
   if (!todoCount) {
-    dialog.info({
+    confirmDialog({
       title: '所选集数均已解析完成',
-      content: '无需重复解析。公共资产图（角色/场景/道具）请在资产库中生成。',
-      positiveText: '去资产库',
-      onPositiveClick: () => {
+      message: '无需重复解析。公共资产图（角色/场景/道具）请在资产库中生成。',
+      confirmText: '去资产库',
+      danger: false,
+      onConfirm: () => {
         void router.push(`/project/${projectId.value}/assets`)
       },
     })
@@ -328,6 +331,17 @@ const episodeNumbers = computed<number[]>(() => {
   return Array.from({ length: total }, (_, i) => i + 1)
 })
 const statusTotalEpisodes = computed(() => episodeNumbers.value.length)
+/*
+ * 评估页已下线，页面不再提供选集入口：集数确定后若未选集则默认全选，
+ * 否则『解析选中』按钮将因 selectedEpisodes 为空而永久不显示。
+ */
+watch(
+  () => statusTotalEpisodes.value,
+  (total) => {
+    if (total > 0 && !flow.selectedEpisodes.length) flow.selectAllEpisodes(total)
+  },
+  { immediate: true },
+)
 const episodeGrid = computed(() => {
   const eps = episodeNumbers.value
   const recordMap = new Map<EpisodeParseStatusItem['episode_no'], EpisodeParseStatusItem>(
@@ -606,12 +620,12 @@ const props = computed(() => propsData.value?.items ?? [])
             <span class="candidate-bar-text">正在解析 {{ submittedEpsLabel || (statusTotalEpisodes ? `全部 ${statusTotalEpisodes} 集` : '剧本') }}…已耗时 {{ parseElapsed }}s</span>
           </template>
           <template v-else-if="candidateReady && agentHasMore">
-            <span class="candidate-bar-badge">✓</span>
+            <span class="candidate-bar-badge"><n-icon :component="Checkmark" :size="13" /></span>
             <span class="candidate-bar-text">已解析 {{ statusSummary.succeeded }}/{{ statusTotalEpisodes }} 集，还有 {{ pendingEpisodes.length }} 集待继续</span>
             <NButton size="small" type="primary" :loading="continuing" @click="doContinueAgent()">继续分析</NButton>
           </template>
           <template v-else-if="candidateReady">
-            <span class="candidate-bar-badge">✓</span>
+            <span class="candidate-bar-badge"><n-icon :component="Checkmark" :size="13" /></span>
             <span class="candidate-bar-text">解析完成，正在应用结果…</span>
           </template>
           <template v-else-if="parseJobLost">
@@ -629,7 +643,7 @@ const props = computed(() => propsData.value?.items ?? [])
         <!-- 解析结果可读文本面板 -->
         <div v-if="candidateReady && formattedResult" class="formatted-result-card">
           <div class="formatted-result-head">
-            <span>📋 解析报告</span>
+            <span><n-icon :component="DocumentTextOutline" :size="14" /> 解析报告</span>
           </div>
           <pre class="formatted-result-body">{{ formattedResult }}</pre>
         </div>
@@ -702,7 +716,8 @@ const props = computed(() => propsData.value?.items ?? [])
                 :disabled="retrying"
                 @click.stop="doRetryParse()"
                 title="重试失败集"
-              >↻</button>
+                aria-label="重试失败集"
+              ><n-icon :component="RefreshOutline" :size="14" /></button>
             </div>
             <div v-if="failedEpisodes.length && showFailedOnly" class="failed-error-list">
               <div v-for="ep in failedEpisodes" :key="`err-${ep.episode_no}`" class="failed-error-card">
@@ -958,7 +973,7 @@ const props = computed(() => propsData.value?.items ?? [])
   font-size: 12px;
   color: var(--text-tertiary);
 }
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .result-cols { grid-template-columns: 1fr; }
   .result-scenes { max-height: none; }
 }

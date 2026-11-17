@@ -13,7 +13,6 @@ import {
   NInput,
   NModal,
   NSelect,
-  useDialog,
   useMessage,
 } from 'naive-ui'
 import type { FormInst, FormRules } from 'naive-ui'
@@ -21,7 +20,10 @@ import { createProject, getStyleOptions } from '@/api/projects'
 import { createSeries } from '@/api/series'
 import type { SeriesCreatePayload, SeriesListItem } from '@/types/series'
 import type { AspectRatio, CreationType, CreateProjectPayload, Project, StyleConfig } from '@/types/project'
+import { NIcon } from 'naive-ui'
+import { FilmOutline, LibraryOutline } from '@vicons/ionicons5'
 import StyleConfigForm from '@/components/StyleConfigForm.vue'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const emit = defineEmits<{
   created: [project: Project]
@@ -29,7 +31,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
-const dialog = useDialog()
+const confirmDialog = useConfirmDialog()
 const message = useMessage()
 
 const ASPECT_OPTIONS: AspectRatio[] = ['9:16', '16:9', '1:1']
@@ -134,12 +136,12 @@ function onUpdateShow(v: boolean) {
     return
   }
   if (formModel.value.name.trim() !== '') {
-    dialog.warning({
+    confirmDialog({
       title: '放弃未保存的修改？',
-      content: '当前表单已填写内容，关闭后将丢失。',
-      positiveText: '放弃修改',
-      negativeText: '继续编辑',
-      onPositiveClick: () => {
+      message: '当前表单已填写内容，关闭后将丢失。',
+      confirmText: '放弃修改',
+      cancelText: '继续编辑',
+      onConfirm: () => {
         show.value = false
       },
     })
@@ -164,14 +166,15 @@ const { mutate: mutateCreate, isPending: creating } = useMutation({
     const code = (e as { code?: string })?.code
     if (code === 'llm_not_configured' || code === 'comfyui_not_configured') {
       const isLlm = code === 'llm_not_configured'
-      dialog.warning({
+      confirmDialog({
         title: isLlm ? '语言模型未配置' : 'ComfyUI 未配置',
-        content: isLlm
+        message: isLlm
           ? '创建作品前需要先完成语言模型配置（API URL / API Key / 模型名称）。是否前往设置页面进行配置？'
           : '创建作品前需要先完成 ComfyUI 配置（至少一个启用实例）。是否前往设置页面进行配置？',
-        positiveText: '前往设置',
-        negativeText: '暂不创建',
-        onPositiveClick: () => {
+        confirmText: '前往设置',
+        cancelText: '暂不创建',
+        danger: false,
+        onConfirm: () => {
           show.value = false
           void router.push('/settings')
         },
@@ -246,7 +249,7 @@ async function handleCreateSeries() {
         :aria-pressed="createType === 'project'"
         @click="createType = 'project'"
       >
-        <span class="ct-icon" aria-hidden="true">🎬</span>
+        <span class="ct-icon" aria-hidden="true"><n-icon :component="FilmOutline" :size="22" /></span>
         <span class="ct-name">单集项目</span>
         <span class="ct-desc">独立的单集漫剧，快速从剧本到成片</span>
       </button>
@@ -257,7 +260,7 @@ async function handleCreateSeries() {
         :aria-pressed="createType === 'series'"
         @click="createType = 'series'"
       >
-        <span class="ct-icon" aria-hidden="true">📚</span>
+        <span class="ct-icon" aria-hidden="true"><n-icon :component="LibraryOutline" :size="22" /></span>
         <span class="ct-name">系列</span>
         <span class="ct-desc">多集长篇创作，统一世界观与角色资产</span>
       </button>

@@ -6,7 +6,7 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
-import { NButton, NInput, useDialog, useMessage } from 'naive-ui'
+import { NButton, NInput, useMessage } from 'naive-ui'
 import {
   archiveProject,
   deleteProject,
@@ -26,9 +26,10 @@ import ProjectCard from '@/components/projects/ProjectCard.vue'
 import ProjectFilterBar from '@/components/projects/ProjectFilterBar.vue'
 import type { SortKey, StatusFilter } from '@/components/projects/ProjectFilterBar.vue'
 import CreateProjectModal from '@/components/projects/CreateProjectModal.vue'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const router = useRouter()
-const dialog = useDialog()
+const confirmDialog = useConfirmDialog()
 const message = useMessage()
 const queryClient = useQueryClient()
 
@@ -140,13 +141,12 @@ function onCardAction(key: string, p: Project) {
   }
 }
 function confirmDelete(p: Project) {
-  dialog.warning({
+  confirmDialog({
     title: '删除作品',
-    content: `确定要删除作品「${p.name}」吗？删除后不可恢复。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    class: 'danger-dialog',
-    onPositiveClick: () => {
+    message: `确定要删除作品「${p.name}」吗？删除后不可恢复。`,
+    impact: [`作品「${p.name}」`],
+    confirmText: '删除',
+    onConfirm: () => {
       mutateDelete(p.id)
     },
   })
@@ -160,29 +160,29 @@ async function confirmPurge(p: Project) {
     return
   }
   if (!preview.deletable) {
-    dialog.error({
+    confirmDialog({
       title: '暂时无法彻底删除',
-      content: `作品「${p.name}」还有 ${preview.blocking_jobs} 个进行中的任务（排队 / 运行 / 提交待确认 / 链式等待），请先到任务页取消或等待完成后再试。`,
-      positiveText: '知道了',
+      message: `作品「${p.name}」还有 ${preview.blocking_jobs} 个进行中的任务（排队 / 运行 / 提交待确认 / 链式等待），请先到任务页取消或等待完成后再试。`,
+      impact: [`进行中的任务 ${preview.blocking_jobs} 个`],
+      confirmText: '知道了',
+      hideCancel: true,
+      danger: false,
     })
     return
   }
   const c = preview.counts
-  dialog.error({
+  confirmDialog({
     title: '彻底删除作品（不可恢复）',
-    content: `即将永久删除作品「${p.name}」及其全部内容：
-
-· 场景 ${c.scenes} 个、镜头 ${c.shots} 个
-· 资产 ${c.assets} 个（含分镜图、角色图、视频等媒体文件）
-· 任务记录 ${c.jobs} 条
-· 角色 ${c.characters} 个、道具 ${c.props} 个
-· 剧本版本 ${c.script_versions} 个
-
-数据库记录与磁盘上的媒体文件都会被清除，此操作无法撤销。`,
-    positiveText: '确认彻底删除',
-    negativeText: '取消',
-    class: 'danger-dialog',
-    onPositiveClick: () => {
+    message: `即将永久删除作品「${p.name}」及其全部内容，数据库记录与磁盘上的媒体文件都会被清除，此操作无法撤销。`,
+    impact: [
+      `场景 ${c.scenes} 个、镜头 ${c.shots} 个`,
+      `资产 ${c.assets} 个（含分镜图、角色图、视频等媒体文件）`,
+      `任务记录 ${c.jobs} 条`,
+      `角色 ${c.characters} 个、道具 ${c.props} 个`,
+      `剧本版本 ${c.script_versions} 个`
+    ],
+    confirmText: '确认彻底删除',
+    onConfirm: () => {
       mutatePurge(p.id)
     },
   })
@@ -367,20 +367,3 @@ function clearFilters() {
 }
 </style>
 
-<style>
-/* 删除确认弹窗：确认按钮使用危险色 */
-.n-dialog.danger-dialog .n-button--primary-type {
-  --n-color: var(--danger) !important;
-  --n-color-hover: var(--state-danger) !important;
-  --n-color-pressed: var(--state-danger) !important;
-  --n-color-focus: var(--state-danger) !important;
-  --n-text-color: var(--text-primary) !important;
-  --n-text-color-hover: var(--text-primary) !important;
-  --n-text-color-pressed: var(--text-primary) !important;
-  --n-text-color-focus: var(--text-primary) !important;
-  --n-border: 1px solid transparent !important;
-  --n-border-hover: 1px solid transparent !important;
-  --n-border-pressed: 1px solid transparent !important;
-  --n-border-focus: 1px solid transparent !important;
-}
-</style>

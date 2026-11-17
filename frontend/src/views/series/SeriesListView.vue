@@ -2,11 +2,12 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
-import { NButton, NEmpty, NInput, NPagination, NSelect, NSpin, NTag, useDialog, useMessage } from 'naive-ui'
+import { NButton, NEmpty, NInput, NPagination, NSelect, NSpin, NTag, useMessage } from 'naive-ui'
 import { archiveSeries, listSeries, unarchiveSeries } from '@/api/series'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const router = useRouter()
-const dialog = useDialog()
+const confirmDialog = useConfirmDialog()
 const message = useMessage()
 const queryClient = useQueryClient()
 
@@ -63,12 +64,12 @@ const unarchiveMutation = useMutation({
 })
 
 function onArchive(id: string, name: string) {
-  dialog.warning({
+  confirmDialog({
     title: '归档系列',
-    content: '确认归档《' + name + '》？归档后不影响历史资产与已完成视频，但不能新建剧集。',
-    positiveText: '归档',
-    negativeText: '取消',
-    onPositiveClick: () => archiveMutation.mutate(id),
+    message: `确认归档《${name}》？归档后不影响历史资产与已完成视频，但不能新建剧集。`,
+    impact: [`系列《${name}》`],
+    confirmText: '归档',
+    onConfirm: () => archiveMutation.mutate(id),
   })
 }
 
@@ -276,7 +277,7 @@ function onSearch() {
   margin-top: var(--sp-5);
 }
 
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .series-list-page {
     padding: var(--sp-4) var(--sp-4) var(--sp-12);
   }

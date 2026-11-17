@@ -49,7 +49,6 @@ const projectId = computed(() => route.params.id as string | undefined)
 /** 仅项目级路由才视为项目页；系列相关路由同样带 id 参数，不能误判 */
 const PROJECT_ROUTE_NAMES = [
   'script',
-  'estimate',
   'parse',
   'storyboard-images',
   'storyboard',
@@ -64,7 +63,7 @@ const SERIES_ROUTE_NAMES = ['series-list', 'series-create', 'series-detail', 'se
 /** 导演台为固定视口布局：页面级滚动条不滚动，改由页面内部面板各自滚动 */
 const isFixedViewport = computed(() => route.name === 'director')
 
-/** 全局导航入口：导演台 | 作品（含单集项目与系列）| 任务中心 | 设置 */
+/** 全局导航入口：作品（含单集项目与系列）| 任务中心 | 设置；导演台入口有意移除，经右侧 AI 助手面板进入 */
 const topMenuOptions = [
   { label: '作品', key: 'projects' },
   { label: '任务中心', key: 'jobs' },

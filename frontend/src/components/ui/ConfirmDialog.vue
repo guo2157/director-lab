@@ -13,6 +13,8 @@ withDefaults(
     cancelText?: string
     danger?: boolean
     loading?: boolean
+    /** 隐藏取消按钮（纯告知场景，如「知道了」） */
+    hideCancel?: boolean
   }>(),
   {
     message: '',
@@ -20,7 +22,8 @@ withDefaults(
     confirmText: '确认',
     cancelText: '取消',
     danger: true,
-    loading: false
+    loading: false,
+    hideCancel: false
   }
 )
 
@@ -48,7 +51,7 @@ function close() {
       </ul>
     </div>
     <template #action>
-      <button type="button" class="cd-btn" :disabled="loading" @click="close">
+      <button v-if="!hideCancel" type="button" class="cd-btn" :disabled="loading" @click="close">
         {{ cancelText }}
       </button>
       <button

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { NTab, NTabs, useDialog, useMessage } from 'naive-ui'
+import { NTab, NTabs, useMessage } from 'naive-ui'
 import {
   listAssets, deleteAsset, lockAsset, unlockAsset,
   replaceAsset, getAssetRegenerateConfig,
@@ -13,6 +13,7 @@ import { getProject, reviewProjectAssets } from '@/api/projects'
 import { generateCharacterPortrait, generatePropAnchor, generateSceneBaseline } from '@/api/storyboard'
 import { getAssetGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import type { AssetGenerationJob, AssetGenerationProgress } from '@/types/generation'
 import VoiceConfigDrawer from '@/components/VoiceConfigDrawer.vue'
 import VoiceMatchPanel from '@/components/VoiceMatchPanel.vue'
@@ -34,7 +35,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const dialog = useDialog()
+const confirmDialog = useConfirmDialog()
 const queryClient = useQueryClient()
 
 const projectId = computed(() => route.params.id as string)
@@ -237,12 +238,12 @@ function onCardMenu(key: string, item: AssetCardItem) {
   if (key === 'lock') {
     lockMutation.mutate({ id: asset.id, lock: !asset.locked })
   } else if (key === 'delete') {
-    dialog.warning({
+    confirmDialog({
       title: '删除资产',
-      content: `确认删除资产「${asset.name || asset.id}」？删除后不可恢复。`,
-      positiveText: '删除',
-      negativeText: '取消',
-      onPositiveClick: () => deleteMutation.mutate(asset.id),
+      message: `确认删除资产「${asset.name || asset.id}」？删除后不可恢复。`,
+      impact: [`资产「${asset.name || asset.id}」`],
+      confirmText: '删除',
+      onConfirm: () => deleteMutation.mutate(asset.id),
     })
   }
 }
@@ -1008,7 +1009,7 @@ onMounted(() => {
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--sp-4);
 }
-@media (max-width: 640px) {
+@media (max-width: 480px) {
   .card-grid {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: var(--sp-3);
