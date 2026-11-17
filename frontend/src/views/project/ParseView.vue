@@ -565,9 +565,8 @@ const props = computed(() => propsData.value?.items ?? [])
   <section class="parse-page">
     <header class="page-header">
       <div class="header-left">
-        <h1 class="page-title">解析</h1>
+        <h1 class="visually-hidden">解析</h1>
         <FlowNav :project-id="projectId" />
-        <span class="project-name">{{ project?.name ?? '' }}</span>
       </div>
       <div class="header-actions">
         <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
@@ -802,8 +801,7 @@ const props = computed(() => propsData.value?.items ?? [])
   flex-shrink: 0;
 }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.page-title { font-size: 16px; font-weight: 600; margin: 0; }
-.project-name { font-size: 12px; color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .page-body { display: flex; flex: 1; min-height: 0; }
 .content-pane { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }

@@ -310,6 +310,19 @@ body {
   outline-offset: 2px;
 }
 
+/* 仅供读屏使用的标题/文案：视觉上不占位，语义保留 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

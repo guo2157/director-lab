@@ -6,7 +6,6 @@ import { NButton, useMessage } from 'naive-ui'
 import {
   createScriptVersion,
   getCurrentScript,
-  getProject,
   normalizeScript,
   runScriptAgent,
   type ScriptNormalizeResult,
@@ -75,14 +74,8 @@ watch(
   { immediate: true },
 )
 
-/* ---------- 项目信息 ---------- */
-const { data: projectData } = useQuery({
-  queryKey: computed(() => ['project', projectId.value]),
-  queryFn: () => getProject(projectId.value),
-  enabled: computed(() => !!projectId.value),
-})
-const project = computed(() => projectData.value)
-
+/* ---------- 项目信息 ----------
+   项目名由 AppLayout 面包屑统一持有（同一个 ['project', id] 缓存），此页不再重复取用 */
 /* ---------- 创作风格配置（项目级唯一基线） ---------- */
 const showStylePanel = ref(false)
 
@@ -282,9 +275,8 @@ watch(
   <section class="script-page">
     <header class="script-header">
       <div class="header-left">
-        <h1 class="page-title">剧本</h1>
+        <h1 class="visually-hidden">剧本</h1>
         <FlowNav :project-id="projectId" />
-        <span class="project-name">{{ project?.name ?? '' }}</span>
       </div>
       <div class="header-actions">
         <NButton size="small" quaternary @click="showStylePanel = !showStylePanel">
@@ -375,8 +367,7 @@ watch(
   flex-shrink: 0;
 }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.page-title { font-size: 16px; font-weight: 600; margin: 0; }
-.project-name { font-size: 12px; color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 .style-drawer {

@@ -4,6 +4,8 @@ import logoUrl from '@/assets/logo.svg'
 import { useRoute, useRouter } from 'vue-router'
 import { NLayout, NLayoutHeader, NLayoutContent } from 'naive-ui'
 import { useAgentStore } from '@/stores/agent'
+import { useQuery } from '@tanstack/vue-query'
+import { getProject } from '@/api/projects'
 import { onWorkspaceEvent, startWorkspaceEvents } from '@/composables/useWorkspaceEvents'
 import { initContextRevision, setContextConflictHandler } from '@/services/workspaceNavigation'
 import type { WorkspaceEvent } from '@/api/workspace'
@@ -80,7 +82,13 @@ function goMenu(key: string) {
   void router.push({ name: key })
 }
 
-const currentTitle = computed(() => String(route.meta?.title ?? ''))
+/** 面包屑第二级：项目名（与各页面 ['project', id] 共用同一个 Query 缓存，不重复请求） */
+const projectQuery = useQuery({
+  queryKey: computed(() => ['project', projectId.value]),
+  queryFn: () => getProject(projectId.value!),
+  enabled: computed(() => isProjectPage.value),
+})
+const projectName = computed(() => projectQuery.data.value?.name ?? '')
 
 function goProjects() {
   if (isProjectPage.value) void router.push('/')
@@ -111,8 +119,10 @@ function goProjects() {
 
         <div v-if="isProjectPage" class="crumb-bar">
           <button type="button" class="crumb-back" @click="goProjects()">项目列表</button>
-          <span class="crumb-sep" aria-hidden="true"></span>
-          <span class="crumb-current">{{ currentTitle }}</span>
+          <template v-if="projectName">
+            <span class="crumb-sep" aria-hidden="true"></span>
+            <span class="crumb-current">{{ projectName }}</span>
+          </template>
         </div>
       </div>
     </n-layout-header>
