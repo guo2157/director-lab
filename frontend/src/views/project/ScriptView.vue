@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
-import { NButton, NModal, NTag, useMessage } from 'naive-ui'
+import { NButton, useMessage } from 'naive-ui'
 import {
   createScriptVersion,
   getCurrentScript,
@@ -15,6 +15,11 @@ import type { ScriptVersion } from '@/types/script'
 import { useScriptFlowStore } from '@/stores/scriptFlow'
 import StyleConfigPanel from '@/components/StyleConfigPanel.vue'
 import FlowNav from '@/components/FlowNav.vue'
+import ScriptEditor from '@/components/script/ScriptEditor.vue'
+import ScriptToolbar from '@/components/script/ScriptToolbar.vue'
+import ScriptStageBar from '@/components/script/ScriptStageBar.vue'
+import ScriptReader from '@/components/script/ScriptReader.vue'
+import ScriptCompareModal from '@/components/script/ScriptCompareModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -83,16 +88,10 @@ const showStylePanel = ref(false)
 
 /* ---------- 编辑器 ---------- */
 const text = ref('')
-const editorRef = ref<HTMLTextAreaElement | null>(null)
-const mirrorRef = ref<HTMLDivElement | null>(null)
-const hlStart = ref<number | null>(null)
-const hlEnd = ref<number | null>(null)
 const textValid = computed(() => text.value.length >= 1 && text.value.length <= MAX_CHARS)
 
 /* 正文变更：除非是「采用优化稿」引起的变化，否则回退到初始剧本阶段并作废校验与保存结果 */
 watch(text, (val) => {
-  hlStart.value = null
-  hlEnd.value = null
   const res = normalizeResult.value
   if (res && val === res.normalized_text) return
   if (stage.value !== 'draft') {
@@ -102,24 +101,66 @@ watch(text, (val) => {
   }
 })
 
-const segments = computed(() => {
-  const s = hlStart.value
-  const e = hlEnd.value
-  const segs =
-    s == null || e == null || s >= e
-      ? [{ text: text.value, hl: false }]
-      : [
-          { text: text.value.slice(0, s), hl: false },
-          { text: text.value.slice(s, e), hl: true },
-          { text: text.value.slice(e), hl: false },
-        ]
-  if (text.value.endsWith('\n')) segs.push({ text: '\n', hl: false })
-  return segs
-})
-function syncScroll(e: Event) {
-  const ta = e.target as HTMLTextAreaElement
-  if (mirrorRef.value) mirrorRef.value.scrollTop = ta.scrollTop
+/* ---------- 视图模式：编辑 / 阅读 / 分栏 ---------- */
+type ViewMode = 'edit' | 'read' | 'split'
+const modes: Array<{ value: ViewMode; label: string }> = [
+  { value: 'edit', label: '编辑' },
+  { value: 'read', label: '阅读' },
+  { value: 'split', label: '分栏' },
+]
+const VIEW_KEY = 'dl.script.view'
+const viewMode = ref<ViewMode>('edit')
+/** 用户手动选过视图就不再自动切换 */
+const userPicked = ref(false)
+/** 分栏需要 ≥1080px，窄屏只给编辑/阅读 */
+const wide = ref(true)
+/** 因窗口变窄被自动降级为阅读：宽度恢复时若用户没手动选过，回到分栏 */
+const forcedRead = ref(false)
+
+function setMode(m: ViewMode) {
+  if (m === 'split' && !wide.value) return
+  viewMode.value = m
+  userPicked.value = true
+  try {
+    localStorage.setItem(VIEW_KEY, m)
+  } catch {
+    /* 隐私模式写入失败不影响使用 */
+  }
 }
+
+onMounted(() => {
+  const mq = window.matchMedia('(min-width: 1080px)')
+  wide.value = mq.matches
+  mq.addEventListener('change', (e) => {
+    wide.value = e.matches
+    if (!e.matches && viewMode.value === 'split') {
+      viewMode.value = 'read'
+      forcedRead.value = true
+    } else if (e.matches && forcedRead.value && !userPicked.value) {
+      viewMode.value = 'split'
+      forcedRead.value = false
+    }
+  })
+  try {
+    const saved = localStorage.getItem(VIEW_KEY) as ViewMode | null
+    if (saved === 'edit' || saved === 'read' || saved === 'split') {
+      userPicked.value = true
+      viewMode.value = saved === 'split' && !wide.value ? 'read' : saved
+    }
+  } catch {
+    /* 读不到就用默认值 */
+  }
+})
+
+/** 正文就绪且用户没选过：宽屏默认分栏（边改边看），窄屏默认阅读 */
+watch(
+  text,
+  (val) => {
+    if (userPicked.value || !val.trim()) return
+    viewMode.value = wide.value ? 'split' : 'read'
+  },
+  { immediate: true },
+)
 
 /* ---------- 第二步：校验补充（不落库，仅预览） ---------- */
 const { mutate: runNormalizeMut, isPending: normalizing } = useMutation({
@@ -184,18 +225,6 @@ function keepOriginal() {
   stage.value = 'checked'
   compareVisible.value = false
   message.info('已保留原文，继续保存版本')
-}
-
-function changeLabel(cat: string): string {
-  if (cat === 'format') return '格式'
-  if (cat === 'clarity') return '明确化'
-  if (cat === 'completion') return '补全'
-  return cat
-}
-function changeTagType(cat: string): 'default' | 'info' | 'warning' {
-  if (cat === 'completion') return 'warning'
-  if (cat === 'clarity') return 'info'
-  return 'default'
 }
 
 /* ---------- 第三步：保存版本 ---------- */
@@ -290,129 +319,42 @@ watch(
     </header>
 
     <!-- 四步流程指示：初始剧本 → 校验补充 → 保存 → 分析 -->
-    <div class="stage-bar">
-      <div
-        v-for="(s, i) in steps"
-        :key="s.key"
-        class="stage-item"
-        :class="{ active: stageIndex === i, done: stageIndex > i }"
-      >
-        <span class="stage-index">{{ stageIndex > i ? '✓' : i + 1 }}</span>
-        <span class="stage-label">{{ s.label }}</span>
-        <span v-if="s.key === 'saved' && savedVersion" class="stage-extra">v{{ savedVersion.version }}</span>
-      </div>
-      <span class="stage-hint">{{ stageHint }}</span>
-    </div>
+    <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" :hint="stageHint" />
 
     <div v-if="showStylePanel" class="style-drawer">
       <StyleConfigPanel :project-id="projectId" />
     </div>
     <div class="script-body">
-      <div class="editor-pane">
-        <div class="pane-toolbar">
-          <span class="pane-label">Markdown 剧本</span>
-          <span class="char-count" :class="{ over: !textValid }">{{ text.length }} / {{ MAX_CHARS }}</span>
-        </div>
-        <div class="editor-wrap">
-          <div ref="mirrorRef" class="editor-mirror" aria-hidden="true">
-            <template v-for="(seg, i) in segments" :key="i">
-              <span v-if="seg.hl" class="hl-mark">{{ seg.text }}</span>
-              <span v-else>{{ seg.text }}</span>
-            </template>
-          </div>
-          <textarea
-            ref="editorRef"
-            v-model="text"
-            class="editor-input"
-            placeholder="粘贴或输入 Markdown 剧本原文，也可以只写一个标题或一句话，点『校验补充』由 AI 整理为标准剧本格式…"
-            spellcheck="false"
-            @scroll="syncScroll"
-          ></textarea>
-        </div>
+      <ScriptToolbar
+        :view-mode="viewMode"
+        :modes="modes"
+        :wide="wide"
+        :chars="text.length"
+        :max-chars="MAX_CHARS"
+        @update:view-mode="setMode"
+      />
+
+      <div class="panes" :class="`is-${viewMode}`">
+        <ScriptEditor
+          v-if="viewMode !== 'read'"
+          v-model="text"
+          placeholder="粘贴或输入 Markdown 剧本原文，也可以只写一个标题或一句话，点『校验补充』由 AI 整理为标准剧本格式…"
+        />
+
+        <ScriptReader v-if="viewMode !== 'edit'" :text="text" @edit="setMode('edit')" />
       </div>
     </div>
 
     <!-- 校验补充：原文与优化稿对比 + 变更清单 + 守恒校验结果 -->
-    <NModal
-      v-model:show="compareVisible"
-      preset="card"
-      title="剧本校验补充"
-      :bordered="false"
-      style="width: min(1100px, 96vw)"
-    >
-      <div v-if="normalizeResult" class="compare">
-        <div class="compare-summary">
-          <NTag size="small" :type="normalizeResult.checks.blocked ? 'error' : 'success'">
-            {{ normalizeResult.checks.blocked ? '守恒校验未通过' : '守恒校验通过' }}
-          </NTag>
-          <span>处理层级：第 {{ normalizeResult.level }} 层</span>
-          <span>{{ normalizeResult.original_chars }} → {{ normalizeResult.normalized_chars }} 字</span>
-        </div>
-
-        <div v-if="normalizeResult.checks.blocked" class="blocked-tip">
-          <div v-if="normalizeResult.checks.missing_characters?.length">
-            丢失人物：{{ normalizeResult.checks.missing_characters.join('、') }}
-          </div>
-          <div v-if="normalizeResult.checks.missing_dialogues?.length">
-            丢失台词：{{ normalizeResult.checks.missing_dialogues.join(' / ') }}
-          </div>
-          <div>
-            优化稿缺失了上述人物或台词。若这是你想要的删改，可点右下角「仍然采用」强制替换。
-          </div>
-        </div>
-        <div v-else-if="normalizeResult.checks.punct_warnings?.length" class="punct-tip">
-          <div>以下台词仅有标点或空白差异，不影响采用：</div>
-          <div class="punct-list">{{ normalizeResult.checks.punct_warnings.join(' / ') }}</div>
-        </div>
-
-        <div class="compare-body">
-          <div class="compare-pane">
-            <div class="pane-title">原文</div>
-            <pre class="pane-text">{{ text }}</pre>
-          </div>
-          <div class="compare-pane">
-            <div class="pane-title">优化稿</div>
-            <pre class="pane-text">{{ normalizeResult.normalized_text }}</pre>
-          </div>
-        </div>
-
-        <div v-if="normalizeResult.changes.length" class="changes">
-          <div class="changes-title">变更清单（{{ normalizeResult.changes.length }}）</div>
-          <div v-for="(c, i) in normalizeResult.changes" :key="i" class="change-item">
-            <NTag size="tiny" :type="changeTagType(c.category)">{{ changeLabel(c.category) }}</NTag>
-            <span class="change-summary">{{ c.summary }}</span>
-            <NTag v-if="c.ai_generated" size="tiny" type="warning">AI 补全</NTag>
-            <span v-if="c.evidence" class="change-evidence">依据：{{ c.evidence }}</span>
-          </div>
-        </div>
-        <div v-else class="changes-empty">未发现需要调整的内容，格式已符合规范</div>
-
-        <div v-if="normalizeResult.questions.length" class="questions">
-          <div class="changes-title">需要你补充的关键要素</div>
-          <ul>
-            <li v-for="(q, i) in normalizeResult.questions" :key="i">{{ q }}</li>
-          </ul>
-          <div class="questions-tip">补充后可修改原文并再次点『校验补充』，获得更贴合原意的优化稿</div>
-        </div>
-      </div>
-      <template #footer>
-        <div class="modal-footer">
-          <NButton @click="compareVisible = false">稍后处理</NButton>
-          <NButton @click="keepOriginal">保留原文</NButton>
-          <NButton
-            v-if="!normalizeResult?.checks.blocked"
-            type="primary"
-            :disabled="!normalizeResult"
-            @click="adoptNormalized"
-          >
-            采用优化稿
-          </NButton>
-          <NButton v-else type="warning" secondary @click="forceAdoptNormalized">
-            仍然采用
-          </NButton>
-        </div>
-      </template>
-    </NModal>
+    <ScriptCompareModal
+      :show="compareVisible"
+      :original-text="text"
+      :result="normalizeResult"
+      @update:show="(v: boolean) => (compareVisible = v)"
+      @adopt="adoptNormalized"
+      @keep="keepOriginal"
+      @force="forceAdoptNormalized"
+    />
   </section>
 </template>
 
@@ -437,40 +379,6 @@ watch(
 .project-name { font-size: 12px; color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
-/* 四步流程条 */
-.stage-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-.stage-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-.stage-item.active { color: var(--brand-primary); font-weight: 600; }
-.stage-item.done { color: var(--state-success); }
-.stage-index {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  border: 1px solid currentColor;
-  flex-shrink: 0;
-}
-.stage-extra { font-size: 11px; color: var(--text-secondary); }
-.stage-hint { margin-left: auto; font-size: 12px; color: var(--text-tertiary); }
-
 .style-drawer {
   flex-shrink: 0;
   max-height: 52vh;
@@ -479,52 +387,14 @@ watch(
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
 }
-.script-body { display: flex; flex: 1; min-height: 0; }
-.editor-pane {
-  flex: 1;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.pane-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
-.pane-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.char-count { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.char-count.over { color: var(--brand-error); }
-.editor-wrap { position: relative; flex: 1; overflow: hidden; }
-.editor-mirror { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; overflow-y: auto; color: transparent; pointer-events: none; z-index: 0; }
-.editor-mirror .hl-mark { background: var(--brand-soft); border-radius: 3px; }
-.editor-input { position: absolute; inset: 0; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.8; border: none; outline: none; resize: none; background: transparent; color: var(--text-primary); caret-color: var(--brand-primary); z-index: 1; }
-.editor-input::placeholder { color: var(--text-secondary); }
-
-/* 校验对比弹窗 */
-.compare { display: flex; flex-direction: column; gap: 12px; max-height: 64vh; overflow-y: auto; }
-.compare-summary { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
-.blocked-tip { padding: 8px 10px; border-radius: 8px; background: var(--danger-soft); color: var(--state-danger); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
-/* 标点/空白差异提示：不阻断采用，用琥珀色与红色阻断区分 */
-.punct-tip { padding: 8px 10px; border-radius: 8px; background: var(--warning-soft); color: var(--state-warning); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
-.punct-list { color: var(--text-secondary); word-break: break-all; }
-.compare-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.compare-pane { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 8px; overflow: hidden; }
-.pane-title { padding: 6px 10px; font-size: 12px; font-weight: 600; background: var(--bg-elevated); border-bottom: 1px solid var(--border-subtle); }
-.pane-text { margin: 0; padding: 10px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow-y: auto; }
-.changes { display: flex; flex-direction: column; gap: 6px; }
-.changes-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.change-item { display: flex; align-items: baseline; gap: 8px; font-size: 12px; flex-wrap: wrap; }
-.change-summary { color: var(--text-primary); }
-.change-evidence { color: var(--text-tertiary); font-size: 11px; }
-.changes-empty { font-size: 12px; color: var(--text-tertiary); padding: 6px 0; }
-.questions { display: flex; flex-direction: column; gap: 4px; padding: 10px; border-radius: 8px; background: var(--warning-soft); }
-.questions ul { margin: 0; padding-left: 18px; font-size: 12px; color: var(--state-warning); }
-.questions-tip { font-size: 11px; color: var(--text-tertiary); }
-.modal-footer { display: flex; justify-content: flex-end; gap: 8px; }
-
+.script-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.panes { display: flex; flex: 1; min-height: 0; min-width: 0; }
+/* 分栏：左编辑右阅读，中间一条竖线分隔（编辑器内部样式随 ScriptEditor） */
+.panes.is-split > .editor-pane { flex: 1 1 50%; border-right: 1px solid var(--border-subtle); }
+.panes.is-split > .reader { flex: 1 1 50%; }
 @media (max-width: 768px) {
   .script-page { height: auto; min-height: calc(100vh - var(--app-header-height, 56px)); }
   .script-header { flex-wrap: wrap; gap: 8px; }
   .header-actions { flex-wrap: wrap; }
-  .stage-hint { display: none; }
-  .compare-body { grid-template-columns: 1fr; }
-  .pane-text { max-height: 28vh; }
 }
 </style>
