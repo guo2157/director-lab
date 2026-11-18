@@ -550,3 +550,26 @@ v2 相对 v1 新增了 4 块范围，本项目全部缺失，需要新建：
 1. §4.1 的 `workflow_type` 表（`image_t2i` / `video_ref2v` / `audio_tts`）与仓库枚举冲突 → 用 `capabilities.generation_modes` 表达。
 2. §16 的 API 路径（`/api/workflows/upload`、`/api/generation/*`）会**造成重复端点**：仓库已有 `POST /api/workflows`、`POST /api/shots/{id}/generate` 等 9 个生成端点，应扩展现有路径而非新增平行路径。
 3. §14 的表名（`workflows` / `workflow_versions` / `generation_tasks`）与现有单数表名（`workflow` / `job`）不一致 → 沿用现有命名，只加 `workflow_version` / `workflow_task_dependency` 两张新表。
+
+---
+
+# 附录 D：实机运行环境检查结果（P3 上线首跑，2026-11-18）
+
+`POST /api/workflows/{id}/check-runtime` 对当前实例（`https://giant-pick-karen-newest.trycloudflare.com`，1066 个 class_type）逐份检查的结果：
+
+| 工作流 | runtime_status | 缺失节点 | 缺失模型 |
+|---|---|---|---|
+| `wf_image_t2i_qwen21_turbo` | **ready** | — | — |
+| `wf_image_ref_qwen21_multi` | **ready** | — | — |
+| `wf_video_h3_ref2va_{fast,std,quality}` | missing_deps | — | `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`、`minimax_h3_video_vae_int8_convrot.safetensors` |
+| `wf_video_h3_flf2v` / `wf_video_h3_t2v` | missing_deps | — | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
+| `wf_tts_qwen3_custom_voice` / `wf_tts_qwen3_voice_clone` | missing_deps | `Qwen3Loader`、`Qwen3CustomVoice`（Qwen3-TTS 节点包未装） | — |
+| `wf_bgm_stable_audio` | missing_deps | — | `stable-audio-open-1.0.safetensors`、`t5-base.safetensors` |
+
+已用原始 `/object_info` 逐名核对（`in raw_json` 判定），**不是检查器的误报**：
+实例上有 `minimax_h3_video_vae_fp16.safetensors`，但工作流引用的是 `..._int8_convrot.safetensors`；turbo LoRA 与 fl2va 权重均未安装。
+
+结论：
+1. **当前实例只能跑图片链路**（两个 image 工作流 ready）。视频三档、FLF2V/T2V、TTS、BGM 均缺依赖——这与隧道从 `december-else-audience-dash` 换成 `giant-pick-karen-newest` 一致，说明这是一台**新的/未备齐权重的实例**，不是代码回归。
+2. 这正是「解析成功 ≠ 能执行」的实例证据：上传/静态校验全部通过的 H3 工作流，在此实例上提交必然失败。
+3. 因此 P4/P5 的真实生成验收必须先补齐实例权重（或把 `comfyui_instances` 指回原实例），否则只能跑 mock。

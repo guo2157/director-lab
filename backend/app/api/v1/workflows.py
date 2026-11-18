@@ -23,6 +23,7 @@ from app.models import Job, Workflow
 from app.models.production import WorkflowVersion
 from app.services import errors
 from app.services.workflow import build_schema, public_schema, validate_definition
+from app.services.workflow import runtime_checker
 from app.services.workflow import versions as versions_svc
 from app.services.workflow.capabilities import normalize as normalize_capabilities
 from app.services.workflow.validator import issue_messages
@@ -318,6 +319,66 @@ def validate_workflow(workflow_id: str, db: Session = Depends(get_db)) -> dict:
                         for o in ((wf.parsed_schema or {}).get("outputs") or [])],
         },
     }
+
+
+@router.post("/{workflow_id}/check-runtime")
+def check_runtime(
+    workflow_id: str,
+    instance: str | None = Query(None, description="指定 ComfyUI 实例 base_url；缺省用默认实例"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """依赖检查：节点 class_type 与模型文件是否在目标实例就绪（不提交任务）。"""
+    wf = db.get(Workflow, workflow_id)
+    if wf is None:
+        raise errors.AppError("workflow_not_found", "工作流不存在", 404)
+    result = runtime_checker.check_definition(
+        wf.definition, wf.capabilities, base_url=instance,
+    )
+    wf.runtime_status = result["runtime_status"]
+    if wf.current_version_id:
+        row = db.get(WorkflowVersion, wf.current_version_id)
+        if row is not None:
+            row.runtime_status = wf.runtime_status
+            row.dependency_snapshot = row.dependency_snapshot or {}
+    db.commit()
+    return {"workflow_id": wf.id, "version": wf.version, **result}
+
+
+@router.post("/{workflow_id}/test", status_code=202)
+def test_workflow(
+    workflow_id: str,
+    instance: str | None = Query(None, description="指定 ComfyUI 实例 base_url"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """真实测试生成：用 Schema 默认值编译最小 prompt 并提交（不落资产、不占任务表）。
+
+    必需媒体槽位无法自造文件时返回 422，并列出缺哪些槽位——不伪造「测试通过」。
+    """
+    wf = db.get(Workflow, workflow_id)
+    if wf is None:
+        raise errors.AppError("workflow_not_found", "工作流不存在", 404)
+    if wf.validation_status == "invalid":
+        raise errors.AppError("workflow_format_invalid", "工作流静态校验未通过，禁止测试", 422)
+    result = runtime_checker.submit_test(
+        wf.definition, wf.capabilities, trigger=wf.trigger, base_url=instance,
+    )
+    if not result.get("submitted"):
+        raise errors.AppError(
+            result.get("reason") or "workflow_test_failed",
+            result.get("message") or "测试提交失败",
+            422,
+            blocking_slots=result.get("blocking_slots") or [],
+        )
+    return {"workflow_id": wf.id, "version": wf.version, **result}
+
+
+@router.get("/test/{prompt_id}")
+def get_test_status(
+    prompt_id: str,
+    instance: str | None = Query(None, description="指定 ComfyUI 实例 base_url"),
+) -> dict:
+    """查询测试任务状态与产物清单（只读，不下载文件）。"""
+    return runtime_checker.test_status(prompt_id, base_url=instance)
 
 
 @router.patch("/{workflow_id}")
