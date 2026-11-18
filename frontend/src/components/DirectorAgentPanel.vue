@@ -715,7 +715,8 @@ function onHotkey(e: KeyboardEvent) {
 
 .agent-archived-toggle .chev {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .agent-archived-list {
