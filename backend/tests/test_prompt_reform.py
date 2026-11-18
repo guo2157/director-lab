@@ -80,6 +80,10 @@ def test_api_accepts_name_only_character(client: TestClient):
 _WF_WITH_NEGATIVE = {
     "1": {"class_type": "EmptyLatentImage", "_meta": {"title": "$~width, $~height"},
           "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+    # 校验器要求连线指向真实存在的节点：原先 6/7 的 clip 指向不存在的 "2"，
+    # 在工作流校验收紧后会直接 422。补一个 CLIP 加载节点让夹具自洽。
+    "2": {"class_type": "CheckpointLoaderSimple", "_meta": {"title": "load ckpt"},
+          "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"}},
     "6": {"class_type": "CLIPTextEncode", "_meta": {"title": "$prompt.text!"},
           "inputs": {"clip": ["2", 0], "text": "a portrait photo"}},
     "7": {"class_type": "CLIPTextEncode", "_meta": {"title": "$negative.text"},
@@ -91,6 +95,9 @@ _WF_WITH_NEGATIVE = {
 _WF_WITHOUT_NEGATIVE = {
     "1": {"class_type": "EmptyLatentImage", "_meta": {"title": "$~width, $~height"},
           "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+    # 同上：clip 连线必须指向真实存在的节点，否则工作流校验 422
+    "2": {"class_type": "CheckpointLoaderSimple", "_meta": {"title": "load ckpt"},
+          "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"}},
     "6": {"class_type": "CLIPTextEncode", "_meta": {"title": "$prompt.text!"},
           "inputs": {"clip": ["2", 0], "text": "a portrait photo"}},
     "9": {"class_type": "SaveImage", "_meta": {"title": "$output.cover"},

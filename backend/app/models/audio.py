@@ -129,6 +129,9 @@ class AudioSegment(TimestampMixin, Base):
     cross_shot: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 片段版本（重新规划时递增）
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # 复用的依赖指纹（A4）：生成该音频时固化的台词/音色/工作流版本/参数摘要。
+    # 历史片段为空 → 读取端按「不可复用」处理，不静默当作可复用。
+    tts_fingerprint: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 备注（规划建议、冲突说明等）
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 

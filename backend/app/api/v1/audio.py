@@ -25,7 +25,7 @@ from app.models.enums import (
 )
 from app.models.narrative import Character
 from app.models.production import Asset, Job, Workflow
-from app.services import audio_plan
+from app.services import audio_plan, tts_params
 from app.services.errors import biz_error, character_not_found
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
@@ -136,24 +136,15 @@ def regenerate_segment(segment_id: str, payload: dict | None = None, db: Session
 
     params: dict = {}
     if job_type == "generate_audio":
-        params["tts_text"] = seg.text
-        # instruct 优先级：片段覆盖 → 片段情绪映射 → 角色默认 instruct
-        instruct = payload.get("instruct") or seg.instruct
-        if not instruct:
-            emotion = payload.get("emotion") or seg.emotion or "neutral"
-            params["tts_emotion"] = emotion
-        else:
-            params["tts_emotion"] = instruct
-        # 音色：优先片段覆盖 → 角色默认音色（speaker 固定，禁止随机）
+        # 参数构建统一走 services/tts_params.build_params：与 H3 复用判定的指纹重算同源，
+        # 避免两处各写一份导致指纹恒失配（A4 §13.5）。
         voice = _resolve_voice(db, seg)
-        if voice:
-            # 键名必须是工作流节点标记声明的 tts_voice（映射到 Qwen3CustomVoice.speaker）；
-            # 曾误写为 voice，注入时找不到该参数，speaker 恒为画布默认值，导致选谁都出同一个音色
-            params["tts_voice"] = voice.voice_id
-            params["tts_lang"] = getattr(voice, "language", "Chinese") or "Chinese"
-            # 无片段 instruct 时回退角色默认 instruct
-            if not instruct and getattr(voice, "default_instruct", ""):
-                params["tts_emotion"] = voice.default_instruct
+        params = tts_params.build_params(
+            seg,
+            voice,
+            instruct_override=payload.get("instruct"),
+            emotion_override=payload.get("emotion"),
+        )
     elif job_type == "generate_bgm":
         params["bgm_style"] = seg.text
         params["duration"] = payload.get("duration")
@@ -206,38 +197,12 @@ def regenerate_segment(segment_id: str, payload: dict | None = None, db: Session
 
 
 def _resolve_voice(db: Session, seg: AudioSegment) -> VoiceProfile | None:
-    """片段音色解析：片段覆盖 → 角色默认音色。"""
-    if seg.voice_profile_id:
-        vp = db.get(VoiceProfile, seg.voice_profile_id)
-        if vp:
-            return vp
-    if seg.character_id:
-        vp = db.execute(
-            select(VoiceProfile).where(
-                VoiceProfile.character_id == seg.character_id,
-                VoiceProfile.is_default == True,  # noqa: E712
-                VoiceProfile.enabled == True,  # noqa: E712
-            )
-        ).scalars().first()
-        if vp:
-            return vp
-        # 兼容 Character.voice_id 旧字段
-        ch = db.get(Character, seg.character_id)
-        if ch and ch.voice_id:
-            return VoiceProfile(voice_id=ch.voice_id, voice_name=ch.voice_id, language="Chinese")
-    # 旁白（无角色）：项目级 narrator_voice 配置（Project.settings）
-    if seg.track_type == "narration":
-        from app.models.narrative import Project
-        project = db.get(Project, seg.project_id)
-        nv = ((project.settings or {}) if project else {}).get("narrator_voice") or {}
-        if nv.get("speaker"):
-            return VoiceProfile(
-                voice_id=nv["speaker"],
-                voice_name=nv.get("speaker", ""),
-                language=nv.get("language", "Chinese"),
-                default_instruct=nv.get("default_instruct", ""),
-            )
-    return None
+    """片段音色解析：片段覆盖 → 角色默认音色 → 兼容 Character.voice_id → 项目旁白音色。
+
+    实现已合并到 `services/tts_params.resolve_voice`：生成侧与 H3 复用判定必须同源，
+    否则指纹会因语言/默认 instruct 不同而恒失配（A4 §13.5）。
+    """
+    return tts_params.resolve_voice(db, seg)
 
 
 @router.post("/segments/{segment_id}/replace", status_code=202)

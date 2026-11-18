@@ -91,15 +91,22 @@ def _group_audio_inputs(rows: list[dict], max_inputs: int = 3) -> dict:
 
 
 def _shot_ref_audios(db: Session, shot: Shot) -> dict:
-    """按说话人收集镜头内已审核配音，作为 H3 ref_audio_N 参考（v2 §8.6）。
+    """按说话人收集镜头内可复用配音，作为 H3 ref_audio_N 参考（v2 §8.6 / §13.5）。
 
-    返回 {paths, bindings, overflow, total_ms}：
+    返回 {paths, bindings, overflow, total_ms, stale, legacy}：
     - paths     媒体注入用（顺序即 ref_audio_0..N）
     - bindings  写入 input_snapshot 的角色↔槽位映射，供任务详情追溯
     - overflow  因槽位不足未入槽的说话人（必须告警，不静默丢）
     - total_ms  本镜配音总时长，供 length 对齐
+    - stale     因依赖指纹失配而**不可复用**的片段（调用方据此决定是否重跑 TTS）
+    - legacy    A4 上线前的历史片段（无指纹）按宽限期复用，调用方必须写事件告警
+
+    A4：复用判据从「approved 即可」升级为「approved + 指纹未变 + 文件仍在」。
+    台词/音色/TTS 工作流版本/内容参数任一变化都会让指纹失配，旧音频不得注入 H3，
+    否则会产出对不上台词的视频（§13.5）。
     """
     from app.models.audio import AudioSegment
+    from app.services.workflow import tts_fingerprint as _fp
 
     segs = (
         db.query(AudioSegment)
@@ -114,9 +121,45 @@ def _shot_ref_audios(db: Session, shot: Shot) -> dict:
         .all()
     )
     rows: list[dict] = []
+    stale: list[dict] = []
+    legacy: list[dict] = []
     for seg in segs:
         asset = db.get(Asset, seg.audio_asset_id)
         if asset is None or not asset.file_path:
+            continue
+        # 当前依赖：台词/音色/TTS 工作流（取片段当前绑定，缺失时用项目内 preset TTS 工作流）
+        from app.services import tts_params as _tp
+        _voice_obj = _tp.resolve_voice(db, seg)
+        _voice = _voice_obj.voice_id if _voice_obj is not None else None
+        _wf = _resolve_tts_workflow(db, seg)
+        _params = _tp.params_for_fingerprint(seg, _voice_obj)
+        decision = _fp.check_reuse(
+            stored=seg.tts_fingerprint,
+            text=seg.text,
+            voice_id=_voice,
+            tts_workflow_id=_wf.id if _wf is not None else None,
+            tts_workflow_version=_wf.version if _wf is not None else None,
+            tts_params=_params,
+            approved=seg.review_status == "approved",
+            audio_exists=bool(asset.file_path),
+            # 宽限期：A4 上线前的历史片段无指纹，不阻断存量项目，但必须留痕告警
+            legacy_grace=True,
+        )
+        if decision.legacy:
+            legacy.append({
+                "segment_id": seg.id,
+                "character_id": seg.character_id,
+                "track_type": seg.track_type,
+                "reason": decision.reason,
+            })
+        if not decision.reusable:
+            stale.append({
+                "segment_id": seg.id,
+                "character_id": seg.character_id,
+                "track_type": seg.track_type,
+                "reason": decision.reason,
+                "changed": decision.changed,
+            })
             continue
         rows.append({
             "file_path": asset.file_path,
@@ -127,7 +170,25 @@ def _shot_ref_audios(db: Session, shot: Shot) -> dict:
             "sequence": seg.sequence,
             "duration_ms": seg.duration_ms,
         })
-    return _group_audio_inputs(rows)
+    result = _group_audio_inputs(rows)
+    result["stale"] = stale
+    result["legacy"] = legacy
+    return result
+
+
+def _resolve_tts_workflow(db: Session, seg):
+    """片段音频应对应的 TTS 工作流：优先 preset 模式的 tts 工作流（与生成时路由一致）。"""
+    rows = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "tts")
+        .order_by(Workflow.created_at)
+        .all()
+    )
+    for wf in rows:
+        caps = wf.capabilities or {}
+        if caps.get("voice_mode") == "preset" and caps.get("voice_values"):
+            return wf
+    return rows[0] if rows else None
 
 
 def _next_asset_version(
@@ -428,6 +489,27 @@ def _sync_audio_segment_after_generate(db: Session, job: Job, created_assets: li
     seg.audio_asset_id = audio_asset["asset_id"]
     seg.generation_status = "completed"
     seg.review_status = "pending"
+    # A4 依赖指纹：生成成功即固化「这条音频是用什么台词/音色/TTS 版本/参数产出的」。
+    # 台词或音色之后再改，指纹就会不匹配，H3 复用判定据此拒绝旧音频（v2 §13.5）。
+    try:
+        from app.services.workflow import tts_fingerprint as _fp
+        _wf = db.get(Workflow, job.workflow_id) if job.workflow_id else None
+        _params = dict(job.params or {})
+        _voice = _params.get("tts_voice")
+        if not _voice and seg.voice_profile_id:
+            from app.models.audio import VoiceProfile as _VP
+            _vp = db.get(_VP, seg.voice_profile_id)
+            _voice = getattr(_vp, "voice_id", None)
+        seg.tts_fingerprint = _fp.compute(
+            text=seg.text,
+            voice_id=_voice,
+            tts_workflow_id=job.workflow_id,
+            tts_workflow_version=_wf.version if _wf is not None else None,
+            tts_params=_params,
+        )
+    except Exception as _fp_exc:  # noqa: BLE001
+        # 指纹计算失败不阻断音频落库，但要留痕：没有指纹的片段后续不会被复用
+        _write_event(db, job, "audio.fingerprint_failed", {"error": str(_fp_exc)[:200]})
     try:
         import json as _json
         import subprocess as _sp
@@ -916,6 +998,57 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 # 同一角色跨镜头复用同一音色，双角色镜头不再把两个人声音混成一条
                 _audio_inputs = _shot_ref_audios(db, _shot)
                 _ref_audio_ms = _audio_inputs["total_ms"]
+                # A4 指纹失配留痕：台词/音色/TTS 版本变了 → 旧音频不注入，明确告诉用户要重跑 TTS
+                if _audio_inputs["stale"]:
+                    _write_event(db, job, "job.audio_tts_stale", {
+                        "stale": _audio_inputs["stale"],
+                        "note": "以下片段配音依赖已变更，未注入 H3 参考音频，需重新生成 TTS 后再出视频",
+                    })
+                    _snap_st = dict(job.input_snapshot or {})
+                    _snap_st["audio_tts_stale"] = _audio_inputs["stale"]
+                    job.input_snapshot = _snap_st
+                    db.commit()
+                # A4 宽限期告警：历史片段无指纹，本次按审核状态复用（不阻断存量项目，但留痕）
+                if _audio_inputs.get("legacy"):
+                    _write_event(db, job, "audio.fingerprint_missing", {
+                        "segments": _audio_inputs["legacy"],
+                        "note": "历史片段无依赖指纹，宽限期按审核状态复用；重新生成后自动补齐",
+                    })
+                    _snap_lg = dict(job.input_snapshot or {})
+                    _snap_lg["audio_fingerprint_missing"] = _audio_inputs["legacy"]
+                    job.input_snapshot = _snap_lg
+                    db.commit()
+                # A3 音频输入校验（v2 §7.6/§8.4）：注入前用 ffprobe 核对真实文件，
+                # 不合格就明确失败并指出是哪个槽位/哪个角色，不让坏音频传到 ComfyUI
+                if _audio_inputs["bindings"]:
+                    from app.services.workflow import audio_check
+                    _audio_cons = audio_check.constraints_from_capabilities(
+                        (wf_record.capabilities or {})
+                    )
+                    _checks = []
+                    for _binding, _path in zip(_audio_inputs["bindings"], _audio_inputs["paths"]):
+                        _checks.append({**_binding, "file_path": _path})
+                    _verdict = audio_check.check_audio_batch(_checks, _audio_cons)
+                    _snap_ac = dict(job.input_snapshot or {})
+                    _snap_ac["audio_input_checks"] = _verdict
+                    job.input_snapshot = _snap_ac
+                    db.commit()
+                    if not _verdict["ok"]:
+                        _msgs = [
+                            v for c in _verdict["checks"] if not c["ok"] for v in c["violations"]
+                        ]
+                        _write_event(db, job, "job.audio_input_invalid", {
+                            "failed_slots": _verdict["failed_slots"],
+                            "violations": _msgs,
+                            "constraints": _audio_cons,
+                            "note": "参考音频不满足工作流输入要求，任务未提交",
+                        })
+                        job.status = "failed"
+                        job.error_code = "audio_input_invalid"
+                        job.error_msg = "；".join(_msgs)[:500]
+                        job.finished_at = _now()
+                        db.commit()
+                        return
                 # 槽位→文件路径按 bindings 顺序回填（paths 与 bindings 同序）
                 for _binding, _path in zip(_audio_inputs["bindings"], _audio_inputs["paths"]):
                     if _path and _binding["slot"] not in media_files:
