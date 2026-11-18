@@ -38,12 +38,17 @@ const clipWorkflowsQuery = useQuery({
   queryFn: () => listWorkflows({ workflow_type: 'video', page_size: 50 }),
   staleTime: 5 * 60 * 1000,
 })
-/** 当前档位对应的 workflow_id；库里没有时返回 undefined，后端按默认工作流匹配 */
+/**
+ * 当前档位对应的 workflow_id。
+ * 只按 `capabilities.tier` 匹配——按工作流名称后缀猜测能力是明令禁止的（AGENTS.md 审计 D5），
+ * 改名就会断链。没有声明 tier 的工作流一律返回 undefined，交由后端按能力/默认匹配。
+ */
 const clipWorkflowId = computed(() => {
   // /api/workflows 返回的是数组（非分页对象），这里两种形态都兼容
   const data: any = clipWorkflowsQuery.data.value
-  const items: Array<{ id: string; name: string }> = Array.isArray(data) ? data : (data?.items ?? [])
-  return items.find((w) => w.name.endsWith(clipTier.value))?.id
+  const items: Array<{ id: string; name: string; capabilities?: { tier?: string } | null }> =
+    Array.isArray(data) ? data : (data?.items ?? [])
+  return items.find((w) => (w.capabilities?.tier ?? '') === clipTier.value)?.id
 })
 
 // --- Data fetching ---
