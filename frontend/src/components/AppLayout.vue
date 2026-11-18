@@ -313,12 +313,17 @@ function goProjects() {
 .content-body.is-agent-docked .content-main {
   transition: flex-basis var(--transition-base);
 }
-/* 非项目页内容区高度自适应：面板吸顶并限制在视口高度内，内部自行滚动 */
-.content-body:not(.has-agent) :deep(.agent-drawer) {
-  position: sticky;
-  top: 0;
-  align-self: flex-start;
-  height: calc(100dvh - var(--app-header-height, 52px));
+/* 非项目页内容区高度自适应：面板吸顶并限制在视口高度内，内部自行滚动。
+   仅限宽屏——窄屏（<=768px）下面板是全屏浮层，由组件内的 position: fixed 接管；
+   若此处不加媒体查询，本选择器的优先级会压过组件的窄屏规则，面板会退化成
+   380px 宽的 sticky 块而不是全屏浮层。 */
+@media (min-width: 769px) {
+  .content-body:not(.has-agent) :deep(.agent-drawer) {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    height: calc(100dvh - var(--app-header-height, 52px));
+  }
 }
 /* 右侧常驻 Agent 面板：内容区高度锁定，滚动交给 .content-main */
 .content-body.has-agent {

@@ -2,7 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import { NButton, NEmpty, NInput, NSelect, NSpin, NTag } from 'naive-ui'
+import { NButton, NIcon, NInput, NSelect, NSpin, NTag } from 'naive-ui'
+import { AddOutline, CloseOutline, SparklesOutline } from '@vicons/ionicons5'
 import { storeToRefs } from 'pinia'
 import type { AgentApproval, AgentMessage } from '@/api/agent'
 import { useAgentStore } from '@/stores/agent'
@@ -39,6 +40,17 @@ const inputText = computed({
 
 const scrollEl = ref<HTMLElement | null>(null)
 const showApprovals = ref(false)
+
+/** 空态引导：三条常用指令，点击即填入输入框（不直接发送，避免误触发写操作） */
+const starterPrompts = [
+  '这个项目现在到哪一步了',
+  '带我去分镜图页',
+  '把第 1 集的镜头生成排队',
+]
+
+function useStarter(text: string) {
+  agent.draft = text
+}
 
 /**
  * 面板展开态由 store 持有：AppLayout 需要据此决定右侧是否让出空间，
@@ -162,27 +174,40 @@ onMounted(async () => {
   }
   scrollToBottom()
   window.addEventListener('resize', onViewportResize)
+  window.addEventListener('keydown', onHotkey)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onViewportResize)
+  window.removeEventListener('keydown', onHotkey)
 })
+
+/**
+ * ⌘K / Ctrl+K 开关助手面板。
+ * 在输入控件内不拦截，避免吃掉编辑器里的原生快捷键。
+ */
+function onHotkey(e: KeyboardEvent) {
+  if (e.key.toLowerCase() !== 'k' || !(e.metaKey || e.ctrlKey)) return
+  const el = e.target as HTMLElement | null
+  if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+  e.preventDefault()
+  agent.togglePanel()
+}
 </script>
 
 <template>
-  <!-- 悬浮入口：始终固定在右下角，未展开时醒目展示 -->
+  <!-- 悬浮入口：右下角贴边停靠，低权重次级样式（深色面 + 发丝描边 + 品牌色图标） -->
   <button
     v-if="!expanded"
     type="button"
     class="agent-fab"
+    aria-label="打开 AI 助手"
     title="AI 助手"
     @click="agent.openPanel()"
   >
-    <svg class="agent-fab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <path d="M12 16v-4M12 8h.01" />
-    </svg>
+    <NIcon class="agent-fab-icon" :component="SparklesOutline" :size="16" />
     <span class="agent-fab-label">AI 助手</span>
+    <span class="agent-fab-key" aria-hidden="true">⌘K</span>
   </button>
 
   <!-- 展开态：参与文档流的右侧面板，占据自身宽度而非覆盖主内容 -->
@@ -194,35 +219,53 @@ onBeforeUnmount(() => {
     <!-- 左边缘拖拽条：调整面板宽度 -->
     <div class="agent-resizer" title="拖拽调整宽度" @mousedown="onResizeStart" />
     <header class="agent-head">
-      <div class="agent-head-main">
-        <NSelect
-          :value="activeSessionId"
-          :options="sessionOptions"
-          :loading="sessionsLoading"
-          size="small"
-          placeholder="选择会话"
-          class="agent-session-select"
-          @update:value="switchSession"
-        />
-        <NButton size="tiny" quaternary title="新建会话" @click="newSession">+</NButton>
+      <div class="agent-head-title">
+        <NIcon :component="SparklesOutline" :size="15" class="agent-head-mark" />
+        <span class="agent-head-label">AI 助手</span>
       </div>
-      <button type="button" class="agent-collapse" title="收起助手" @click="agent.closePanel()">×</button>
+      <div class="agent-head-actions">
+        <button type="button" class="agent-icon-btn" aria-label="新建会话" title="新建会话" @click="newSession">
+          <NIcon :component="AddOutline" :size="16" />
+        </button>
+        <button type="button" class="agent-icon-btn" aria-label="收起助手" title="收起助手" @click="agent.closePanel()">
+          <NIcon :component="CloseOutline" :size="16" />
+        </button>
+      </div>
     </header>
+
+    <!-- 会话切换独立成行，不再挤占标题行 -->
+    <div class="agent-session-bar">
+      <NSelect
+        :value="activeSessionId"
+        :options="sessionOptions"
+        :loading="sessionsLoading"
+        size="small"
+        placeholder="选择会话"
+        class="agent-session-select"
+        @update:value="switchSession"
+      />
+    </div>
 
     <div ref="scrollEl" class="agent-stream">
       <div v-if="messagesLoading" class="agent-state"><NSpin size="small" /></div>
-      <NEmpty
-        v-else-if="!activeSessionId"
-        size="small"
-        description="新建一个会话开始"
-        class="agent-state"
-      />
-      <NEmpty
-        v-else-if="!messages.length"
-        size="small"
-        description="说说你想做什么"
-        class="agent-state"
-      />
+      <div v-else-if="!activeSessionId || !messages.length" class="agent-empty">
+        <div class="agent-empty-mark" aria-hidden="true">
+          <NIcon :component="SparklesOutline" :size="20" />
+        </div>
+        <p class="agent-empty-title">{{ activeSessionId ? '说说你想做什么' : '新建一个会话开始' }}</p>
+        <p class="agent-empty-desc">助手可以读项目数据、切换页面、提交生成任务</p>
+        <div class="agent-empty-actions">
+          <button
+            v-for="s in starterPrompts"
+            :key="s"
+            type="button"
+            class="agent-starter"
+            @click="useStarter(s)"
+          >
+            {{ s }}
+          </button>
+        </div>
+      </div>
       <div v-else class="agent-messages">
         <article v-for="m in messages" :key="m.id" class="agent-msg" :class="m.role">
           <div class="agent-msg-role">{{ roleLabel(m.role) }}</div>
@@ -272,45 +315,62 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* ── 悬浮按钮 ── */
+/* ── 悬浮入口：次级按钮形态 ──
+   深色面 + 发丝描边 + 品牌色图标，不再用大面积实心品牌色。
+   理由（DESIGN.md §5/§8）：圆角上限 6px、青色只做点缀、卡片层级靠边框不靠阴影。
+   视觉重量必须低于页面主 CTA（如「新建作品」），它是辅助入口。 */
 .agent-fab {
   position: fixed;
-  right: 20px;
-  bottom: 24px;
+  right: var(--sp-6);
+  bottom: var(--sp-6);
   z-index: 200;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 18px;
-  background: var(--brand-primary);
-  color: var(--text-on-brand);
-  border: 0;
-  border-radius: 28px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
   cursor: pointer;
-  box-shadow: 0 4px 18px var(--brand-line);
+  box-shadow: none;
   font-family: var(--font-ui);
-  font-size: 14px;
-  font-weight: 600;
-  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  transition: color var(--transition-fast), border-color var(--transition-fast),
+    background var(--transition-fast);
 }
 
 .agent-fab:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 22px var(--brand-line);
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border-color: var(--brand-line);
 }
 
-.agent-fab:active {
-  transform: translateY(0);
+.agent-fab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .agent-fab-icon {
-  width: 20px;
-  height: 20px;
   flex-shrink: 0;
+  color: var(--brand-primary);
 }
 
 .agent-fab-label {
   white-space: nowrap;
+}
+
+/* 快捷键提示：弱化到三级文字，仅在宽屏显示 */
+.agent-fab-key {
+  padding-left: var(--sp-2);
+  margin-left: var(--sp-1);
+  border-left: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
 }
 
 /* ── 展开面板（flex 子项，不覆盖主内容） ── */
@@ -346,43 +406,80 @@ onBeforeUnmount(() => {
   background: var(--brand-primary);
 }
 
-/* ── 页头 ── */
+/* ── 页头：标题在左，操作在右，会话选择独立成行 ── */
 .agent-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
-.agent-head-main {
+.agent-head-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
   min-width: 0;
 }
 
-.agent-session-select {
-  flex: 1;
-  min-width: 0;
+.agent-head-mark {
+  color: var(--brand-primary);
+  flex-shrink: 0;
 }
 
-.agent-collapse {
+.agent-head-label {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.agent-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
+
+/* 纯图标按钮：28×28 触控区，与全站一致 */
+.agent-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   appearance: none;
   background: none;
   border: 0;
-  padding: 2px 8px;
-  font-size: 20px;
-  line-height: 1;
+  border-radius: var(--radius);
   color: var(--text-tertiary);
   cursor: pointer;
-  transition: color var(--transition-fast);
+  transition: color var(--transition-fast), background var(--transition-fast);
 }
 
-.agent-collapse:hover {
+.agent-icon-btn:hover {
   color: var(--text-primary);
+  background: var(--overlay-hover);
+}
+
+.agent-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* 会话切换条：独立一行，下拉不再挤压标题与操作 */
+.agent-session-bar {
+  flex-shrink: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.agent-session-select {
+  width: 100%;
 }
 
 /* ── 消息流 ── */
@@ -409,6 +506,83 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: var(--sp-6) var(--sp-4);
+}
+
+/* ── 空态：图标 + 一句话 + 三条引导指令 ──
+   左右内边距必须与 .agent-session-bar 一致（sp-3），
+   否则引导条右边缘与上方下拉、下方输入框差 4px，破坏内容网格。 */
+.agent-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-3);
+  text-align: center;
+}
+
+.agent-empty-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: var(--sp-1);
+  border: 1px solid var(--brand-line);
+  border-radius: var(--radius-lg);
+  background: var(--brand-soft);
+  color: var(--brand-primary);
+}
+
+.agent-empty-title {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-empty-desc {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-tertiary);
+}
+
+.agent-empty-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+  margin-top: var(--sp-3);
+}
+
+/* 引导指令：可点击的整行条目，不是装饰文字 */
+.agent-starter {
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.agent-starter:hover {
+  color: var(--text-primary);
+  border-color: var(--brand-line);
+}
+
+.agent-starter:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .agent-messages {
@@ -546,13 +720,12 @@ onBeforeUnmount(() => {
 
 @media (max-width: 768px) {
   .agent-fab {
-    right: 12px;
-    bottom: 16px;
-    padding: 10px 14px;
-    font-size: 13px;
+    right: var(--sp-3);
+    bottom: var(--sp-4);
   }
 
-  .agent-fab-label {
+  /* 窄屏只留图标 + 文字，收起快捷键提示 */
+  .agent-fab-key {
     display: none;
   }
 
@@ -573,10 +746,9 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-fab {
-    transition: none;
-  }
-  .agent-collapse {
+  .agent-fab,
+  .agent-icon-btn,
+  .agent-starter {
     transition: none;
   }
 }
