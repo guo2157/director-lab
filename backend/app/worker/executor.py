@@ -46,14 +46,58 @@ def _workflow_frame_size(definition: dict | None) -> tuple[int, int] | None:
     return None
 
 
-def _shot_ref_audios(db: Session, shot: Shot) -> tuple[list[str], int]:
-    """按说话人收集镜头内已审核的配音，作为 H3 ref_audios 参考。
+def _group_audio_inputs(rows: list[dict], max_inputs: int = 3) -> dict:
+    """把镜头音频片段按说话人分组为 H3 参考音频槽位（纯函数，便于单测）。
 
-    H3 ref_audios 最多 3 条，且每条应只对应一个音色。此前把整镜所有片段
-    concat 成一条，双角色镜头会把两个人的音色混在一起，模型学到的既不是
-    甲也不是乙。现按说话人分组（角色 ID；旁白按 track_type），每个说话人
-    取该镜第一条已审核片段做锚点，按出场顺序最多 3 条。
-    返回 (参考音频路径列表, 本镜配音总时长毫秒)。总时长供 length 对齐使用。
+    规则（v2 计划 §8.6）：
+    - 每个说话人只取一条：同一角色跨片段复用同一音色，双角色镜头不能把两个人的
+      声音混成一条（历史故障）
+    - **必须记录 character_id / track_type / segment_id**：只存文件路径的话，
+      任务详情无法回答「ref_audio_2 是谁的声音」，违反「保存合并前的独立音频和角色映射」
+    - 超出槽位上限时进 overflow 并显式告警，**不允许静默丢弃**
+    - 总时长按全部片段累加（含未入槽的），用于帧数反算
+    """
+    paths: list[str] = []
+    bindings: list[dict] = []
+    overflow: list[dict] = []
+    seen: set[str] = set()
+    total_ms = 0
+    for row in rows:
+        total_ms += int(row.get("duration_ms") or 0)
+        speaker_key = row.get("character_id") or row.get("track_type") or "unknown"
+        if speaker_key in seen:
+            continue
+        if len(paths) >= max_inputs:
+            overflow.append({
+                "character_id": row.get("character_id"),
+                "track_type": row.get("track_type"),
+                "segment_id": row.get("segment_id"),
+                "reason": "max_audio_inputs_exceeded",
+            })
+            continue
+        seen.add(speaker_key)
+        slot = f"ref_audio_{len(paths)}"
+        paths.append(row["file_path"])
+        bindings.append({
+            "slot": slot,
+            "asset_id": row.get("asset_id"),
+            "character_id": row.get("character_id"),
+            "track_type": row.get("track_type"),
+            "segment_id": row.get("segment_id"),
+            "sequence": row.get("sequence"),
+            "duration_ms": int(row.get("duration_ms") or 0),
+        })
+    return {"paths": paths, "bindings": bindings, "overflow": overflow, "total_ms": total_ms}
+
+
+def _shot_ref_audios(db: Session, shot: Shot) -> dict:
+    """按说话人收集镜头内已审核配音，作为 H3 ref_audio_N 参考（v2 §8.6）。
+
+    返回 {paths, bindings, overflow, total_ms}：
+    - paths     媒体注入用（顺序即 ref_audio_0..N）
+    - bindings  写入 input_snapshot 的角色↔槽位映射，供任务详情追溯
+    - overflow  因槽位不足未入槽的说话人（必须告警，不静默丢）
+    - total_ms  本镜配音总时长，供 length 对齐
     """
     from app.models.audio import AudioSegment
 
@@ -69,20 +113,21 @@ def _shot_ref_audios(db: Session, shot: Shot) -> tuple[list[str], int]:
         .order_by(AudioSegment.sequence, AudioSegment.created_at)
         .all()
     )
-    paths: list[str] = []
-    seen_speakers: set[str] = set()
-    total_ms = 0
+    rows: list[dict] = []
     for seg in segs:
-        total_ms += int(seg.duration_ms or 0)
-        speaker_key = seg.character_id or seg.track_type
-        if speaker_key in seen_speakers or len(paths) >= 3:
-            continue
         asset = db.get(Asset, seg.audio_asset_id)
         if asset is None or not asset.file_path:
             continue
-        seen_speakers.add(speaker_key)
-        paths.append(asset.file_path)
-    return paths, total_ms
+        rows.append({
+            "file_path": asset.file_path,
+            "asset_id": asset.id,
+            "character_id": seg.character_id,
+            "track_type": seg.track_type,
+            "segment_id": seg.id,
+            "sequence": seg.sequence,
+            "duration_ms": seg.duration_ms,
+        })
+    return _group_audio_inputs(rows)
 
 
 def _next_asset_version(
@@ -869,11 +914,23 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                         pass  # 首帧注入失败不阻断生成，回退为无首帧约束
                 # H3 参考音频（音色/口型引导）：按说话人各注入一条 ref_audio_N，
                 # 同一角色跨镜头复用同一音色，双角色镜头不再把两个人声音混成一条
-                _ref_audio_paths, _ref_audio_ms = _shot_ref_audios(db, _shot)
-                for _ref_idx, _ref_path in enumerate(_ref_audio_paths):
-                    _ref_key = f"ref_audio_{_ref_idx}"
-                    if _ref_path and _ref_key not in media_files:
-                        media_files[_ref_key] = _ref_path
+                _audio_inputs = _shot_ref_audios(db, _shot)
+                _ref_audio_ms = _audio_inputs["total_ms"]
+                # 槽位→文件路径按 bindings 顺序回填（paths 与 bindings 同序）
+                for _binding, _path in zip(_audio_inputs["bindings"], _audio_inputs["paths"]):
+                    if _path and _binding["slot"] not in media_files:
+                        media_files[_binding["slot"]] = _path
+                if _audio_inputs["overflow"]:
+                    # 槽位不足：显式告警并留痕，不静默丢掉第 4 个说话人的声音
+                    _write_event(db, job, "job.audio_slot_overflow", {
+                        "dropped": _audio_inputs["overflow"],
+                        "max_audio_inputs": len(_audio_inputs["paths"]),
+                        "note": "H3 参考音频槽位不足，以下说话人未注入音频",
+                    })
+                    _snap_ov = dict(job.input_snapshot or {})
+                    _snap_ov["audio_slot_overflow"] = _audio_inputs["overflow"]
+                    job.input_snapshot = _snap_ov
+                    db.commit()
                 _project = db.get(Project, job.project_id)
                 if _project is not None and "width" not in params and "height" not in params:
                     # 档位工作流（极速 480×864 / 标准 640×1120 / 质量 768×1344）自带画幅优先，
@@ -903,6 +960,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     k: params[k] for k in ("width", "height", "length") if k in params
                 }
                 _snap["injected_media"] = dict(media_files)
+                # 角色↔音频槽位绑定：任务详情可回答「ref_audio_2 是谁的声音」
+                if _audio_inputs["bindings"]:
+                    _snap["audio_bindings"] = _audio_inputs["bindings"]
                 job.input_snapshot = _snap
                 db.commit()
 
