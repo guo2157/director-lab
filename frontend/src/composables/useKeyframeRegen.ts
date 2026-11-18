@@ -107,8 +107,10 @@ export function useKeyframeRegen(opts: {
       // 初始化重新生成工作台：提示词与参考图来自基础版本原始生成配置
       regenPrompt.value = cfg.prompt?.rendered ?? shot.image_prompt ?? ''
       regenMode.value = 'inherit_prompt_only'
-    regenWorkflowId.value = undefined
-    regenParams.value = {}
+      // 默认选中「这个基础版本当时使用的工作流」——用户看到的是真实配置，而不是空白；
+      // watch 会顺带拉一次 Schema 并补默认参数（切到第三档即可直接改）
+      regenWorkflowId.value = cfg.workflow?.id ?? undefined
+      regenParams.value = {}
       regenRefs.value = (cfg.refs ?? []).map((r) => ({ ...r }))
       regenValidation.value = null
       // 快照参数里的 ref_* 键即生成时实际传入的槽位，值为对应资产文件名
