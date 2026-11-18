@@ -42,7 +42,12 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 600.0
     # 单次生成的最大 token 数（含推理模型的思考 token）。不显式设置时部分供应商默认
     # 仅 4096，长剧本解析会先耗尽预算再输出 shot，表现为「JSON 合法但镜头为空」。
-    llm_max_tokens: int = 16384
+    llm_max_tokens: int = 32768
+    # 推理模型（deepseek-v4.x 等）默认带思考链，思考 token 与正文共享 max_tokens 预算。
+    # 剧本解析这类纯结构化 JSON 任务里，思考会把预算吃光，表现为「JSON 在字符串中途
+    # 被截断」（Expecting ',' delimiter / 非合法 JSON），重试多少次都一样。
+    # 默认关闭思考；供应商不认该字段时客户端自动降级重试，不影响其它 OpenAI 兼容端点。
+    llm_disable_thinking: bool = True
     # 流式接收空闲超时（httpx read timeout 语义）：远端连续该时长不吐数据即抛 llm_timeout，
     # 避免 LLM 流式中途停摆时任务线程永久阻塞，把串行队列堵死
     llm_stream_idle_timeout_seconds: float = 900.0
@@ -50,6 +55,8 @@ class Settings(BaseSettings):
 
     # --- 任务调度（D-18 修订 D-03：并发 = 可用 ComfyUI 实例数，单实例串行排队，多实例负载均衡并行） ---
     render_concurrency: int = 1
+    # 单次 LLM 调用最大解析集数（默认 1：每集独立 LLM 调用，从根本上消除 token 溢出）
+    max_episodes_per_batch: int = 1
     # script-agent 首批自动+后续半自动：true 时首次调用仅解析首批（≤max_episodes_per_batch），
     # result.has_more 提示前端『继续分析』；false 时单次调用解析全部批次范围
     agent_first_batch_auto: bool = True
@@ -134,7 +141,7 @@ _PERSISTED_FIELDS = [
     "comfyui_base_url", "comfyui_instances_json",
     "comfyui_timeout_seconds", "comfyui_job_timeout_seconds",
     "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "llm_instances_json", "llm_timeout_seconds",
-    "llm_max_tokens",
+    "llm_max_tokens", "llm_disable_thinking",
     "llm_stream_idle_timeout_seconds",
     "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
 ]

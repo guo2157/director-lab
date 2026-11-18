@@ -54,7 +54,7 @@ OUTLINE_SYSTEM_PROMPT = _register_default("script_outline_system", """你是专�
 
 
 def analyze_script_outline(text: str, *, episode_duration_target: int = DEFAULT_EPISODE_DURATION,
-                           max_episodes_per_batch: int = 10, client=None) -> dict:
+                           max_episodes_per_batch: int = 1, client=None) -> dict:
     """LLM 大纲分析：集数、每集时长与镜头数一律以 LLM 分析为准（代码规则估算已移除）。
 
     返回结构与原估算对象兼容（algorithm_version/char_count/dialogue_char_estimate/

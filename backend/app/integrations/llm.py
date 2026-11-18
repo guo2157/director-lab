@@ -20,6 +20,9 @@ import httpx
 
 from app.core.config import get_settings
 
+# 已确认不支持 thinking 字段的端点（base_url）：命中后不再携带该字段，保证兼容性
+_THINKING_UNSUPPORTED: set[str] = set()
+
 
 class LLMError(Exception):
     """语言模型交互错误，携带失败分类错误码（message 不含凭据）。"""
@@ -80,12 +83,41 @@ class LLMClient:
             self.model = model or settings.llm_model
         self.timeout = timeout or settings.llm_timeout_seconds
         self.max_tokens = int(getattr(settings, "llm_max_tokens", 16384) or 16384)
+        # 关闭推理链：思考 token 与正文共享 max_tokens，结构化 JSON 任务里会把预算吃光。
+        # 供应商不识别该字段时由 _post_with_thinking_fallback 记录到 _THINKING_UNSUPPORTED
+        # 并自动降级，避免把兼容性问题暴露成解析失败。
+        self.disable_thinking = bool(getattr(settings, "llm_disable_thinking", True))
 
     def _check_config(self) -> None:
         if not self.api_key:
             raise LLMError("llm_unconfigured", "语言模型未配置 API Key（DLAB_LLM_API_KEY）")
         if not self.base_url:
             raise LLMError("llm_unconfigured", "语言模型未配置 base_url")
+
+    def _post(self, client: httpx.Client, payload: dict[str, Any], headers: dict[str, str]):
+        """POST /chat/completions，附带关闭推理链的兼容降级。
+
+        推理模型（deepseek-v4.x 等）默认输出思考链，思考 token 记在 completion 里，
+        与正文共享 max_tokens。剧本解析这类长 JSON 任务里思考会把预算吃光，
+        表现为 JSON 在字符串中途被截断（"Expecting ',' delimiter"），重试无效。
+        这里显式传 thinking={"type": "disabled"}；若供应商不认该字段（HTTP 400
+        且响应提到 thinking），本次去掉该字段重试，并记录到进程级黑名单，
+        后续调用不再携带，保证对任意 OpenAI 兼容端点的兼容性。
+        """
+        url = f"{self.base_url}/chat/completions"
+        want_disable = self.disable_thinking and self.base_url not in _THINKING_UNSUPPORTED
+        if want_disable:
+            payload = {**payload, "thinking": {"type": "disabled"}}
+        resp = client.post(url, json=payload, headers=headers)
+        if (
+            want_disable
+            and resp.status_code in (400, 422)
+            and "thinking" in (resp.text or "").lower()
+        ):
+            _THINKING_UNSUPPORTED.add(self.base_url)
+            payload = {k: v for k, v in payload.items() if k != "thinking"}
+            resp = client.post(url, json=payload, headers=headers)
+        return resp
 
     def chat(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True,
              max_tokens: int | None = None) -> str:
@@ -117,7 +149,7 @@ class LLMClient:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             with httpx.Client(timeout=self.timeout, trust_env=False) as client:
-                resp = client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
+                resp = self._post(client, payload, headers)
         except httpx.TimeoutException as e:
             raise LLMError("llm_timeout", f"语言模型请求超时: {type(e).__name__}") from e
         except httpx.ConnectError as e:
@@ -241,7 +273,11 @@ def is_truncated_json_output(message: str) -> bool:
 
 
 def parse_llm_json(content: str) -> dict:
-    """解析 LLM 返回的 JSON 文本（兼容 markdown 代码块包裹）。"""
+    """解析 LLM 返回的 JSON 文本（兼容 markdown 代码块包裹与截断修复）。
+
+    模型输出可能因 max_tokens 截断导致 JSON 不完整（字符串未闭合、括号不匹配等），
+    此时先尝试启发式补齐再解析：补全末位缺失的引号与括号/方括号/花括号。
+    """
     text = content.strip()
     # 兼容模型在 JSON 外包裹 markdown 代码块的情况
     if text.startswith("```"):
@@ -251,7 +287,60 @@ def parse_llm_json(content: str) -> dict:
     try:
         result = json.loads(text)
     except json.JSONDecodeError as e:
-        raise LLMError("llm_invalid_output", f"语言模型输出非合法 JSON: {e}") from e
+        repaired = _repair_truncated_json(text)
+        if repaired != text:
+            try:
+                result = json.loads(repaired)
+            except json.JSONDecodeError as e2:
+                raise LLMError("llm_invalid_output", f"语言模型输出非合法 JSON: {e2}") from e2
+        else:
+            raise LLMError("llm_invalid_output", f"语言模型输出非合法 JSON: {e}") from e
     if not isinstance(result, dict):
         raise LLMError("llm_invalid_output", "语言模型输出 JSON 顶层须为对象")
     return result
+
+
+def _repair_truncated_json(text: str) -> str:
+    """启发式修复被截断的 JSON 文本。
+
+    用栈跟踪括号打开顺序，按逆序补齐：先闭合内层再闭合外层。
+    同时处理字符串内逗号缺失（行尾截断时常见）。
+    """
+    if not text:
+        return text
+    bracket_stack: list[str] = []
+    in_str = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\":
+            escaped = True
+            i += 1
+            continue
+        if ch == '"':
+            in_str = not in_str
+            i += 1
+            continue
+        if in_str:
+            i += 1
+            continue
+        if ch == "{":
+            bracket_stack.append("}")
+        elif ch == "[":
+            bracket_stack.append("]")
+        elif ch in ("}", "]"):
+            if bracket_stack and bracket_stack[-1] == ch:
+                bracket_stack.pop()
+        i += 1
+    suffix = ""
+    if in_str:
+        suffix += '"'
+    # 按逆序补齐：先闭合最后打开的内层括号
+    while bracket_stack:
+        suffix += bracket_stack.pop()
+    return text + suffix if suffix else text

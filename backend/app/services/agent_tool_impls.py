@@ -9,6 +9,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from app.core.config import get_settings
 from app.models import Asset, Character, Job, Project, Prop, Scene, Shot, Workflow, ids
 from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.services.progress import derive_progress
@@ -1548,7 +1549,7 @@ def tool_script_evaluate(db: Session, project_id: str) -> dict:
         estimate_data = analyze_script_outline(
             text,
             episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
-            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
+            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch),
         )
         report = evaluate_script(text, estimate_data, settings_map)
     except LLMError as e:

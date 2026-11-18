@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.integrations.llm import LLMClient, LLMError
 from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion
@@ -169,7 +170,7 @@ def execute_script_agent_job(job_id: str) -> dict:
         project = db.get(Project, job.project_id)
         settings_map = (project.settings or {}) if project else {}
         episode_duration_target = int(settings_map.get("episode_duration_target", 90))
-        max_per_batch = int(settings_map.get("max_episodes_per_batch", 10))
+        max_per_batch = int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch)
         try:
             outline_data = analyze_script_outline(
                 text,

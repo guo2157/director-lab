@@ -93,6 +93,10 @@ def _settings_to_dict(s) -> dict:
         "llm_api_key_set": bool(s.llm_api_key),
         "llm_model": s.llm_model,
         "llm_timeout_seconds": s.llm_timeout_seconds,
+        # 解析相关预算：max_tokens 与思考链开关、单批集数，前端设置页可直接看到并调
+        "llm_max_tokens": s.llm_max_tokens,
+        "llm_disable_thinking": s.llm_disable_thinking,
+        "max_episodes_per_batch": s.max_episodes_per_batch,
         "render_concurrency": s.render_concurrency,
         "worker_poll_interval_seconds": s.worker_poll_interval_seconds,
         "job_max_attempts": s.job_max_attempts,
@@ -115,6 +119,8 @@ def update_settings_api(payload: dict) -> dict:
     updatable = [
         "comfyui_base_url", "comfyui_timeout_seconds", "comfyui_job_timeout_seconds",
         "llm_provider", "llm_base_url", "llm_model", "llm_timeout_seconds",
+        # 解析预算三件套：此前不在白名单里，前端传了会被静默丢弃（表现为「改了没用」）
+        "llm_max_tokens", "llm_disable_thinking", "max_episodes_per_batch",
         "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
     ]
     for key in updatable:

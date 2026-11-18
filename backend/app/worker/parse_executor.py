@@ -135,8 +135,13 @@ def _upsert_records(db: Session, project_id: str, episode_start: int, episode_co
             )
             db.add(rec)
         if status == "running":
-            # 仅 pending/failed 可进入 running（防重入）
-            if rec.status in ("running", "succeeded"):
+            # pending/failed/retry 可进入 running；succeeded 只随失败批次回退到 failed
+            if rec.status == "running":
+                records.append(rec)
+                continue
+            if rec.status == "succeeded":
+                # 已成功集在后续批次失败时可能被标记为 failed（整体回退），
+                # 但不允许直接进入 running——需先经过 failed 再由重试驱动
                 records.append(rec)
                 continue
             rec.attempt_count = (rec.attempt_count or 0) + 1
@@ -249,7 +254,9 @@ def execute_parse_job(job_id: str) -> dict:
                 try:
                     return client.chat_json(
                         get_prompt("parse_system"), retry_prompt,
-                        max_tokens=min(client.max_tokens * 2, 32768),
+                        # 上限不能等于当前值：max_tokens 已提到 32768 时旧写法
+                        # min(max_tokens*2, 32768) 等于原地重试，重试多少次都同样截断。
+                        max_tokens=min(max(client.max_tokens * 2, 65536), 131072),
                     )
                 except LLMError as retry_exc:
                     # 放大后仍失败：保留首次错误语义（截断比 HTTP 报错更准确）

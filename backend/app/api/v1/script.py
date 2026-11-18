@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import EpisodeParseRecord, Job, ParseVersion, Project, ScriptEstimate, ScriptVersion
 from app.models import ids
@@ -224,7 +225,7 @@ def evaluate_project_script(project_id: str, payload: dict, db: Session = Depend
         estimate_data = analyze_script_outline(
             text,
             episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
-            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
+            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch),
         )
     except LLMError as e:
         raise errors.AppError(e.code, e.message, 502)
@@ -254,7 +255,7 @@ def create_estimate(project_id: str, payload: EstimateCreate,
         result = analyze_script_outline(
             payload.text,
             episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
-            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch", 10)),
+            max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch),
         )
     except LLMError as e:
         raise errors.AppError(e.code, e.message, 502)
