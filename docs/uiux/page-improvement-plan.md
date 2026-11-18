@@ -74,8 +74,8 @@
 | `/series/create` | ✅ | 修必填星号缺失（副标题承诺 `*`，实际全页无星号） |
 | `/series/:id` | ✅ | 修双 primary + 页头文案与实际状态不一致（0 剧集却写「下一集」） |
 | `/series/:id/continue` | ✅ | 两个禁用按钮补真实原因；实测填入后续写要求即恢复可用 |
-| `/episodes/:id/review` | 🟡 | 只能验证错误态：库中该剧集不存在（后端悬空引用，见 §9.3） |
-| `/director` | 🟡 | 空态合格（说明 + 新建入口 + 输入禁用有解释）；有会话态无数据可测，折叠头键盘不可操作属库层面（§8.3） |
+| `/episodes/:id/review` | 🟡 | 只能验证错误态：库中该剧集不存在（后端悬空引用，见 §9.3）。**已在 §10 修复根因并清理数据** |
+| ~~`/director`~~ | ⛔ | **已不再是独立页面**，改为全局「AI 助手」浮动按钮（各页右下角）唤出的侧栏。原路由审查结论作废；折叠头键盘不可操作仍属库层面（§8.3） |
 | `/settings` | ✅ | 侧边导航由纯 `div` 改为可聚焦 `button`，补 `aria-current` 与焦点环 |
 
 ---
@@ -262,3 +262,75 @@ series_episodes 表行数 = 0
 | 剧集审核正常态 | 无可用剧集（见 §9.3），只能验证「剧集不存在」错误态 |
 | 导演台有会话态 | 库中无可用会话 |
 | 合成页空态/失败态 | 仅有 1 条已完成记录 |
+
+
+---
+
+## 10. 第四轮（2026-11-18 晚·续）
+
+### 10.1 解析原文在确认/刷新后仍可查看 + 复制全文
+
+原条件 `v-if="candidateReady && formattedResult"`，而 `candidateReady` 依赖 `parseJob.status === 'succeeded'`，
+`parseJob` 又只来自 Pinia 里的 `flow.parseJobId`。确认解析后 `flow.resetAfterConfirmParse()` 会清空该 id，
+于是**原文块必然消失，刷新后更查不到**——低频但确实需要核对的内容彻底拿不到。
+
+处置：
+
+| 项 | 做法 |
+|---|---|
+| 复用格式化逻辑 | 把 `formattedResult` 的实现抽成 `formatResult(r)`，当前结果与历史结果共用 |
+| 历史结果来源 | 新增只读查询 `listJobs({project_id, job_type:'parse'})`，取最近一次 `succeeded` 且带 `result` 的任务 |
+| 不碰 store | 只算 `rawReportText = 当前结果 \|\| 历史结果`，不再写 `parseJobId`，避免与 `resetAfterConfirmParse` 抢时序 |
+| 复制 | 新增「复制全文」；`navigator.clipboard` 失败时回退 `execCommand`（http 暴露与非用户激活场景都能用） |
+
+实测（`/project/prj_ee9942c5fa42/parse`，该项目的 parseJobId 早已被清空）：
+- 刷新后原文块稳定出现，展开后 335 字符真实内容（角色/道具/场景原文）
+- 点「复制全文」→ 提示「已复制解析全文」，按钮变「已复制」、`aria-label` 同步
+
+> 曾先试过「把 parseJobId 写回 store」的方案，实测页面**时而显示时而消失**——因为与
+> `resetAfterConfirmParse` 的清理逻辑互相打架。已放弃，改为纯只读派生。
+
+### 10.2 后端：删除项目时清理 series 悬空指针
+
+§9.3 记录的「剧集不存在」根因确认：
+
+```
+purge_project() 删除 series_episodes 行，但不清 series.latest_confirmed_episode_id
+                                                          / latest_completed_episode_id
+```
+
+`backend/app/services/project_purge.py` 中补：删完剧集后，把指向这些剧集的 `latest_*` 指针置空。
+
+验证（回滚事务，不落库）：
+
+```
+purge 前 : ('eps_purgeverify01', 'eps_purgeverify01')
+purge 后 : (None, None)
+残留 series_episodes 行数: 0
+RESULT: PASS
+```
+
+回归：`tests/test_series_management.py` 22 passed。
+
+存量数据一并清理（先备份 `data/director_lab.db`）：`srs_03524b9d7a4e` 的悬空
+`latest_confirmed_episode_id` 已置空，清理 1 行。
+
+### 10.3 导演台入口变更
+
+`/director` 不再是独立页面，改为全局「AI 助手」浮动按钮唤出的侧栏。§5 中该行结论作废。
+原「折叠头不可键盘操作」结论对侧栏内的折叠区仍然成立（Naive UI `n-collapse` 无 role/tabindex）。
+
+### 10.4 工程侧：并行 root 会话反复改写文件
+
+本轮再次遇到 `frontend/src/views/project/ParseView.vue` 与 `frontend/dist/` 变为 **root 属主**，
+导致 `patch` 报 `Permission denied`、`vite build` 清空 outDir 失败。
+
+处置：
+
+```bash
+find frontend/src docs -user root -type f
+sudo -n chown -R ubuntu:ubuntu frontend/src frontend/dist
+```
+
+**规则**：任何写入失败先查属主，不要当成工具 bug 重试；改完立刻 commit，避免被下一次 root 写入覆盖。
+本轮 `git checkout -- <file>` 还误删了同文件里未提交的复制按钮改动——回退应精确到片段，不要整文件 checkout。
