@@ -46,7 +46,15 @@ const stepDone = computed(() => stages.map((s) => {
   return idx > maxIdx
 }))
 
-const activeKey = computed(() => route.name as string)
+// 当前步骤：先按路由名直接匹配，未命中时回落到「覆盖该阶段的父步骤」
+// （如 /parse 属于剧本阶段的子页面，应高亮 01 剧本，而不是整列没有高亮）
+const activeKey = computed(() => {
+  const name = route.name as string
+  const direct = stages.find((s) => s.key === name)
+  if (direct) return direct.key
+  const owner = stages.find((s) => (s.stages as readonly string[]).includes(name))
+  return owner?.key ?? name
+})
 
 function goStep(key: string) {
   void router.push(`/project/${props.projectId}/${key}`)
@@ -68,8 +76,10 @@ function goStep(key: string) {
         :class="{ 'is-active': activeKey === s.key, 'is-done': stepDone[i] }"
       >
         <button type="button" class="step-hit" @click="goStep(s.key)">
-          <span class="step-index"><n-icon v-if="stepDone[i]" :component="Checkmark" :size="14" /><template v-else>{{ String(i + 1).padStart(2, '0') }}</template></span>
+          <span class="step-index">{{ String(i + 1).padStart(2, '0') }}</span>
           <span class="step-label">{{ s.label }}</span>
+          <!-- 完成态用行尾勾选标记表示，编号列始终保持 01–05 统一风格 -->
+          <n-icon v-if="stepDone[i]" class="step-done-mark" :component="Checkmark" :size="13" />
         </button>
       </li>
     </ol>
@@ -137,6 +147,7 @@ function goStep(key: string) {
 
 .step-hit {
   appearance: none;
+  position: relative;
   width: 100%;
   background: none;
   border: 0;
@@ -180,6 +191,13 @@ function goStep(key: string) {
   white-space: nowrap;
 }
 
+/* 完成态勾选标记：靠右对齐，编号列保持 01–05 统一 */
+.step-done-mark {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--brand-primary);
+}
+
 .rail-step.is-done .step-index {
   color: var(--brand-primary);
   border-color: var(--brand-deep);
@@ -193,6 +211,18 @@ function goStep(key: string) {
 .rail-step.is-active .step-hit {
   color: var(--text-primary);
   background: var(--bg-panel);
+}
+/* 当前步骤再加一条左侧品牌色竖条：仅靠背景色在深色底上对比太弱，
+   侧栏扫一眼分不清自己在哪一步 */
+.rail-step.is-active .step-hit::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--brand-primary);
 }
 
 .rail-step.is-active .step-index {

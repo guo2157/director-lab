@@ -667,7 +667,7 @@ const resultGroups = computed<
   { key: 'character', label: '角色', count: characters.value.length },
   { key: 'prop', label: '道具', count: props.value.length },
   { key: 'shot', label: '分镜', count: parseShots.value.length },
-  { key: 'dialogue', label: '对白', count: dialogueRows.value.length },
+  { key: 'dialogue', label: '台词', count: dialogueRows.value.length },
   { key: 'audio', label: '音频规划', count: null },
 ])
 const activeGroupLabel = computed(
@@ -973,12 +973,12 @@ async function copyRawReport() {
 
 <template>
   <section class="parse-page">
-    <header class="page-header">
-      <div class="header-left">
+    <header class="parse-header">
+      <div class="parse-header-left">
         <h1 class="visually-hidden">解析</h1>
         <FlowNav :project-id="projectId" />
       </div>
-      <div class="header-actions">
+      <div class="parse-header-actions">
         <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
         <NButton
           v-if="pendingEpisodes.length && !parseJobRunning"
@@ -998,7 +998,7 @@ async function copyRawReport() {
         </NButton>
       </div>
     </header>
-    <div class="page-body">
+    <div class="parse-body">
       <div class="content-pane">
         <!-- 剧本智能分析：状态 + 实时输出 + 真实耗时，统一在一个窗口内 -->
         <section v-if="analysisVisible" class="analysis-card">
@@ -1101,23 +1101,26 @@ async function copyRawReport() {
               <span v-if="g.attempts" class="failure-attempt">已尝试 {{ g.attempts }} 次</span>
             </li>
           </ul>
-          <div class="episode-grid">
-            <div
-              v-for="ep in visibleEpisodes"
-              :key="ep.episode_no"
-              class="episode-cell"
-              :class="`is-${ep.status}`"
-              :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${ep.asset_count ? '，解析出 ' + ep.asset_count + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
-            >
-              <span class="episode-cell-no">第 {{ ep.episode_no }} 集</span>
-              <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? ep.asset_count + ' 个分镜' : statusLabel(ep.status) }}</span>
+          <!-- 集格与状态图例同排：集数少时图例靠右补位，避免右侧整片留白 -->
+          <div class="episode-row">
+            <div class="episode-grid">
+              <div
+                v-for="ep in visibleEpisodes"
+                :key="ep.episode_no"
+                class="episode-cell"
+                :class="`is-${ep.status}`"
+                :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${ep.asset_count ? '，解析出 ' + ep.asset_count + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
+              >
+                <span class="episode-cell-no">第 {{ ep.episode_no }} 集</span>
+                <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? ep.asset_count + ' 个分镜' : statusLabel(ep.status) }}</span>
+              </div>
             </div>
-          </div>
-          <div class="episode-legend">
-            <span class="legend-item"><i class="dot is-pending" />待解析 {{ statusSummary.pending }}</span>
-            <span class="legend-item"><i class="dot is-running" />进行中 {{ statusSummary.running }}</span>
-            <span class="legend-item"><i class="dot is-succeeded" />已完成 {{ statusSummary.succeeded }}</span>
-            <span class="legend-item"><i class="dot is-failed" />失败 {{ statusSummary.failed }}</span>
+            <div class="episode-legend">
+              <span class="legend-item" :class="{ 'is-zero': !statusSummary.pending }"><i class="dot is-pending" />待解析 {{ statusSummary.pending }}</span>
+              <span class="legend-item" :class="{ 'is-zero': !statusSummary.running }"><i class="dot is-running" />进行中 {{ statusSummary.running }}</span>
+              <span class="legend-item" :class="{ 'is-zero': !statusSummary.succeeded }"><i class="dot is-succeeded" />已完成 {{ statusSummary.succeeded }}</span>
+              <span class="legend-item" :class="{ 'is-zero': !statusSummary.failed }"><i class="dot is-failed" />失败 {{ statusSummary.failed }}</span>
+            </div>
           </div>
         </div>
 
@@ -1171,7 +1174,7 @@ async function copyRawReport() {
                 @click="activeGroup = g.key"
               >
                 <span class="group-label">{{ g.label }}</span>
-                <span class="group-count">{{ g.count === null ? '—' : g.count }}</span>
+                <span class="group-count" :class="{ 'is-text': g.count === null }">{{ g.count === null ? '未生成' : g.count }}</span>
               </button>
             </nav>
 
@@ -1341,7 +1344,20 @@ async function copyRawReport() {
   transition: background var(--transition-fast);
 }
 .raw-report-toggle:hover { background: var(--overlay-hover); color: var(--text-primary); }
-.raw-report-caret { margin-left: auto; font-size: 12px; color: var(--text-tertiary); }
+/* 「展开 / 收起」紧跟标题文字，不再被 margin-left:auto 推到整行最右，
+   避免宽屏下标题与状态词之间出现大片空档；同时做成带边框的小胶囊，
+   让它是可点控件而非说明文字 */
+.raw-report-caret {
+  margin-left: 6px;
+  padding: 1px 8px;
+  font-size: 11.5px;
+  line-height: 17px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.raw-report-toggle:hover .raw-report-caret { color: var(--brand-primary); border-color: var(--brand-primary); }
 .raw-report-body {
   margin: 0;
   padding: var(--sp-4);
@@ -1356,25 +1372,36 @@ async function copyRawReport() {
   font-family: var(--font-mono);
 }
 .parse-page {
+  --parse-col-max: 960px;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
-.page-header {
+/* 页头 / 页身：使用页面私有类名，避免命中 global.css 的 .page-header / .page-body
+   （全局 .page-body 带 max-width + margin:0 auto，在 flex 容器里会把内容压成窄柱） */
+.parse-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 16px;
+  /* 左右内边距跟随内容列限宽，让页头两端与卡片边缘对齐，避免页头飘在更外侧 */
+  padding: 10px max(20px, calc((100% - var(--parse-col-max)) / 2));
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
-.header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.parse-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
-.header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.page-body { display: flex; flex: 1; min-height: 0; }
-.content-pane { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+.parse-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.parse-body { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.content-pane { flex: 1; min-width: 0; padding: 24px 20px 40px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+/* 内容列限宽居中：避免超宽屏下卡片内部左右两端（标题 / 操作按钮）被拉开过远。
+   限宽加在卡片自身而非 .content-pane 上，防止 flex:1 + margin:auto 把内容压成窄柱。 */
+.content-pane > * {
+  width: 100%;
+  max-width: var(--parse-col-max);
+  margin-inline: auto;
+}
 /* ===== 剧本智能分析：单一窗口承载状态 / 输出 / 耗时 ===== */
 .analysis-card {
   border: 1px solid var(--border-subtle);
@@ -1478,8 +1505,10 @@ async function copyRawReport() {
 .quick-chip:hover:not(:disabled) { border-color: var(--brand-primary); color: var(--brand-primary); }
 .quick-chip.active { background: var(--brand-soft); border-color: var(--brand-primary); color: var(--brand-primary); }
 .quick-chip:disabled { opacity: 0.4; cursor: not-allowed; }
-.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
-.episode-cell { position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: var(--radius-lg); border: 1px solid transparent; transition: transform 0.15s ease; }
+/* 集格固定宽度流式换行，图例紧跟其后；不用 1fr 拉伸，避免单集时格子被拉宽、图例被推到最右 */
+.episode-row { display: flex; align-items: center; gap: var(--sp-3) var(--sp-6); flex-wrap: wrap; }
+.episode-grid { display: flex; flex-wrap: wrap; gap: 12px; min-width: 0; }
+.episode-cell { flex: 0 0 140px; width: 140px; position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: var(--radius-lg); border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
 .episode-cell-no { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
 .episode-cell-meta { font-size: 14px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
@@ -1490,20 +1519,25 @@ async function copyRawReport() {
 .episode-cell.is-succeeded { background: var(--success-soft); color: var(--state-success); border-color: var(--success-line); }
 .episode-cell.is-failed { background: var(--danger-soft); color: var(--brand-error); border-color: var(--danger-line); }
 /* 失败原因统一在顶部失败面板展示，集格内不再重复重试入口 */
-.episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary); }
+.episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary); flex: none; }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
+/* 计数为 0 的状态降权：色点去饱和、文字转弱，避免「失败 0」的红点抢视觉焦点 */
+.legend-item.is-zero { opacity: 0.5; }
+.legend-item.is-zero .dot { background: var(--neutral-line) !important; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.is-pending { background: var(--neutral-line); }
 .dot.is-running { background: var(--brand-primary); }
 .dot.is-succeeded { background: var(--success-line); }
 .dot.is-failed { background: var(--brand-error); }
 @media (max-width: 768px) {
-  .episode-grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
-  .page-header { flex-wrap: wrap; gap: var(--sp-2); padding: 10px 12px; }
-  .header-left { width: 100%; }
+  .episode-cell { flex: 0 0 88px; width: 88px; min-height: 68px; padding: 10px 6px; }
+  .episode-cell-no { font-size: 14px; }
+  .episode-cell-meta { font-size: 12px; }
+  .parse-header { flex-wrap: wrap; gap: var(--sp-2); padding: 10px 12px; }
+  .parse-header-left { width: 100%; }
   /* 移动端操作区独占一行，按钮等分宽度，避免第三个按钮被裁切 */
-  .header-actions { width: 100%; flex-wrap: nowrap; gap: var(--sp-2); }
-  .header-actions > * { flex: 1 1 0; min-width: 0; }
+  .parse-header-actions { width: 100%; flex-wrap: nowrap; gap: var(--sp-2); }
+  .parse-header-actions > * { flex: 1 1 0; min-width: 0; }
   .ac-head { flex-wrap: wrap; }
   .ac-meta { flex-wrap: wrap; row-gap: 2px; }
   .ac-actions { flex-wrap: wrap; }
@@ -1511,9 +1545,9 @@ async function copyRawReport() {
   .content-pane { padding: var(--sp-4) var(--sp-3); gap: var(--sp-4); }
 }
 
-/* 解析结果总览：场景清单 + 角色 / 道具 chips */
+/* 解析结果总览：场景清单 + 角色 / 道具 chips
+   卡片间距统一由 .content-pane 的 gap 控制，这里不再叠加 margin-top */
 .result-panel {
-  margin-top: var(--sp-3);
   padding: var(--sp-4);
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
@@ -1633,6 +1667,8 @@ async function copyRawReport() {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
+/* 无数字的占位（如「音频规划 未生成」）用更小的字号，避免和真实计数一样抢眼 */
+.group-count.is-text { font-size: 10.5px; letter-spacing: 0.02em; }
 .group-item.is-active .group-count { color: var(--brand-hover); }
 .group-pane { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .pane-empty { margin: 0; padding: var(--sp-4) 0; font-size: 12.5px; color: var(--text-tertiary); }
