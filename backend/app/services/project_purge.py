@@ -284,6 +284,18 @@ def purge_project(db: Session, project_id: str) -> dict:
             delete(series_episodes).where(series_episodes.c.project_id == project_id),
             "series_episode",
         )
+        # 系列上的 latest_* 指针会指向被删掉的剧集，必须一并清空，
+        # 否则 /series/:id 与 /episodes/:id/review 会拿到悬空 episode_id（报「剧集不存在」）。
+        if episode_ids:
+            series_tbl = tables.get("series")
+            if series_tbl is not None:
+                for col in ("latest_confirmed_episode_id", "latest_completed_episode_id"):
+                    if col in series_tbl.columns:
+                        db.execute(
+                            series_tbl.update()
+                            .where(series_tbl.c[col].in_(episode_ids))
+                            .values({col: None})
+                        )
 
     # ══ 13. Agent 链路：Message / Task → Session ════════════════
     _delete(
