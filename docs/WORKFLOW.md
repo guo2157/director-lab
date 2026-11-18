@@ -55,6 +55,8 @@
 | frames | 帧数 | $frames | 否 |
 | tts_text | 配音文本 | $tts_text! | 是（TTS） |
 | length | 视频目标帧数（H3 本地节点；124–362，步长 17，offset 5，fps=24） | $length.value | 否 |
+| ref_audio_0 / ref_audio_1 / ref_audio_2 | H3 参考音频：本镜已审核的对白/旁白，按说话人各一条 | $ref_audio_N.~audio | 否 |
+| tts_lang | TTS 语种（如 Chinese） | $tts_lang | 否 |
 
 ## 4. 输出约定（P0）
 
@@ -489,9 +491,28 @@ shot.duration    → $duration_hint（目标时长）
 6. **文件缺失处理**：参考图文件不存在时跳过该槽位并记录 `file_missing`，不阻断生成。
 7. **提示词 @名称 语法**：分镜图/视频定义提示词用 `@角色名`/`@场景名` 引用（@引用解析可携带参考图）；`ref_image`（本镜分镜图）与 `ref_prev_frame`（上一镜末帧）为系统保留槽，提示词中不写 @ 引用。
 
-## 13. 标准工作流清单（随文交付，9 份）
+## 13. 标准工作流清单（随文交付）
 
-标准工作流文件位于 `backend/data/workflows/` 目录，均为 ComfyKit API 格式；大部分附带 `.meta.json` 能力声明，例外情况见清单内标注：
+### 13.0 当前实际清单（2026-11-18 核对，以本节为准）
+
+`backend/data/workflows/` 实存 **10 份**工作流 + 10 份 `.meta.json`，均已在 `workflow` 表注册（`is_builtin=1`）：
+
+| 文件 | workflow_type | 槽位 | 输出标记 | 说明 |
+| --- | --- | --- | --- | --- |
+| `wf_image_t2i_qwen21_turbo.json` | image | 0 | `$output.cover` | 纯文生图（定妆图/基准图/锚定图） |
+| `wf_image_ref_qwen21_multi.json` | image | 9 图 | `$output.cover` | 多参考图出图（默认，`trigger.priority=20`） |
+| `wf_video_h3_ref2va_fast_5s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 极速档，`capabilities.tier=fast_5s`，480×864 |
+| `wf_video_h3_ref2va_std_5s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 标准档，`tier=std_5s`，640×1120（日常出片） |
+| `wf_video_h3_ref2va_quality_10s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 质量档，`tier=quality_10s`，768×1344 |
+| `wf_video_h3_flf2v.json` | video | 首帧 + 尾帧 | `$output.clip` | 首尾帧生视频（跨集连续性） |
+| `wf_video_h3_t2v.json` | video | 0 | `$output.clip` | 纯文生视频（参考图全空时的降级路径） |
+| `wf_tts_qwen3_custom_voice.json` | tts | — | `$output.voice` | Qwen3 预设音色（`voice_mode=preset`） |
+| `wf_tts_qwen3_voice_clone.json` | tts | 1 音频 | `$output.voice` | Qwen3 音色克隆（`voice_mode=clone_reference_audio`） |
+| `wf_bgm_stable_audio.json` | bgm | — | `$output.bgm` | Stable Audio Open |
+
+> 第 13.1 节起的分档说明与 §13 旧表为 2026-10 交付快照，仅作历史参考；文件名/份数/槽位以本节为准。SFX 工作流仍未交付。
+
+### 13.0.1 历史快照（2026-10，逐步淘汰）
 
 | 文件 | target / workflow_type | 说明 | required_params | priority |
 | --- | --- | --- | --- | --- |

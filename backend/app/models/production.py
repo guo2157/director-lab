@@ -72,6 +72,37 @@ class Workflow(TimestampMixin, Base):
     parsed_schema: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    # P2：当前生效版本指针 + 生命周期状态（draft/published/disabled）
+    current_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="published", server_default="published")
+    validation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
+    runtime_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
+
+
+class WorkflowVersion(Base):
+    """工作流版本：定义一经发布不可修改（P2，补 docs/API.md:431 的承诺）。
+
+    历史任务用 `job.workflow_version`（整数）+ 本表 `unique(workflow_id, version)`
+    精确定位当时的定义，因此修改工作流不会再改变历史任务的语义。
+    """
+
+    __tablename__ = "workflow_version"
+    __table_args__ = (UniqueConstraint("workflow_id", "version", name="uq_workflow_version_wf_version"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(String(32), ForeignKey("workflow.id"), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    definition: Mapped[dict] = mapped_column(JSON, nullable=False)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parsed_schema: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    schema_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    parser_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    validation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
+    runtime_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
+    dependency_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    changelog: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class Job(Base):

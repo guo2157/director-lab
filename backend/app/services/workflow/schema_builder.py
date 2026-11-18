@@ -234,7 +234,12 @@ def build_schema(definition: dict, *, capabilities: dict | None = None,
 
 
 def public_schema(schema: dict | None) -> dict:
-    """对外 Schema：参数字典转数组、剥离节点绑定（前端不需要也不允许知道 node_id）。"""
+    """对外 Schema：参数字典转数组、剥离节点绑定、按模态分组（P2）。
+
+    - `parameters`：标量/文本参数（动态表单主体）
+    - `reference_inputs` / `audio_inputs` / `video_inputs`：按 media_type 分组的槽位
+    - `params`：全量平铺数组，保留给旧消费方（前端改造完成后可移除）
+    """
     schema = schema or {}
     params = []
     for name, param in (schema.get("params") or {}).items():
@@ -242,6 +247,10 @@ def public_schema(schema: dict | None) -> dict:
         item.setdefault("key", name)
         params.append(item)
     params.sort(key=lambda p: (int(p.get("order") or 90), str(p.get("key"))))
+
+    def _media(kind: str) -> list[dict]:
+        return [p for p in params if p.get("type") == kind]
+
     outputs = [
         {k: v for k, v in out.items() if k != "node_id"}
         for out in (schema.get("outputs") or [])
@@ -249,6 +258,10 @@ def public_schema(schema: dict | None) -> dict:
     return {
         "schema_version": schema.get("schema_version") or SCHEMA_VERSION,
         "parser_version": schema.get("parser_version") or PARSER_VERSION,
+        "parameters": [p for p in params if p.get("type") not in ("image", "audio", "video")],
+        "reference_inputs": _media("image"),
+        "audio_inputs": _media("audio"),
+        "video_inputs": _media("video"),
         "params": params,
         "outputs": outputs,
         "errors": list(schema.get("errors") or []),

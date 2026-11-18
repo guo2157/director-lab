@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import Workflow
 from app.services.workflow_inject import parse_workflow
+from app.services.workflow import versions as versions_svc
 from app.services.workflow.schema_builder import build_schema
 
 settings = get_settings()
@@ -93,10 +94,13 @@ def seed():
                 existing.original_filename = wf_path.name
                 existing.file_hash = file_hash
                 existing.is_builtin = True
-                existing.version = (existing.version or 0) + 1
+                # P2：定义变化生成不可变版本并发布，不再原地只加版本号
+                versions_svc.create_version(
+                    db, existing, definition, changelog="seed 更新", publish=True
+                )
                 updated += 1
             else:
-                db.add(Workflow(
+                wf_row = Workflow(
                     name=name,
                     original_filename=wf_path.name,
                     file_hash=file_hash,
@@ -106,10 +110,15 @@ def seed():
                     capabilities=capabilities,
                     definition=definition,
                     parsed_schema=parsed_schema,
-                    version=1,
+                    version=0,
                     is_default=False,
                     is_builtin=True,
-                ))
+                )
+                db.add(wf_row)
+                db.flush()
+                versions_svc.create_version(
+                    db, wf_row, definition, changelog="seed 导入", publish=True
+                )
                 created += 1
         db.commit()
         print(f"[done] 新增 {created}，更新 {updated}，未变化 {unchanged}，共 {created + updated + unchanged}")

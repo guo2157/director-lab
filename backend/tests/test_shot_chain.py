@@ -93,7 +93,10 @@ def _make_video_workflow(client, name="v-wf"):
         data={"name": name, "workflow_type": "video"},
         files={"file": (
             f"{name}.json",
+            # P1 起上传会做静态校验：工作流必须带 $output.* 标记（WORKFLOW.md §2 P0），
+            # 故测试夹具补一个 $output.clip，而不是放宽校验
             json.dumps({"1": {"class_type": "EmptyLatentImage",
+                               "_meta": {"title": "$output.clip"},
                                "inputs": {"width": 512, "height": 288, "batch_size": 1}}}),
             "application/json",
         )},
