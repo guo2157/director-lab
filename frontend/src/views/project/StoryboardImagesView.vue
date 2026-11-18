@@ -5,6 +5,7 @@ import { useQuery, useMutation } from '@tanstack/vue-query'
 import { NButton, NProgress, useMessage } from 'naive-ui'
 import { listScenes, listSceneShots, confirmShotKeyframe, unconfirmShotKeyframe } from '@/api/script'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
+import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { lockAsset, unlockAsset, replaceAsset } from '@/api/assets'
 import { getProject } from '@/api/projects'
@@ -204,7 +205,11 @@ async function retryFailedShots() {
   if (!ids.length) return
   retryingFailed.value = true
   try {
-    await generateProjectShots(projectId.value, { shot_ids: ids, target: 'keyframe' })
+    await generateProjectShots(projectId.value, {
+    shot_ids: ids,
+    target: 'keyframe',
+    workflow_id: generateWorkflowId.value,
+  })
     message.success(`已重新提交 ${ids.length} 张失败分镜图`)
     refreshAll()
     await trackAfterSubmit()
@@ -221,9 +226,20 @@ void keyframeProgress.bootstrap()
 /** 正在提交的镜头：主按钮即时反馈，避免重复点击 */
 const pendingShotId = ref('')
 
+/**
+ * 本页出图工作流（P5-c）：缺省 null 时后端按能力/默认匹配；
+ * 选中后单张与批量都带上 workflow_id，参数仍由后端 Schema 编译，前端不碰节点。
+ * 只列 image 类型，能力标签由 /capabilities 提供（不按名称猜）。
+ */
+const generateWorkflowId = ref<string | undefined>(undefined)
+
 const generateMutation = useMutation({
   mutationFn: (payload: { shotId: string; params?: Record<string, string> }) =>
-    generateShot(payload.shotId, { target: 'keyframe', params: payload.params } as GenerateShotPayload),
+    generateShot(payload.shotId, {
+      target: 'keyframe',
+      params: payload.params,
+      workflow_id: generateWorkflowId.value,
+    } as GenerateShotPayload),
   onSuccess: async () => {
     message.success('分镜图生成任务已提交，正在生成（进度见顶部进度条）')
     // 提交后立即建立在途基线并轮询，全部结束后提示「全部分镜图已生成完成」
@@ -549,6 +565,16 @@ function onFirstGenerate(shot: Shot, prompt: string) {
     </section>
 
     <!-- 批量操作：吸附在顶部，滚动 26 个镜头时也不跑掉 -->
+    <div class="wf-bar">
+      <span class="wf-bar-label">出图工作流</span>
+      <WorkflowSelector
+        v-model="generateWorkflowId"
+        workflow-type="image"
+        size="small"
+        placeholder="缺省按能力自动匹配"
+      />
+    </div>
+
     <BatchToolbar
       :total="allShots.length"
       :selected="selectedList.length"
@@ -638,6 +664,17 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 </template>
 
 <style scoped>
+.wf-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.wf-bar-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
 .sb-images-page {
   min-height: calc(100vh - var(--app-header-height, 52px));
 }
