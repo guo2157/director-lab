@@ -5,6 +5,7 @@ import { NButton, NDropdown, NProgress, NTag } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import type { CreationType, Project } from '@/types/project'
 import { stageLabel } from '@/constants/stages'
+import { relativeTime } from '@/utils/time'
 
 const props = defineProps<{
   project: Project
@@ -49,18 +50,6 @@ const percent = computed(() =>
 )
 /** 当前真实生产阶段（后端 current_stage 派生），未知枚举原样显示 */
 const stageText = computed(() => stageLabel(props.project.current_stage))
-
-function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} 天前`
-  return new Date(iso).toLocaleDateString('zh-CN')
-}
 
 const menuOptions = computed<DropdownOption[]>(() => [
   { key: 'copy', label: '复制（后续版本支持）', disabled: true },

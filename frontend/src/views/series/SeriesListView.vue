@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { NButton, NEmpty, NInput, NPagination, NSelect, NSpin, NTag, useMessage } from 'naive-ui'
 import { archiveSeries, listSeries, unarchiveSeries } from '@/api/series'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import { relativeTime } from '@/utils/time'
 
 const router = useRouter()
 const confirmDialog = useConfirmDialog()
@@ -131,6 +132,9 @@ function onSearch() {
             <span>未解决剧情线 {{ item.open_plot_thread_count }}</span>
             <span>设定 v{{ item.bible_version }}</span>
           </div>
+          <p class="updated" :title="new Date(item.updated_at).toLocaleString('zh-CN')">
+            更新于 {{ relativeTime(item.updated_at) }}
+          </p>
           <div class="card-actions" @click.stop>
             <n-button size="small" @click="openSeries(item.id)">进入</n-button>
             <n-button
@@ -259,10 +263,15 @@ function onSearch() {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2) var(--sp-3);
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-1);
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.updated {
+  margin: 0 0 var(--sp-3);
   font-size: 11px;
   color: var(--text-tertiary);
 }
