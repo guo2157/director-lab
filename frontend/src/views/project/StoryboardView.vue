@@ -596,10 +596,10 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           排队/等待前序 {{ queuedClipCount }}
         </span>
         <span v-if="estimatedWaitText" class="gen-state">预计剩余 {{ estimatedWaitText }}</span>
-        <span v-if="clipProgress.data.value?.all_done" class="gen-state ok">
-          全部分镜视频已生成完成<template v-if="clipProgress.data.value?.last_completed_at">（最近完成于 {{ new Date(clipProgress.data.value.last_completed_at).toLocaleTimeString('zh-CN', { hour12: false }) }}）</template>
+        <span v-if="clipProgress.data.value?.all_done && clipProgress.data.value?.last_completed_at" class="gen-state ok">
+          最近完成于 {{ new Date(clipProgress.data.value.last_completed_at).toLocaleTimeString('zh-CN', { hour12: false }) }}
         </span>
-        <span v-else-if="allShots.length" class="gen-state">未生成 {{ allShots.length - clipsDoneCount }}</span>
+        <span v-else-if="allShots.length && !clipProgress.data.value?.all_done" class="gen-state">未生成 {{ allShots.length - clipsDoneCount }}</span>
         <span v-if="failedClipByShot.size" class="gen-state fail">
           最近失败 {{ failedClipByShot.size }} 个
         </span>
@@ -631,7 +631,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       <span class="gate-text">
         {{ readiness.all ? '公共资产已齐全，可生成分镜图与分镜视频' : `公共资产未齐全：${readiness.done}/${readiness.total}，生成分镜图前请先在资产库完成生成` }}
       </span>
-      <n-button size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
+      <n-button v-if="!readiness.all" size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
       <n-checkbox
         :checked="allShotsSelected"
         :disabled="!allShots.length"
@@ -646,12 +646,17 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       />
       <n-button
         size="medium"
-        type="primary"
+        :type="clipsDone ? 'default' : 'primary'"
         :disabled="!readiness.all || !selectedShotIds.length"
         :loading="batchClipMutation.isPending.value"
         @click="handleBatchClip"
       >批量出视频（{{ selectedShotIds.length }}）</n-button>
-      <n-button size="small" type="primary" :disabled="!clipsDone" @click="router.push(`/project/${projectId}/compose`)">去合成导出</n-button>
+      <n-button
+        size="small"
+        :type="clipsDone ? 'primary' : 'default'"
+        :disabled="!clipsDone"
+        @click="router.push(`/project/${projectId}/compose`)"
+      >去合成导出</n-button>
     </div>
     <!-- Loading -->
     <n-spin v-if="scenesQuery.isLoading.value" class="page-loading" />
@@ -699,6 +704,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               <div class="shot-card" @click="openShotDetail(shot)">
                 <n-checkbox
                   class="shot-check"
+                  :label="`选择镜头 ${shotGlobalSeq(shot)}`"
                   :checked="selectedShotIds.includes(shot.id)"
                   @update:checked="(v: boolean) => toggleShot(shot.id, v)"
                   @click.stop
@@ -926,6 +932,18 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   background: var(--overlay-active);
   border-radius: var(--radius);
   padding: 2px;
+}
+/* label 只为提供可访问名（aria-labelledby 引用它），视觉上不显示 */
+.shot-check :deep(.n-checkbox__label) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 .shot-thumb {
   width: 100%;
