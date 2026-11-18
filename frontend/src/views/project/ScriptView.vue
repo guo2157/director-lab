@@ -265,6 +265,17 @@ watch(
       text.value = sv.text ?? ''
       flow.scriptVersionId = sv.script_version_id
       flow.scriptText = sv.text ?? ''
+      // 刷新或重新进入页面时恢复已保存版本状态：
+      // 否则 savedVersion 恒为 null，「开始分析」按钮一直禁用，点击无任何反应。
+      if (!savedVersion.value) {
+        savedVersion.value = {
+          script_version_id: sv.script_version_id,
+          version: sv.version ?? 0,
+          content_hash: '',
+          created_at: '',
+        }
+        stage.value = 'saved'
+      }
     }
   },
   { immediate: true },
