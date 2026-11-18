@@ -126,6 +126,26 @@ def list_sessions(
     }
 
 
+@router.post("/{session_id}/auto-title")
+def auto_title_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+    """按首轮对话自动生成会话标题（幂等）。
+
+    仅当标题仍为默认值（『新会话』等）时生效；用户手动命名过的不覆盖。
+    LLM 不可用时降级为本地摘要，不会失败。前端在首条消息返回后调用。
+    """
+    s = _get_session(db, session_id)
+    from app.services.session_title import generate_session_title, is_default_title
+
+    if not is_default_title(s.title):
+        return {"id": s.id, "title": s.title, "renamed": False}
+
+    # LLM 调用在事务之外执行（服务内部用独立短事务写回）
+    title = generate_session_title(session_id)
+    if title is None:
+        return {"id": s.id, "title": s.title, "renamed": False}
+    return {"id": s.id, "title": title, "renamed": True}
+
+
 @router.get("/{session_id}")
 def get_session(session_id: str, db: Session = Depends(get_db)) -> AgentSessionOut:
     return _session_out(db, _get_session(db, session_id))

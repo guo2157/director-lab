@@ -3,10 +3,18 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { NButton, NIcon, NInput, NSelect, NSpin, NTag } from 'naive-ui'
-import { AddOutline, CloseOutline, SparklesOutline } from '@vicons/ionicons5'
+import {
+  AddOutline,
+  CheckmarkOutline,
+  CloseOutline,
+  CreateOutline,
+  SparklesOutline,
+  TrashOutline,
+} from '@vicons/ionicons5'
 import { storeToRefs } from 'pinia'
 import type { AgentApproval, AgentMessage } from '@/api/agent'
 import { useAgentStore } from '@/stores/agent'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { navigateFromPayload } from '@/services/workspaceNavigation'
 
 const route = useRoute()
@@ -28,6 +36,7 @@ const {
   approvalBusyId,
   sessionOptions,
   pendingApprovals,
+  archivedSessions,
 } = storeToRefs(agent)
 
 /** 输入草稿同步到 store，收起面板后不丢 */
@@ -40,6 +49,92 @@ const inputText = computed({
 
 const scrollEl = ref<HTMLElement | null>(null)
 const showApprovals = ref(false)
+
+/** 会话重命名内联编辑态 */
+const renaming = ref(false)
+const renameText = ref('')
+const renameInput = ref<{ focus: () => void } | null>(null)
+const confirm = useConfirmDialog()
+
+/** 已归档会话（「最近删除」）：默认折叠，展开才拉取 */
+const showArchived = ref(false)
+const restoringId = ref<string | null>(null)
+
+async function toggleArchived() {
+  showArchived.value = !showArchived.value
+  if (showArchived.value) await agent.loadArchivedSessions()
+}
+
+async function restoreOne(id: string) {
+  restoringId.value = id
+  try {
+    await agent.restoreArchived(id)
+    tip.success('会话已恢复')
+    if (!agent.archivedSessions.length) showArchived.value = false
+  } catch (e) {
+    tip.error(`恢复失败：${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    restoringId.value = null
+  }
+}
+
+function startRename() {
+  const cur = sessions.value.find((s) => s.id === activeSessionId.value)
+  if (!cur) return
+  renameText.value = cur.title
+  renaming.value = true
+  nextTick(() => renameInput.value?.focus())
+}
+
+function cancelRename() {
+  renaming.value = false
+  renameText.value = ''
+}
+
+/** 提交重命名：空值/未变化时静默退出（不打扰用户） */
+async function commitRename() {
+  if (!renaming.value) return
+  const id = activeSessionId.value
+  const next = renameText.value.trim()
+  const cur = sessions.value.find((s) => s.id === id)
+  if (!id || !next || (cur && cur.title === next)) {
+    cancelRename()
+    return
+  }
+  renaming.value = false
+  try {
+    await agent.renameSession(id, next)
+    tip.success('已重命名')
+  } catch (e) {
+    tip.error(`重命名失败：${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+/** 删除会话：软删除（归档），消息保留供审计，故文案写「归档」而非「永久删除」 */
+function confirmDelete() {
+  const id = activeSessionId.value
+  const cur = sessions.value.find((s) => s.id === id)
+  if (!id || !cur) return
+  confirm({
+    title: '删除会话',
+    message: `确定要删除会话「${cur.title}」吗？`,
+    impact: [
+      `${cur.message_count} 条消息将归档`,
+      '归档后不再出现在会话列表',
+      '不会删除项目、资产或生成产物',
+    ],
+    confirmText: '删除',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await agent.removeSession(id)
+        tip.success('会话已删除')
+      } catch (e) {
+        tip.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+  })
+}
 
 /** 空态引导：三条常用指令，点击即填入输入框（不直接发送，避免误触发写操作） */
 const starterPrompts = [
@@ -233,18 +328,93 @@ function onHotkey(e: KeyboardEvent) {
       </div>
     </header>
 
-    <!-- 会话切换独立成行，不再挤占标题行 -->
+    <!-- 会话切换独立成行，不再挤占标题行；重命名 / 删除常驻可见（不折进 ⋯） -->
     <div class="agent-session-bar">
-      <NSelect
-        :value="activeSessionId"
-        :options="sessionOptions"
-        :loading="sessionsLoading"
-        size="small"
-        placeholder="选择会话"
-        class="agent-session-select"
-        @update:value="switchSession"
-      />
+      <template v-if="renaming">
+        <NInput
+          ref="renameInput"
+          v-model:value="renameText"
+          size="small"
+          maxlength="40"
+          placeholder="会话名称"
+          @keydown.enter.prevent="commitRename"
+          @keydown.esc.prevent="cancelRename"
+          @blur="commitRename"
+        />
+        <div class="agent-session-tools">
+          <button type="button" class="agent-icon-btn" aria-label="保存名称" title="保存（Enter）" @mousedown.prevent @click="commitRename">
+            <NIcon :component="CheckmarkOutline" :size="16" />
+          </button>
+          <button type="button" class="agent-icon-btn" aria-label="取消重命名" title="取消（Esc）" @mousedown.prevent @click="cancelRename">
+            <NIcon :component="CloseOutline" :size="16" />
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <NSelect
+          :value="activeSessionId"
+          :options="sessionOptions"
+          :loading="sessionsLoading"
+          size="small"
+          placeholder="选择会话"
+          class="agent-session-select"
+          @update:value="switchSession"
+        />
+        <div class="agent-session-tools">
+          <button
+            type="button"
+            class="agent-icon-btn"
+            :disabled="!activeSessionId"
+            aria-label="重命名会话"
+            title="重命名会话"
+            @click="startRename"
+          >
+            <NIcon :component="CreateOutline" :size="16" />
+          </button>
+          <button
+            type="button"
+            class="agent-icon-btn is-danger"
+            :disabled="!activeSessionId"
+            aria-label="删除会话"
+            title="删除会话"
+            @click="confirmDelete"
+          >
+            <NIcon :component="TrashOutline" :size="16" />
+          </button>
+        </div>
+      </template>
     </div>
+
+    <!-- 已归档会话（低频只读）：折叠在会话条下方，不占常驻空间。
+         必须无条件渲染切换按钮——若用 v-if="archivedSessions.length" 包住整块，
+         首次进入（未加载、长度为 0）按钮不出现，用户永远无法打开列表，形成死锁。 -->
+    <section class="agent-archived">
+      <button
+        type="button"
+        class="agent-archived-toggle"
+        :aria-expanded="showArchived"
+        @click="toggleArchived"
+      >
+        <span>
+          已删除{{ archivedSessions.length ? ` ${archivedSessions.length} 个` : '' }}会话
+        </span>
+        <span class="chev" aria-hidden="true">{{ showArchived ? '▾' : '▸' }}</span>
+      </button>
+      <div v-show="showArchived" class="agent-archived-list">
+        <p v-if="!archivedSessions.length" class="agent-archived-none">没有已删除的会话</p>
+        <div v-for="s in archivedSessions" :key="s.id" class="agent-archived-item">
+          <span class="agent-archived-title" :title="s.title">{{ s.title }}</span>
+          <button
+            type="button"
+            class="agent-restore"
+            :disabled="restoringId === s.id"
+            @click="restoreOne(s.id)"
+          >
+            {{ restoringId === s.id ? '恢复中…' : '恢复' }}
+          </button>
+        </div>
+      </div>
+    </section>
 
     <div ref="scrollEl" class="agent-stream">
       <div v-if="messagesLoading" class="agent-state"><NSpin size="small" /></div>
@@ -444,7 +614,8 @@ function onHotkey(e: KeyboardEvent) {
   flex-shrink: 0;
 }
 
-/* 纯图标按钮：28×28 触控区，与全站一致 */
+/* 纯图标按钮：28×28 触控区，与全站一致。
+   用 --text-secondary 而非 --text-tertiary：这是可点击控件，tertiary 语义属于辅助文字。 */
 .agent-icon-btn {
   display: flex;
   align-items: center;
@@ -456,7 +627,7 @@ function onHotkey(e: KeyboardEvent) {
   background: none;
   border: 0;
   border-radius: var(--radius);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: color var(--transition-fast), background var(--transition-fast);
 }
@@ -473,13 +644,145 @@ function onHotkey(e: KeyboardEvent) {
 
 /* 会话切换条：独立一行，下拉不再挤压标题与操作 */
 .agent-session-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   flex-shrink: 0;
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .agent-session-select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 会话操作：重命名 / 删除常驻可见（用户规则：常用写操作不折进 ⋯） */
+.agent-session-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
+
+.agent-icon-btn:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+  background: none;
+}
+
+/* 删除按钮：默认与其它图标同色，悬停才转危险色——避免面板长期带红色警示 */
+.agent-icon-btn.is-danger:hover:not(:disabled) {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+
+/* ── 已归档会话（最近删除）──
+   低频只读，折叠在会话条下方：默认一行文字，展开才列出可恢复项。
+   不做常驻横条——那会长期占用面板纵向空间。 */
+.agent-archived {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-sunken);
+}
+
+.agent-archived-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
+  /* 高度撑到 28px 满足最小触控区（DESIGN.md §7），不能只靠文字行高 */
+  min-height: 28px;
+  padding: var(--sp-1) var(--sp-3);
+  appearance: none;
+  background: none;
+  border: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.agent-archived-toggle:hover {
+  color: var(--text-primary);
+}
+
+.agent-archived-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.agent-archived-toggle .chev {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.agent-archived-list {
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 0 var(--sp-3) var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.agent-archived-none {
+  margin: 0;
+  padding: var(--sp-1) 0;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.agent-archived-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.agent-archived-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-restore {
+  flex-shrink: 0;
+  padding: 2px var(--sp-2);
+  appearance: none;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.agent-restore:hover:not(:disabled) {
+  color: var(--brand-primary);
+  border-color: var(--brand-line);
+}
+
+.agent-restore:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.agent-restore:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 /* ── 消息流 ── */

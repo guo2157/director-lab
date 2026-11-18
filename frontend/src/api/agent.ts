@@ -72,6 +72,16 @@ export function archiveSession(id: string) {
   return del<{ id: string; status: string }>(`/agent/sessions/${id}`)
 }
 
+/**
+ * 按首轮对话自动生成会话标题（幂等）。
+ * 仅当标题仍为默认值「新会话」时生效；用户手动命名过的不覆盖。
+ */
+export function autoTitleSession(id: string) {
+  return post<{ id: string; title: string; renamed: boolean }>(
+    `/agent/sessions/${id}/auto-title`,
+  )
+}
+
 /** 恢复归档会话 */
 export function restoreSession(id: string) {
   return post<AgentSession>(`/agent/sessions/${id}/restore`)

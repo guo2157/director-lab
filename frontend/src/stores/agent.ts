@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
+  autoTitleSession,
   createSession,
   executeApproval,
   listApprovals,
@@ -8,6 +9,9 @@ import {
   listReviews,
   listSessions,
   resolveApproval,
+  archiveSession,
+  restoreSession,
+  updateSession,
 } from '@/api/agent'
 import type { AgentApproval, AgentMessage, AgentSession, ReviewCard } from '@/api/agent'
 import { post } from '@/api/client'
@@ -167,6 +171,69 @@ export const useAgentStore = defineStore('agent', () => {
     return s
   }
 
+  /** 重命名会话（用户手动命名后，自动命名不再覆盖） */
+  async function renameSession(id: string, title: string): Promise<void> {
+    const next = title.trim()
+    if (!next) return
+    const updated = await updateSession(id, { title: next })
+    const cur = sessions.value.find((s) => s.id === id)
+    if (cur) cur.title = updated.title
+  }
+
+  /**
+   * 归档（软删除）会话：后端仅置 status=archived，消息保留供审计。
+   * 删掉的是当前会话时，自动切到剩余的第一个，没有则清空选中态。
+   */
+  async function removeSession(id: string): Promise<void> {
+    await archiveSession(id)
+    const wasActive = activeSessionId.value === id
+    await loadSessions()
+    if (wasActive) {
+      activeSessionId.value = sessions.value[0]?.id ?? null
+      if (activeSessionId.value) await switchSession(activeSessionId.value)
+      else {
+        messages.value = []
+        approvals.value = []
+        reviewCards.value = []
+      }
+    }
+  }
+
+  /**
+   * 首轮对话后按内容自动命名。只在标题仍为默认值时生效（后端判定），
+   * 失败静默——命名是锦上添花，不影响聊天。
+   */
+  async function autoTitle(id: string): Promise<void> {
+    try {
+      const res = await autoTitleSession(id)
+      if (!res.renamed) return
+      const cur = sessions.value.find((s) => s.id === id)
+      if (cur) cur.title = res.title
+    } catch {
+      // 命名失败不影响聊天流程
+    }
+  }
+
+  /** 归档会话列表（「最近删除」，供恢复入口用） */
+  const archivedSessions = ref<AgentSession[]>([])
+
+  async function loadArchivedSessions(): Promise<void> {
+    try {
+      const res = await listSessions({ include_archived: true, page_size: 100 })
+      archivedSessions.value = (res.items ?? []).filter((s) => s.status === 'archived')
+    } catch {
+      archivedSessions.value = []
+    }
+  }
+
+  /** 恢复归档会话：恢复后切到该会话 */
+  async function restoreArchived(id: string): Promise<void> {
+    await restoreSession(id)
+    await loadSessions()
+    await loadArchivedSessions()
+    await switchSession(id)
+  }
+
   /**
    * 发送消息。返回 assistant 消息便于调用方处理导航。
    * 不使用乐观消息之外的第二套 API，复用既有 /agent/sessions/{id}/chat。
@@ -199,6 +266,8 @@ export const useAgentStore = defineStore('agent', () => {
       else messages.value.push(res.user_message)
       messages.value.push(res.assistant_message)
       void loadApprovals()
+      // 首轮对话后自动命名（后端判定是否仍为默认标题，已手动命名的不覆盖）
+      void autoTitle(activeSessionId.value)
       return res.assistant_message
     } catch (e) {
       const idx = messages.value.findIndex((m) => m.id === optimisticId)
@@ -240,7 +309,7 @@ export const useAgentStore = defineStore('agent', () => {
     // 状态
     sessions, activeSessionId, messages, approvals, reviewCards,
     sessionsLoading, messagesLoading, sending, approvalBusyId,
-    draft, navNotice,
+    draft, navNotice, archivedSessions,
     // 面板布局
     panelOpen, panelWidth, openPanel, closePanel, togglePanel, setPanelWidth,
     // 派生
@@ -248,6 +317,8 @@ export const useAgentStore = defineStore('agent', () => {
     // 动作
     loadSessions, loadMessages, loadApprovals, loadReviewCards,
     switchSession, newSession, sendMessage,
+    renameSession, removeSession, autoTitle,
+    loadArchivedSessions, restoreArchived,
     decideApproval, runApproved, setNavNotice,
   }
 })
