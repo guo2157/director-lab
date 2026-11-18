@@ -15,7 +15,8 @@ import {
   runScriptAgent,
 } from '@/api/projects'
 import { listCharacters, listProps, listScenes } from '@/api/script'
-import { getJob } from '@/api/jobs'
+import { getJob, listJobs } from '@/api/jobs'
+import type { Job } from '@/types/job'
 import type { EpisodeParseStatusItem, Scene, Shot } from '@/types/script'
 import { useScriptFlowStore } from '@/stores/scriptFlow'
 import FlowNav from '@/components/FlowNav.vue'
@@ -443,8 +444,12 @@ function fmtSeverity(s: string) {
   const m: Record<string, string> = { critical: '严重', major: '重要', minor: '轻微' }
   return m[s] ?? s
 }
-const formattedResult = computed(() => {
-  const r = candidateResult.value
+const formattedResult = computed(() => formatResult(candidateResult.value))
+/**
+ * job.result → 可读全文。
+ * 抽成普通函数，供「当前任务结果」与「从后端补回的历史结果」共用。
+ */
+function formatResult(r: Record<string, any> | null | undefined): string {
   if (!r) return ''
   const lines: string[] = []
   const ev = (r as any).evaluation as Record<string, any> | undefined
@@ -530,7 +535,25 @@ const formattedResult = computed(() => {
     for (const w of warns) lines.push(`  ⚠ ${typeof w === 'string' ? w : w.message || JSON.stringify(w)}`)
   }
   return lines.join('\n')
+}
+
+/**
+ * 从后端补回「最近一次成功解析」的 result。
+ * 为什么需要：确认解析后 flow.resetAfterConfirmParse() 会清掉 parseJobId，
+ * 分析窗（含原文）随之消失，刷新后也没有原文可查。这里独立取一次，只读不写 store。
+ */
+const { data: archivedParseJobs } = useQuery({
+  queryKey: computed(() => ['jobs', 'parse-archive', projectId.value]),
+  queryFn: () => listJobs({ project_id: projectId.value, job_type: 'parse', page: 1, page_size: 50 }),
+  enabled: computed(() => !!projectId.value),
 })
+const archivedParseText = computed(() => {
+  const items = archivedParseJobs.value?.items ?? []
+  const hit = items.find((j: Job) => j.status === 'succeeded' && j.result)
+  return formatResult((hit?.result ?? null) as Record<string, any> | null)
+})
+/** 原文全文：优先当前任务结果，其次后端历史结果 */
+const rawReportText = computed(() => formattedResult.value || archivedParseText.value)
 
 /* ---------- 确认候选版本 ---------- */
 const { mutate: doConfirmParse } = useMutation({
@@ -679,9 +702,78 @@ const analysisFootLabel = computed(() => {
   if (parseJob.value?.status === 'succeeded') return '任务已完成'
   return '任务已结束'
 })
+/** 从 JSON 文本片段中按 key 统计数组元素数量 */
+function countJsonArrayItems(prefix: string, text: string): number {
+  const idx = text.indexOf(prefix)
+  if (idx < 0) return 0
+  const after = text.slice(idx + prefix.length)
+  let depth = 0
+  let started = false
+  let count = 0
+  for (let i = 0; i < after.length; i++) {
+    const c = after[i]
+    if (c === '{') { depth++; started = true }
+    else if (c === '}') { depth--; if (depth <= 0 && started) break }
+    else if (c === '[') { depth++; started = true }
+    else if (c === ']') { depth--; if (depth <= 0 && started) break }
+    // 统计顶层对象的出现次数（每个顶层对象以 "{ 开头）
+    if (started && depth === 1 && c === '{' && (i === 0 || after[i-1] !== '\\')) {
+      let j = i + 1
+      while (j < after.length && after[j] !== '"' && after[j] !== '}') j++
+      if (after[j] === '"') count++
+    }
+  }
+  // 修正：用简单的正则匹配闭合对象计数更可靠
+  const section = after.slice(0, 50000)
+  // 统计独立顶层对象的名称（如 "name": "xxx" 模式）
+  const nameMatches = section.match(/"name"\s*:\s*"/g)
+  return nameMatches ? nameMatches.length : 0
+}
+
+/** 将 LLM 输出的 JSON 流转换为人性化进度描述 */
+const readableStreamText = computed(() => {
+  const raw = llmStreamText.value
+  if (!raw) return ''
+  // 检测是否像 JSON 输出（json_mode 下的 LLM 流）
+  if (!raw.trimStart().startsWith('{') && !raw.includes('"characters"') && !raw.includes('"scenes"')) {
+    return raw // 不是 JSON 流，直接展示原文
+  }
+  const lines: string[] = []
+  // 提取 episode 信息
+  const epMatch = raw.match(/"episode"\s*:\s*(\d+)/g)
+  if (epMatch) {
+    const nums = epMatch.map(m => m.match(/\d+/)?.[0] ?? '').filter(Boolean)
+    if (nums.length) lines.push(`📺 正在分析第 ${nums.join('、')} 集`)
+  }
+  // 统计角色数量
+  const charCount = countJsonArrayItems('"characters"', raw)
+  if (charCount > 0) lines.push(`👤 已识别 ${charCount} 个角色`)
+  // 统计场景数量
+  const sceneCount = countJsonArrayItems('"scenes"', raw)
+  if (sceneCount > 0) lines.push(`🎬 已识别 ${sceneCount} 个场景`)
+  // 统计分镜数量
+  const shotCount = countJsonArrayItems('"shots"', raw)
+  if (shotCount > 0) lines.push(`🎞️ 已拆解 ${shotCount} 个分镜`)
+  // 统计道具数量
+  const propCount = countJsonArrayItems('"props"', raw)
+  if (propCount > 0) lines.push(`🪑 已识别 ${propCount} 个道具`)
+  // 评估相关
+  if (raw.includes('"score"')) {
+    const scoreMatch = raw.match(/"score"\s*:\s*([\d.]+)/)
+    if (scoreMatch) lines.push(`📊 剧本评分 ${scoreMatch[1]}`)
+  }
+  // 剧集梗概
+  const titleMatches = raw.match(/"title"\s*:\s*"([^"]+)"/g)
+  if (titleMatches && titleMatches.length > 0) {
+    const titles = titleMatches.map(m => m.match(/"([^"]+)"$/)?.[1] ?? '').filter(Boolean)
+    if (titles.length) lines.push(`📖 剧集：${titles.join('、')}`)
+  }
+  return lines.length > 0 ? lines.join('\n') : 'AI 正在输出分析内容…'
+})
+
 /** 输出区内容：有真实流式文本就展示，否则给与状态相符的说明（不伪造进度） */
 const analysisBodyText = computed(() => {
-  if (llmStreamText.value) return llmStreamText.value
+  if (llmStreamText.value) return readableStreamText.value
   if (parseJobRunning.value) return llmPlaceholder.value
   if (parseJob.value?.status === 'succeeded') return '分析已完成。下方可查看解析结果与集数状态。'
   if (parseJob.value?.status === 'failed') return '本次分析未产出结果。请查看失败原因后重试。'
@@ -703,6 +795,54 @@ const failedGroups = computed(() => {
   return [...map.entries()].map(([msg, v]) => ({ msg, eps: v.eps.sort((a, b) => a - b), attempts: v.attempts }))
 })
 const showRawReport = ref(false)
+const copiedRaw = ref(false)
+/** 传统复制：不依赖安全上下文与用户激活，作为 clipboard API 的回退 */
+function legacyCopy(text: string): boolean {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.style.position = 'fixed'
+  ta.style.top = '-1000px'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  document.body.removeChild(ta)
+  return ok
+}
+/**
+ * 复制解析全文。
+ * 先试 navigator.clipboard（需安全上下文 + 用户激活），失败再回退 execCommand；
+ * 站点常以 http 对外暴露，只写 clipboard 会在部分环境点不动。
+ */
+async function copyRawReport() {
+  const text = rawReportText.value
+  if (!text) return
+  let ok = false
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } catch {
+      ok = false
+    }
+  }
+  if (!ok) ok = legacyCopy(text)
+  if (!ok) {
+    message.error('复制失败，请手动选中文本复制')
+    return
+  }
+  copiedRaw.value = true
+  message.success('已复制解析全文')
+  window.setTimeout(() => {
+    copiedRaw.value = false
+  }, 2000)
+}
 </script>
 
 <template>
@@ -783,14 +923,23 @@ const showRawReport = ref(false)
           <!-- 失败原因不在此重复：集级原因与重试入口统一由下方失败面板承担 -->
         </section>
 
-        <!-- 解析原文：低频内容默认折叠，需要核对时再展开 -->
-        <div v-if="candidateReady && formattedResult" class="raw-report">
-          <button class="raw-report-toggle" :aria-expanded="showRawReport" @click="showRawReport = !showRawReport">
-            <n-icon :component="DocumentTextOutline" :size="14" />
-            解析原文（评估与拆解全文）
-            <span class="raw-report-caret">{{ showRawReport ? '收起' : '展开' }}</span>
-          </button>
-          <pre v-if="showRawReport" class="raw-report-body">{{ formattedResult }}</pre>
+        <!-- 解析原文：低频内容默认折叠，需要核对时再展开。
+             数据源优先当前任务结果，其次后端历史结果（确认解析后 parseJobId 会被清空） -->
+        <div v-if="rawReportText" class="raw-report">
+          <div class="raw-report-head">
+            <button class="raw-report-toggle" :aria-expanded="showRawReport" @click="showRawReport = !showRawReport">
+              <n-icon :component="DocumentTextOutline" :size="14" />
+              解析原文（评估与拆解全文）
+              <span class="raw-report-caret">{{ showRawReport ? '收起' : '展开' }}</span>
+            </button>
+            <button
+              type="button"
+              class="raw-report-copy"
+              :aria-label="copiedRaw ? '已复制解析全文' : '复制解析全文'"
+              @click="copyRawReport"
+            >{{ copiedRaw ? '已复制' : '复制全文' }}</button>
+          </div>
+          <pre v-if="showRawReport" class="raw-report-body">{{ rawReportText }}</pre>
         </div>
 
         <!-- 集数解析状态：分析进行中不展示，分析完成后才显示 -->
@@ -946,6 +1095,22 @@ const showRawReport = ref(false)
 
 /* ===== 解析原文折叠 ===== */
 .raw-report { border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-panel); overflow: hidden; }
+.raw-report-head { display: flex; align-items: center; gap: var(--sp-2); padding-right: var(--sp-3); }
+.raw-report-head .raw-report-toggle { flex: 1; width: auto; }
+.raw-report-copy {
+  flex: none;
+  padding: 2px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.raw-report-copy:hover { color: var(--brand-primary); border-color: var(--brand-primary); }
+.raw-report-copy:focus-visible { outline: 2px solid var(--brand-hover); outline-offset: 2px; }
 .raw-report-toggle {
   width: 100%;
   display: flex;
