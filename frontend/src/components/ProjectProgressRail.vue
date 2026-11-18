@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { NIcon } from 'naive-ui'
 import { Checkmark } from '@vicons/ionicons5'
 import { getProject } from '@/api/projects'
+import { STAGE_LABELS, STAGE_ORDER } from '@/constants/stages'
 
 const props = defineProps<{ projectId: string }>()
 const route = useRoute()
@@ -21,21 +22,8 @@ const stages = [
   { key: 'compose', label: '合成与导出', stages: ['compose', 'export', 'done'] },
 ]
 
-/** 后端阶段枚举 → 中文阶段名 */
-const stageLabels: Record<string, string> = {
-  estimate: '剧本评估',
-  select_range: '选取范围',
-  parse: '剧本解析',
-  characters: '角色定妆',
-  scenes: '场景基准',
-  assets_review: '资产审核',
-  keyframes: '分镜出图',
-  clips: '分镜成片',
-  audio: '音频制作',
-  compose: '合成',
-  export: '导出',
-  done: '已完成',
-}
+/** 后端阶段枚举 → 中文阶段名（唯一来源：@/constants/stages） */
+const stageLabels = STAGE_LABELS
 
 const { data: project } = useQuery({
   queryKey: computed(() => ['project', props.projectId]),
@@ -43,11 +31,7 @@ const { data: project } = useQuery({
 })
 
 // 后端阶段 → 前端流程步骤索引（按顺序取第一个匹配）
-const stageOrder = [
-  'estimate', 'select_range', 'parse',
-  'characters', 'scenes', 'assets_review', 'keyframes', 'clips', 'audio',
-  'compose', 'export', 'done',
-]
+const stageOrder = STAGE_ORDER as readonly string[]
 
 const currentStage = computed(() => project.value?.current_stage ?? '')
 

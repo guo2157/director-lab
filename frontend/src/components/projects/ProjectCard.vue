@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import { NButton, NDropdown, NProgress, NTag } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import type { CreationType, Project } from '@/types/project'
+import { stageLabel } from '@/constants/stages'
 
 const props = defineProps<{
   project: Project
@@ -35,13 +36,19 @@ const ratioClass = computed(() => `cover-${props.project.aspect_ratio.replace(':
 const animationDelay = computed(() => `${Math.min(props.index, 12) * 0.04}s`)
 const updatedTitle = computed(() => new Date(props.project.updated_at).toLocaleString('zh-CN'))
 const updatedText = computed(() => relativeTime(props.project.updated_at))
-/** 进度 = 已排镜头的集数 / 总集数 */
-const percent = computed(() => {
-  const plan = props.project.episode_plan
-  if (!plan || plan.length === 0) return 0
-  const planned = plan.filter((e) => (e.shot_count ?? 0) > 0).length
-  return Math.round((planned / plan.length) * 100)
-})
+
+/**
+ * 进度 = 已完成镜头 / 总镜头（后端派生字段 shot_done / shot_total）。
+ * 此前读 episode_plan[].shot_count，该字段后端从不返回，导致进度恒为 0%。
+ */
+const shotTotal = computed(() => props.project.shot_total ?? 0)
+const shotDone = computed(() => props.project.shot_done ?? 0)
+const hasShots = computed(() => shotTotal.value > 0)
+const percent = computed(() =>
+  hasShots.value ? Math.round((shotDone.value / shotTotal.value) * 100) : 0,
+)
+/** 当前真实生产阶段（后端 current_stage 派生），未知枚举原样显示 */
+const stageText = computed(() => stageLabel(props.project.current_stage))
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
@@ -104,17 +111,22 @@ function onCardKey(e: KeyboardEvent) {
         <span :title="updatedTitle">更新于 {{ updatedText }}</span>
       </div>
       <div class="progress-row">
-        <n-progress
-          class="progress-bar"
-          type="line"
-          :percentage="percent"
-          :height="6"
-          :border-radius="3"
-          :show-indicator="false"
-          color="var(--brand-primary)"
-          rail-color="var(--border-subtle)"
-        />
-        <span class="progress-text">{{ percent }}%</span>
+        <!-- 当前真实生产阶段（后端 current_stage），不根据页面访问记录推断 -->
+        <span class="stage-chip" :title="`当前阶段：${stageText}`">{{ stageText }}</span>
+        <template v-if="hasShots">
+          <n-progress
+            class="progress-bar"
+            type="line"
+            :percentage="percent"
+            :height="6"
+            :border-radius="3"
+            :show-indicator="false"
+            color="var(--brand-primary)"
+            rail-color="var(--border-subtle)"
+            :aria-label="`镜头完成 ${shotDone} / ${shotTotal}`"
+          />
+          <span class="progress-text">{{ shotDone }}/{{ shotTotal }} 镜</span>
+        </template>
       </div>
     </div>
   </article>
@@ -239,6 +251,16 @@ function onCardKey(e: KeyboardEvent) {
   gap: var(--sp-2);
   margin-top: var(--sp-3);
 }
+.stage-chip {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--brand-soft);
+  color: var(--brand-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
 .progress-bar {
   flex: 1;
 }
@@ -246,7 +268,7 @@ function onCardKey(e: KeyboardEvent) {
   font-size: 12px;
   line-height: 18px;
   color: var(--text-secondary);
-  min-width: 34px;
+  min-width: 56px;
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
