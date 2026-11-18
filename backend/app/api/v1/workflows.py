@@ -99,6 +99,50 @@ def list_workflows(
     return [_to_dict(w, db) for w in wfs]
 
 
+@router.post("/resolve")
+def resolve_workflow(payload: dict, db: Session = Depends(get_db)) -> dict:
+    """按业务槽位解析工作流（G1，v2 计划 §11.1/§11.2）。
+
+    选择优先级：显式 workflow_id → 项目默认 → 系统默认 → 内置 → 能力匹配。
+    显式指定或项目默认不满足能力时**返回 422 + 缺失能力列表，不回退**（§24 第 16 条）。
+    """
+    from app.services.workflow import matcher
+
+    slot = payload.get("slot")
+    if not isinstance(slot, str) or not slot:
+        raise errors.AppError("invalid_request", "slot 必填（image/storyboard_image/video/tts/bgm/sfx）", 422)
+    required = payload.get("required")
+    if required is not None and not isinstance(required, dict):
+        raise errors.AppError("invalid_request", "required 必须是对象", 422)
+    res = matcher.resolve(
+        db,
+        slot=slot,
+        project_id=payload.get("project_id"),
+        workflow_id=payload.get("workflow_id"),
+        extra_required=required,
+    )
+    if res.workflow is None:
+        res.require(slot=slot)  # 抛 422，带 missing_capabilities
+    wf = res.workflow
+    assert wf is not None
+    caps = matcher._caps_of(wf)
+    return {
+        "workflow": {
+            "id": wf.id,
+            "name": wf.name,
+            "alias": wf.alias,
+            "workflow_type": wf.workflow_type,
+            "version": wf.version,
+            "is_default": wf.is_default,
+            "runtime_status": wf.runtime_status,
+            "capabilities": caps,
+        },
+        "source": res.source,
+        "required": required or {},
+        "considered_workflows": res.considered,
+    }
+
+
 @router.get("/{workflow_id}")
 def get_workflow(workflow_id: str, db: Session = Depends(get_db)) -> dict:
     wf = db.get(Workflow, workflow_id)

@@ -309,3 +309,73 @@ def update_style_config(project_id: str, payload: dict, db: Session = Depends(ge
         "note": "配置仅影响后续任务，不会自动重生成已审核资产与已生成结果",
     }
 
+
+
+# --- 项目级默认工作流配置（G2，v2 计划 §11.3 / §19） -------------------------
+# 存放在 project.settings["default_workflows"]，不建新表（见审计附录 C.2 第 3 条）。
+# 项目默认不能绕过能力校验：保存时校验类型，解析时由 matcher 校验能力。
+
+@router.get("/{project_id}/workflow-config")
+def get_workflow_config(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """读项目工作流配置：已配置的默认工作流 + 各槽位候选（含能力摘要与可用性）。
+
+    候选列表按能力标记计算 `usable`，前端据此禁用不可用项并展示原因，
+    避免用户选中一个缺依赖的工作流后到生成时才失败。
+    """
+    from app.models import Workflow
+    from app.services.workflow import capabilities as caps_svc
+    from app.services.workflow import matcher
+
+    p = _get_project(db, project_id)
+    defaults = matcher.project_defaults(db, project_id)
+
+    rows = db.query(Workflow).order_by(Workflow.workflow_type, Workflow.name).all()
+    candidates: dict[str, list[dict]] = {slot: [] for slot in matcher.SLOT_WF_TYPE}
+    for wf in rows:
+        caps = (
+            caps_svc.normalize(wf.workflow_type, wf.definition,
+                               capabilities=wf.capabilities or {}, trigger=wf.trigger or {})
+            if wf.definition else dict(wf.capabilities or {})
+        )
+        entry = {
+            "id": wf.id,
+            "name": wf.name,
+            "alias": wf.alias,
+            "workflow_type": wf.workflow_type,
+            "version": wf.version,
+            "is_default": wf.is_default,
+            "runtime_status": wf.runtime_status,
+            "generation_modes": caps.get("generation_modes") or [],
+            "modalities": caps.get("modalities") or {},
+            "tier": (caps.get("source") or {}).get("tier"),
+        }
+        for slot, expected_type in matcher.SLOT_WF_TYPE.items():
+            if wf.workflow_type != expected_type:
+                continue
+            ok, missing = caps_svc.capability_matches(
+                caps, matcher.SLOT_REQUIRED.get(slot, {})
+            )
+            candidates[slot].append({**entry, "usable": ok, "missing": missing})
+
+    return {
+        "project_id": p.id,
+        "defaults": defaults,
+        "slots": sorted(matcher.SLOT_WF_TYPE),
+        "slot_required": matcher.SLOT_REQUIRED,
+        "candidates": candidates,
+    }
+
+
+@router.put("/{project_id}/workflow-config")
+def update_workflow_config(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """保存项目默认工作流。空字符串表示「恢复系统默认」，从映射中移除该槽位。"""
+    from app.services.workflow import matcher
+
+    body = payload.get("defaults") if isinstance(payload.get("defaults"), dict) else payload
+    saved = matcher.save_project_defaults(db, project_id, body or {})
+    return {
+        "project_id": project_id,
+        "defaults": saved,
+        "saved": True,
+        "note": "项目默认工作流不绕过能力校验；不兼容时生成接口会明确报错而非静默切换",
+    }

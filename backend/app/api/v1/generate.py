@@ -41,8 +41,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _match_workflow_exact(db: Session, target: str, workflow_id: str | None) -> Workflow:
-    """工作流匹配：显式 workflow_id 优先；否则按 workflow_type 依次尝试 默认 → 内置 → 任意。"""
+def _match_workflow_exact(db: Session, target: str, workflow_id: str | None,
+                          project_id: str | None = None) -> Workflow:
+    """工作流匹配：显式 workflow_id 优先；否则 项目默认 → 默认 → 内置 → 任意。
+
+    项目级默认来自 `project.settings.default_workflows`（v2 §11.3/§19，G2）。
+    项目默认同样受能力校验约束——由调用方通过 matcher 校验，此处只负责定位。
+    """
     if workflow_id:
         wf = db.get(Workflow, workflow_id)
         if wf is None:
@@ -51,6 +56,26 @@ def _match_workflow_exact(db: Session, target: str, workflow_id: str | None) -> 
     wf_type = _TARGET_WF_TYPE.get(target)
     if wf_type is None:
         raise errors.AppError("invalid_request", f"不支持的 target: {target}", 400)
+    # 0. 项目级默认工作流优先（项目设置里显式配置过才算）
+    if project_id:
+        from app.services.workflow import matcher as _matcher
+        _slot = _matcher.TARGET_SLOT.get(target)
+        _defaults = _matcher.project_defaults(db, project_id)
+        _pid = _defaults.get(_slot) if _slot else None
+        if _pid:
+            _wf = db.get(Workflow, _pid)
+            if _wf is None:
+                raise errors.AppError(
+                    "workflow_not_found",
+                    f"项目默认工作流不存在（{target}）：{_pid}", 404,
+                )
+            if _wf.workflow_type != wf_type:
+                raise errors.AppError(
+                    "workflow_capability_mismatch",
+                    f"项目默认工作流 {_wf.name} 类型为 {_wf.workflow_type}，"
+                    f"与 {target} 要求的 {wf_type} 不符", 422,
+                )
+            return _wf
     # 1. 默认工作流优先
     wf = (
         db.query(Workflow)
@@ -124,19 +149,28 @@ def _find_ref_capable_video_workflow(db: Session) -> Workflow | None:
     return min(candidates, key=lambda item: item[0])[1]
 
 
-def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workflow:
+def _match_workflow(db: Session, target: str, workflow_id: str | None,
+                    project_id: str | None = None) -> Workflow:
     """工作流匹配：显式 workflow_id 优先；分镜图默认自动改用带参考槽位的工作流。
 
     默认图片工作流是无参考的纯文生图（0 槽位），而分镜图提示词通常带 @角色，
     直接用会在 ref_inject 里报"当前工作流仅支持 0 个角色参考槽位"。
+
+    project_id 非空时，项目级默认（`settings.default_workflows`）优先于系统默认（G2）。
     """
-    wf = _match_workflow_exact(db, target, workflow_id)
-    if workflow_id is None and target == "keyframe":
+    wf = _match_workflow_exact(db, target, workflow_id, project_id)
+    # 项目默认命中时不再做「无槽位就换」的兜底——用户显式配置的工作流必须被尊重，
+    # 能力不足由 matcher 报错，不静默替换（v2 §24 第 16 条）。
+    _project_default_hit = bool(
+        project_id and workflow_id is None
+        and _is_project_default(db, project_id, target, wf.id)
+    )
+    if not _project_default_hit and workflow_id is None and target == "keyframe":
         if not (wf.capabilities or {}).get("reference_slots"):
             alt = _find_ref_capable_image_workflow(db)
             if alt is not None:
                 return alt
-    if workflow_id is None and target == "clip" and not wf.is_default:
+    if not _project_default_hit and workflow_id is None and target == "clip" and not wf.is_default:
         slots = (wf.capabilities or {}).get("reference_slots") or []
         names = [item.get("param") if isinstance(item, dict) else item for item in slots]
         if "ref_image" not in names:
@@ -144,6 +178,15 @@ def _match_workflow(db: Session, target: str, workflow_id: str | None) -> Workfl
             if alt is not None:
                 return alt
     return wf
+
+
+def _is_project_default(db: Session, project_id: str, target: str, workflow_id: str) -> bool:
+    """该工作流是否就是项目为该 target 配置的默认工作流。"""
+    from app.services.workflow import matcher as _matcher
+    slot = _matcher.TARGET_SLOT.get(target)
+    if not slot:
+        return False
+    return _matcher.project_defaults(db, project_id).get(slot) == workflow_id
 
 
 def _workflow_binds_param(wf: Workflow, param_name: str) -> bool:
@@ -1021,7 +1064,7 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
         _check_keyframe_gate(db, [shot.id])
     # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重复提交
     _check_inflight_duplicate(db, shot.id, target)
-    wf = _match_workflow(db, target, payload.get("workflow_id"))
+    wf = _match_workflow(db, target, payload.get("workflow_id"), scene.project_id)
     params = dict(payload.get("params") or {})
     # 跨集连续性首帧注入（第五节）：集首镜 clip 生成时注入上一集末帧
     if target == "clip":
@@ -1132,7 +1175,7 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
         )
         for a in olds:
             a.validity = "superseded"
-    wf = _match_workflow(db, target, payload.get("workflow_id"))
+    wf = _match_workflow(db, target, payload.get("workflow_id"), scene.project_id)
     params = dict(payload.get("params") or {})
     # 跨集连续性首帧注入（重做与单镜生成行为一致）
     if target == "clip":
@@ -1226,7 +1269,7 @@ def regenerate_shot_clip(shot_id: str, payload: dict | None = None,
         invalidate_chain_after_regenerate(db, shot, reset_keyframe_confirmed=False)
         for a in olds:
             a.validity = "superseded"
-    wf = _match_workflow(db, target, payload.get("workflow_id"))
+    wf = _match_workflow(db, target, payload.get("workflow_id"), scene.project_id)
     params = dict(payload.get("params") or {})
     wf = _inject_continuity_first_frame(db, shot, target, wf, params)
     params.setdefault("prompt", shot.video_prompt or shot.image_prompt or "")
@@ -1388,7 +1431,7 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
         _check_keyframe_gate(db, [s.id for s in shots])
         # 尾帧依赖预检（P0）：避免循环中途失败导致部分任务已入队
         _assert_prev_frames_available(db, shots, target)
-    wf = _match_workflow(db, target, payload.get("workflow_id"))
+    wf = _match_workflow(db, target, payload.get("workflow_id"), sc.project_id)
     # 幂等过滤（P0）：同一工作流已生成过视频的镜头直接跳过，避免重复渲染；
     # 需要重做时走分镜视频详情页的重新生成，不受此处限制
     shots, already_done = _filter_already_generated(db, shots, target, wf.id, wf.version)
@@ -1498,7 +1541,7 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
         # independent 不依赖尾帧；chained 由链式任务在执行时解析上一镜尾帧
         if chain_mode is None:
             _assert_prev_frames_available(db, shots, target)
-    wf = _match_workflow(db, target, payload.get("workflow_id"))
+    wf = _match_workflow(db, target, payload.get("workflow_id"), project_id)
     # 幂等过滤（P0）：同一工作流已生成过视频的镜头直接跳过，避免重复渲染；
     # 需要重做时走分镜视频详情页的重新生成，不受此处限制
     shots, already_done = _filter_already_generated(db, shots, target, wf.id, wf.version)
