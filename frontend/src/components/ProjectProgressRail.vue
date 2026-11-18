@@ -65,7 +65,9 @@ function goStep(key: string) {
   <aside class="progress-rail" aria-label="制作流程">
     <div class="rail-head">
       <span class="rail-title">制作流程</span>
-      <span v-if="stageText" class="rail-stage">{{ stageText }}</span>
+      <span v-if="stageText" class="rail-stage">
+        <span class="rail-stage-key">进度</span>{{ stageText }}
+      </span>
     </div>
 
     <ol class="rail-steps">
@@ -112,10 +114,19 @@ function goStep(key: string) {
   color: var(--text-primary);
 }
 
+/* 「当前阶段 xxx」：前缀用小号弱色标注，避免这行字被误读为可点的步骤项 */
 .rail-stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
   font-size: 12px;
   color: var(--brand-primary);
   letter-spacing: 0.01em;
+}
+.rail-stage-key {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
 }
 
 .rail-steps {

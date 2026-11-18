@@ -2,8 +2,8 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { NButton, NEmpty, NIcon, useMessage } from 'naive-ui'
-import { DocumentTextOutline, SparklesOutline } from '@vicons/ionicons5'
+import { NButton, NEmpty, NIcon, NModal, useMessage } from 'naive-ui'
+import { SparklesOutline } from '@vicons/ionicons5'
 import {
   confirmParseVersion,
   getCurrentScript,
@@ -920,6 +920,7 @@ const failedGroups = computed(() => {
   }
   return [...map.entries()].map(([msg, v]) => ({ msg, eps: v.eps.sort((a, b) => a - b), attempts: v.attempts }))
 })
+/** 解析原文弹窗：低频内容不再占用内容区，改从页头按钮打开 */
 const showRawReport = ref(false)
 const copiedRaw = ref(false)
 /** 传统复制：不依赖安全上下文与用户激活，作为 clipboard API 的回退 */
@@ -979,6 +980,9 @@ async function copyRawReport() {
         <FlowNav :project-id="projectId" />
       </div>
       <div class="parse-header-actions">
+        <NButton v-if="rawReportText" quaternary @click="showRawReport = true">
+          解析原文
+        </NButton>
         <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
         <NButton
           v-if="pendingEpisodes.length && !parseJobRunning"
@@ -1049,24 +1053,8 @@ async function copyRawReport() {
           <!-- 失败原因不在此重复：集级原因与重试入口统一由下方失败面板承担 -->
         </section>
 
-        <!-- 解析原文：低频内容默认折叠，需要核对时再展开。
-             数据源优先当前任务结果，其次后端历史结果（确认解析后 parseJobId 会被清空） -->
-        <div v-if="rawReportText" class="raw-report">
-          <div class="raw-report-head">
-            <button class="raw-report-toggle" :aria-expanded="showRawReport" @click="showRawReport = !showRawReport">
-              <n-icon :component="DocumentTextOutline" :size="14" />
-              解析原文（评估与拆解全文）
-              <span class="raw-report-caret">{{ showRawReport ? '收起' : '展开' }}</span>
-            </button>
-            <button
-              type="button"
-              class="raw-report-copy"
-              :aria-label="copiedRaw ? '已复制解析全文' : '复制解析全文'"
-              @click="copyRawReport"
-            >{{ copiedRaw ? '已复制' : '复制全文' }}</button>
-          </div>
-          <pre v-if="showRawReport" class="raw-report-body">{{ rawReportText }}</pre>
-        </div>
+        <!-- 解析原文：低频内容，改由页头「解析原文」按钮打开弹窗查看，
+             不再在内容区常驻一条折叠条（曾占 47px 高 + 20px 间距） -->
 
         <!-- 集数解析状态：分析进行中不展示，分析完成后才显示 -->
         <div v-if="statusTotalEpisodes && !parseJobRunning" class="parse-status-panel panel-card">
@@ -1288,6 +1276,23 @@ async function copyRawReport() {
         <NEmpty v-else-if="statusTotalEpisodes === 0" description="尚未确定集数，请返回剧本页完成分析" />
       </div>
     </div>
+
+    <!-- 解析原文弹窗：低频核对内容，按需打开，不再常驻占用内容区 -->
+    <NModal
+      v-model:show="showRawReport"
+      preset="card"
+      title="解析原文（评估与拆解全文）"
+      class="raw-report-modal"
+      :bordered="false"
+      :style="{ width: 'min(920px, 92vw)' }"
+    >
+      <template #header-extra>
+        <NButton size="tiny" quaternary @click="copyRawReport">
+          {{ copiedRaw ? '已复制' : '复制全文' }}
+        </NButton>
+      </template>
+      <pre class="raw-report-modal-body">{{ rawReportText }}</pre>
+    </NModal>
   </section>
 </template>
 
@@ -1310,64 +1315,19 @@ async function copyRawReport() {
 .failure-msg { flex: 1; min-width: 0; color: var(--text-secondary); word-break: break-word; }
 .failure-attempt { flex: none; font-size: 11.5px; color: var(--text-tertiary); }
 
-/* ===== 解析原文折叠 ===== */
-.raw-report { border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-panel); overflow: hidden; }
-.raw-report-head { display: flex; align-items: center; gap: var(--sp-2); padding-right: var(--sp-3); }
-.raw-report-head .raw-report-toggle { flex: 1; width: auto; }
-.raw-report-copy {
-  flex: none;
-  padding: 2px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: color var(--transition-fast), border-color var(--transition-fast);
-}
-.raw-report-copy:hover { color: var(--brand-primary); border-color: var(--brand-primary); }
-.raw-report-copy:focus-visible { outline: 2px solid var(--brand-hover); outline-offset: 2px; }
-.raw-report-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
-  border: none;
-  background: none;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--transition-fast);
-}
-.raw-report-toggle:hover { background: var(--overlay-hover); color: var(--text-primary); }
-/* 「展开 / 收起」紧跟标题文字，不再被 margin-left:auto 推到整行最右，
-   避免宽屏下标题与状态词之间出现大片空档；同时做成带边框的小胶囊，
-   让它是可点控件而非说明文字 */
-.raw-report-caret {
-  margin-left: 6px;
-  padding: 1px 8px;
-  font-size: 11.5px;
-  line-height: 17px;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  transition: color var(--transition-fast), border-color var(--transition-fast);
-}
-.raw-report-toggle:hover .raw-report-caret { color: var(--brand-primary); border-color: var(--brand-primary); }
-.raw-report-body {
+/* ===== 解析原文弹窗正文 ===== */
+.raw-report-modal-body {
   margin: 0;
-  padding: var(--sp-4);
-  border-top: 1px solid var(--border-subtle);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   font-size: 13px;
   line-height: 1.8;
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 480px;
+  max-height: min(62vh, 560px);
   overflow-y: auto;
   font-family: var(--font-mono);
 }
