@@ -233,9 +233,9 @@ function goStep(key: string) {
     border-bottom: 1px solid var(--border-subtle);
     overflow-x: auto;
   }
+  /* 窄屏：隐藏「制作流程」标题，把宽度让给 5 个步骤，让全部阶段一屏可见 */
   .rail-head {
-    padding: 0;
-    flex-shrink: 0;
+    display: none;
   }
   .rail-stage,
   .rail-step::after {
@@ -243,11 +243,21 @@ function goStep(key: string) {
   }
   .rail-steps {
     flex-direction: row;
-    gap: var(--sp-1);
+    gap: 2px;
+    width: 100%;
+    justify-content: space-between;
   }
   .step-hit {
-    padding: 6px 8px;
-    min-height: 28px;
+    padding: 6px 4px;
+    min-height: 32px;
+    gap: 0;
+  }
+  .step-label {
+    font-size: 12px;
+  }
+  /* 窄屏隐藏 01–05 序号：阶段语义由 label 承载，序号只占宽度 */
+  .step-index {
+    display: none;
   }
 }
 </style>

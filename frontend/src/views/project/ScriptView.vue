@@ -38,11 +38,15 @@ function errMsg(e: unknown): string {
 /* ---------- 四步流程：初始剧本 → 校验补充 → 保存 → 分析 ---------- */
 type Stage = 'draft' | 'checked' | 'saved' | 'analyzing'
 const stage = ref<Stage>('draft')
+/*
+ * 阶段条描述「现在处于哪个阶段」，按钮描述「可以做什么」。
+ * 两者语义不同，因此标签不与按钮同名——否则同一屏出现两遍"校验补充/保存版本/开始分析"。
+ */
 const steps = [
-  { key: 'draft', label: '初始剧本' },
-  { key: 'checked', label: '校验补充' },
-  { key: 'saved', label: '保存版本' },
-  { key: 'analyzing', label: '开始分析' },
+  { key: 'draft', label: '剧本编辑' },
+  { key: 'checked', label: '内容校验' },
+  { key: 'saved', label: '版本已存' },
+  { key: 'analyzing', label: '智能分析' },
 ] as const
 const stageIndex = computed(() => {
   const i = steps.findIndex((s) => s.key === stage.value)
@@ -297,6 +301,8 @@ watch(
           size="small"
           :loading="normalizing"
           :disabled="!textValid || normalizing"
+          :title="!textValid ? '剧本正文为空或超出字数上限，无法校验' : undefined"
+          :aria-label="!textValid ? '校验补充（不可用：剧本正文为空或超出上限）' : '校验补充'"
           @click="handleNormalize"
         >
           {{ normalizing ? '校验中…' : normalizeResult ? '查看校验结果' : '校验补充' }}
@@ -305,6 +311,8 @@ watch(
           size="small"
           :loading="saving"
           :disabled="!textValid || saving"
+          :title="!textValid ? '剧本正文为空或超出字数上限，无法保存版本' : undefined"
+          :aria-label="!textValid ? '保存版本（不可用：剧本正文为空或超出上限）' : '保存版本'"
           @click="saveVersionMut()"
         >
           {{ saving ? '保存中…' : savedVersion ? '重新保存' : '保存版本' }}
@@ -314,6 +322,8 @@ watch(
           type="primary"
           :loading="analyzing"
           :disabled="!savedVersion || analyzing"
+          :title="!savedVersion ? '请先保存剧本版本，分析会以已保存版本为准' : undefined"
+          :aria-label="!savedVersion ? '开始分析（不可用：需先保存剧本版本）' : '开始分析'"
           @click="runAgentMut()"
         >
           开始分析

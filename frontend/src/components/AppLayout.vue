@@ -347,19 +347,19 @@ function goProjects() {
 
 @media (max-width: 768px) {
   .header-inner {
-    gap: 14px;
-    padding: 0 12px;
+    gap: 8px;
+    padding: 0 10px;
   }
   .brand-name {
     font-size: 14px;
   }
   .nav-item {
-    padding: 0 10px;
+    padding: 0 7px;
     font-size: 13px;
   }
   .nav-item::after {
-    left: 10px;
-    right: 10px;
+    left: 7px;
+    right: 7px;
   }
   .crumb-sep,
   .crumb-current {

@@ -95,6 +95,8 @@ const reviewLabel = () => {
           quaternary
           :disabled="reviewStatus !== 'approved'"
           :loading="reviewing"
+          :title="reviewStatus !== 'approved' ? '仅当资产审核通过后，才能驳回返工' : undefined"
+          :aria-label="reviewStatus !== 'approved' ? '驳回返工（不可用：仅当资产审核通过后可用）' : '驳回返工'"
           @click="emit('reject')"
         >
           驳回返工
@@ -105,6 +107,8 @@ const reviewLabel = () => {
           type="primary"
           :disabled="!allDone"
           :loading="reviewing"
+          :title="!allDone ? (total === 0 ? '当前项目还没有资产，请先在解析页完成解析并生成资产' : `还有 ${total - done} 项资产未生成完成，全部完成后才能审核`) : undefined"
+          :aria-label="!allDone ? (total === 0 ? '审核通过（不可用：当前项目还没有资产）' : '审核通过（不可用：资产尚未全部生成完成）') : '审核通过'"
           @click="emit('approve')"
         >
           审核通过
@@ -113,6 +117,8 @@ const reviewLabel = () => {
           size="small"
           type="primary"
           :disabled="reviewStatus !== 'approved'"
+          :title="reviewStatus !== 'approved' ? '资产审核通过后才能进入分镜图生成' : undefined"
+          :aria-label="reviewStatus !== 'approved' ? '去分镜图（不可用：资产尚未审核通过）' : '去分镜图'"
           @click="emit('next')"
         >
           去分镜图 <n-icon :component="ArrowForwardOutline" :size="14" />

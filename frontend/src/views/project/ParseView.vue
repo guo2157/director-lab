@@ -3,12 +3,13 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { NButton, NEmpty, NIcon, useMessage } from 'naive-ui'
-import { Checkmark, DocumentTextOutline, RefreshOutline } from '@vicons/ionicons5'
+import { DocumentTextOutline, SparklesOutline } from '@vicons/ionicons5'
 import {
   confirmParseVersion,
   getCurrentScript,
   getParseStatus,
   getProject,
+  getScriptAgentStatus,
   parseScript,
   retryParse,
   runScriptAgent,
@@ -116,8 +117,6 @@ const { mutate: runParse, isPending: parsing } = useMutation({
 })
 const submittedEpsLabel = ref('')
 const submitting = ref(false)
-/* 解析完成摘要卡片（确认成功后展示） */
-const parseDone = ref(false)
 /** 基于 store 的 selectedRanges 严格按选中区间解析：区间内过滤已成功集后重新拆子区间，跳过幂等重复提交 */
 function handleParse() {
   if (!flow.scriptVersionId || !flow.selectedEpisodes.length || submitting.value) return
@@ -153,7 +152,6 @@ function handleParse() {
   }
   const skipped = flow.selectedEpisodes.length - todoCount
   submitting.value = true
-  parseDone.value = false
   const firstEp = todoRanges[0].start
   const lastEp = todoRanges[todoRanges.length - 1].end
   const submittedLabel = todoCount === 1 ? `第 ${firstEp} 集` : `第 ${firstEp}-${lastEp} 集`
@@ -184,12 +182,44 @@ const parseJobRunning = computed(
     !parseJobError.value &&
     (!parseJob.value || parseJob.value.status === 'queued' || parseJob.value.status === 'running'),
 )
-const parseElapsed = ref(0)
+/**
+ * 耗时以任务真实时间戳为准，不再本地自增：
+ * - 起点 priority：started_at（任务真正开始执行）> created_at（排队也计入，但至少不会归零）
+ * - 终点：finished_at 存在即冻结，否则取当前时间
+ * 这样刷新页面、重新渲染都不会重置计时，任务结束后也不会继续跳。
+ */
+const nowTick = ref(Date.now())
+const analysisStartedMs = computed(() => {
+  const j = parseJob.value
+  const raw = j?.started_at || j?.created_at
+  const ms = raw ? new Date(raw).getTime() : 0
+  return Number.isNaN(ms) ? 0 : ms
+})
+const parseElapsed = computed(() => {
+  const start = analysisStartedMs.value
+  if (!start) return 0
+  const fin = parseJob.value?.finished_at
+  const end = fin ? new Date(fin).getTime() : nowTick.value
+  if (Number.isNaN(end)) return 0
+  return Math.max(0, Math.floor((end - start) / 1000))
+})
+/** HH:mm:ss（超过 1 小时）或 mm:ss，需求指定格式 */
+const elapsedText = computed(() => {
+  const s = parseElapsed.value
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return h > 0 ? `${p2(h)}:${p2(m)}:${p2(s % 60)}` : `${p2(m)}:${p2(s % 60)}`
+})
 /** 任务状态查询失败（任务已清理或接口异常）：停止转圈，给用户明确出口 */
 const parseJobLost = computed(() => !!flow.parseJobId && parseJobError.value)
 /** 排队过久（worker 未消费该任务）：避免用户误以为模型正在思考 */
 const queuedTooLong = computed(() => parseJob.value?.status === 'queued' && parseElapsed.value >= 60)
-/** 流式占位文案：区分排队中 / 等待过久 / 正常预检中 */
+/**
+ * 输出区占位文案：只在「已确定在等待、但还没有真实 token」时使用。
+ * 原则：只陈述可观测事实（排队/已等待多久），不假装知道后端内部阶段——
+ * 后端并不上报「预检中/评估中」这类阶段，写出来就是编造执行过程。
+ */
 const llmPlaceholder = computed(() => {
   if (queuedTooLong.value) {
     return '任务已排队超过 1 分钟，后端分析引擎可能未运行或繁忙，请检查服务后重试…'
@@ -200,13 +230,13 @@ const llmPlaceholder = computed(() => {
   if (parseElapsed.value >= 180) {
     return '已等待超过 3 分钟仍未收到模型输出，模型接口可能超时，建议返回剧本页重新发起分析…'
   }
-  return '正在预检与评估剧本质量，分析内容即将开始输出…'
+  return '已连接分析任务，正在等待模型返回第一段输出…'
 })
 let elapsedTimerId: ReturnType<typeof setInterval> | null = null
 function ensureElapsedTimer() {
   if (elapsedTimerId !== null) return
   elapsedTimerId = setInterval(() => {
-    if (parseJobRunning.value) parseElapsed.value += 1
+    if (parseJobRunning.value) nowTick.value = Date.now()
     else if (elapsedTimerId) { clearInterval(elapsedTimerId); elapsedTimerId = null }
   }, 1000)
 }
@@ -323,10 +353,11 @@ const episodeNumbers = computed<number[]>(() => {
   // 否则集数会被算成 0，导致集数方格区与完成卡片都显示不出结果
   const records = parseStatus.value?.records ?? []
   const maxRecorded = records.reduce((m, r) => Math.max(m, r.episode_no), 0)
+  // 注意：不要在这里回退到 flow.totalEpisodes —— 它是 `estimate?.estimated_episodes ?? 0`，
+  // 刷新后 estimate 为 null 时恒为 0，会把整条兜底链截断，导致集数面板与失败/重试入口整体消失。
   const total =
     flow.estimate?.estimated_episodes ??
     parseStatus.value?.total_episodes ??
-    flow.totalEpisodes ??
     maxRecorded
   return Array.from({ length: total }, (_, i) => i + 1)
 })
@@ -375,7 +406,6 @@ const { mutate: doRetryParse, isPending: retrying } = useMutation({
   mutationFn: () => retryParse(projectId.value),
   onSuccess: (res) => {
     flow.parseJobId = res.job_id
-    parseDone.value = false
     queryClient.invalidateQueries({ queryKey: ['parse-status'] })
     message.success(`已重新入队 ${res.retried_episodes.length} 个失败集`)
   },
@@ -393,7 +423,6 @@ const { mutate: doContinueAgent, isPending: continuing } = useMutation({
     ),
   onSuccess: (res) => {
     flow.parseJobId = res.job_id
-    parseDone.value = false
     queryClient.invalidateQueries({ queryKey: ['parse-status'] })
     message.success('已继续分析未解析集')
   },
@@ -503,24 +532,11 @@ const formattedResult = computed(() => {
   return lines.join('\n')
 })
 
-/** 刷新恢复：项目已有已确认解析版本且全部集解析成功时，恢复完成态与『去资产库』引导 */
-const allEpisodesSucceeded = computed(
-  () => statusTotalEpisodes.value > 0 && statusSummary.value.succeeded === statusTotalEpisodes.value,
-)
-watch(
-  () => [project.value?.current_parse_version_id, allEpisodesSucceeded.value, parseJobRunning.value] as const,
-  ([versionId, allDone, running]) => {
-    if (versionId && allDone && !running) parseDone.value = true
-  },
-  { immediate: true },
-)
-
 /* ---------- 确认候选版本 ---------- */
 const { mutate: doConfirmParse } = useMutation({
   mutationFn: () => confirmParseVersion(projectId.value, flow.candidateVersionId!, project.value?.current_parse_version_id),
   onSuccess: () => {
     message.success('解析结果已确认，场景/角色/道具已更新')
-    parseDone.value = true
     flow.resetAfterConfirmParse()
     void queryClient.invalidateQueries({ queryKey: ['scenes', projectId.value] })
     void queryClient.invalidateQueries({ queryKey: ['characters', projectId.value] })
@@ -530,7 +546,6 @@ const { mutate: doConfirmParse } = useMutation({
     // 幂等处理：多批次重复确认时版本已是 current（仅候选状态可确认），视为已确认成功，不弹错误
     const msg = errMsg(e)
     if (msg.includes('仅候选状态') || msg.includes('conflict')) {
-      parseDone.value = true
       flow.resetAfterConfirmParse()
       return
     }
@@ -573,6 +588,121 @@ const { data: propsData } = useQuery({
   enabled: computed(() => !!projectId.value),
 })
 const props = computed(() => propsData.value?.items ?? [])
+
+/* ---------- 解析结果状态：单一事实来源 ---------- */
+/** 有失败集且当前没有任务在跑（含刷新后 parseJobId 已丢失的情况）：失败必须常驻可见 */
+const showFailurePanel = computed(() => failedEpisodes.value.length > 0 && !parseJobRunning.value)
+/** 解析真正完成：全部集成功。以集级解析状态为唯一事实来源 */
+const parseAllSucceeded = computed(
+  () => statusTotalEpisodes.value > 0 && statusSummary.value.succeeded === statusTotalEpisodes.value,
+)
+/** 结果区状态文案与色调：只在这里表达一次解析状态 */
+const resultState = computed<{ label: string; tone: string }>(() => {
+  if (parseJobRunning.value) return { label: '解析中', tone: 'running' }
+  if (showFailurePanel.value) {
+    return statusSummary.value.succeeded > 0
+      ? { label: '部分成功', tone: 'warning' }
+      : { label: '解析失败', tone: 'failed' }
+  }
+  if (parseAllSucceeded.value) return { label: '解析完成', tone: 'succeeded' }
+  if (statusTotalEpisodes.value > 0) return { label: '待解析', tone: 'pending' }
+  return { label: '暂无结果', tone: 'pending' }
+})
+/** 概览统计：全部来自真实解析结果，pendingIssueCount 只统计真实失败集 */
+const overviewStats = computed(() => [
+  { key: 'episode', label: '集', value: statusTotalEpisodes.value },
+  { key: 'scene', label: '场景', value: scenes.value.length },
+  { key: 'character', label: '角色', value: characters.value.length },
+  { key: 'prop', label: '道具', value: props.value.length },
+  { key: 'shot', label: '分镜', value: totalShots.value },
+])
+const pendingIssueCount = computed(() => failedEpisodes.value.length)
+
+/* ---------- 刷新恢复：从后端最近一次 script_agent 任务恢复运行态 ----------
+ * 依赖 GET /projects/{id}/script-agent/status（返回最近一个 script_agent 任务的 id/status）。
+ * 只恢复「仍在排队/运行」的任务：已结束的任务不接管，避免页面重新进入失败态展示，
+ * 失败信息由集级解析状态 + 失败面板负责（单一事实来源）。
+ */
+const { data: agentStatusData } = useQuery({
+  queryKey: computed(() => ['script-agent-status', projectId.value]),
+  queryFn: () => getScriptAgentStatus(projectId.value),
+  enabled: computed(() => !!projectId.value),
+  refetchInterval: computed(() => (flow.parseJobId ? false : 5000)),
+})
+watch(
+  () => agentStatusData.value,
+  (s) => {
+    if (!s?.job || flow.parseJobId) return
+    // 活跃任务必须接管（刷新后继续显示实时输出与耗时）；
+    // 失败任务也要接管，否则刷新后看不到「执行失败 + 耗时」；
+    // 已成功不接管——成功后按需求收起执行过程，只展示解析结果。
+    if (['queued', 'running', 'failed', 'lost'].includes(s.job.status)) {
+      flow.parseJobId = s.job.id
+    }
+  },
+  { immediate: true },
+)
+
+/* ---------- 统一分析窗：状态 / 阶段 / 底部标签 ---------- */
+/** 何时展示分析窗：有任务在跟踪，或项目尚未解析完成（此时需要告诉用户「等待执行」） */
+const analysisVisible = computed(
+  () =>
+    !!flow.parseJobId ||
+    statusTotalEpisodes.value === 0 ||
+    statusSummary.value.pending === statusTotalEpisodes.value,
+)
+const analysisState = computed<{ label: string; tone: string }>(() => {
+  if (parseJobLost.value) return { label: '状态未知', tone: 'failed' }
+  if (!flow.parseJobId) return { label: '等待执行', tone: 'idle' }
+  if (parseJobRunning.value) return { label: '正在分析', tone: 'running' }
+  const st = parseJob.value?.status
+  if (st === 'succeeded') return { label: '已完成', tone: 'succeeded' }
+  if (st === 'failed' || st === 'lost') return { label: '执行失败', tone: 'failed' }
+  if (st === 'cancelled') return { label: '已取消', tone: 'idle' }
+  return { label: '等待执行', tone: 'idle' }
+})
+const analysisStage = computed(() => {
+  if (!flow.parseJobId) return '尚未提交分析，返回剧本页点击「开始分析」'
+  if (parseJobLost.value) return '无法获取任务状态（任务可能已过期）'
+  const st = parseJob.value?.status
+  if (st === 'queued') return '任务排队中，等待分析引擎接管'
+  if (parseJobRunning.value) {
+    return llmStreamText.value ? 'AI 正在输出分析内容' : llmPlaceholder.value
+  }
+  if (st === 'succeeded') return `已解析 ${statusSummary.value.succeeded}/${statusTotalEpisodes.value} 集`
+  if (st === 'failed') return '分析中断，失败原因见下方'
+  return '任务已结束'
+})
+const analysisFootLabel = computed(() => {
+  if (parseJobRunning.value) return '任务执行中'
+  if (!flow.parseJobId) return '等待任务'
+  if (parseJob.value?.status === 'succeeded') return '任务已完成'
+  return '任务已结束'
+})
+/** 输出区内容：有真实流式文本就展示，否则给与状态相符的说明（不伪造进度） */
+const analysisBodyText = computed(() => {
+  if (llmStreamText.value) return llmStreamText.value
+  if (parseJobRunning.value) return llmPlaceholder.value
+  if (parseJob.value?.status === 'succeeded') return '分析已完成。下方可查看解析结果与集数状态。'
+  if (parseJob.value?.status === 'failed') return '本次分析未产出结果。请查看失败原因后重试。'
+  return '等待 Agent 开始输出…'
+})
+/** 失败原因按文案分组：同一错误只展示一次，避免逐集重复刷屏 */
+const failedGroups = computed(() => {
+  const map = new Map<string, { eps: number[]; attempts: number }>()
+  for (const e of failedEpisodes.value) {
+    const key = e.error_msg || '解析失败，未返回具体原因'
+    const cur = map.get(key)
+    if (cur) {
+      cur.eps.push(e.episode_no)
+      cur.attempts = Math.max(cur.attempts, e.attempt_count || 0)
+    } else {
+      map.set(key, { eps: [e.episode_no], attempts: e.attempt_count || 0 })
+    }
+  }
+  return [...map.entries()].map(([msg, v]) => ({ msg, eps: v.eps.sort((a, b) => a - b), attempts: v.attempts }))
+})
+const showRawReport = ref(false)
 </script>
 
 <template>
@@ -586,7 +716,6 @@ const props = computed(() => propsData.value?.items ?? [])
         <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
         <NButton
           v-if="pendingEpisodes.length && !parseJobRunning"
-          type="primary"
           :loading="continuing"
           @click="doContinueAgent()"
         >
@@ -594,7 +723,7 @@ const props = computed(() => propsData.value?.items ?? [])
         </NButton>
         <NButton
           v-if="flow.selectedEpisodes.length"
-          :type="statusTotalEpisodes && flow.selectedEpisodes.length && !flow.candidateVersionId ? 'primary' : 'default'"
+          :type="statusTotalEpisodes && flow.selectedEpisodes.length && !flow.candidateVersionId && !failedEpisodes.length ? 'primary' : 'default'"
           :disabled="!flow.scriptVersionId || !statusTotalEpisodes || !flow.selectedEpisodes.length || !!flow.candidateVersionId || submitting"
           :loading="parsing"
           @click="handleParse()"
@@ -605,87 +734,76 @@ const props = computed(() => propsData.value?.items ?? [])
     </header>
     <div class="page-body">
       <div class="content-pane">
-        <!-- LLM 流式输出区：分析进行中实时展示模型返回内容（评估阶段显示占位提示） -->
-        <div v-if="flow.parseJobId && parseJobRunning && !parseJobLost" class="llm-stream-card">
-          <div class="llm-stream-head">
-            <i class="spin-dot" />
-            <span>AI 分析输出中…</span>
-          </div>
-          <div ref="llmStreamBoxRef" class="llm-stream-body">{{ llmStreamText || llmPlaceholder }}</div>
-        </div>
-        <!-- 候选状态窄条 -->
-        <div v-if="flow.parseJobId" class="candidate-bar" :class="`is-${parseJob?.status ?? 'running'}`">
-          <template v-if="parseJobRunning">
-            <i class="spin-dot" />
-            <span class="candidate-bar-text">正在解析 {{ submittedEpsLabel || (statusTotalEpisodes ? `全部 ${statusTotalEpisodes} 集` : '剧本') }}…已耗时 {{ parseElapsed }}s</span>
-          </template>
-          <template v-else-if="candidateReady && agentHasMore">
-            <span class="candidate-bar-badge"><n-icon :component="Checkmark" :size="13" /></span>
-            <span class="candidate-bar-text">已解析 {{ statusSummary.succeeded }}/{{ statusTotalEpisodes }} 集，还有 {{ pendingEpisodes.length }} 集待继续</span>
-            <NButton size="small" type="primary" :loading="continuing" @click="doContinueAgent()">继续分析</NButton>
-          </template>
-          <template v-else-if="candidateReady">
-            <span class="candidate-bar-badge"><n-icon :component="Checkmark" :size="13" /></span>
-            <span class="candidate-bar-text">解析完成，正在应用结果…</span>
-          </template>
-          <template v-else-if="parseJobLost">
-            <span class="candidate-bar-badge is-error">!</span>
-            <span class="candidate-bar-text">无法获取分析任务状态（任务可能已过期），请返回剧本页重新发起分析</span>
-            <NButton size="small" quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
-          </template>
-          <template v-else>
-            <span class="candidate-bar-badge is-error">!</span>
-            <span class="candidate-bar-text">解析失败：{{ parseJob?.error_msg || '未知原因' }}</span>
-            <NButton size="small" @click="handleParse()">重新解析</NButton>
-          </template>
-        </div>
+        <!-- 剧本智能分析：状态 + 实时输出 + 真实耗时，统一在一个窗口内 -->
+        <section v-if="analysisVisible" class="analysis-card">
+          <header class="ac-head">
+            <span class="ac-title">
+              <n-icon :component="SparklesOutline" :size="15" />
+              AI Agent
+            </span>
+            <span class="ac-state" :class="`is-${analysisState.tone}`">
+              <i v-if="parseJobRunning" class="spin-dot" />
+              {{ analysisState.label }}
+            </span>
+          </header>
 
-        <!-- 解析结果可读文本面板 -->
-        <div v-if="candidateReady && formattedResult" class="formatted-result-card">
-          <div class="formatted-result-head">
-            <span><n-icon :component="DocumentTextOutline" :size="14" /> 解析报告</span>
+          <div class="ac-meta">
+            <span class="ac-stage">{{ analysisStage }}</span>
+            <span v-if="statusTotalEpisodes" class="ac-progress">
+              {{ statusSummary.succeeded }}/{{ statusTotalEpisodes }} 集
+            </span>
+            <span class="ac-elapsed" :title="`任务开始时间：${parseJob?.started_at || parseJob?.created_at || '—'}`">
+              已耗时 {{ elapsedText }}
+            </span>
           </div>
-          <pre class="formatted-result-body">{{ formattedResult }}</pre>
-        </div>
-        <!-- 解析完成摘要卡片 -->
-        <div v-if="parseDone" class="parse-done-card">
-          <div class="parse-done-head">
-            <span class="parse-done-badge"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg></span>
-            <span class="parse-done-title">解析完成</span>
+
+          <div class="ac-divider" />
+
+          <div class="ac-body-label">Agent 实时输出</div>
+          <div ref="llmStreamBoxRef" class="ac-body">{{ analysisBodyText }}</div>
+
+          <div class="ac-divider" />
+
+          <footer class="ac-foot">
+            <span>{{ analysisFootLabel }}</span>
+            <span v-if="parseJobRunning" class="ac-live">实时更新</span>
+          </footer>
+
+          <!-- 分支动作：仅在各自真实业务状态下出现，保持原入口能力 -->
+          <div v-if="candidateReady && agentHasMore" class="ac-actions">
+            <span class="ac-action-hint">
+              已解析 {{ statusSummary.succeeded }}/{{ statusTotalEpisodes }} 集，还有 {{ pendingEpisodes.length }} 集待继续
+            </span>
+            <NButton size="small" type="primary" :loading="continuing" @click="doContinueAgent()">继续分析</NButton>
           </div>
-          <div class="parse-done-stats">
-            <div class="parse-done-stat">
-              <span class="parse-done-stat-value">{{ statusSummary.succeeded || statusTotalEpisodes }}</span>
-              <span class="parse-done-stat-label">集</span>
-            </div>
-            <div class="parse-done-stat">
-              <span class="parse-done-stat-value">{{ scenes.length }}</span>
-              <span class="parse-done-stat-label">场景</span>
-            </div>
-            <div class="parse-done-stat">
-              <span class="parse-done-stat-value">{{ characters.length }}</span>
-              <span class="parse-done-stat-label">角色</span>
-            </div>
-            <div class="parse-done-stat">
-              <span class="parse-done-stat-value">{{ props.length }}</span>
-              <span class="parse-done-stat-label">道具</span>
-            </div>
+          <div v-else-if="parseJobLost" class="ac-actions">
+            <span class="ac-action-hint">任务状态已失效，需重新发起分析</span>
+            <NButton size="small" @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
           </div>
-          <div class="parse-done-actions">
-            <NButton type="primary" @click="router.push(`/project/${projectId}/assets`)">去资产库 →</NButton>
-          </div>
+          <!-- 失败原因不在此重复：集级原因与重试入口统一由下方失败面板承担 -->
+        </section>
+
+        <!-- 解析原文：低频内容默认折叠，需要核对时再展开 -->
+        <div v-if="candidateReady && formattedResult" class="raw-report">
+          <button class="raw-report-toggle" :aria-expanded="showRawReport" @click="showRawReport = !showRawReport">
+            <n-icon :component="DocumentTextOutline" :size="14" />
+            解析原文（评估与拆解全文）
+            <span class="raw-report-caret">{{ showRawReport ? '收起' : '展开' }}</span>
+          </button>
+          <pre v-if="showRawReport" class="raw-report-body">{{ formattedResult }}</pre>
         </div>
 
         <!-- 集数解析状态：分析进行中不展示，分析完成后才显示 -->
         <div v-if="statusTotalEpisodes && !parseJobRunning" class="parse-status-panel panel-card">
           <div class="episode-toolbar">
-            <span class="pane-label">集数解析状态</span>
+            <span class="pane-label">分集解析结果</span>
             <span class="episode-count-tag">{{ statusSummary.succeeded }}/{{ statusTotalEpisodes || 0 }} 集完成</span>
-            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag" style="background:var(--brand-soft);color:var(--brand-primary,var(--brand-primary));">选中 {{ flow.selectedEpisodes.length }} 集</span>
+            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag is-selected">选中 {{ flow.selectedEpisodes.length }} 集</span>
+            <span class="toolbar-spacer" />
             <button
+              v-if="failedEpisodes.length"
               class="quick-chip"
               :class="{ active: showFailedOnly }"
-              :disabled="!failedEpisodes.length"
               @click="showFailedOnly = !showFailedOnly"
             >
               只看失败（{{ statusSummary.failed }}）
@@ -693,13 +811,21 @@ const props = computed(() => propsData.value?.items ?? [])
             <NButton
               v-if="failedEpisodes.length"
               size="small"
-              type="warning"
+              type="primary"
               :loading="retrying"
               @click="doRetryParse()"
             >
               重试失败集（{{ failedEpisodes.length }}）
             </NButton>
           </div>
+          <!-- 失败原因：与分集结果同处一块，不再单独成卡；相同错误按文案合并一次 -->
+          <ul v-if="failedGroups.length" class="failure-list">
+            <li v-for="g in failedGroups" :key="g.msg">
+              <span class="failure-ep">第 {{ g.eps.join('、') }} 集</span>
+              <span class="failure-msg">{{ g.msg }}</span>
+              <span v-if="g.attempts" class="failure-attempt">已尝试 {{ g.attempts }} 次</span>
+            </li>
+          </ul>
           <div class="episode-grid">
             <div
               v-for="ep in visibleEpisodes"
@@ -710,24 +836,6 @@ const props = computed(() => propsData.value?.items ?? [])
             >
               <span class="episode-cell-no">第 {{ ep.episode_no }} 集</span>
               <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? ep.asset_count + ' 个分镜' : statusLabel(ep.status) }}</span>
-              <button
-                v-if="ep.status === 'failed'"
-                class="episode-cell-retry"
-                :disabled="retrying"
-                @click.stop="doRetryParse()"
-                title="重试失败集"
-                aria-label="重试失败集"
-              ><n-icon :component="RefreshOutline" :size="14" /></button>
-            </div>
-            <div v-if="failedEpisodes.length && showFailedOnly" class="failed-error-list">
-              <div v-for="ep in failedEpisodes" :key="`err-${ep.episode_no}`" class="failed-error-card">
-                <div class="failed-error-head">
-                  <span class="failed-error-ep">第 {{ ep.episode_no }} 集</span>
-                  <button class="failed-error-retry" :disabled="retrying" @click="doRetryParse()">重试</button>
-                </div>
-                <p v-if="ep.error_msg" class="failed-error-msg">{{ ep.error_msg }}</p>
-                <p v-else class="failed-error-msg muted">解析失败，请重试</p>
-              </div>
             </div>
           </div>
           <div class="episode-legend">
@@ -738,68 +846,136 @@ const props = computed(() => propsData.value?.items ?? [])
           </div>
         </div>
 
-        <!-- 解析结果总览：场景 / 角色 / 道具（有结果就展示，不再用空占位） -->
-        <section v-if="hasResults" class="result-panel">
+        <!-- 解析结果：状态 + 紧凑概览 + 分组内容，统计只在这里出现一次 -->
+        <section v-if="hasResults || parseAllSucceeded" class="result-panel">
           <header class="result-head">
             <h3 class="result-title">解析结果</h3>
-            <span class="result-meta">
-              {{ scenes.length }} 场景 · {{ totalShots }} 镜 · {{ characters.length }} 角色 · {{ props.length }} 道具
-            </span>
+            <span class="result-state" :class="`is-${resultState.tone}`">{{ resultState.label }}</span>
             <span class="result-spacer" />
             <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/storyboard-images`)">
               去分镜图 →
             </NButton>
+            <NButton
+              v-if="parseAllSucceeded"
+              size="small"
+              type="primary"
+              @click="router.push(`/project/${projectId}/assets`)"
+            >
+              去资产库 →
+            </NButton>
           </header>
+
+          <div class="overview-stats">
+            <div v-for="s in overviewStats" :key="s.key" class="ov-item">
+              <span class="ov-value">{{ s.value }}</span>
+              <span class="ov-label">{{ s.label }}</span>
+            </div>
+            <div v-if="pendingIssueCount" class="ov-item is-issue">
+              <span class="ov-value">{{ pendingIssueCount }}</span>
+              <span class="ov-label">待处理</span>
+            </div>
+          </div>
+
           <div class="result-cols">
             <div class="result-col">
-              <div class="result-col-head">场景</div>
+              <div class="result-col-head">场景 <span class="col-count">{{ scenes.length }}</span></div>
               <ol class="result-scenes">
                 <li v-for="sc in scenes" :key="sc.id">
                   <span class="rs-seq">#{{ sc.seq }}</span>
-                  <span class="rs-title" :title="sc.title">{{ sc.title }}</span>
+                  <span class="rs-body">
+                    <span class="rs-title" :title="sc.title">{{ sc.title }}</span>
+                    <span v-if="sc.summary" class="rs-desc" :title="sc.summary">{{ sc.summary }}</span>
+                  </span>
+                  <span v-if="sc.episodes?.length" class="rs-ep">第 {{ sc.episodes.join('、') }} 集</span>
                   <span class="rs-count">{{ sc.shot_count ?? 0 }} 镜</span>
                 </li>
+                <li v-if="!scenes.length" class="rs-empty">未解析出场景</li>
               </ol>
             </div>
             <div class="result-col">
-              <div class="result-col-head">角色</div>
-              <div class="result-chips">
-                <span v-for="c in characters" :key="c.id" class="result-chip">{{ c.name }}</span>
-                <span v-if="!characters.length" class="result-none">无</span>
-              </div>
+              <div class="result-col-head">角色 <span class="col-count">{{ characters.length }}</span></div>
+              <ul class="result-people">
+                <li v-for="c in characters" :key="c.id">
+                  <span class="rp-name">{{ c.name }}</span>
+                  <span v-if="c.description" class="rp-desc" :title="c.description">{{ c.description }}</span>
+                </li>
+                <li v-if="!characters.length" class="rs-empty">未解析出角色</li>
+              </ul>
             </div>
             <div class="result-col">
-              <div class="result-col-head">道具</div>
-              <div class="result-chips">
-                <span v-for="pr in props" :key="pr.id" class="result-chip">{{ pr.name }}</span>
-                <span v-if="!props.length" class="result-none">无</span>
-              </div>
+              <div class="result-col-head">道具 <span class="col-count">{{ props.length }}</span></div>
+              <ul class="result-people">
+                <li v-for="pr in props" :key="pr.id">
+                  <span class="rp-name">{{ pr.name }}</span>
+                  <span v-if="pr.description" class="rp-desc" :title="pr.description">{{ pr.description }}</span>
+                </li>
+                <li v-if="!props.length" class="rs-empty">未解析出道具</li>
+              </ul>
             </div>
           </div>
         </section>
 
-        <NEmpty v-else-if="flow.selectedEpisodes.length" description="请点击『解析选中』提交任务" />
-        <NEmpty v-else-if="!parseDone" description="Agent 将自动完成评估与解析，请稍候" />
+        <NEmpty
+          v-else-if="statusTotalEpisodes > 0 && statusSummary.pending === statusTotalEpisodes"
+          description="尚未解析，点击右上角『解析选中』提交任务"
+        />
+        <NEmpty v-else-if="statusTotalEpisodes === 0" description="尚未确定集数，请返回剧本页完成分析" />
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
-.formatted-result-card { border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--bg-panel); margin-bottom: 12px; overflow: hidden; }
-.formatted-result-head { padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text-primary); border-bottom: 1px solid var(--border-subtle); background: var(--brand-soft); }
-.formatted-result-body { margin: 0; padding: 16px 20px; font-size: 13px; line-height: 1.8; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; max-height: 600px; overflow-y: auto; font-family: inherit; }
-.parse-done-card { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; border: 1px solid var(--success-line); border-radius: 14px; padding: 20px 28px; background: var(--success-soft); }
-.parse-done-head { display: flex; align-items: center; gap: 8px; }
-.parse-done-badge { width: 26px; height: 26px; border-radius: 50%; background: var(--state-success); color: var(--text-primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.parse-done-badge svg { display: block; }
-.parse-done-title { font-size: 22px; font-weight: 700; letter-spacing: 0.3px; color: var(--text-primary); }
-.parse-done-sub { font-size: 12px; color: var(--text-secondary); }
-.parse-done-stats { display: flex; gap: 32px; }
-.parse-done-stat { display: flex; align-items: baseline; gap: 6px; }
-.parse-done-stat-value { font-size: 28px; font-weight: 700; color: var(--text-primary); }
-.parse-done-stat-label { font-size: 14px; color: var(--text-secondary); }
-.parse-done-actions { display: flex; gap: 10px; margin-left: auto; }
+/* ===== 失败原因：并入分集结果面板，用左侧色条标记而非整块红底 ===== */
+.toolbar-spacer { flex: 1; }
+.failure-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 2px solid var(--danger-line);
+  background: var(--danger-soft);
+  border-radius: var(--radius-sm);
+}
+.failure-list li { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 12.5px; line-height: 1.6; }
+.failure-ep { flex: none; font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.failure-msg { flex: 1; min-width: 0; color: var(--text-secondary); word-break: break-word; }
+.failure-attempt { flex: none; font-size: 11.5px; color: var(--text-tertiary); }
+
+/* ===== 解析原文折叠 ===== */
+.raw-report { border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-panel); overflow: hidden; }
+.raw-report-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.raw-report-toggle:hover { background: var(--overlay-hover); color: var(--text-primary); }
+.raw-report-caret { margin-left: auto; font-size: 12px; color: var(--text-tertiary); }
+.raw-report-body {
+  margin: 0;
+  padding: var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 480px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+}
 .parse-page {
   display: flex;
   flex-direction: column;
@@ -820,28 +996,111 @@ const props = computed(() => propsData.value?.items ?? [])
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .page-body { display: flex; flex: 1; min-height: 0; }
 .content-pane { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
-.candidate-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
-.llm-stream-card { margin-bottom: 10px; border: 1px solid var(--success-line); border-radius: 8px; overflow: hidden; background: var(--bg-sunken); }
-.llm-stream-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; color: var(--state-success); background: var(--success-soft); }
-.llm-stream-body { max-height: 360px; overflow-y: auto; padding: 14px 16px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; color: var(--text-primary); }
-.candidate-bar.is-running { background: var(--brand-soft); }
-.candidate-bar.is-succeeded { background: var(--success-soft); }
-.candidate-bar.is-failed { background: var(--danger-soft); }
-.candidate-bar-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--brand-primary); color: var(--text-primary); display: flex; align-items: center; justify-content: center; font-size: 11px; }
-.candidate-bar-badge.is-error { background: var(--brand-error); }
-.candidate-bar-text { flex: 1; }
-.spin-dot { width: 12px; height: 12px; border: 2px solid var(--brand-primary); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+/* ===== 剧本智能分析：单一窗口承载状态 / 输出 / 耗时 ===== */
+.analysis-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.ac-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ac-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ac-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 12px;
+  line-height: 19px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--neutral-line);
+  background: var(--neutral-soft);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.ac-state.is-running { color: var(--brand-hover); background: var(--brand-soft); border-color: var(--brand-line); }
+.ac-state.is-succeeded { color: var(--state-success); background: var(--success-soft); border-color: var(--success-line); }
+.ac-state.is-failed { color: var(--danger-text); background: var(--danger-soft); border-color: var(--danger-line); }
+.ac-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4) 0;
+  font-size: 12.5px;
+}
+.ac-stage { flex: 1; min-width: 0; color: var(--text-secondary); }
+.ac-progress { flex: none; font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
+.ac-elapsed {
+  flex: none;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.ac-divider { height: 1px; margin: var(--sp-3) var(--sp-4) 0; background: var(--border-subtle); }
+.ac-body-label {
+  padding: var(--sp-3) var(--sp-4) 0;
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  color: var(--text-tertiary);
+}
+.ac-body {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+.ac-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  background: var(--bg-sunken);
+  border-top: 1px solid var(--border-subtle);
+}
+.ac-live { margin-left: auto; color: var(--brand-hover); }
+.ac-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
+}
+.ac-action-hint { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-secondary); word-break: break-word; }
+.spin-dot { width: 10px; height: 10px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.parse-status-panel { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.parse-status-panel { border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .episode-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pane-label { font-size: 16px; font-weight: 600; color: var(--text-primary); }
 .episode-count-tag { font-size: 14px; font-weight: 600; color: var(--brand-primary); font-variant-numeric: tabular-nums; }
-.quick-chip { border: 1px solid var(--border-subtle); background: none; border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
+.episode-count-tag.is-selected { background: var(--brand-soft); border-radius: var(--radius-sm); padding: 0 6px; }
+.quick-chip { border: 1px solid var(--border-subtle); background: none; border-radius: var(--radius-pill); padding: 3px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; }
 .quick-chip:hover:not(:disabled) { border-color: var(--brand-primary); color: var(--brand-primary); }
 .quick-chip.active { background: var(--brand-soft); border-color: var(--brand-primary); color: var(--brand-primary); }
 .quick-chip:disabled { opacity: 0.4; cursor: not-allowed; }
 .episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
-.episode-cell { position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; border: 1px solid transparent; transition: transform 0.15s ease; }
+.episode-cell { position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: var(--radius-lg); border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
 .episode-cell-no { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
 .episode-cell-meta { font-size: 14px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
@@ -851,18 +1110,7 @@ const props = computed(() => propsData.value?.items ?? [])
 .episode-cell.is-running { background: var(--brand-soft); color: var(--brand-primary); border-color: var(--brand-line); }
 .episode-cell.is-succeeded { background: var(--success-soft); color: var(--state-success); border-color: var(--success-line); }
 .episode-cell.is-failed { background: var(--danger-soft); color: var(--brand-error); border-color: var(--danger-line); }
-.episode-cell-retry { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border: none; border-radius: 50%; background: var(--danger-soft); color: var(--brand-error); font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s ease; }
-.episode-cell-retry:hover:not(:disabled) { background: var(--danger-line); }
-.episode-cell-retry:disabled { opacity: 0.4; cursor: not-allowed; }
-.failed-error-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
-.failed-error-card { border: 1px solid var(--danger-line); border-radius: 8px; padding: 8px 10px; background: var(--danger-soft); }
-.failed-error-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.failed-error-ep { font-size: 13px; font-weight: 600; color: var(--brand-error); }
-.failed-error-retry { border: 1px solid var(--danger-line); background: none; border-radius: 4px; padding: 3px 12px; font-size: 12px; color: var(--brand-error); cursor: pointer; transition: all 0.15s ease; }
-.failed-error-retry:hover:not(:disabled) { background: var(--danger-soft); }
-.failed-error-retry:disabled { opacity: 0.4; cursor: not-allowed; }
-.failed-error-msg { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
-.failed-error-msg.muted { font-style: italic; }
+/* 失败原因统一在顶部失败面板展示，集格内不再重复重试入口 */
 .episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary); }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -872,12 +1120,16 @@ const props = computed(() => propsData.value?.items ?? [])
 .dot.is-failed { background: var(--brand-error); }
 @media (max-width: 768px) {
   .episode-grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
-  .page-header { flex-wrap: wrap; }
-  .header-actions { flex-wrap: wrap; }
-  .candidate-bar { flex-wrap: wrap; }
-  .candidate-bar-text { min-width: 0; word-break: break-word; }
-  .parse-done-stats { flex-wrap: wrap; gap: 16px; }
-  .parse-done-actions { margin-left: 0; width: 100%; }
+  .page-header { flex-wrap: wrap; gap: var(--sp-2); padding: 10px 12px; }
+  .header-left { width: 100%; }
+  /* 移动端操作区独占一行，按钮等分宽度，避免第三个按钮被裁切 */
+  .header-actions { width: 100%; flex-wrap: nowrap; gap: var(--sp-2); }
+  .header-actions > * { flex: 1 1 0; min-width: 0; }
+  .ac-head { flex-wrap: wrap; }
+  .ac-meta { flex-wrap: wrap; row-gap: 2px; }
+  .ac-actions { flex-wrap: wrap; }
+  .ac-body { max-height: 240px; }
+  .content-pane { padding: var(--sp-4) var(--sp-3); gap: var(--sp-4); }
 }
 
 /* 解析结果总览：场景清单 + 角色 / 道具 chips */
@@ -892,89 +1144,161 @@ const props = computed(() => propsData.value?.items ?? [])
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  row-gap: var(--sp-2);
+  flex-wrap: wrap;
   margin-bottom: var(--sp-3);
 }
 .result-title {
   margin: 0;
+  flex: none;
+  white-space: nowrap;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
 }
-.result-meta {
-  font-size: 12px;
-  color: var(--text-tertiary);
+.result-state {
+  padding: 1px 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--neutral-line);
+  color: var(--text-secondary);
+  background: var(--neutral-soft);
+  white-space: nowrap;
+}
+.result-state.is-succeeded { color: var(--state-success); background: var(--success-soft); border-color: var(--success-line); }
+.result-state.is-running { color: var(--brand-hover); background: var(--brand-soft); border-color: var(--brand-line); }
+.result-state.is-warning { color: var(--state-warning); background: var(--warning-soft); border-color: var(--warning-line); }
+.result-state.is-failed { color: var(--danger-text); background: var(--danger-soft); border-color: var(--danger-line); }
+.result-spacer { flex: 1; }
+
+/* 紧凑统计条：统计只出现一次，不再是六张大卡片 */
+.overview-stats {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.ov-item {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 0 var(--sp-4);
+  border-right: 1px solid var(--border-subtle);
+}
+.ov-item:first-child { padding-left: 0; }
+.ov-item:last-child, .ov-item.is-issue { border-right: none; }
+.ov-value {
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
-.result-spacer { flex: 1; }
+.ov-label { font-size: 12px; color: var(--text-tertiary); }
+.ov-item.is-issue .ov-value { color: var(--danger-text); }
+.ov-item.is-issue .ov-label { color: var(--danger-text); }
+
 .result-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--sp-4);
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-5);
 }
 .result-col { min-width: 0; }
 .result-col-head {
-  margin-bottom: 6px;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--sp-2);
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
 }
-.result-scenes {
+.col-count {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.result-scenes, .result-people {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: 216px;
+  gap: 1px;
+  max-height: 260px;
   overflow-y: auto;
 }
-.result-scenes li {
+.result-scenes li, .result-people li {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: var(--sp-2);
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
   font-size: 12.5px;
-  line-height: 1.9;
+  line-height: 1.55;
 }
+.result-scenes li:hover, .result-people li:hover { background: var(--overlay-hover); }
 .rs-seq {
   flex: none;
+  padding-top: 1px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-tertiary);
 }
+.rs-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .rs-title {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
-.rs-count {
+.rs-desc, .rp-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+.rs-ep {
   flex: none;
+  padding-top: 1px;
   font-size: 11px;
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
-.result-chips {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.result-chip {
-  padding: 1px var(--sp-2);
-  font-size: 11.5px;
-  line-height: 19px;
-  color: var(--text-secondary);
-  background: var(--neutral-soft);
-  border: 1px solid var(--neutral-line);
-  border-radius: var(--radius-sm);
-}
-.result-none {
-  font-size: 12px;
+.rs-count {
+  flex: none;
+  padding-top: 1px;
+  font-size: 11px;
   color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.rp-name { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.rs-empty { font-size: 12px; color: var(--text-tertiary); padding: 5px 6px; }
+@media (max-width: 1100px) {
+  .result-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .result-col:first-child { grid-column: 1 / -1; }
 }
 @media (max-width: 768px) {
   .result-cols { grid-template-columns: 1fr; }
-  .result-scenes { max-height: none; }
+  .result-col:first-child { grid-column: auto; }
+  .result-scenes, .result-people { max-height: none; }
+  /* 统计条按 3 列均分，避免单个统计项被挤到第二行孤零零 */
+  .overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3) 0; }
+  .ov-item { padding: 0 var(--sp-3); }
+  .ov-item:nth-child(3n) { border-right: none; }
+  .result-head { align-items: flex-start; }
+  .result-spacer { display: none; }
+  .result-head > button { flex: none; }
 }
 </style>

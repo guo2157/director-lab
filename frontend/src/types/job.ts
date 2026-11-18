@@ -40,6 +40,8 @@ export interface Job {
   progress?: number | null
   created_at: string
   updated_at: string
+  /** 任务真正开始执行的时间（后端返回）；耗时计算以此为准，缺失时回退 created_at */
+  started_at?: string | null
   finished_at?: string | null
 }
 
