@@ -148,3 +148,61 @@ sudo -n chown ubuntu:ubuntu <file>
 ```
 
 **规则：任何脚本化写文件后，必须 `read_file` 回读验证关键字符串**，不能依赖返回值判断成功。本次已据此复验全部既有改动（ParseView / JobsView / AppLayout / ProjectProgressRail / AssetStatusBar / types/job.ts / docs），确认均已真实落盘。
+
+
+---
+
+## 8. 第二轮页面审查（2026-11-18 下午）
+
+覆盖此前「仅源码审查」的页面：作品列表、分镜看板、合成与导出、设置、系列、导演台。
+
+### 8.1 已修复
+
+| 页面 | 问题 | 处置 | 验证 |
+|---|---|---|---|
+| 作品列表 | **P0 数据失真**：卡片进度读 `episode_plan[].shot_count`，该字段后端从不返回，进度恒为 0%。「游乐场」26 镜全部完成却显示 0% | 改用后端派生字段 `shot_done` / `shot_total`，显示「26/26 镜」 | DOM `aria-valuenow=100`、文案「已完成 26/26 镜」 |
+| 作品列表 | 卡片看不到当前生产阶段 | 新增阶段标签，读 `current_stage`；阶段枚举与中文文案抽到 `@/constants/stages.ts`，`ProjectProgressRail` 复用去重 | 实测「剧本解析」「已完成」 |
+| 分镜看板 | 26 个镜头选择框可访问名为空：`aria-labelledby` 指向**不存在的 id**（悬空引用） | 用 `label` 提供真实引用目标 + sr-only 隐藏视觉文字 | a11y 树读出「选择镜头 1..26」；实测 label 1×1、`clip-path: inset(50%)` |
+| 分镜看板 | 「全部分镜视频已生成完成」在标题与副行重复两遍 | 副行只留「最近完成于 HH:mm:ss」，并修正 `v-else-if` 副作用（all_done 缺时间戳会错落到「未生成 N」） | 视觉确认只出现一次 |
+| 分镜看板 | 资产已齐全时仍常驻「去资产库」跳转按钮 | 改 `v-if="!readiness.all"` | 资产齐全时按钮消失 |
+| 分镜看板 | 同屏两个 primary 按钮（批量出视频 / 去合成导出） | 按 `clipsDone` 权重互斥，任一时刻只有一个 primary | 实测「去合成导出」primary、「批量出视频」default |
+| 设置 | 侧边导航为纯 `div`：键盘无法聚焦、无可访问名、激活态仅靠背景色 | 改 `button type=button`，补 `aria-current=page`、`:focus-visible` 焦点环、button 样式重置 | 实测可聚焦、名「ComfyUI / 多实例加权负载均衡」 |
+| 系列 | 列表卡片缺「最近更新时间」（方案 §7.1 要求，后端 `updated_at` 一直有） | 卡片补「更新于 x」，与 `ProjectCard` 共用 `@/utils/time.ts` | 实测「更新于 7 天前」，title 为完整时间 |
+
+### 8.2 实测驳回的假警报（未改代码）
+
+| 警报 | 实测结论 |
+|---|---|
+| Comfy 预览视频路径为 `data\media\x.mp4`（Windows 反斜杠），Linux 上应 404 | 后端会归一化反斜杠，两种写法均返回 `200` + `video/mp4` + 45MB 真实文件。**不是 bug** |
+| 分镜看板快照显示「视频 0/26（0%）」但进度条 100 | 快照取到数据加载前瞬间；稳定态实测 `26/26（100%）` |
+| 按钮可访问名显示为「loading 刷新进度」 | DOM 内 button 无 loading 元素，是 a11y 快照拼接假象 |
+| 场景 `shot_count` 疑似又一个「后端不返回」的假字段 | `/scenes` 接口**确实返回**（7+4+4+5+6=26）。与 `episode_plan` 的假字段长得一样，但性质相反 |
+
+> 教训：同一个字段名在不同接口上可能一个是真、一个是假。**必须逐个接口核对响应，不能沿用上一个 bug 的结论。**
+
+### 8.3 库层面 a11y 缺口（未修，需单独决策）
+
+以下两项来自 Naive UI 自身实现，无组件级开关，影响全站所有卡片/折叠区：
+
+1. **n-card 标题双层 `role="heading"`**
+   `node_modules/naive-ui/es/card/src/Card.mjs:206,209` 同时给 `.n-card-header` 与 `.n-card-header__main` 加 `role="heading"`，且外层 heading 会把 `header-extra` 里的按钮文字一并吸进名称。
+   实测：「视频预览 整部 · 2:17 重新载入」内含「视频预览」，屏幕阅读器会重复播报。
+
+2. **n-collapse 折叠头不可键盘操作**
+   `.n-collapse-item__header` 为普通 `div`（无 `role` / `tabindex` / `aria-expanded`），键盘用户无法展开「项目状态 / 风格基线 / 音频生产」。
+
+可选处置：
+- 升级 Naive UI 并确认上游已修；
+- 或在 `App.vue` 挂载后用一个**范围受限**的 DOM 修正器（仅针对 `.n-card-header__main` 去掉 role、给折叠头补 `role=button`/`tabindex=0`/键盘事件），需评估 MutationObserver 开销；
+- 或接受现状，在验收报告登记为已知限制。
+
+**本轮未改动**：属全站行为变更，回归面大且无上游开关，不在一轮内顺手做。
+
+### 8.4 仍未实机验证
+
+| 页面 | 原因 |
+|---|---|
+| 导演台有会话态 | 库里没有可用会话，只能验证空态（空态本身合格：说明 + 新建入口 + 输入框禁用有解释） |
+| 合成与导出 无记录态 | 仅有 1 条已完成记录，已就绪分支验证过；空态与失败态未实机 |
+| `/series/create`、`/series/:id`、`/series/:id/continue` | 未逐页走查 |
+| `episodes/:id/review` | 未走查 |
