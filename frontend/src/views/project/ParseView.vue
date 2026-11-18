@@ -555,6 +555,129 @@ const archivedParseText = computed(() => {
 /** 原文全文：优先当前任务结果，其次后端历史结果 */
 const rawReportText = computed(() => formattedResult.value || archivedParseText.value)
 
+/* ---------- 分镜 / 对白分组：直接取自解析结果 scenes[].shots[] ----------
+ * 数据边界：解析结果是唯一带 shots 明细的来源（当前任务 result 或历史成功任务 result）。
+ * 不额外请求 GET /projects/{id}/shots —— 该接口必须传 episode，多集需 N 次请求，
+ * 而解析页只需要「解析出的结构」，完整分镜编辑仍由分镜图/分镜看板负责。
+ */
+/** 历史解析结果对象（与 archivedParseText 同一查询，只读，不写 store） */
+const archivedParseResult = computed<Record<string, any> | null>(() => {
+  const items = archivedParseJobs.value?.items ?? []
+  const hit = items.find((j: Job) => j.status === 'succeeded' && j.result)
+  return (hit?.result ?? null) as Record<string, any> | null
+})
+/** 展示用解析结果：当前任务优先，其次后端历史 */
+const effectiveParseResult = computed<Record<string, any> | null>(
+  () => (candidateResult.value as Record<string, any> | null) ?? archivedParseResult.value,
+)
+
+type ResultGroupKey = 'scene' | 'character' | 'prop' | 'shot' | 'dialogue' | 'audio'
+const activeGroup = ref<ResultGroupKey>('scene')
+
+interface ParseShotRow {
+  ep: number
+  sceneSeq: number
+  sceneTitle: string
+  shotNo: number | string
+  shotType: string
+  duration: number | null
+  desc: string
+  props: string[]
+  who: string
+  /** shot_kind：dialogue/narration/visual/transition，用于区分旁白与角色台词 */
+  kind: string
+  dialogue: Array<{ speaker: string; text: string; emotion: string }>
+}
+
+const parseShots = computed<ParseShotRow[]>(() => {
+  const r = effectiveParseResult.value
+  const out: ParseShotRow[] = []
+  for (const sc of (r?.scenes as any[] | undefined) ?? []) {
+    const sceneSeq = Number(sc?.seq ?? 0)
+    const sceneTitle = String(sc?.title ?? '未命名场景')
+    for (const sh of (sc?.shots as any[] | undefined) ?? []) {
+      const segs = Array.isArray(sh?.dialogue_segments) ? sh.dialogue_segments : []
+      const dlg = segs.length
+        ? segs
+            .map((g: any) => ({
+              speaker: String(g?.speaker ?? ''),
+              text: String(g?.text ?? ''),
+              emotion: String(g?.emotion ?? ''),
+            }))
+            .filter((g: { text: string }) => g.text)
+        : sh?.dialogue
+          ? [{ speaker: String(sh?.speaker ?? ''), text: String(sh.dialogue), emotion: String(sh?.emotion ?? '') }]
+          : []
+      out.push({
+        ep: Number(sh?.episode ?? 0),
+        sceneSeq,
+        sceneTitle,
+        shotNo: (sh?.shot_no ?? sh?.seq ?? '') as number | string,
+        shotType: String(sh?.shot_type ?? ''),
+        duration: sh?.duration == null ? null : Number(sh.duration),
+        desc: String(sh?.description ?? ''),
+        props: Array.isArray(sh?.props) ? sh.props.map(String) : [],
+        who: String(sh?.character_id ?? sh?.speaker ?? ''),
+        kind: String(sh?.shot_kind ?? ''),
+        dialogue: dlg,
+      })
+    }
+  }
+  const num = (v: unknown) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10) || 0)
+  return out.sort((a, b) => a.ep - b.ep || a.sceneSeq - b.sceneSeq || num(a.shotNo) - num(b.shotNo))
+})
+
+interface DialogueRow {
+  ep: number
+  sceneTitle: string
+  shotNo: number | string
+  speaker: string
+  text: string
+  emotion: string
+  /** 无 speaker 且 shot_kind=narration 时为旁白 */
+  narration: boolean
+}
+const dialogueRows = computed<DialogueRow[]>(() => {
+  const rows: DialogueRow[] = []
+  for (const s of parseShots.value) {
+    for (const d of s.dialogue) {
+      rows.push({
+        ep: s.ep,
+        sceneTitle: s.sceneTitle,
+        shotNo: s.shotNo,
+        speaker: d.speaker,
+        text: d.text,
+        emotion: d.emotion,
+        narration: !d.speaker && s.kind === 'narration',
+      })
+    }
+  }
+  return rows
+})
+const emotionMap: Record<string, string> = {
+  neutral: '平静', happy: '愉快', sad: '悲伤', angry: '愤怒', fearful: '恐惧',
+}
+const emotionLabel = (e: string) => emotionMap[e] ?? e
+
+/** 分组目录：数量为真实解析条数；音频规划在解析结果中没有对应字段，故不给数字 */
+const resultGroups = computed<
+  Array<{ key: ResultGroupKey; label: string; count: number | null }>
+>(() => [
+  { key: 'scene', label: '场景', count: scenes.value.length },
+  { key: 'character', label: '角色', count: characters.value.length },
+  { key: 'prop', label: '道具', count: props.value.length },
+  { key: 'shot', label: '分镜', count: parseShots.value.length },
+  { key: 'dialogue', label: '对白', count: dialogueRows.value.length },
+  { key: 'audio', label: '音频规划', count: null },
+])
+const activeGroupLabel = computed(
+  () => resultGroups.value.find((g) => g.key === activeGroup.value)?.label ?? '',
+)
+/** 「分镜明细取不到但库里确有分镜」时的兜底说明用 */
+const shotsWithoutDetail = computed(
+  () => parseShots.value.length === 0 && totalShots.value > 0,
+)
+
 /* ---------- 确认候选版本 ---------- */
 const { mutate: doConfirmParse } = useMutation({
   mutationFn: () => confirmParseVersion(projectId.value, flow.candidateVersionId!, project.value?.current_parse_version_id),
@@ -631,13 +754,16 @@ const resultState = computed<{ label: string; tone: string }>(() => {
   if (statusTotalEpisodes.value > 0) return { label: '待解析', tone: 'pending' }
   return { label: '暂无结果', tone: 'pending' }
 })
-/** 概览统计：全部来自真实解析结果，pendingIssueCount 只统计真实失败集 */
+/** 概览统计：全部来自真实解析结果，pendingIssueCount 只统计真实失败集
+ *  group 存在即可点击切到对应分组；「集」不是结果分组（任务状态在上方面板），故不给 group
+ */
 const overviewStats = computed(() => [
-  { key: 'episode', label: '集', value: statusTotalEpisodes.value },
-  { key: 'scene', label: '场景', value: scenes.value.length },
-  { key: 'character', label: '角色', value: characters.value.length },
-  { key: 'prop', label: '道具', value: props.value.length },
-  { key: 'shot', label: '分镜', value: totalShots.value },
+  { key: 'episode', label: '集', value: statusTotalEpisodes.value, group: null },
+  { key: 'scene', label: '场景', value: scenes.value.length, group: 'scene' as const },
+  { key: 'character', label: '角色', value: characters.value.length, group: 'character' as const },
+  { key: 'prop', label: '道具', value: props.value.length, group: 'prop' as const },
+  { key: 'shot', label: '分镜', value: totalShots.value, group: 'shot' as const },
+  { key: 'dialogue', label: '台词', value: dialogueRows.value.length, group: 'dialogue' as const },
 ])
 const pendingIssueCount = computed(() => failedEpisodes.value.length)
 
@@ -1015,51 +1141,139 @@ async function copyRawReport() {
           </header>
 
           <div class="overview-stats">
-            <div v-for="s in overviewStats" :key="s.key" class="ov-item">
+            <component
+              :is="s.group ? 'button' : 'div'"
+              v-for="s in overviewStats"
+              :key="s.key"
+              class="ov-item"
+              :class="{ 'is-clickable': !!s.group, 'is-current': !!s.group && activeGroup === s.group }"
+              :type="s.group ? 'button' : undefined"
+              @click="s.group ? (activeGroup = s.group) : undefined"
+            >
               <span class="ov-value">{{ s.value }}</span>
               <span class="ov-label">{{ s.label }}</span>
-            </div>
+            </component>
             <div v-if="pendingIssueCount" class="ov-item is-issue">
               <span class="ov-value">{{ pendingIssueCount }}</span>
               <span class="ov-label">待处理</span>
             </div>
           </div>
 
-          <div class="result-cols">
-            <div class="result-col">
-              <div class="result-col-head">场景 <span class="col-count">{{ scenes.length }}</span></div>
-              <ol class="result-scenes">
-                <li v-for="sc in scenes" :key="sc.id">
-                  <span class="rs-seq">#{{ sc.seq }}</span>
-                  <span class="rs-body">
-                    <span class="rs-title" :title="sc.title">{{ sc.title }}</span>
-                    <span v-if="sc.summary" class="rs-desc" :title="sc.summary">{{ sc.summary }}</span>
-                  </span>
-                  <span v-if="sc.episodes?.length" class="rs-ep">第 {{ sc.episodes.join('、') }} 集</span>
-                  <span class="rs-count">{{ sc.shot_count ?? 0 }} 镜</span>
-                </li>
-                <li v-if="!scenes.length" class="rs-empty">未解析出场景</li>
-              </ol>
-            </div>
-            <div class="result-col">
-              <div class="result-col-head">角色 <span class="col-count">{{ characters.length }}</span></div>
-              <ul class="result-people">
-                <li v-for="c in characters" :key="c.id">
-                  <span class="rp-name">{{ c.name }}</span>
-                  <span v-if="c.description" class="rp-desc" :title="c.description">{{ c.description }}</span>
-                </li>
-                <li v-if="!characters.length" class="rs-empty">未解析出角色</li>
-              </ul>
-            </div>
-            <div class="result-col">
-              <div class="result-col-head">道具 <span class="col-count">{{ props.length }}</span></div>
-              <ul class="result-people">
-                <li v-for="pr in props" :key="pr.id">
-                  <span class="rp-name">{{ pr.name }}</span>
-                  <span v-if="pr.description" class="rp-desc" :title="pr.description">{{ pr.description }}</span>
-                </li>
-                <li v-if="!props.length" class="rs-empty">未解析出道具</li>
-              </ul>
+          <div class="result-body">
+            <nav class="group-nav" aria-label="解析结果分组">
+              <button
+                v-for="g in resultGroups"
+                :key="g.key"
+                type="button"
+                class="group-item"
+                :class="{ 'is-active': activeGroup === g.key }"
+                :aria-current="activeGroup === g.key ? 'true' : undefined"
+                @click="activeGroup = g.key"
+              >
+                <span class="group-label">{{ g.label }}</span>
+                <span class="group-count">{{ g.count === null ? '—' : g.count }}</span>
+              </button>
+            </nav>
+
+            <div class="group-pane" role="region" :aria-label="activeGroupLabel">
+              <template v-if="activeGroup === 'scene'">
+                <ol v-if="scenes.length" class="result-scenes is-tall">
+                  <li v-for="sc in scenes" :key="sc.id">
+                    <span class="rs-seq">#{{ sc.seq }}</span>
+                    <span class="rs-body">
+                      <span class="rs-title" :title="sc.title">{{ sc.title }}</span>
+                      <span v-if="sc.summary" class="rs-desc" :title="sc.summary">{{ sc.summary }}</span>
+                    </span>
+                    <span v-if="sc.episodes?.length" class="rs-ep">第 {{ sc.episodes.join('、') }} 集</span>
+                    <span class="rs-count">{{ sc.shot_count ?? 0 }} 镜</span>
+                  </li>
+                </ol>
+                <p v-else class="pane-empty">未解析出场景</p>
+              </template>
+
+              <template v-else-if="activeGroup === 'character'">
+                <ul v-if="characters.length" class="result-people is-tall">
+                  <li v-for="c in characters" :key="c.id">
+                    <span class="rp-name">{{ c.name }}</span>
+                    <span v-if="c.description" class="rp-desc" :title="c.description">{{ c.description }}</span>
+                  </li>
+                </ul>
+                <p v-else class="pane-empty">未解析出角色</p>
+              </template>
+
+              <template v-else-if="activeGroup === 'prop'">
+                <ul v-if="props.length" class="result-people is-tall">
+                  <li v-for="pr in props" :key="pr.id">
+                    <span class="rp-name">{{ pr.name }}</span>
+                    <span v-if="pr.description" class="rp-desc" :title="pr.description">{{ pr.description }}</span>
+                  </li>
+                </ul>
+                <p v-else class="pane-empty">未解析出道具</p>
+              </template>
+
+              <template v-else-if="activeGroup === 'shot'">
+                <div v-if="parseShots.length" class="pane-table">
+                  <div class="pt-row pt-head" aria-hidden="true">
+                    <span class="pt-no">场-镜</span>
+                    <span class="pt-scene">场景</span>
+                    <span class="pt-type">景别</span>
+                    <span class="pt-dur">时长</span>
+                    <span class="pt-desc">画面</span>
+                  </div>
+                  <div
+                    v-for="s in parseShots"
+                    :key="`${s.ep}-${s.sceneSeq}-${s.shotNo}`"
+                    class="pt-row"
+                  >
+                    <span class="pt-no">{{ s.sceneSeq }}-{{ s.shotNo }}</span>
+                    <span class="pt-scene" :title="s.sceneTitle">第 {{ s.ep }} 集 · {{ s.sceneTitle }}</span>
+                    <span class="pt-type">{{ s.shotType || '—' }}</span>
+                    <span class="pt-dur">{{ s.duration == null ? '—' : `${s.duration}s` }}</span>
+                    <span class="pt-desc" :title="s.desc">
+                      {{ s.desc }}<em v-if="s.dialogue.length" class="pt-flag">台词 {{ s.dialogue.length }}</em>
+                    </span>
+                  </div>
+                </div>
+                <p v-else class="pane-empty">
+                  {{
+                    shotsWithoutDetail
+                      ? `解析结果明细已不可用；库里当前有 ${totalShots} 个分镜，请到分镜图页查看`
+                      : '未解析出分镜'
+                  }}
+                </p>
+                <div class="pane-foot">
+                  <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/storyboard-images`)">
+                    去分镜图查看全部 →
+                  </NButton>
+                </div>
+              </template>
+
+              <template v-else-if="activeGroup === 'dialogue'">
+                <ul v-if="dialogueRows.length" class="dialog-list is-tall">
+                  <li v-for="(d, i) in dialogueRows" :key="`${d.ep}-${d.shotNo}-${i}`">
+                    <span class="dl-meta">第 {{ d.ep }} 集 · #{{ d.shotNo }}</span>
+                    <span class="dl-speaker" :class="{ 'is-narration': d.narration }">
+                      {{ d.speaker || (d.narration ? '旁白' : '未标注说话人') }}
+                    </span>
+                    <span class="dl-text">{{ d.text }}</span>
+                    <span v-if="d.emotion" class="dl-emotion">{{ emotionLabel(d.emotion) }}</span>
+                  </li>
+                </ul>
+                <p v-else class="pane-empty">
+                  {{ shotsWithoutDetail ? '解析结果明细已不可用，台词明细请到分镜看板查看' : '未解析出台词' }}
+                </p>
+              </template>
+
+              <template v-else-if="activeGroup === 'audio'">
+                <div class="pane-note">
+                  <p>
+                    解析结果不含音频规划。配音、BGM、音效在资产与分镜确认后按台词生成；TTS 音频与 H3 视频参考槽位相互独立。
+                  </p>
+                  <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/assets`)">
+                    去资产库 →
+                  </NButton>
+                </div>
+              </template>
             </div>
           </div>
         </section>
@@ -1354,8 +1568,19 @@ async function copyRawReport() {
   align-items: baseline;
   gap: 5px;
   padding: 0 var(--sp-4);
+  /* 统计项可能是 <button>（可点击切分组）：清掉 UA 默认外观，保证与 <div> 视觉一致 */
+  border: 0;
   border-right: 1px solid var(--border-subtle);
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: default;
 }
+.ov-item.is-clickable { cursor: pointer; }
+.ov-item.is-clickable:hover .ov-value { color: var(--brand-hover); }
+.ov-item.is-current .ov-value { color: var(--brand-hover); }
+.ov-item:focus-visible { outline: 2px solid var(--brand-hover); outline-offset: 2px; }
 .ov-item:first-child { padding-left: 0; }
 .ov-item:last-child, .ov-item.is-issue { border-right: none; }
 .ov-value {
@@ -1369,28 +1594,101 @@ async function copyRawReport() {
 .ov-item.is-issue .ov-value { color: var(--danger-text); }
 .ov-item.is-issue .ov-label { color: var(--danger-text); }
 
-.result-cols {
+/* ===== 分组目录 + 内容面板（替代原三栏平铺） ===== */
+.result-body {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   gap: var(--sp-5);
+  align-items: start;
 }
-.result-col { min-width: 0; }
-.result-col-head {
+.group-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-right: var(--sp-3);
+  border-right: 1px solid var(--border-subtle);
+}
+.group-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: var(--sp-2);
-  padding-bottom: 5px;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 12px;
-  letter-spacing: 0.03em;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 6px var(--sp-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
   color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
-.col-count {
+.group-item:hover { background: var(--overlay-hover); color: var(--text-primary); }
+.group-item.is-active { background: var(--brand-soft); color: var(--brand-hover); font-weight: 600; }
+.group-item:focus-visible { outline: 2px solid var(--brand-hover); outline-offset: 1px; }
+.group-count {
+  flex: none;
   font-size: 11px;
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
+.group-item.is-active .group-count { color: var(--brand-hover); }
+.group-pane { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.pane-empty { margin: 0; padding: var(--sp-4) 0; font-size: 12.5px; color: var(--text-tertiary); }
+.pane-foot { display: flex; justify-content: flex-end; }
+.pane-note { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-3) 0; }
+.pane-note p { margin: 0; max-width: 62ch; font-size: 12.5px; line-height: 1.7; color: var(--text-secondary); }
+.is-tall { max-height: 460px; }
+
+/* 分镜表：列由内容决定，镜号/景别/时长定宽，画面自适应 */
+.pane-table { display: flex; flex-direction: column; max-height: 460px; overflow-y: auto; }
+.pt-row {
+  display: grid;
+  grid-template-columns: 56px minmax(120px, 1.1fr) 64px 56px minmax(0, 2.6fr);
+  gap: var(--sp-3);
+  align-items: start;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.pt-row:not(.pt-head):hover { background: var(--overlay-hover); }
+.pt-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.pt-no { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.pt-scene { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.pt-type, .pt-dur { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.pt-desc { min-width: 0; color: var(--text-primary); word-break: break-word; }
+.pt-flag { margin-left: 6px; font-style: normal; font-size: 11px; color: var(--brand-hover); }
+
+/* 对白：说话人与台词分列，情绪单独一列弱化 */
+.dialog-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; }
+.dialog-list li {
+  display: grid;
+  grid-template-columns: 96px 96px minmax(0, 1fr) auto;
+  gap: var(--sp-3);
+  align-items: baseline;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.dialog-list li:hover { background: var(--overlay-hover); }
+.dl-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+.dl-speaker { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text-primary); }
+/* 旁白不是角色，弱化并与角色台词区分（不只靠颜色，标签文字本身就是「旁白」） */
+.dl-speaker.is-narration { font-weight: 400; color: var(--text-tertiary); }
+.dl-text { min-width: 0; color: var(--text-primary); word-break: break-word; }
+.dl-emotion { flex: none; font-size: 11px; color: var(--text-tertiary); }
+
 .result-scenes, .result-people {
   list-style: none;
   margin: 0;
@@ -1398,7 +1696,6 @@ async function copyRawReport() {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  max-height: 260px;
   overflow-y: auto;
 }
 .result-scenes li, .result-people li {
@@ -1449,15 +1746,29 @@ async function copyRawReport() {
   font-variant-numeric: tabular-nums;
 }
 .rp-name { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
-.rs-empty { font-size: 12px; color: var(--text-tertiary); padding: 5px 6px; }
 @media (max-width: 1100px) {
-  .result-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .result-col:first-child { grid-column: 1 / -1; }
+  .result-body { grid-template-columns: 168px minmax(0, 1fr); }
+  .pt-row { grid-template-columns: 52px minmax(104px, 1fr) 56px 52px minmax(0, 2.4fr); gap: var(--sp-2); }
 }
 @media (max-width: 768px) {
-  .result-cols { grid-template-columns: 1fr; }
-  .result-col:first-child { grid-column: auto; }
-  .result-scenes, .result-people { max-height: none; }
+  /* 目录转横向 Tab；分镜/对白收成两行一条，避免小屏挤压 */
+  .result-body { grid-template-columns: 1fr; gap: var(--sp-3); }
+  .group-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 0 0 var(--sp-2);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .group-item { flex: none; padding: 6px var(--sp-3); }
+  .is-tall, .pane-table, .dialog-list { max-height: none; }
+  .pt-head { display: none; }
+  .pt-row { grid-template-columns: 40px minmax(0, 1fr); gap: 0 var(--sp-2); }
+  .pt-no { grid-row: 1 / span 2; }
+  .pt-scene, .pt-desc { grid-column: 2; }
+  .pt-type, .pt-dur { display: none; }
+  .dialog-list li { grid-template-columns: 1fr; gap: 1px; }
+  .dl-speaker { font-weight: 600; }
   /* 统计条按 3 列均分，避免单个统计项被挤到第二行孤零零 */
   .overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3) 0; }
   .ov-item { padding: 0 var(--sp-3); }
@@ -1465,5 +1776,9 @@ async function copyRawReport() {
   .result-head { align-items: flex-start; }
   .result-spacer { display: none; }
   .result-head > button { flex: none; }
+}
+@media (max-width: 480px) {
+  /* 手机上 6 个分组挤不进一行：允许换行，避免后两个分组被藏在横向滚动里 */
+  .group-nav { flex-wrap: wrap; overflow-x: visible; }
 }
 </style>

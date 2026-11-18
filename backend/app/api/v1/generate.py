@@ -279,11 +279,16 @@ def _finalize_negative(compiled, wf: Workflow, params: dict) -> dict:
     return out
 
 
-def _match_pure_asset_workflow(db: Session, workflow_id: str | None) -> Workflow:
+def _match_pure_asset_workflow(db: Session, workflow_id: str | None,
+                               project_id: str | None = None) -> Workflow:
     """资产图专用工作流匹配：优先无参考图槽位的纯文生图工作流。
 
     带参考图槽位的工作流在未提供参考图时，模型会自行补全主体，
     导致角色图、道具图中混入无关人物、场景与杂物，破坏资产纯净度。
+
+    选择优先级（G6，与 matcher 一致）：显式 workflow_id → 项目默认(image 槽位)
+    → 系统默认 → 内置 → 任意无参考槽位。项目默认同样受「无 reference_slots」
+    约束——配置了带参考槽位的工作流时明确报错，不静默换用别的（v2 §24 第 16 条）。
     """
     if workflow_id:
         wf = db.get(Workflow, workflow_id)
@@ -296,6 +301,28 @@ def _match_pure_asset_workflow(db: Session, workflow_id: str | None) -> Workflow
                 422,
             )
         return wf
+    # 项目级默认（资产图共用 image 槽位：角色定妆图/场景基准图/道具锚定图）
+    if project_id:
+        from app.services.workflow import matcher as _matcher
+        _pid = _matcher.project_defaults(db, project_id).get("image")
+        if _pid:
+            _wf = db.get(Workflow, _pid)
+            if _wf is None:
+                raise errors.AppError(
+                    "workflow_not_found", f"项目默认资产图工作流不存在：{_pid}", 404,
+                )
+            if _wf.workflow_type != "image":
+                raise errors.AppError(
+                    "workflow_capability_mismatch",
+                    f"项目默认资产图工作流 {_wf.name} 类型为 {_wf.workflow_type}，应为 image", 422,
+                )
+            if (_wf.capabilities or {}).get("reference_slots"):
+                raise errors.AppError(
+                    "workflow_capability_mismatch",
+                    f"项目默认资产图工作流 {_wf.name} 声明了参考图槽位；"
+                    "资产图必须使用无参考图的纯文生图工作流，请到项目工作流配置中改选", 422,
+                )
+            return _wf
     candidates = (
         db.query(Workflow)
         .filter(Workflow.workflow_type == "image")

@@ -46,8 +46,9 @@ class Settings(BaseSettings):
     # 推理模型（deepseek-v4.x 等）默认带思考链，思考 token 与正文共享 max_tokens 预算。
     # 剧本解析这类纯结构化 JSON 任务里，思考会把预算吃光，表现为「JSON 在字符串中途
     # 被截断」（Expecting ',' delimiter / 非合法 JSON），重试多少次都一样。
-    # 默认关闭思考；供应商不认该字段时客户端自动降级重试，不影响其它 OpenAI 兼容端点。
-    llm_disable_thinking: bool = True
+    # 剧本解析必须保留推理能力，默认启用 Thinking；仅显式设为 True 时才会发送
+    # thinking.type=disabled。供应商不认该字段时客户端自动降级重试。
+    llm_disable_thinking: bool = False
     # 流式接收空闲超时（httpx read timeout 语义）：远端连续该时长不吐数据即抛 llm_timeout，
     # 避免 LLM 流式中途停摆时任务线程永久阻塞，把串行队列堵死
     llm_stream_idle_timeout_seconds: float = 900.0
@@ -57,6 +58,14 @@ class Settings(BaseSettings):
     render_concurrency: int = 1
     # 单次 LLM 调用最大解析集数（默认 1：每集独立 LLM 调用，从根本上消除 token 溢出）
     max_episodes_per_batch: int = 1
+    # 单集解析扩展输出预算（首次截断后放大至此值）
+    llm_parse_max_tokens: int = 65536
+    # 超长解析硬上限（受模型/供应商上下文限制约束，不可无限放大）
+    llm_parse_hard_max_tokens: int = 131072
+    # 单集解析默认并发数
+    llm_parse_concurrency: int = 3
+    # 单个解析任务最大自动重试次数
+    llm_parse_retry_limit: int = 2
     # script-agent 首批自动+后续半自动：true 时首次调用仅解析首批（≤max_episodes_per_batch），
     # result.has_more 提示前端『继续分析』；false 时单次调用解析全部批次范围
     agent_first_batch_auto: bool = True

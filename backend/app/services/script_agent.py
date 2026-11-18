@@ -62,11 +62,11 @@ def _upsert_records(db: Session, project_id: str, episode_start: int, episode_co
                     status: str, *, error_msg: str | None = None,
                     asset_counts: dict[int, int] | None = None,
                     parse_version_id: str | None = None) -> None:
-    """按集 upsert 集级解析记录（复用 parse_executor 同款状态机语义）。"""
-    from app.worker.parse_executor import _upsert_records as _upsert
-    _upsert(db, project_id, episode_start, episode_count, status,
-            error_msg=error_msg, asset_counts=asset_counts,
-            parse_version_id=parse_version_id)
+    """按集 upsert 集级解析记录（复用脚本解析服务同款状态机语义）。"""
+    from app.services.script_parse import upsert_episode_records
+    upsert_episode_records(db, project_id, episode_start, episode_count, status,
+                           error_msg=error_msg, asset_counts=asset_counts,
+                           parse_version_id=parse_version_id)
 
 
 def _find_or_create_parse_version(db: Session, project_id: str, script_version_id: str,
@@ -152,7 +152,7 @@ def execute_script_agent_job(job_id: str) -> dict:
         )
         for _prev in _done:
             _pp = _prev.params or {}
-            if _pp.get("script_version_id") == sv.id and int(_pp.get("episode_start") or 1) == episode_start:
+            if not params.get("retry") and _pp.get("script_version_id") == sv.id and int(_pp.get("episode_start") or 1) == episode_start:
                 job.status = "succeeded"
                 job.result = dict(_prev.result or {})
                 job.result["idempotent_reuse"] = True
@@ -214,18 +214,20 @@ def execute_script_agent_job(job_id: str) -> dict:
             _fail_job(db, job, "invalid_request", f"episode_start {episode_start} 超出口径总集数 {total_episodes}")
             return {"ok": False, "reason": "out_of_scope"}
 
-        # ---- 4. 批次划分：口径已由大纲前置锁定，全量并行 ----
+        # ---- 4. 批次划分：口径已由大纲前置锁定 ----
+        # agent_first_batch_auto=True：首次任务仅解析首批，后续「继续分析」逐批推进
+        # agent_first_batch_auto=False：单次任务解析全部批次（旧行为）
         first_batch_auto = getattr(settings, "agent_first_batch_auto", True)
+        # 先按全量划分批次
+        batches = []
+        s = episode_start
+        while s <= total_episodes:
+            e = min(s + max_per_batch - 1, total_episodes)
+            batches.append((s, e))
+            s = e + 1
         if first_batch_auto:
-            batches = []
-            s = episode_start
-            while s <= total_episodes:
-                e = min(s + max_per_batch - 1, total_episodes)
-                batches.append((s, e))
-                s = e + 1
-        else:
-            # 回退口径：仅解析首批（旧行为，供对照验证）
-            batches = [(episode_start, min(episode_start + max_per_batch - 1, total_episodes))]
+            # True：首次只解析首批，前端「继续分析」触发后续批次
+            batches = batches[:1]
         batch_end = batches[-1][1]
         episode_count = batch_end - episode_start + 1
 
@@ -281,10 +283,17 @@ def execute_script_agent_job(job_id: str) -> dict:
         def _parse_batch(b_start: int, b_end: int) -> dict:
             """单批次 LLM 解析（工作线程内执行，不触碰数据库）。"""
             b_count = b_end - b_start + 1
+            # 只提取当前批次的剧本片段，而非传入全文，减少无关 token 消耗
+            episode_text = text
+            try:
+                if hasattr(sv, "get_episode_chunk"):
+                    episode_text = sv.get_episode_chunk(b_start) or text
+            except Exception:
+                pass
             user_prompt = (
                 style_config.parse_context_block(style_settings)
                 + f"请解析以下剧本，仅解析第 {b_start} 集到第 {b_end} 集，"
-                + f"共 {b_count} 集。范围外的集不要输出。\n\n剧本全文：\n{text}"
+                + f"共 {b_count} 集。范围外的集不要输出。\n\n剧本全文：\n{episode_text}"
             )
 
             def _on_delta(delta_text: str) -> None:
@@ -300,7 +309,7 @@ def execute_script_agent_job(job_id: str) -> dict:
         writer_thread.start()
         batch_results: list[dict] = []
         batch_errors: list[tuple[tuple[int, int], LLMError]] = []
-        max_workers = max(1, min(len(batches), 4))
+        max_workers = max(1, min(len(batches), int(getattr(settings, "llm_parse_concurrency", 3) or 3)))
         try:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dlab-parse") as pool:
                 fut_map = {pool.submit(_parse_batch, bs, be): (bs, be) for bs, be in batches}
@@ -315,13 +324,19 @@ def execute_script_agent_job(job_id: str) -> dict:
             writer_thread.join(timeout=5)
 
         if batch_errors:
+            # 单集独立失败：成功集保留，仅标记失败集为 failed
+            for (bs, be), e in batch_errors:
+                _upsert_records(db, job.project_id, bs, be - bs + 1, "failed",
+                                error_msg=e.message[:2000], parse_version_id=pv.id)
             failed_desc = "; ".join(
                 f"第 {bs}-{be} 集: {e.message[:200]}" for (bs, be), e in batch_errors[:3]
             )
-            _upsert_records(db, job.project_id, episode_start, episode_count, "failed",
-                            error_msg=failed_desc[:2000], parse_version_id=pv.id)
-            _fail_job(db, job, batch_errors[0][1].code, f"批次解析失败: {failed_desc}")
-            return {"ok": False, "reason": batch_errors[0][1].code}
+            # 仅所有批次都失败时才标记整体失败；部分成功则标记 partial
+            if not batch_results:
+                _fail_job(db, job, batch_errors[0][1].code, f"所有批次解析失败: {failed_desc}")
+                return {"ok": False, "reason": batch_errors[0][1].code}
+            # 部分失败：写入 succeeded 前先更新失败集状态
+            db.commit()
 
         # ---- 6. 合并各批归一化结果（主线程串行；跨批实体去重）----
         merged: dict = {

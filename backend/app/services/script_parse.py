@@ -882,3 +882,71 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             write_episode_snapshot(db, project.id, p.id, ep)
     stats["prop_lifecycle_props"] = derived_props
     return stats
+
+
+# ==============================
+# 集级解析记录管理（从 parse_executor 迁移，消除跨模块依赖）
+# script_agent 和 parse_executor 共用此函数
+# ==============================
+
+def upsert_episode_records(
+    db: "Session",
+    project_id: str,
+    episode_start: int,
+    episode_count: int,
+    status: str,
+    *,
+    error_msg: str | None = None,
+    asset_counts: dict[int, int] | None = None,
+    parse_version_id: str | None = None,
+) -> list:
+    """按集 upsert 集级解析记录（asset_type=all：当前单次 LLM 调用产出全部实体分组）。
+
+    状态机：pending → running → succeeded/failed；failed 重试回 running。
+    """
+    from datetime import datetime, timezone
+    from app.models import EpisodeParseRecord, ids as model_ids
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    records = []
+    for ep in range(episode_start, episode_start + episode_count):
+        rec = (
+            db.query(EpisodeParseRecord)
+            .filter(
+                EpisodeParseRecord.project_id == project_id,
+                EpisodeParseRecord.episode_no == ep,
+                EpisodeParseRecord.asset_type == "all",
+            )
+            .first()
+        )
+        if rec is None:
+            rec = EpisodeParseRecord(
+                id=model_ids.episode_parse_record_id(),
+                project_id=project_id,
+                episode_no=ep,
+                asset_type="all",
+                status="pending",
+                attempt_count=0,
+                version=0,
+                created_at=now,
+            )
+            db.add(rec)
+        if status == "running":
+            if rec.status == "running":
+                records.append(rec)
+                continue
+            if rec.status == "succeeded":
+                records.append(rec)
+                continue
+            rec.attempt_count = (rec.attempt_count or 0) + 1
+        rec.status = status
+        rec.error_msg = error_msg
+        rec.updated_at = now
+        rec.version = (rec.version or 0) + 1
+        if asset_counts is not None and status == "succeeded":
+            rec.asset_count = asset_counts.get(ep, 0)
+        if parse_version_id:
+            rec.parse_version_id = parse_version_id
+        records.append(rec)
+    db.flush()
+    return records

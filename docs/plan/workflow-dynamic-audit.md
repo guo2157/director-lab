@@ -535,15 +535,18 @@ v2 相对 v1 新增了 4 块范围，本项目全部缺失，需要新建：
 
 ## C.1 Phase 拆分（对齐 v2 计划 §22，映射真实缺口）
 
+> **状态列已于 2026-11-18 晚间按 HEAD `4caed6b` 现场复核更新**（原表停留在 `bb9799d`，滞后 6 个提交）。
+> 详细复核见 §E。
+
 | Phase | v2 要求 | 本项目实际要做的（对应缺陷号） | 状态 |
 |---|---|---|---|
 | P0 审计 | 审计报告 + 音频链路 | 本文件 + 附录 B | **已完成** |
-| P1 基础管理 | 上传/解析/元信息/校验/版本 | D1/D2/D4/D7/D9/D14 → 已实现上传解析+校验+alias/file_hash（13 测试通过）；**版本表 D3 未做** | **部分完成** |
-| P2 Schema 与能力 | 参数/三模态槽位/输出/能力注册表 | D11（槽位语义写死）、D7 剩余、CapabilityRegistry 缺失 | 待做 |
-| P3 编译与执行 | Resolver/Compiler/Executor/OutputParser/MediaManager/Snapshot | 编译与输出解析已有（`workflow_inject` + `executor`），需抽出纯函数 + `compiled_prompt_hash`；Resolver/MediaManager 缺失 | 待做 |
-| P4 TTS↔H3 协同 | 音频产物标准化/槽位/复用/多角色/音轨策略 | 链路已通；缺 A1–A4 四项 | 待做 |
-| P5 前端动态化 | 6 组件 + 管理页 + 5 个页面接入 | 全部缺失（D5 的 name 后缀匹配必须同时改掉） | 待做 |
-| P6 集成与迁移 | 回归 + 文档 + 删旧代码 | 测试基线 699 collected / 22 passed（工作流相关） | 待做 |
+| P1 基础管理 | 上传/解析/元信息/校验/版本 | D1/D2/D4/D7/D9/D14 → 上传解析+校验+alias/file_hash | **已完成** `38f2391` |
+| P2 Schema 与能力 | 参数/三模态槽位/输出/能力注册表 | 不可变版本表 + CapabilityRegistry + 三模态分组；D3/D7/D11 已修 | **已完成** `272cb54` |
+| P3 编译与执行 | Resolver/Compiler/Executor/OutputParser/MediaManager/Snapshot | 编译与输出解析已有（`workflow_inject` + `executor`）；`runtime_checker` + `/test` 真实提交已补；**matcher / compiled_prompt_hash 仍缺** | **大部分完成** `fa95a4f` |
+| P4 TTS↔H3 协同 | 音频产物标准化/槽位/复用/多角色/音轨策略 | A1 角色映射 + A2 超限告警已补；**A3 音频格式校验 / A4 依赖指纹仍缺** | **部分完成** `af6977d` |
+| P5 前端动态化 | 6 组件 + 管理页 + 5 个页面接入 | `WorkflowSelector` / `WorkflowParameterForm` / `WorkflowTestPanel` 已建；分镜图页已接；**管理页 / 项目默认 / 角色·场景·道具·分镜视频页仍未接** | **部分完成** `3532ae4`→`4caed6b` |
+| P6 集成与迁移 | 回归 + 文档 + 删旧代码 | 待 P4/P5 收尾后执行 | 待做 |
 
 ## C.2 v2 计划里必须修正的 3 处（同上文 §9，v2 仍未修正）
 
@@ -573,3 +576,92 @@ v2 相对 v1 新增了 4 块范围，本项目全部缺失，需要新建：
 1. **当前实例只能跑图片链路**（两个 image 工作流 ready）。视频三档、FLF2V/T2V、TTS、BGM 均缺依赖——这与隧道从 `december-else-audience-dash` 换成 `giant-pick-karen-newest` 一致，说明这是一台**新的/未备齐权重的实例**，不是代码回归。
 2. 这正是「解析成功 ≠ 能执行」的实例证据：上传/静态校验全部通过的 H3 工作流，在此实例上提交必然失败。
 3. 因此 P4/P5 的真实生成验收必须先补齐实例权重（或把 `comfyui_instances` 指回原实例），否则只能跑 mock。
+
+---
+
+# 附录 E：2026-11-18 晚间现场复核（HEAD `4caed6b`）
+
+> 本附录替代 C.1 状态表的旧口径。全部结论来自现场命令，不是引用旧记录。
+
+## E.1 复核命令与实测结果
+
+```bash
+cd /home/ubuntu/director-lab
+git log --oneline -6            # 4caed6b / 03a6f2b / e8460dc / 2657847 / 4797f73 / af6977d
+git status --short              # 仅 script/llm/ParseView 等解析链脏文件（并行会话），工作流相关文件干净
+cd backend && .venv/bin/alembic heads    # b8d2f5c1e9a3 (单头)
+curl -s http://127.0.0.1:8000/api/workflows  # 10 条，全部 is_default=false，alias 全 NULL
+python3 -c "sqlite3 PRAGMA table_info(workflow)"  # 20 列，含 alias/original_filename/file_hash/current_version_id/status/validation_status/runtime_status
+select count(*) from workflow_version    # 10 行（seed 已回填 v1..v6）
+```
+
+工作流相关测试子集实测 **64 passed**（`test_workflow_upload_and_schema` / `test_workflow_versions_and_capabilities` / `test_workflow_runtime_check` / `test_audio_slot_bindings` / `test_clip_inject_and_dedup` / `test_workflow_negative_binding` / `test_prompt_ref_consistency` / `test_audio_policy`）。
+
+## E.2 逐项复核：计划 §22 的 7 个 Phase 真实状态
+
+| 能力 | 计划要求 | 真实状态 | 证据 |
+|---|---|---|---|
+| 上传 ComfyUI API Format | P1 | ✅ | `POST /api/workflows` 先 `validate_definition` 再 `build_schema`，落 `file_hash` |
+| 自动解析节点/输入/输出 | P1 | ✅ | `schema_builder.build_schema` 复用 `parse_workflow`，H3 出 17 参数 |
+| alias / original_filename / file_hash | P1 | ✅ 字段就绪，**但全表 alias=NULL** | `PRAGMA table_info(workflow)` 20 列；`seed_workflows.py:114` 未写 alias |
+| 不可变版本 + 发布/回滚 | P2 | ✅ | `workflow_version` 10 行；`/versions` `/publish` `/rollback` 均在 |
+| CapabilityRegistry + 兼容性检查 | P2 | ✅ | `capabilities.normalize` / `capability_matches`（返回缺失点路径） |
+| 三模态 Schema 分组 | P2 | ✅ | `normalize` 出 `reference.slots`，`modalities.{image,audio,video}_input` |
+| 运行环境依赖检查 | P3 | ✅ 且已实测 | `/check-runtime`：2 image ready，H3/TTS/BGM 均 missing_deps |
+| 真实测试提交 | P3 | ✅ | `POST /workflows/{id}/test` 202 + `GET /workflows/test/{prompt_id}` |
+| **matcher 服务（能力匹配 + 原因）** | P3/P4 | ❌ **缺** | `grep -rn "capability_matches" backend/app` 只有定义，0 调用方 |
+| **项目级默认工作流** | P4/§11.3 | ❌ **缺** | `grep -rn "default_workflows\|default_image_workflow_id"` = 0 命中 |
+| A1 音频槽位角色映射 | P4 | ✅ | `_group_audio_inputs` 返回 bindings，写 `input_snapshot.audio_bindings` |
+| A2 第 4 说话人显式告警 | P4 | ✅ | overflow → `job.audio_slot_overflow` 事件 |
+| **A3 音频格式/采样率/时长校验** | P4/§7.6 | ❌ **缺** | `grep "sample_rate\|audio_constraints"` 在 workflow/ 与 audio.py 均 0 命中；meta 无音频约束声明 |
+| **A4 TTS 复用依赖指纹** | P4/§13.5 | ❌ **缺** | 复用判据仍只有 `review_status=approved`（`executor.py:_shot_ref_audios`） |
+| WorkflowSelector / ParameterForm | P5 | ✅ | `components/workflow/*.vue` 3 个文件 |
+| 分镜图页接入 | P5 | ✅ | `StoryboardImagesView.vue:570` |
+| **独立工作流管理页** | P5/§18 | ❌ **缺** | `frontend/src/views/workflow/` 不存在；仍在 `SettingsView` 单 tab |
+| **角色/场景/道具页接入** | P5/§10.1-3 | ❌ **缺** | `AssetsView.vue` 调 `generateCharacterPortrait(id)` 不传 workflow_id |
+| **分镜视频页接入选择器** | P5/§10.5 | ⚠️ **半接** | `StoryboardView` 按 `capabilities.tier` 推导 workflow_id（D5 已修但非选择器）；`ShotGenerateTab` 无工作流选择 |
+| **视频/图片重新生成弹窗** | P5/§10.6-7 | ⚠️ **部分** | `RegenWorkbench` 已接选择器；`ShotGenerateTab` 未接 |
+
+## E.3 TTS → H3 音频链路复核（v2 §2.2 十问，本轮重新验证）
+
+**结论：链路完好，无回归。** 逐条复核：
+
+| # | 问题 | 复核结果 | 现场证据 |
+|---|---|---|---|
+| 1 | 音色 ID 存哪 | 未变 | `voice_profile.voice_id` / `character.voice_id` / `project.settings.narrator_voice`（`audio.py:208 _resolve_voice`） |
+| 2 | TTS 哪个节点收 voice_id | 未变 | `wf_tts_qwen3_custom_voice` 节点 2 `Qwen3CustomVoice.speaker` ← `$tts_voice.speaker` |
+| 3 | TTS 音频存哪 | 未变 | `Asset(asset_type="audio")`；`AudioSegment.audio_asset_id`（`models/audio.py:121`） |
+| 4 | 凭什么参数进 H3 | **已增强** | `ref_audio_0/1/2`，且现在带 `audio_bindings` 角色映射 |
+| 5 | H3 用哪个音频节点 | 未变 | 节点 40/41/42 `LoadAudio` → 节点 6 `ref_audios.ref_audio_0/1/2` |
+| 6 | 多角色绑定 | **已增强** | `speaker_key = character_id or track_type` 去重保序；第 4 人进 overflow 并告警（A2 已修） |
+| 7 | 音频影响时长吗 | 未变 | `_ref_audio_ms` → `frames=ceil((ms/1000+0.3)*24)`，`n=ceil((frames-5)/17)`，`length=17n+5`（`executor.py:948-957`） |
+| 8 | H3 输出形态 | 未变 | 节点 16 `SaveVideo` 单 mp4 内嵌音轨；`audio_plan.register_native_audio` |
+| 9 | 重生成复用 TTS | 未变（**但仍无指纹**） | `_shot_ref_audios` 每次实时查 approved 片段；A4 未做 |
+| 10 | 改台词/音色重跑什么 | 未变 | 台词→segment regenerate 产新版本；视频须重生成 |
+
+**四个概念仍严格区分**（无混用）：
+- `voice_id` = `VoiceProfile.voice_id`（Qwen3 speaker 值）
+- `voice_audio` = H3 `ref_audio_N` 注入的**本镜台词音频**
+- `voice_reference_audio` = TTS 克隆工作流的 `$tts_voice_ref.~audio!`（只在 TTS 内部）
+- `voice_conditioning` = `capabilities.voice_mode ∈ preset / clone_reference_audio`
+
+## E.4 本轮确认的剩余缺口（按优先级）
+
+| ID | 缺口 | 计划条款 | 影响 |
+|---|---|---|---|
+| **G1** | 无 matcher 服务；`capability_matches` 无调用方 | §11.1/§11.2 | 显式指定不兼容工作流不会被拦截；无「缺失能力」明确报错 |
+| **G2** | 无项目级默认工作流 | §11.3/§19 | 每次只能靠 `is_default`（当前全 false）或插入顺序兜底 |
+| **G3** | A3 音频输入无格式/采样率/声道/时长校验 | §7.6/§8.4 | 不符合 H3 约束的音频直接上传，失败在 ComfyUI 侧 |
+| **G4** | A4 TTS 复用无依赖指纹 | §13.5 | 台词/音色改了但旧片段仍 approved 时会误复用 |
+| **G5** | 无独立工作流管理页 | §18 | 参数绑定/槽位配置/测试运行无 UI |
+| **G6** | 角色/场景/道具/分镜视频页未接选择器 | §10.1-10.5 | 新增工作流仍需改页面代码，违反 §25 最终目标 |
+| **G7** | `alias` 全表 NULL | §4.2/§4.3 | 稳定别名未落地，业务引用只能靠 id |
+| **G8** | `is_default` 全 false | §11.1 | 匹配链第一级恒空 |
+
+## E.5 环境约束（影响验收方式）
+
+`/check-runtime` 实测：**当前 ComfyUI 实例只有 2 个 image 工作流 ready**，H3 三档 / FLF2V / T2V / TTS / BGM 全部 `missing_deps`（缺 `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`、`minimax_h3_video_vae_int8_convrot.safetensors`、Qwen3-TTS 节点包等）。
+
+因此 G1–G8 的验收口径：
+- **代码/契约层**（matcher、能力校验、指纹、Schema、前端组件）→ 可用真实工作流 JSON + 单元测试验收。
+- **真实生成层**（H3 出视频、TTS 出音频）→ 必须先在实例上补齐权重，或把 `comfyui_instances` 指回原实例；否则只能以 `missing_deps` 明确报错为验收结果，**不得用 mock 声称已通过**。

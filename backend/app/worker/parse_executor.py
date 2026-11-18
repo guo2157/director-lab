@@ -111,51 +111,15 @@ def _upsert_records(db: Session, project_id: str, episode_start: int, episode_co
                     status: str, *, error_msg: str | None = None,
                     asset_counts: dict[int, int] | None = None,
                     parse_version_id: str | None = None) -> list[EpisodeParseRecord]:
-    """按集 upsert 集级解析记录（asset_type=all：当前单次 LLM 调用产出全部实体分组）。
-
-    状态机：pending → running → succeeded/failed；failed 重试回 running。
+    """[DEPRECATED] 已迁移至 app.services.script_parse.upsert_episode_records。
+    保留此包装器仅用于向后兼容旧调用方（测试等），新代码应直接引用公共模块。
     """
-    now = _now().replace(tzinfo=None)
-    records = []
-    for ep in range(episode_start, episode_start + episode_count):
-        rec = (
-            db.query(EpisodeParseRecord)
-            .filter(
-                EpisodeParseRecord.project_id == project_id,
-                EpisodeParseRecord.episode_no == ep,
-                EpisodeParseRecord.asset_type == "all",
-            )
-            .first()
-        )
-        if rec is None:
-            rec = EpisodeParseRecord(
-                id=ids.episode_parse_record_id(), project_id=project_id,
-                episode_no=ep, asset_type="all", status="pending",
-                attempt_count=0, version=0, created_at=now,
-            )
-            db.add(rec)
-        if status == "running":
-            # pending/failed/retry 可进入 running；succeeded 只随失败批次回退到 failed
-            if rec.status == "running":
-                records.append(rec)
-                continue
-            if rec.status == "succeeded":
-                # 已成功集在后续批次失败时可能被标记为 failed（整体回退），
-                # 但不允许直接进入 running——需先经过 failed 再由重试驱动
-                records.append(rec)
-                continue
-            rec.attempt_count = (rec.attempt_count or 0) + 1
-        rec.status = status
-        rec.error_msg = error_msg
-        rec.updated_at = now
-        rec.version = (rec.version or 0) + 1
-        if asset_counts is not None and status == "succeeded":
-            rec.asset_count = asset_counts.get(ep, 0)
-        if parse_version_id:
-            rec.parse_version_id = parse_version_id
-        records.append(rec)
-    db.flush()
-    return records
+    from app.services.script_parse import upsert_episode_records
+    return upsert_episode_records(
+        db, project_id, episode_start, episode_count, status,
+        error_msg=error_msg, asset_counts=asset_counts,
+        parse_version_id=parse_version_id,
+    )
 
 
 def _task_progress(db: Session, job_id: str, progress: int) -> None:
@@ -182,7 +146,15 @@ def _task_step(db: Session, job_id: str, step: str, message: str, progress: int)
 
 
 def execute_parse_job(job_id: str) -> dict:
-    """执行一个剧本解析任务。返回执行结果摘要。"""
+    """[DEPRECATED] 链路已统一至 script_agent。
+    
+    scheduler 已将所有 parse 类型任务路由至 execute_script_agent_job，
+    此函数仅保留用于测试兼容和历史对比。新代码应使用 
+    app.services.script_agent.execute_script_agent_job。
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.warning("execute_parse_job 已 deprecated，请使用 execute_script_agent_job")
     db: Session = SessionLocal()
     try:
         job = db.get(Job, job_id)

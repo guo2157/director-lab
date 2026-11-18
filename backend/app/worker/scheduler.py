@@ -264,7 +264,9 @@ def _execute_job(job_id: str, job_type: str) -> dict:
         from app.worker.series_executor import execute_series_agent_job
         return execute_series_agent_job(job_id)
     if job_type == "parse":
-        return execute_parse_job(job_id)
+        # 链路统一：parse 类型已迁移至 script_agent 执行，保留兼容分发
+        from app.services.script_agent import execute_script_agent_job
+        return execute_script_agent_job(job_id)
     if job_type == "compose":
         return execute_compose_job(job_id)
     if job_type == "export":

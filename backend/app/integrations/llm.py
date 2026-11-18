@@ -14,11 +14,25 @@
 """
 import json
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from app.core.config import get_settings
+
+
+@dataclass
+class LLMCallMetadata:
+    """单次 LLM 调用的元数据（用于观测、统计与重试决策）。"""
+    model: str = ""
+    max_tokens: int = 0
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    duration_ms: int = 0
+    retry_count: int = 0
 
 # 已确认不支持 thinking 字段的端点（base_url）：命中后不再携带该字段，保证兼容性
 _THINKING_UNSUPPORTED: set[str] = set()
@@ -82,11 +96,11 @@ class LLMClient:
             self.api_key = api_key if api_key is not None else settings.llm_api_key
             self.model = model or settings.llm_model
         self.timeout = timeout or settings.llm_timeout_seconds
-        self.max_tokens = int(getattr(settings, "llm_max_tokens", 16384) or 16384)
-        # 关闭推理链：思考 token 与正文共享 max_tokens，结构化 JSON 任务里会把预算吃光。
-        # 供应商不识别该字段时由 _post_with_thinking_fallback 记录到 _THINKING_UNSUPPORTED
-        # 并自动降级，避免把兼容性问题暴露成解析失败。
-        self.disable_thinking = bool(getattr(settings, "llm_disable_thinking", True))
+        self.max_tokens = int(getattr(settings, "llm_max_tokens", 32768) or 32768)
+        # 保留推理能力：剧本解析依赖模型的深度推理（角色关系、剧情因果、场景边界等），
+        # 默认不禁用 Thinking。仅当 llm_disable_thinking=True 时显式发送 thinking.type=disabled。
+        # 供应商不识别该字段时由 _post 记录到 _THINKING_UNSUPPORTED 并自动降级。
+        self.disable_thinking = bool(getattr(settings, "llm_disable_thinking", False))
 
     def _check_config(self) -> None:
         if not self.api_key:
@@ -94,15 +108,22 @@ class LLMClient:
         if not self.base_url:
             raise LLMError("llm_unconfigured", "语言模型未配置 base_url")
 
-    def _post(self, client: httpx.Client, payload: dict[str, Any], headers: dict[str, str]):
-        """POST /chat/completions，附带关闭推理链的兼容降级。
+    def _thinking_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """根据 disable_thinking 配置决定是否注入 thinking 参数。
+        仅当 disable_thinking=True 且端点不在黑名单时才注入 thinking.type=disabled。
+        disable_thinking=False（默认）时不传 thinking 字段，保留模型推理能力。
+        """
+        if self.disable_thinking and self.base_url not in _THINKING_UNSUPPORTED:
+            return {**payload, "thinking": {"type": "disabled"}}
+        return payload
 
-        推理模型（deepseek-v4.x 等）默认输出思考链，思考 token 记在 completion 里，
-        与正文共享 max_tokens。剧本解析这类长 JSON 任务里思考会把预算吃光，
-        表现为 JSON 在字符串中途被截断（"Expecting ',' delimiter"），重试无效。
-        这里显式传 thinking={"type": "disabled"}；若供应商不认该字段（HTTP 400
-        且响应提到 thinking），本次去掉该字段重试，并记录到进程级黑名单，
-        后续调用不再携带，保证对任意 OpenAI 兼容端点的兼容性。
+    def _post(self, client: httpx.Client, payload: dict[str, Any], headers: dict[str, str]):
+        """POST /chat/completions，附带 Thinking 配置的兼容降级。
+
+        Thinking 策略由 llm_disable_thinking 控制（默认 False，保留推理）。
+        若配置为关闭且端点不识别 thinking 字段（HTTP 400/422 含 thinking），
+        则自动移除该字段并记录到进程级黑名单，后续调用不再携带，
+        保证对任意 OpenAI 兼容端点的兼容性。
         """
         url = f"{self.base_url}/chat/completions"
         want_disable = self.disable_thinking and self.base_url not in _THINKING_UNSUPPORTED
@@ -175,10 +196,12 @@ class LLMClient:
         return content
 
     def chat_stream(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True,
-                    on_delta=None) -> str:
+                    on_delta=None, max_tokens: int | None = None) -> str:
         """流式对话调用：SSE 增量接收，on_delta(text) 逐块回调，返回完整文本。
-        网络错误分类与 chat() 一致；流中断视为 llm_error。"""
+        网络错误分类与 chat() 一致；流中断视为 llm_error。
+        max_tokens 可单次覆盖实例默认值；支持 finish_reason=length 截断检测。"""
         self._check_config()
+        limit = int(max_tokens or self.max_tokens)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -186,13 +209,16 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.3,
-            "max_tokens": self.max_tokens,
+            "max_tokens": limit,
             "stream": True,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        # 流式也走 Thinking 兼容策略（与 _post 一致的逻辑）
+        payload = self._thinking_payload(payload)
         headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "text/event-stream"}
         parts: list[str] = []
+        last_finish_reason: str | None = None
         # 流式空闲超时：上游可能持续发送 SSE 心跳（注释行/空 data），
         # 使 httpx 的 read timeout 不断被重置，任务线程却永远收不到有效内容、无法结束。
         # 因此额外以『最后一次收到有效 delta 的时刻』为准做空闲判定。
@@ -228,7 +254,12 @@ class LLMClient:
                         except json.JSONDecodeError:
                             continue
                         try:
-                            delta = chunk["choices"][0]["delta"].get("content") or ""
+                            choice0 = chunk["choices"][0]
+                            delta = choice0.get("delta", {}).get("content") or ""
+                            # 记录最后一个非空 finish_reason（通常出现在最后一条 chunk）
+                            fr = choice0.get("finish_reason")
+                            if fr:
+                                last_finish_reason = str(fr)
                         except (KeyError, IndexError, TypeError):
                             continue
                         if delta:
@@ -247,6 +278,12 @@ class LLMClient:
             raise LLMError("llm_unreachable", f"语言模型连接失败: {type(e).__name__}") from e
         except httpx.HTTPError as e:
             raise LLMError("llm_unreachable", f"语言模型网络错误: {type(e).__name__}") from e
+        # 流式截断检测：与 chat_messages 一致，finish_reason=length 时显式报错
+        if last_finish_reason == "length":
+            raise LLMError(
+                "llm_output_truncated",
+                f"语言模型流式输出被截断（max_tokens={limit}），请提高 llm_max_tokens 或缩小单次解析范围",
+            )
         return "".join(parts)
 
     def chat_json(self, system_prompt: str, user_prompt: str,

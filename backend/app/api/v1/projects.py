@@ -355,7 +355,19 @@ def get_workflow_config(project_id: str, db: Session = Depends(get_db)) -> dict:
             ok, missing = caps_svc.capability_matches(
                 caps, matcher.SLOT_REQUIRED.get(slot, {})
             )
-            candidates[slot].append({**entry, "usable": ok, "missing": missing})
+            entry_slot = {**entry, "usable": ok, "missing": missing}
+            # 资产图槽位额外约束（与 generate.py::_match_pure_asset_workflow 一致）：
+            # 带参考图槽位的工作流在无参考图时会由模型自行补全主体，导致角色图混入
+            # 无关人物、场景图混入人物道具。这类工作流对资产图永远不可用，前端不该
+            # 让用户选中后到生成时才 422，因此在这里就标为不可用并说明原因。
+            if slot == "image" and caps.get("reference_slots"):
+                entry_slot["usable"] = False
+                entry_slot["missing"] = [
+                    *entry_slot["missing"],
+                    "资产图只允许无参考图的纯文生图工作流",
+                ]
+                entry_slot["asset_purity_blocked"] = True
+            candidates[slot].append(entry_slot)
 
     return {
         "project_id": p.id,

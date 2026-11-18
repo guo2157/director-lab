@@ -530,7 +530,7 @@
 
 **GET /api/settings**：返回全部配置；密钥字段返回掩码，并附带 `api_key_set` 布尔值表示是否已配置。
 
-**PUT /api/settings**：部分更新；密钥字段传空字符串表示清除。
+**PUT /api/settings**：部分更新；密钥字段传空字符串表示清除。解析预算相关字段（`llm_max_tokens`、`llm_disable_thinking`、`max_episodes_per_batch`）同样可写并即时生效——此前未列入白名单，前端传了会被静默丢弃。
 
 **POST /api/settings/test-comfyui**：请求体 `base_url`、`api_key`（可选）。失败时 `detail.reason` 取值为 `connection_refused` / `timeout` / `unauthorized` / `invalid_response` / `dns_error`。
 

@@ -439,7 +439,7 @@ def create_parse(project_id: str, payload: ParseCreate,
     else:
         episode_count = payload.episode_count
     job = Job(
-        id=ids.job_id(), project_id=project_id, job_type="parse",
+        id=ids.job_id(), project_id=project_id, job_type="script_agent",
         params={
             "script_version_id": sv.id,
             "episode_start": payload.episode_start,
@@ -502,26 +502,28 @@ def retry_parse(project_id: str, db: Session = Depends(get_db)) -> ParseRetryOut
     )
     if not failed:
         raise errors.invalid_request("没有失败的解析记录可重试")
-    # 失败集去重并归并为连续区间（当前按集粒度重试，取最小/最大集数）
+    # 失败集去重，每集独立创建 script_agent 重试任务，避免合并区间覆盖成功集
     episodes = sorted({r.episode_no for r in failed})
-    episode_start, episode_end = episodes[0], episodes[-1]
-    # 需要剧本版本：取项目当前剧本版本
     sv = db.get(ScriptVersion, p.current_script_version_id) if p.current_script_version_id else None
     if sv is None:
         raise errors.script_version_not_found()
-    job = Job(
-        id=ids.job_id(), project_id=project_id, job_type="parse",
-        params={
-            "script_version_id": sv.id,
-            "episode_start": episode_start,
-            "episode_count": episode_end - episode_start + 1,
-            "retry": True,
-        },
-        status="queued", created_at=_now(),
-    )
-    db.add(job)
+    job_ids: list[str] = []
+    for ep in episodes:
+        job = Job(
+            id=ids.job_id(), project_id=project_id, job_type="script_agent",
+            params={
+                "script_version_id": sv.id,
+                "episode_start": ep,
+                "episode_count": 1,
+                "retry": True,
+                "retry_episodes": [ep],
+            },
+            status="queued", created_at=_now(),
+        )
+        db.add(job)
+        job_ids.append(job.id)
     db.commit()
-    return ParseRetryOut(job_id=job.id, retried_episodes=episodes)
+    return ParseRetryOut(job_id=job_ids[0] if job_ids else "", retried_episodes=episodes)
 
 
 @router.post("/{project_id}/parse-versions/{parse_version_id}/confirm")
