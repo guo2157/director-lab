@@ -66,6 +66,9 @@ const {
   loadAssetPickerItems,
   pickAsset,
   uploadRefImage,
+  regenWorkflowId,
+  workflowSchema,
+  regenParams,
 } = useKeyframeRegen({
   projectId: computed(() => props.projectId),
   reviewApproved: computed(() => props.reviewApproved),
@@ -168,6 +171,9 @@ function onReplace() {
               :bound-count="boundCount"
               :editable="regenRefsEditable"
               :validation="regenValidation"
+              v-model:workflow-id="regenWorkflowId"
+              v-model:params="regenParams"
+              :schema="workflowSchema"
               @pick="openAssetPicker"
               @remove="removeRegenRef"
             />

@@ -6,6 +6,9 @@
  */
 import { NAlert, NButton, NImage, NRadioButton, NRadioGroup, NTag } from 'naive-ui'
 import type { ValidateResult } from '@/api/regeneration'
+import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
+import WorkflowParameterForm from '@/components/workflow/WorkflowParameterForm.vue'
+import type { WorkflowSchema } from '@/types/workflow'
 
 interface WorkbenchRow {
   slot_param: string
@@ -25,10 +28,16 @@ defineProps<{
   boundCount: number
   editable: boolean
   validation: ValidateResult | null
+  /** 完整重新配置模式下的工作流选择与动态参数（P5） */
+  workflowId?: string
+  schema?: WorkflowSchema | null
+  params?: Record<string, unknown>
 }>()
 
 const emit = defineEmits<{
   'update:mode': [string]
+  'update:workflowId': [string | undefined]
+  'update:params': [Record<string, unknown>]
   pick: [string]
   remove: [string]
 }>()
@@ -46,6 +55,21 @@ const emit = defineEmits<{
           {{ opt.label }}
         </n-radio-button>
       </n-radio-group>
+    </div>
+
+    <div v-if="mode === 'full_reconfigure'" class="wb-wf">
+      <div class="wb-wf-label">工作流</div>
+      <WorkflowSelector
+        :model-value="workflowId"
+        :workflow-type="'image'"
+        size="small"
+        @update:model-value="(v: string | undefined) => emit('update:workflowId', v)"
+      />
+      <WorkflowParameterForm
+        :schema="schema ?? null"
+        :model-value="params ?? {}"
+        @update:model-value="(v: Record<string, unknown>) => emit('update:params', v)"
+      />
     </div>
 
     <div class="wb-list">
@@ -196,6 +220,20 @@ const emit = defineEmits<{
 .wb-actions {
   display: flex;
   gap: 6px;
+}
+.wb-wf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+.wb-wf-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
 }
 .wb-hint {
   margin: 0;

@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef } from 'vue'
+import { computed, ref, watch, type ComputedRef } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { listCharacters, listProps } from '@/api/script'
 import {
@@ -9,6 +9,8 @@ import {
   type ValidateResult,
 } from '@/api/regeneration'
 import { listAssets, uploadAsset } from '@/api/assets'
+import { getWorkflowSchema } from '@/api/workflows'
+import type { WorkflowSchema } from '@/types/workflow'
 import type { Asset } from '@/types/asset'
 import type { Shot } from '@/types/script'
 import { useKeyframeSlots, isCharSlot, isSceneSlot, isPropSlot } from './useKeyframeSlots'
@@ -105,6 +107,8 @@ export function useKeyframeRegen(opts: {
       // 初始化重新生成工作台：提示词与参考图来自基础版本原始生成配置
       regenPrompt.value = cfg.prompt?.rendered ?? shot.image_prompt ?? ''
       regenMode.value = 'inherit_prompt_only'
+    regenWorkflowId.value = undefined
+    regenParams.value = {}
       regenRefs.value = (cfg.refs ?? []).map((r) => ({ ...r }))
       regenValidation.value = null
       // 快照参数里的 ref_* 键即生成时实际传入的槽位，值为对应资产文件名
@@ -130,6 +134,35 @@ export function useKeyframeRegen(opts: {
   const regenPrompt = ref('')
   /** 工作台模式：默认沿用原配置只改提示词；modify_refs 可增删替换参考图 */
   const regenMode = ref<'inherit_prompt_only' | 'modify_refs' | 'full_reconfigure'>('inherit_prompt_only')
+
+  // 完整重新配置：工作流选择 + Schema 驱动的动态参数（P5）
+  const regenWorkflowId = ref<string | undefined>(undefined)
+  const workflowSchema = ref<WorkflowSchema | null>(null)
+  const regenParams = ref<Record<string, unknown>>({})
+
+  /** 切换工作流时按 Schema 默认值补参数；已填值不覆盖 */
+  async function loadWorkflowSchema(id: string | undefined) {
+    if (!id) {
+      workflowSchema.value = null
+      return
+    }
+    try {
+      const schema = await getWorkflowSchema(id)
+      workflowSchema.value = schema
+      const next: Record<string, unknown> = { ...regenParams.value }
+      for (const param of schema.parameters) {
+        if (next[param.key] === undefined && param.default !== null && param.default !== undefined) {
+          next[param.key] = param.default
+        }
+      }
+      regenParams.value = next
+    } catch (e: any) {
+      opts.message.error(`读取工作流 Schema 失败：${e?.message ?? e}`)
+      workflowSchema.value = null
+    }
+  }
+
+  watch(regenWorkflowId, (id) => { void loadWorkflowSchema(id) })
   /** 工作台参考图列表（含禁用项；提交时按模式决定是否携带） */
   const regenRefs = ref<RegenerateRef[]>([])
   /** 提交前预检结果（null=未校验） */
@@ -147,6 +180,7 @@ export function useKeyframeRegen(opts: {
   const regenModeOptions = [
     { label: '沿用原配置，只修改提示词', value: 'inherit_prompt_only' },
     { label: '修改参考图', value: 'modify_refs' },
+    { label: '切换工作流 / 改参数', value: 'full_reconfigure' },
   ]
   const regenRefsEditable = computed(() => regenMode.value !== 'inherit_prompt_only')
 
@@ -281,6 +315,12 @@ export function useKeyframeRegen(opts: {
         mode: regenMode.value,
         prompt: regenPrompt.value,
       }
+      if (regenMode.value === 'full_reconfigure') {
+        // 只有「切换工作流 / 改参数」才允许覆盖工作流与参数；
+        // 其余模式沿用原快照，避免静默改变历史配置
+        if (regenWorkflowId.value) payload.workflow_id = regenWorkflowId.value
+        payload.params = { ...regenParams.value }
+      }
       if (regenMode.value !== 'inherit_prompt_only') {
         payload.refs = regenRefs.value.map((r) => ({
           slot_param: r.slot_param,
@@ -367,6 +407,9 @@ export function useKeyframeRegen(opts: {
     // 工作台
     regenPrompt,
     regenMode,
+    regenWorkflowId,
+    workflowSchema,
+    regenParams,
     regenModeOptions,
     regenRefs,
     regenRefRows,
