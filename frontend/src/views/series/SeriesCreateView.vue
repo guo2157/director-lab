@@ -103,10 +103,10 @@ function goBack() {
     </header>
 
     <n-card :bordered="false" class="form-card">
-      <n-form ref="formRef" :model="form" :rules="rules" label-placement="top" :show-require-mark="false">
+      <n-form ref="formRef" :model="form" :rules="rules" label-placement="top">
         <section class="form-section">
           <div class="section-title">基础信息</div>
-          <n-form-item label="系列名称" path="name">
+          <n-form-item label="系列名称" path="name" required>
             <n-input v-model:value="form.name" placeholder="例如：小熊成长记" maxlength="200" show-count />
           </n-form-item>
           <n-form-item label="系列简介" path="description">
