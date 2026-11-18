@@ -208,8 +208,21 @@ onBeforeUnmount(() => {
             <span class="hint">{{ nextNumberHint }}</span>
           </n-space>
           <n-space>
-            <n-button type="primary" :loading="previewing" :disabled="!instruction.trim()" @click="doPreview">构建上下文预览</n-button>
-            <n-button type="primary" ghost :loading="submitting" :disabled="!instruction.trim() || taskRunning" @click="doContinue">开始续写</n-button>
+            <n-button
+              type="primary"
+              :loading="previewing"
+              :disabled="!instruction.trim()"
+              :title="!instruction.trim() ? '请先填写「续写要求」（必填）' : undefined"
+              @click="doPreview"
+            >构建上下文预览</n-button>
+            <n-button
+              type="primary"
+              ghost
+              :loading="submitting"
+              :disabled="!instruction.trim() || taskRunning"
+              :title="!instruction.trim() ? '请先填写「续写要求」（必填）' : taskRunning ? '已有生成任务在运行，完成后再提交' : undefined"
+              @click="doContinue"
+            >开始续写</n-button>
             <n-button v-if="routeEpisodeId" quaternary @click="goReview(routeEpisodeId)">查看该集审核</n-button>
           </n-space>
         </n-space>

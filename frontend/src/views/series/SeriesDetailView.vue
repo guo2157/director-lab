@@ -75,6 +75,8 @@ const assetsQuery = useQuery({
 
 const series = computed(() => seriesQuery.data.value)
 const episodes = computed(() => episodesQuery.data.value?.items ?? [])
+/** 续写按钮文案：尚无剧集时是「第 1 集」，否则「下一集」 */
+const continueLabel = computed(() => (episodes.value.length === 0 ? '续写第 1 集' : '续写下一集'))
 const bible = computed(() => bibleQuery.data.value)
 const continuity = computed(() => continuityQuery.data.value)
 const threads = computed(() => threadsQuery.data.value ?? [])
@@ -175,9 +177,9 @@ const nextAction = computed<{ label: string; hint: string; cta: string; run: () 
   const ep = focusEpisode.value
   if (!ep) {
     return {
-      label: episodes.value.length === 0 ? '续写第 1 集' : '续写下一集',
+      label: continueLabel.value,
       hint: '填写本集创作要求后提交，系统会自动建立生产项目并生成剧本草稿。先在「系列设定」补充人物与世界观，生成会更稳定。',
-      cta: episodes.value.length === 0 ? '续写第 1 集' : '续写下一集',
+      cta: continueLabel.value,
       run: () => goContinue(),
     }
   }
@@ -324,9 +326,10 @@ async function goWorkspace(ep: SeriesEpisode) {
             </div>
           </div>
           <n-space>
-            <n-button type="primary" @click="goContinue()">续写下一集</n-button>
+            <!-- 持久工具栏动作，主操作交给下方「下一步」，避免同屏两个 primary 指向同一动作 -->
+            <n-button secondary @click="goContinue()">{{ continueLabel }}</n-button>
             <n-button
-              title="只创建占位剧集，不生成剧本；建议直接用「续写下一集」"
+              :title="`只创建占位剧集，不生成剧本；建议直接用「${continueLabel}」`"
               @click="createEpisodeMutation.mutate()"
               :loading="createEpisodeMutation.isPending.value"
             >
@@ -374,9 +377,10 @@ async function goWorkspace(ep: SeriesEpisode) {
 
         <n-tabs type="line" animated>
           <n-tab-pane name="episodes" tab="剧集列表">
-            <n-empty v-if="episodes.length === 0" description="还没有剧集：点「续写第 1 集」，填写要求后自动生成剧本并建立生产项目">
+            <n-empty v-if="episodes.length === 0" description="还没有剧集：填写本集创作要求后，系统会自动生成剧本并建立生产项目">
               <template #extra>
-                <n-button type="primary" size="small" @click="goContinue()">续写第 1 集</n-button>
+                <!-- 与上方「下一步」是同一个动作（goContinue），此处降为次级，避免同屏两个 primary -->
+                <n-button secondary size="small" @click="goContinue()">续写第 1 集</n-button>
               </template>
             </n-empty>
             <div v-else class="episode-list">
