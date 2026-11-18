@@ -58,6 +58,11 @@ class Workflow(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=ids.workflow_id)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 展示名与搜索别名（P1）：name 为上传时的展示名，alias 供搜索/旧名兼容
+    alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 上传原始文件名与定义指纹（P1）：溯源用，不参与唯一性判定
+    original_filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     workflow_type: Mapped[str] = mapped_column(String(16), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     trigger: Mapped[dict | None] = mapped_column(JSON, nullable=True)

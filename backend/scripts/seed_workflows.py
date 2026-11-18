@@ -7,9 +7,9 @@
 实际变化时才 version+1，内容一致的重复播种不改动记录、不虚增版本。
 运行方式：在 backend 目录执行 .venv/bin/python scripts/seed_workflows.py
 """
+import hashlib
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 # 允许以脚本方式直接运行时定位到 backend 包根
@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import Workflow
 from app.services.workflow_inject import parse_workflow
+from app.services.workflow.schema_builder import build_schema
 
 settings = get_settings()
 
@@ -56,18 +57,18 @@ def seed():
             description = (capabilities or {}).get("notes")
             # 校验解析：标记解析 + 画布残留键检测；错误也落库以便排查，不阻断导入
             parsed = parse_workflow(definition)
-            parsed_schema = {
-                "params": {k: asdict(v) for k, v in parsed.params.items()},
-                "outputs": sorted(parsed.outputs),
-                "errors": list(parsed.errors),
-                "warnings": list(parsed.warnings),
-            }
+            # P1：与上传端点共用同一 Schema 构建器，避免 parsed_schema 出现两种形状（审计 D7）
+            parsed_schema = build_schema(definition, capabilities=capabilities, trigger=trigger)
             status = "OK" if not parsed.errors else f"ERROR({len(parsed.errors)})"
             print(
                 f"  [{status}] {name}  type={workflow_type}  "
                 f"params={len(parsed.params)} outputs={len(parsed.outputs)}"
             )
             existing = db.query(Workflow).filter_by(name=name).first()
+            # P1：内置工作流也记录溯源信息（原始文件名 + 定义指纹），与上传端点保持一致
+            file_hash = hashlib.sha256(
+                canonical(definition).encode("utf-8")
+            ).hexdigest()
             if existing:
                 changed = (
                     existing.workflow_type != workflow_type
@@ -76,6 +77,8 @@ def seed():
                     or canonical(existing.capabilities) != canonical(capabilities)
                     or canonical(existing.definition) != canonical(definition)
                     or canonical(existing.parsed_schema) != canonical(parsed_schema)
+                    or existing.original_filename != wf_path.name
+                    or existing.file_hash != file_hash
                     or not existing.is_builtin
                 )
                 if not changed:
@@ -87,12 +90,16 @@ def seed():
                 existing.capabilities = capabilities
                 existing.definition = definition
                 existing.parsed_schema = parsed_schema
+                existing.original_filename = wf_path.name
+                existing.file_hash = file_hash
                 existing.is_builtin = True
                 existing.version = (existing.version or 0) + 1
                 updated += 1
             else:
                 db.add(Workflow(
                     name=name,
+                    original_filename=wf_path.name,
+                    file_hash=file_hash,
                     workflow_type=workflow_type,
                     description=description,
                     trigger=trigger,
