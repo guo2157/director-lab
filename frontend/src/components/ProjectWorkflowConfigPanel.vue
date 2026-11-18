@@ -11,7 +11,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { NAlert, NButton, NSelect, NSpin, NTag, NTooltip, useMessage } from 'naive-ui'
+import { NAlert, NButton, NSelect, NSpin, useMessage } from 'naive-ui'
 import { getProjectWorkflowConfig, saveProjectWorkflowConfig } from '@/api/projects'
 import type { WorkflowCandidate } from '@/api/projects'
 

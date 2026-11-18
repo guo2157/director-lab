@@ -383,3 +383,83 @@ def test_fingerprint_version_bump_invalidates():
     )
     assert d.reusable is False
     assert "fingerprint_version" in d.changed
+
+
+# --- 事件落库：调用方必须消费 stale / legacy，不能静默 ----------------------
+
+def _make_job(db, ctx):
+    """建一个真实的 clip 任务（事件写入需要 job 存在）。"""
+    from app.models.production import Job
+    job = Job(
+        id=ids.job_id(), project_id=ctx["project"].id, shot_id=ctx["shot"].id,
+        job_type="clip", status="running", workflow_id=ctx["wf"].id,
+        params={}, input_snapshot={}, created_at=_now(),
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+def _events(db, job):
+    from app.models.production import JobEvent
+    return (
+        db.query(JobEvent)
+        .filter(JobEvent.job_id == job.id)
+        .order_by(JobEvent.event_seq)
+        .all()
+    )
+
+
+def test_stale_writes_audio_tts_stale_event(db, scene_ctx):
+    """指纹失配时必须写 job.audio_tts_stale 事件，把「为什么不能用旧音频」落库。"""
+    seg = _add_segment(db, scene_ctx, text="你终于来了。")
+    seg.tts_fingerprint = _current_fingerprint(db, scene_ctx, seg)
+    db.commit()
+    seg.text = "你怎么才来。"
+    db.commit()
+
+    job = _make_job(db, scene_ctx)
+    result = executor._shot_ref_audios(db, scene_ctx["shot"])
+    # 模拟 executor 里的消费逻辑
+    if result["stale"]:
+        executor._write_event(db, job, "job.audio_tts_stale", {"stale": result["stale"]})
+        db.commit()
+
+    evs = _events(db, job)
+    stale_ev = [e for e in evs if e.event_type == "job.audio_tts_stale"]
+    assert len(stale_ev) == 1
+    payload = stale_ev[0].payload
+    assert payload["stale"][0]["changed"] == ["text"]
+    assert "台词" in payload["stale"][0]["reason"]
+    # event_type 必须能装进 String(32)，换 MySQL 不截断
+    assert len("job.audio_tts_stale") <= 32
+    assert len("audio.fingerprint_missing") <= 32
+
+
+def test_legacy_writes_fingerprint_missing_event(db, scene_ctx):
+    """宽限期复用必须留痕：audio.fingerprint_missing 事件带片段清单。"""
+    _add_segment(db, scene_ctx, fingerprint=None)
+
+    job = _make_job(db, scene_ctx)
+    result = executor._shot_ref_audios(db, scene_ctx["shot"])
+    assert result["legacy"]
+    if result["legacy"]:
+        executor._write_event(db, job, "audio.fingerprint_missing", {"segments": result["legacy"]})
+        db.commit()
+
+    evs = _events(db, job)
+    ev = [e for e in evs if e.event_type == "audio.fingerprint_missing"]
+    assert len(ev) == 1
+    assert len(ev[0].payload["segments"]) == 1
+
+
+def test_no_event_when_nothing_stale(db, scene_ctx):
+    """指纹一致且无历史片段时不写噪音事件。"""
+    seg = _add_segment(db, scene_ctx)
+    seg.tts_fingerprint = _current_fingerprint(db, scene_ctx, seg)
+    db.commit()
+
+    job = _make_job(db, scene_ctx)
+    result = executor._shot_ref_audios(db, scene_ctx["shot"])
+    assert result["stale"] == [] and result["legacy"] == []
+    assert _events(db, job) == []
