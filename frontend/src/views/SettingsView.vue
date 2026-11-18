@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
+import WorkflowTestPanel from '@/components/workflow/WorkflowTestPanel.vue'
 import {
   NCard, NButton, NSpin, NInput, NInputNumber, NSelect, NSwitch,
   NTag, NEmpty, NUpload, NTooltip, NModal, NPopconfirm, NIcon, useMessage,
@@ -562,6 +563,8 @@ const downloadWorkflow = (wf: Workflow) => {
               </div>
             </div>
           </n-card>
+
+          <WorkflowTestPanel class="wf-test-panel" />
 
           <!-- 新增工作流弹窗 -->
           <n-modal

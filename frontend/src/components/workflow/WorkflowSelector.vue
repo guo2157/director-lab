@@ -13,12 +13,12 @@ import { MODE_LABELS } from '@/types/workflow'
 
 const props = withDefaults(defineProps<{
   modelValue?: string
+  /** 缺省不按类型过滤（管理/测试场景需要跨类型选择） */
   workflowType?: WorkflowType
   disabled?: boolean
   placeholder?: string
   size?: 'small' | 'medium' | 'large'
 }>(), {
-  workflowType: 'image',
   placeholder: '选择工作流（缺省按能力自动匹配）',
   size: 'medium',
 })
