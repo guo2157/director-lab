@@ -317,21 +317,23 @@ const downloadWorkflow = (wf: Workflow) => {
 <template>
   <div class="settings-page">
     <div class="settings-layout">
-      <!-- Sidebar nav -->
+      <!-- Sidebar nav：用 button 保证键盘可聚焦与可访问名，激活态同时给出 aria-current -->
       <aside class="settings-nav">
         <div class="nav-header">设置</div>
-        <div
+        <button
           v-for="tab in tabs"
           :key="tab.key"
+          type="button"
           class="nav-item"
           :class="{ active: activeTab === tab.key }"
+          :aria-current="activeTab === tab.key ? 'page' : undefined"
           @click="activeTab = tab.key"
         >
-          <div class="nav-text">
-            <div class="nav-label">{{ tab.label }}</div>
-            <div class="nav-desc">{{ tab.desc }}</div>
-          </div>
-        </div>
+          <span class="nav-text">
+            <span class="nav-label">{{ tab.label }}</span>
+            <span class="nav-desc">{{ tab.desc }}</span>
+          </span>
+        </button>
       </aside>
 
       <!-- Content -->
@@ -667,14 +669,23 @@ const downloadWorkflow = (wf: Workflow) => {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 10px 12px;
+  border: 0;
   border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.18s ease, color 0.18s ease;
   color: var(--text-primary);
 }
 .nav-item:hover {
   background: var(--bg-elevated);
+}
+.nav-item:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 2px;
 }
 .nav-item.active {
   background: var(--brand-primary);
@@ -683,12 +694,17 @@ const downloadWorkflow = (wf: Workflow) => {
 .nav-item.active .nav-desc {
   color: var(--overlay-active);
 }
-.nav-text { min-width: 0; }
+.nav-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
 .nav-label {
   font-size: 14px;
   font-weight: 500;
 }
 .nav-desc {
+  display: block;
   font-size: 11px;
   color: var(--text-secondary);
   white-space: nowrap;
