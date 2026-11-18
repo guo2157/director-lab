@@ -61,18 +61,22 @@
 
 ---
 
-## 5. 未开始页面
+## 5. 全部页面覆盖清单
 
 | 页面 | 状态 | 备注 |
 |---|---|---|
-| `/` 项目列表 | ⬜ | 仅实机看过，未逐项审查 |
+| `/` 项目列表 | ✅ | 实机审查完毕；**修掉 P0 假进度**（读后端不存在的 `shot_count` → 恒 0%，改 `shot_done/shot_total`），补真实阶段标签。见 §8.1 |
 | `/project/:id/script` | ✅ | 步骤条标签改为阶段语（剧本编辑/内容校验/版本已存/智能分析），与按钮的动作语区分，消除同屏两遍同名；三个禁用按钮补 `title` + `aria-label`（「开始分析」禁用时明确提示需先保存版本） |
 | `/project/:id/storyboard-images` | ✅ | 复核确认已符合既定偏好：`promptDigest()` 只取「目标画面」一行 + `line-clamp: 2` |
-| `/project/:id/storyboard` | ⬜ | 仅源码审查 |
-| `/project/:id/compose` | ⬜ | 仅源码审查 |
-| `/series/*`（4 条） | ⬜ | 仅源码审查 |
-| `/director` | ⬜ | 仅源码审查 |
-| `/settings` | ⬜ | 仅源码审查 |
+| `/project/:id/storyboard` | ✅ | 修 4 项：26 个选择框悬空 `aria-labelledby`、重复完成文案、资产齐全时的多余「去资产库」、双 primary。见 §8.1 |
+| `/project/:id/compose` | ✅ | 实机审查通过，仅记录 n-card 双层 `role="heading"`（库层面，见 §8.3）。另确认 `data\media\...` 反斜杠路径后端可归一化，非 bug |
+| `/series`（列表） | ✅ | 补「最近更新时间」；抽共享 `relativeTime` |
+| `/series/create` | ✅ | 修必填星号缺失（副标题承诺 `*`，实际全页无星号） |
+| `/series/:id` | ✅ | 修双 primary + 页头文案与实际状态不一致（0 剧集却写「下一集」） |
+| `/series/:id/continue` | ✅ | 两个禁用按钮补真实原因；实测填入后续写要求即恢复可用 |
+| `/episodes/:id/review` | 🟡 | 只能验证错误态：库中该剧集不存在（后端悬空引用，见 §9.3） |
+| `/director` | 🟡 | 空态合格（说明 + 新建入口 + 输入禁用有解释）；有会话态无数据可测，折叠头键盘不可操作属库层面（§8.3） |
+| `/settings` | ✅ | 侧边导航由纯 `div` 改为可聚焦 `button`，补 `aria-current` 与焦点环 |
 
 ---
 
