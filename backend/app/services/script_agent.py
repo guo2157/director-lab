@@ -22,6 +22,11 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.integrations.llm import LLMClient, LLMError
+from app.integrations.llm_response import (
+    ERR_SCHEMA_MISMATCH,
+    validate_parse_payload,
+)
+from app.integrations.llm_retry import call_with_retry
 from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion
 from app.models import ids
 from app.services.script_parse import (
@@ -281,8 +286,14 @@ def execute_script_agent_job(job_id: str) -> dict:
                 wdb.close()
 
         def _parse_batch(b_start: int, b_end: int) -> dict:
-            """单批次 LLM 解析（工作线程内执行，不触碰数据库）。"""
+            """单批次 LLM 解析（工作线程内执行，不触碰数据库）。
+
+            重试策略统一由 ``llm_retry.call_with_retry`` 承担：按错误码决定
+            放大 token / 修复提示 / 退避，不再一律当截断处理。
+            每次尝试的元数据经 ``attempts`` 返回，供主线程写事件。
+            """
             b_count = b_end - b_start + 1
+
             # 只提取当前批次的剧本片段，而非传入全文，减少无关 token 消耗
             episode_text = text
             try:
@@ -299,11 +310,40 @@ def execute_script_agent_job(job_id: str) -> dict:
             def _on_delta(delta_text: str) -> None:
                 delta_q.put(delta_text)
 
-            content = client.chat_stream(
-                get_prompt("parse_system"), user_prompt, json_mode=True, on_delta=_on_delta,
+            attempts: list[dict] = []
+
+            def _record(rec) -> None:
+                attempts.append(rec.to_dict())
+
+            def _parse_and_validate(text: str) -> dict:
+                """JSON 解析 + 业务校验都放在重试循环内部。
+
+                只做 JSON 解析是不够的：模型可以吐出完全合法的 JSON，
+                但每个 scene 都没有 shots（真实发生：场景 7 个 / 分镜 0 个）。
+                这种情况必须在**重试循环内**判失败，才能追加 schema 约束提示
+                再问一次；放到循环外就变成了「解析成功但结果不可用」，
+                最后仍然落库，违反「不完整输出不能保存」。
+                """
+                data = parse_llm_json(text)
+                problems = validate_parse_payload(data)
+                if problems:
+                    raise LLMError(
+                        ERR_SCHEMA_MISMATCH,
+                        "解析结果业务校验未通过: " + "；".join(problems[:8]),
+                    )
+                return data
+
+            raw = call_with_retry(
+                client,
+                system_prompt=get_prompt("parse_system"),
+                user_prompt=user_prompt,
+                json_mode=True,
+                stream=True,
+                on_delta=_on_delta,
+                on_attempt=_record,
+                validate=_parse_and_validate,
             )
-            raw = parse_llm_json(content)
-            return {"start": b_start, "end": b_end, "raw": raw}
+            return {"start": b_start, "end": b_end, "raw": raw, "attempts": attempts}
 
         writer_thread = threading.Thread(target=_delta_writer, daemon=True)
         writer_thread.start()
@@ -350,6 +390,13 @@ def execute_script_agent_job(job_id: str) -> dict:
         seen_scenes: set = set()
         batch_results.sort(key=lambda r: r["start"])
         for br in batch_results:
+            # 记录每次尝试的元数据（token 预算 / finish_reason / 用量），
+            # 用于复盘「是否真的放大了预算」「空输出时上游到底返回了什么」
+            if br.get("attempts"):
+                _write_event(db, job, "agent.parse_attempts", {
+                    "range": f"{br['start']}-{br['end']}",
+                    "attempts": br["attempts"],
+                })
             norm = normalize_parse_output(
                 br["raw"], episode_start=br["start"],
                 episode_count=br["end"] - br["start"] + 1,
@@ -398,6 +445,27 @@ def execute_script_agent_job(job_id: str) -> dict:
             for sh in sc.get("shots") or []:
                 ep = int(sh.get("episode") or episode_start)
                 per_episode_shots[ep] = per_episode_shots.get(ep, 0) + 1
+
+        # 落库前最后一道业务门禁：重试循环内的 validate 只校验「单批」结果，
+        # 这里校验**合并后**的最终结果。宁可整任务失败，也不能把
+        # 「场景 7 个 / 分镜 0 个」这种不可用结果写进 ParseVersion 与 job.result。
+        final_problems = validate_parse_payload(merged)
+        if final_problems:
+            msg = "解析结果业务校验未通过，已拒绝落库: " + "；".join(final_problems[:8])
+            # 保留原始响应供定位（模型漏输出 / 字段名不符 / 静默截断）
+            job.result = {
+                "rejected": True,
+                "problems": final_problems,
+                "raw_batches": [
+                    {"range": f"{br['start']}-{br['end']}", "raw": br["raw"]}
+                    for br in batch_results
+                ],
+            }
+            _upsert_records(db, job.project_id, episode_start, episode_count, "failed",
+                            error_msg=msg, parse_version_id=pv.id)
+            _fail_job(db, job, ERR_SCHEMA_MISMATCH, msg)
+            return {"ok": False, "reason": ERR_SCHEMA_MISMATCH, "problems": final_problems}
+
         _upsert_records(db, job.project_id, episode_start, episode_count, "succeeded",
                         asset_counts=per_episode_shots, parse_version_id=pv.id)
 

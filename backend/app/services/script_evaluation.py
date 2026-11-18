@@ -138,17 +138,23 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
     LLM 错误向上抛 LLMError（llm_unconfigured/llm_unreachable/llm_timeout/llm_error/llm_invalid_output），
     由调用方转为 HTTP 错误，不落库半成品。
     """
-    from app.integrations.llm import LLMClient, parse_llm_json
+    from app.integrations.llm import LLMClient
+    from app.integrations.llm_retry import call_with_retry
     from app.services.prompt_store import get_prompt
 
     system = get_prompt("script_evaluation_system")
     user = build_evaluation_user_prompt(script_text, estimate_data or {}, config or {})
     client = LLMClient()
-    if on_delta is not None:
-        content = client.chat_stream(system, user, json_mode=True, on_delta=on_delta)
-        result = parse_llm_json(content)
-    else:
-        result = client.chat_json(system, user)
+    # 统一重试：空正文/截断/非 JSON 按错误码分流，JSON 解析在循环内
+    result = call_with_retry(
+        client,
+        system_prompt=system,
+        user_prompt=user,
+        json_mode=True,
+        stream=on_delta is not None,
+        on_delta=on_delta,
+        use_chat_json=on_delta is None,
+    )
 
     # 校验返回结构基本字段
     required_keys = {"strengths", "issues", "suggestions", "production_risks",

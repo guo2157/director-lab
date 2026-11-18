@@ -20,6 +20,55 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.integrations.llm_response import (
+    ERR_EMPTY_CONTENT,
+    ERR_INVALID_OUTPUT,
+    ERR_OUTPUT_TRUNCATED,
+    ERR_STREAM_INTERRUPTED,
+    LLMResponseMeta,
+    ValidationResult,
+    is_likely_truncated_json,
+    note_provider_cap,
+    parse_json_safely,
+    validate_llm_response,
+)
+
+
+def _raise_from_validation(result: ValidationResult, message: str | None = None,
+                           *, meta: LLMResponseMeta | None = None) -> None:
+    """把校验结果转成 LLMError（错误码透传，供重试策略按类型决策）。"""
+    raise LLMError(result.error_code or ERR_INVALID_OUTPUT,
+                   message or result.error_message or "语言模型响应校验未通过",
+                   meta=meta)
+
+
+def _coerce_content(raw: Any) -> str | None:
+    """把 message.content 归一化为纯文本。
+
+    OpenAI 标准是字符串；部分供应商返回内容块数组
+    ``[{"type": "text", "text": "..."}]``。两种都要支持，
+    否则会把整段正文丢掉、表现为「content 为空」。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+        return "".join(parts)
+    if isinstance(raw, dict):
+        text = raw.get("text") or raw.get("content")
+        return text if isinstance(text, str) else None
+    return str(raw)
 
 
 @dataclass
@@ -39,12 +88,22 @@ _THINKING_UNSUPPORTED: set[str] = set()
 
 
 class LLMError(Exception):
-    """语言模型交互错误，携带失败分类错误码（message 不含凭据）。"""
+    """语言模型交互错误，携带失败分类错误码（message 不含凭据）。
 
-    def __init__(self, code: str, message: str):
+    附加元数据（content_length / reasoning_length / usage / finish_reason）用于
+    重试记录与问题复盘：空输出时「思考吃了多少 token」是判断该不该放大预算的
+    关键依据，不能丢。
+    """
+
+    def __init__(self, code: str, message: str, *, meta: "LLMResponseMeta | None" = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.content_length = meta.content_length if meta else 0
+        self.reasoning_length = meta.reasoning_length if meta else 0
+        self.finish_reason = meta.finish_reason if meta else None
+        self.usage = dict(meta.usage or {}) if meta else {}
+        self.request_id = meta.request_id if meta else None
 
 
 def _active_llm_instance(settings) -> dict | None:
@@ -156,7 +215,12 @@ class LLMClient:
                       max_tokens: int | None = None) -> str:
         """多轮消息列表对话（导演台 Agent 用）：messages 为 OpenAI 格式 role/content 列表。
         默认 json_mode=False（自然语言回复）；错误分类与 chat() 一致。
-        max_tokens 可单次覆盖实例默认值（长输出被截断时放大重试用）。"""
+        max_tokens 可单次覆盖实例默认值（长输出被截断时放大重试用）。
+
+        响应完整性统一由 ``validate_llm_response`` 判定：空正文、截断、供应商错误
+        各有独立错误码，不再让空串直接落到 json.loads 变成
+        ``Expecting value: line 1 column 1 (char 0)``。
+        """
         self._check_config()
         limit = int(max_tokens or self.max_tokens)
         payload: dict[str, Any] = {
@@ -179,27 +243,63 @@ class LLMClient:
             raise LLMError("llm_unreachable", f"语言模型网络错误: {type(e).__name__}") from e
         if resp.status_code >= 400:
             # 响应体可能含敏感信息，只截取状态码与有限长度，不记录请求头
-            raise LLMError("llm_error", f"语言模型接口 HTTP {resp.status_code}: {resp.text[:300]}")
-        data = resp.json()
-        try:
-            choice = data["choices"][0]
-            content = choice["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
-            raise LLMError("llm_error", "语言模型响应结构异常") from e
-        # 推理模型的思考 token 也占用 max_tokens；被截断时 JSON 可能仍「合法」但内容为空，
-        # 必须显式失败，不能把残缺结果当成功落库。
-        if choice.get("finish_reason") == "length":
-            raise LLMError(
-                "llm_output_truncated",
-                f"语言模型输出被截断（max_tokens={limit}），请提高 llm_max_tokens 或缩小单次解析范围",
+            meta = LLMResponseMeta(
+                content=None, provider_error=f"HTTP {resp.status_code}",
+                model=self.model, max_tokens=limit,
+                request_id=resp.headers.get("x-request-id"),
             )
-        return content
+            _raise_from_validation(validate_llm_response(meta),
+                                   f"语言模型接口 HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        meta = self._extract_completion_meta(data, limit=limit)
+        # 推理模型的思考 token 也占用 max_tokens；被截断时空正文或 JSON 残缺，
+        # 必须显式失败，不能把残缺结果当成功落库。
+        result = validate_llm_response(meta)
+        if not result.valid:
+            _raise_from_validation(result)
+        # 记录该端点观测到的 completion 上限：网关可能静默截断并谎报 stop，
+        # 只有靠 usage 才能识别（见 llm_response.detect_truncation）
+        note_provider_cap(self.base_url, meta.completion_tokens)
+        return meta.content or ""
+
+    def _extract_completion_meta(self, data: dict, *, limit: int) -> LLMResponseMeta:
+        """从非流式响应体提取完整元数据（content / reasoning / finish_reason / usage）。
+
+        兼容两种结构：``message.content`` 为字符串（标准）或为内容块数组（部分供应商）。
+        """
+        try:
+            choices = data.get("choices") or []
+            choice = choices[0] if choices else {}
+            message = choice.get("message") or {}
+            return LLMResponseMeta(
+                content=_coerce_content(message.get("content")),
+                reasoning_content=(message.get("reasoning_content")
+                                   or message.get("reasoning")),
+                finish_reason=choice.get("finish_reason"),
+                usage=data.get("usage") or {},
+                request_id=data.get("id"),
+                stream_completed=True,
+                model=str(data.get("model") or self.model),
+                max_tokens=limit,
+            )
+        except (AttributeError, TypeError):
+            return LLMResponseMeta(
+                content=None, provider_error="响应结构异常",
+                model=self.model, max_tokens=limit,
+            )
 
     def chat_stream(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True,
                     on_delta=None, max_tokens: int | None = None) -> str:
-        """流式对话调用：SSE 增量接收，on_delta(text) 逐块回调，返回完整文本。
-        网络错误分类与 chat() 一致；流中断视为 llm_error。
-        max_tokens 可单次覆盖实例默认值；支持 finish_reason=length 截断检测。"""
+        """流式对话调用：SSE 增量接收，on_delta(text) 逐块回调，返回完整正文。
+
+        收集纪律（本次修复重点）：
+        - content 与 reasoning_content **分别**收集，reasoning 绝不作为最终 JSON；
+        - 某个 chunk 的 content 为空不退出（推理模型前 N 个 chunk 只有思考内容）；
+        - 记录最后一个非空 finish_reason 与 usage（含 reasoning_tokens）；
+        - 只有收到 ``[DONE]`` 才算正常完成，否则判定 llm_stream_interrupted；
+        - 后续空 chunk 不会覆盖已收集内容（只 append）。
+        调用后可从 self.last_metadata 获取本次调用的结构化元数据。
+        """
         self._check_config()
         limit = int(max_tokens or self.max_tokens)
         payload: dict[str, Any] = {
@@ -211,6 +311,8 @@ class LLMClient:
             "temperature": 0.3,
             "max_tokens": limit,
             "stream": True,
+            # 要求供应商在流末尾补一个 usage chunk（不支持的供应商会忽略该字段）
+            "stream_options": {"include_usage": True},
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -218,10 +320,12 @@ class LLMClient:
         payload = self._thinking_payload(payload)
         headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "text/event-stream"}
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         last_finish_reason: str | None = None
-        # 流式空闲超时：上游可能持续发送 SSE 心跳（注释行/空 data），
-        # 使 httpx 的 read timeout 不断被重置，任务线程却永远收不到有效内容、无法结束。
-        # 因此额外以『最后一次收到有效 delta 的时刻』为准做空闲判定。
+        last_usage: dict | None = None
+        request_id: str | None = None
+        stream_completed = False
+        # 流式空闲超时
         _settings = get_settings()
         idle_timeout = float(getattr(_settings, "llm_stream_idle_timeout_seconds", 60.0) or 60.0)
         last_content_at = time.monotonic()
@@ -230,17 +334,25 @@ class LLMClient:
             with httpx.Client(timeout=stream_timeout, trust_env=False) as client:
                 with client.stream("POST", f"{self.base_url}/chat/completions",
                                    json=payload, headers=headers) as resp:
+                    request_id = resp.headers.get("x-request-id")
                     if resp.status_code >= 400:
                         body = resp.read().decode(errors="replace")[:300]
-                        raise LLMError("llm_error", f"语言模型接口 HTTP {resp.status_code}: {body}")
+                        meta = LLMResponseMeta(
+                            content=None, provider_error=f"HTTP {resp.status_code}",
+                            model=self.model, max_tokens=limit,
+                            request_id=request_id, stream_completed=False,
+                        )
+                        _raise_from_validation(
+                            validate_llm_response(meta),
+                            f"语言模型接口 HTTP {resp.status_code}: {body}",
+                        )
                     for line in resp.iter_lines():
-                        # 空闲判定：连续 idle_timeout 秒未收到有效 delta 即判定超时，
-                        # 避免只靠心跳维持连接时任务永久卡在 running
                         if time.monotonic() - last_content_at > idle_timeout:
                             raise LLMError(
                                 "llm_timeout",
                                 f"语言模型流式响应空闲超过 {idle_timeout:.0f} 秒"
-                                f"（已接收 {sum(len(p) for p in parts)} 字符），判定为响应超时",
+                                f"（已接收 {sum(len(p) for p in parts)} 字符正文），"
+                                "判定为响应超时",
                             )
                         if not line.startswith("data:"):
                             continue
@@ -248,27 +360,51 @@ class LLMClient:
                         if not data:
                             continue
                         if data == "[DONE]":
+                            stream_completed = True
                             break
                         try:
                             chunk = json.loads(data)
                         except json.JSONDecodeError:
                             continue
+                        # usage 可能出现在独立的末尾 chunk（choices 为空）
+                        chunk_usage = chunk.get("usage")
+                        if isinstance(chunk_usage, dict) and chunk_usage:
+                            last_usage = {
+                                "prompt_tokens": chunk_usage.get("prompt_tokens"),
+                                "completion_tokens": chunk_usage.get("completion_tokens"),
+                                "total_tokens": chunk_usage.get("total_tokens"),
+                                "reasoning_tokens": (
+                                    chunk_usage.get("reasoning_tokens")
+                                    or (chunk_usage.get("completion_tokens_details") or {})
+                                    .get("reasoning_tokens")
+                                ),
+                            }
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            # 纯 usage chunk / 心跳：不退出，继续消费
+                            continue
                         try:
-                            choice0 = chunk["choices"][0]
-                            delta = choice0.get("delta", {}).get("content") or ""
-                            # 记录最后一个非空 finish_reason（通常出现在最后一条 chunk）
-                            fr = choice0.get("finish_reason")
-                            if fr:
-                                last_finish_reason = str(fr)
+                            choice0 = choices[0]
                         except (KeyError, IndexError, TypeError):
                             continue
+                        delta_obj = choice0.get("delta") or {}
+                        # content 与 reasoning 分别收集，互不覆盖
+                        delta = delta_obj.get("content") or ""
+                        reasoning = delta_obj.get("reasoning_content") or ""
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            last_content_at = time.monotonic()
+                        # 记录最后一个非空 finish_reason
+                        fr = choice0.get("finish_reason")
+                        if fr:
+                            last_finish_reason = str(fr)
                         if delta:
                             parts.append(delta)
                             last_content_at = time.monotonic()
                             if on_delta is not None:
                                 try:
                                     on_delta(delta)
-                                except Exception:  # noqa: BLE001 - 回调异常不阻断流式接收
+                                except Exception:  # noqa: BLE001
                                     pass
         except LLMError:
             raise
@@ -278,63 +414,92 @@ class LLMClient:
             raise LLMError("llm_unreachable", f"语言模型连接失败: {type(e).__name__}") from e
         except httpx.HTTPError as e:
             raise LLMError("llm_unreachable", f"语言模型网络错误: {type(e).__name__}") from e
-        # 流式截断检测：与 chat_messages 一致，finish_reason=length 时显式报错
-        if last_finish_reason == "length":
-            raise LLMError(
-                "llm_output_truncated",
-                f"语言模型流式输出被截断（max_tokens={limit}），请提高 llm_max_tokens 或缩小单次解析范围",
-            )
-        return "".join(parts)
+
+        content = "".join(parts)
+        reasoning = "".join(reasoning_parts) if reasoning_parts else None
+        # 将本次调用的元数据存入实例属性，供调用方观测与统计
+        self.last_metadata = LLMCallMetadata(
+            model=self.model,
+            max_tokens=limit,
+            finish_reason=last_finish_reason,
+            prompt_tokens=last_usage.get("prompt_tokens") if last_usage else None,
+            completion_tokens=last_usage.get("completion_tokens") if last_usage else None,
+            reasoning_tokens=last_usage.get("reasoning_tokens") if last_usage else None,
+            retry_count=self.last_metadata.retry_count if hasattr(self, "last_metadata") else 0,
+        )
+        # 统一完整性校验：空正文 / 截断 / 流中断 各有独立错误码
+        meta = LLMResponseMeta(
+            content=content,
+            reasoning_content=reasoning,
+            finish_reason=last_finish_reason,
+            usage=last_usage or {},
+            request_id=request_id,
+            stream_completed=stream_completed,
+            model=self.model,
+            max_tokens=limit,
+        )
+        result = validate_llm_response(meta)
+        if not result.valid:
+            _raise_from_validation(result)
+        # 记录该端点观测到的 completion 上限（同 chat_messages）
+        note_provider_cap(self.base_url, meta.completion_tokens)
+        return content
 
     def chat_json(self, system_prompt: str, user_prompt: str,
                   *, max_tokens: int | None = None) -> dict:
-        """单次对话调用并解析 JSON 输出。模型返回非合法 JSON 时报 llm_invalid_output。"""
+        """单次对话调用并解析 JSON 输出。
+
+        与旧实现的差异：把本次调用的元数据（finish_reason / usage）一并传给
+        解析器，使「供应商静默截断」也能被判为 llm_output_truncated，
+        而不是笼统的 llm_invalid_output。
+        """
         content = self.chat(system_prompt, user_prompt, json_mode=True, max_tokens=max_tokens)
-        return parse_llm_json(content)
+        m = getattr(self, "last_metadata", None)
+        meta = LLMResponseMeta(
+            content=content,
+            finish_reason=getattr(m, "finish_reason", None),
+            usage={
+                "completion_tokens": getattr(m, "completion_tokens", None),
+                "reasoning_tokens": getattr(m, "reasoning_tokens", None),
+                "prompt_tokens": getattr(m, "prompt_tokens", None),
+            },
+            model=self.model,
+            max_tokens=int(max_tokens or self.max_tokens),
+        )
+        obj, result = parse_json_safely(content, expect=dict,
+                                        meta=meta, base_url=self.base_url)
+        if obj is None:
+            # meta 必须透传：否则重试记录里的 content_length 会是 0，
+            # 「正文拿到了但 JSON 不合法」与「正文根本没拿到」将无法区分。
+            raise LLMError(result.error_code or ERR_INVALID_OUTPUT,
+                           result.error_message or "语言模型输出无法解析为 JSON",
+                           meta=meta)
+        return obj
 
 
-def is_truncated_json_output(message: str) -> bool:
-    """判断 JSON 解析失败是否由输出被截断引起。
+def is_truncated_json_output(message: str, content: str | None = None) -> bool:
+    """判断 JSON 解析失败是否由输出被截断引起（委托 llm_response 单一实现）。
 
-    上游不一定返回 finish_reason=length（部分代理会省略），此时只能从 JSON 解码
-    错误特征判断：字符串未闭合、末尾缺分隔符/括号等。命中即值得放大 max_tokens 重试。
+    与旧实现的区别：不再把 ``Expecting value`` 当截断证据——空串、纯空白、
+    纯自然语言都会抛它，把它一律当截断正是本次误判的根源。
     """
-    markers = (
-        "Unterminated string",
-        "Expecting ',' delimiter",
-        "Expecting property name enclosed in double quotes",
-        "Expecting value",
-        "Invalid \\uXXXX escape",
-    )
-    return any(marker in (message or "") for marker in markers)
+    return is_likely_truncated_json(message, content)
 
 
 def parse_llm_json(content: str) -> dict:
-    """解析 LLM 返回的 JSON 文本（兼容 markdown 代码块包裹与截断修复）。
+    """解析 LLM 返回的 JSON 文本（委托 llm_response.parse_json_safely）。
 
-    模型输出可能因 max_tokens 截断导致 JSON 不完整（字符串未闭合、括号不匹配等），
-    此时先尝试启发式补齐再解析：补全末位缺失的引号与括号/方括号/花括号。
+    空内容返回 ``llm_empty_content``（而非笼统的 llm_invalid_output）；
+    ``Expecting value`` 不再被判为截断；markdown 代码块、前后夹文本、
+    真正的截断各有独立处理分支。
     """
-    text = content.strip()
-    # 兼容模型在 JSON 外包裹 markdown 代码块的情况
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError as e:
-        repaired = _repair_truncated_json(text)
-        if repaired != text:
-            try:
-                result = json.loads(repaired)
-            except json.JSONDecodeError as e2:
-                raise LLMError("llm_invalid_output", f"语言模型输出非合法 JSON: {e2}") from e2
-        else:
-            raise LLMError("llm_invalid_output", f"语言模型输出非合法 JSON: {e}") from e
-    if not isinstance(result, dict):
-        raise LLMError("llm_invalid_output", "语言模型输出 JSON 顶层须为对象")
-    return result
+    meta = LLMResponseMeta(content=content)
+    obj, result = parse_json_safely(content, expect=dict, meta=meta)
+    if obj is None:
+        raise LLMError(result.error_code or ERR_INVALID_OUTPUT,
+                       result.error_message or "语言模型输出无法解析为 JSON",
+                       meta=meta)
+    return obj
 
 
 def _repair_truncated_json(text: str) -> str:

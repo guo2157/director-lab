@@ -152,6 +152,9 @@ _PERSISTED_FIELDS = [
     "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "llm_instances_json", "llm_timeout_seconds",
     "llm_max_tokens", "llm_disable_thinking",
     "llm_stream_idle_timeout_seconds",
+    "llm_parse_max_tokens", "llm_parse_hard_max_tokens",
+    "llm_parse_retry_limit", "llm_parse_concurrency",
+    "agent_first_batch_auto", "max_episodes_per_batch",
     "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
 ]
 

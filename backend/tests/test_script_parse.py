@@ -576,3 +576,76 @@ def test_scene_cross_episode_reuse_keeps_description(client, monkeypatch):
         assert rows[0].description == "首集描述：木质马棚，清晨斜光。", "复用不得覆盖首集描述"
     finally:
         db.close()
+
+
+# ══════════════════════════════════════════════ 不完整结果不得落库
+
+def test_parse_rejects_result_without_shots_and_does_not_persist(client, monkeypatch):
+    """真实故障复现：场景 7 个 / 分镜 0 个 → 必须拒绝落库。
+
+    修复前：业务校验只写在 llm_response 里，没有接进保存路径，
+    JSON 合法就直接建 ParseVersion + apply_parse_result，
+    表现为「解析成功但下游 no_pending_plans」。
+    """
+    pid = _make_project(client)
+    sv = _save_script(client, pid)
+    _confirmed_estimate(client, pid, sv, monkeypatch)
+
+    empty_shots = {
+        "project_analysis": {"summary": "无分镜", "theme": "测试",
+                             "highlights": [], "foreshadowing": []},
+        "characters": [{"name": "林晓", "description": "转学生", "traits": "细心"}],
+        "props": [],
+        "scenes": [
+            {"episode": 1, "title": f"场景{i}", "description": "x",
+             "time_note": "白天", "shots": []}
+            for i in range(1, 8)
+        ],
+        "episodes": [{"episode": 1, "goal": "目标", "rhythm_curve": "上扬",
+                      "cliffhanger_type": "危机逼近", "hook_to_next": "承接",
+                      "locked": False}],
+    }
+
+    r = client.post(f"/api/projects/{pid}/parse",
+                    json={"script_version_id": sv["script_version_id"],
+                          "text": SCRIPT_TEXT, "episode_start": 1, "episode_count": 1})
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+
+    import app.worker.parse_executor as pe_mod
+
+    calls = {"n": 0}
+
+    class _FakeLLM:
+        def __init__(self, *a, **kw):
+            pass
+
+        def chat_json(self, s, u, max_tokens=None):
+            calls["n"] += 1
+            return empty_shots
+
+    monkeypatch.setattr(pe_mod, "LLMClient", _FakeLLM)
+    res = pe_mod.execute_parse_job(job_id)
+
+    # 1) 执行必须失败，且失败原因指向结构缺失而非「成功」
+    assert res["ok"] is False
+    assert res["reason"] in ("parse_no_shots", "llm_schema_mismatch")
+
+    # 2) 不得产生任何解析版本（不完整结果不落库）
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "failed"
+    assert job.get("result", {}).get("rejected") is True
+    # 直接查库确认没有 ParseVersion 被创建（无列表接口）
+    import app.core.database as db_mod
+    from app.models import ParseVersion
+    db = db_mod.SessionLocal()
+    try:
+        assert db.query(ParseVersion).filter(ParseVersion.project_id == pid).count() == 0
+    finally:
+        db.close()
+
+    # 3) 不得写入任何场景/镜头实体
+    assert client.get(f"/api/projects/{pid}/scenes").json() == []
+
+    # 4) 自动补全确实重问过一次（不是直接放弃）
+    assert calls["n"] == 2

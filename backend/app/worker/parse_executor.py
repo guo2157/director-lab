@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.integrations.llm import LLMClient, LLMError, is_truncated_json_output
+from app.integrations.llm import LLMClient, LLMError, is_truncated_json_output, parse_llm_json
+from app.integrations.llm_response import validate_parse_payload
+from app.integrations.llm_retry import call_with_retry
 from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion, ids
 from app.services import style_config
 from app.services.prompt_store import get_prompt
@@ -205,36 +207,21 @@ def execute_parse_job(job_id: str) -> dict:
         client = LLMClient()
 
         def _parse_llm(prompt_text: str) -> dict:
-            """解析调用：输出被截断时放大 max_tokens 并强制紧凑输出重试一次。
+            """解析调用：统一走 llm_retry.call_with_retry。
 
-            单集分镜正文很长，上游又不一定回 finish_reason=length，
-            表现为 JSON 在字符串中途结束；直接失败会让用户反复重试。
+            旧实现只在「截断」时重试一次，空正文/非 JSON/流中断直接失败；
+            现按错误码分流：截断放大 token、非 JSON 追加格式提示、流中断退避。
+            这里用 use_chat_json 走非流式 + 内置 JSON 解析（解析器已在
+            chat_json 内部按 llm_response 的错误码分类）。
             """
-            try:
-                return client.chat_json(get_prompt("parse_system"), prompt_text)
-            except LLMError as exc:
-                truncated = exc.code == "llm_output_truncated" or (
-                    exc.code == "llm_invalid_output"
-                    and is_truncated_json_output(exc.message)
-                )
-                if not truncated:
-                    raise
-                retry_prompt = prompt_text + (
-                    "\n\n【输出约束】上一次输出在中途被截断。请重新输出完整 JSON："
-                    "紧凑排版（不使用换行缩进）、省略无实际信息的空值字段，确保 JSON 完整闭合。"
-                )
-                try:
-                    return client.chat_json(
-                        get_prompt("parse_system"), retry_prompt,
-                        # 上限不能等于当前值：max_tokens 已提到 32768 时旧写法
-                        # min(max_tokens*2, 32768) 等于原地重试，重试多少次都同样截断。
-                        max_tokens=min(max(client.max_tokens * 2, 65536), 131072),
-                    )
-                except LLMError as retry_exc:
-                    # 放大后仍失败：保留首次错误语义（截断比 HTTP 报错更准确）
-                    if retry_exc.code in ("llm_error", "llm_timeout", "llm_unreachable"):
-                        raise exc from retry_exc
-                    raise
+            return call_with_retry(
+                client,
+                system_prompt=get_prompt("parse_system"),
+                user_prompt=prompt_text,
+                json_mode=True,
+                stream=False,
+                use_chat_json=True,
+            )
 
         try:
             raw = _parse_llm(user_prompt)
@@ -252,12 +239,15 @@ def execute_parse_job(job_id: str) -> dict:
         )
         shot_total = sum(len(sc.get("shots") or []) for sc in norm.data.get("scenes") or [])
         # 推理模型偶发「合法 JSON 但 scenes 无 shots」，表现为下游 no_pending_plans。
-        # 在同一任务内自动重问一次，避免把可恢复的模型抖动直接暴露成流程失败。
-        if shot_total == 0:
+        # 用统一业务校验（validate_parse_payload）判定，而不是只看 shot_total：
+        # 缺 title、scenes 为空、集号非法同样是不可用结果。
+        problems = validate_parse_payload(norm.data)
+        if problems:
             _task_step(db, job.id, "parse_repair", "模型漏输出分镜，正在自动补全", 55)
             repair_prompt = user_prompt + (
-                "\n\n【补全要求】上一次输出缺少每个 scene 的 shots 数组。"
-                "请重新输出完整 JSON，必须为每个 scene 提供至少 1 个 shot，"
+                "\n\n【补全要求】上一次输出未通过结构校验："
+                + "；".join(problems[:8])
+                + "。请重新输出完整 JSON，必须为每个 scene 提供至少 1 个 shot，"
                 "shot 字段与上述 schema 完全一致，不得省略或留空。"
             )
             try:
@@ -271,6 +261,7 @@ def execute_parse_job(job_id: str) -> dict:
                 character_name_to_id=char_map,
             )
             shot_total = sum(len(sc.get("shots") or []) for sc in norm.data.get("scenes") or [])
+            problems = validate_parse_payload(norm.data)
 
         # 结果落库：完整解析结果存 job.result（API.md §5 parse 契约）
         style_diffs = style_config.compute_style_diff(
@@ -294,15 +285,15 @@ def execute_parse_job(job_id: str) -> dict:
             .first()
         )
         next_ver = (max_ver[0] if max_ver else 0) + 1
-        # 空镜头解析不可确认：自动补全后仍无 shots，说明模型持续漏输出，
+        # 空镜头解析不可确认：自动补全后仍未通过业务校验，说明模型持续漏输出，
         # 若放行会在分镜图阶段才报 no_pending_plans，故障点后移且难以定位。
-        if shot_total == 0:
-            msg = "模型连续两次未输出任何镜头，请重试、换用非推理模型或缩小解析集范围"
+        if problems:
+            msg = "解析结果未通过业务校验，已拒绝落库：" + "；".join(problems[:8])
             # 保留原始响应，便于定位是模型漏输出、字段名不符还是被截断
-            job.result = {"raw_response": raw}
+            job.result = {"rejected": True, "problems": problems, "raw_response": raw}
             _upsert_records(db, job.project_id, episode_start, episode_count, "failed", error_msg=msg)
-            _fail_job(db, job, "parse_no_shots", msg)
-            return {"ok": False, "reason": "parse_no_shots"}
+            _fail_job(db, job, "parse_no_shots" if shot_total == 0 else "llm_schema_mismatch", msg)
+            return {"ok": False, "reason": "parse_no_shots" if shot_total == 0 else "llm_schema_mismatch"}
         pv = ParseVersion(
             id=ids.parse_version_id(),
             project_id=job.project_id,
