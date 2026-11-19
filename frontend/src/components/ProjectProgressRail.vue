@@ -90,9 +90,9 @@ function goStep(key: string) {
 
 <style scoped>
 .progress-rail {
-  width: var(--app-rail-width, 212px);
+  width: var(--app-rail-width, 216px);
   flex-shrink: 0;
-  padding: var(--sp-5) 0;
+  padding: var(--sp-6) var(--sp-3);
   background: var(--bg-sunken);
   border-right: 1px solid var(--border-subtle);
   display: flex;
@@ -103,15 +103,17 @@ function goStep(key: string) {
 .rail-head {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 0 var(--sp-5);
+  gap: 4px;
+  padding: 0 var(--sp-2);
 }
 
 .rail-title {
-  font-size: 13px;
+  font-family: var(--font-display);
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--text-primary);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
 }
 
 /* 「当前阶段 xxx」：前缀用小号弱色标注，避免这行字被误读为可点的步骤项 */
@@ -119,7 +121,7 @@ function goStep(key: string) {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--brand-primary);
   letter-spacing: 0.01em;
 }
@@ -135,6 +137,7 @@ function goStep(key: string) {
   padding: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
 .rail-step {
@@ -145,9 +148,9 @@ function goStep(key: string) {
 .rail-step:not(:last-child)::after {
   content: '';
   position: absolute;
-  left: calc(var(--sp-5) + 11px);
-  top: 30px;
-  bottom: -2px;
+  left: calc(var(--sp-2) + 12px);
+  top: 32px;
+  bottom: -4px;
   width: 1px;
   background: var(--border-subtle);
 }
@@ -166,12 +169,15 @@ function goStep(key: string) {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px var(--sp-5);
-  min-height: 30px;
+  padding: 6px var(--sp-2);
+  min-height: 32px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   text-align: left;
   color: var(--text-secondary);
-  transition: color var(--transition-fast), background var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast);
 }
 
 .step-hit:hover {
@@ -179,21 +185,25 @@ function goStep(key: string) {
   background: var(--overlay-hover);
 }
 
+/* 编号：圆角方块，是这一列的结构骨架 */
 .step-index {
   flex-shrink: 0;
-  width: 23px;
-  height: 23px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   line-height: 1;
   color: var(--text-tertiary);
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
 }
 
 .step-label {
@@ -211,7 +221,7 @@ function goStep(key: string) {
 
 .rail-step.is-done .step-index {
   color: var(--brand-primary);
-  border-color: var(--brand-deep);
+  border-color: var(--brand-line);
   background: var(--brand-soft);
 }
 
@@ -219,21 +229,21 @@ function goStep(key: string) {
   color: var(--text-secondary);
 }
 
+/* 当前步骤：soft 品牌底 + 左侧竖条 + 编号反色 —— 三重编码，深色底上单靠明度差不可读 */
 .rail-step.is-active .step-hit {
   color: var(--text-primary);
-  background: var(--bg-panel);
+  background: var(--brand-soft);
+  box-shadow: inset 0 0 0 1px var(--brand-line);
 }
-/* 当前步骤再加一条左侧品牌色竖条：仅靠背景色在深色底上对比太弱，
-   侧栏扫一眼分不清自己在哪一步 */
 .rail-step.is-active .step-hit::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: var(--brand-primary);
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-gradient);
 }
 
 .rail-step.is-active .step-index {
@@ -273,8 +283,8 @@ function goStep(key: string) {
     justify-content: space-between;
   }
   .step-hit {
-    padding: 6px 4px;
-    min-height: 32px;
+    padding: 6px 6px;
+    min-height: 34px;
     gap: 0;
   }
   .step-label {

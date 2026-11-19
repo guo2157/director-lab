@@ -139,6 +139,8 @@ class AudioSegment(TimestampMixin, Base):
 Index("ix_audio_segment_project_episode_track", AudioSegment.__table__.c.project_id,
       AudioSegment.__table__.c.episode, AudioSegment.__table__.c.track_type)
 Index("ix_audio_segment_shot", AudioSegment.__table__.c.shot_id)
+# 按镜头取音频并按创建时间排序：现有 ix_audio_segment_shot 仍需临时 B-Tree。
+Index("ix_audio_segment_shot_created", AudioSegment.__table__.c.shot_id, AudioSegment.__table__.c.created_at)
 
 
 class VoiceLibrary(TimestampMixin, Base):
@@ -190,6 +192,8 @@ class VoiceLibrary(TimestampMixin, Base):
 
 Index("ix_voice_library_gender_enabled", VoiceLibrary.__table__.c.gender_presentation,
       VoiceLibrary.__table__.c.enabled)
+# 音色列表固定 order_by(sort_order)：原为全表扫描 + 临时排序。
+Index("ix_voice_library_sort_order", VoiceLibrary.__table__.c.sort_order)
 
 
 class AudioReview(TimestampMixin, Base):

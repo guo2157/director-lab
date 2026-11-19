@@ -65,6 +65,9 @@ class PropShotState(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("project_id", "prop_id", "shot_id", name="uq_pss_project_prop_shot"),
         Index("ix_pss_project_shot", "project_id", "shot_id"),
+        # 仅按 shot_id 反查（reference_resolver / prop_validator / prompt_qc 高频路径）：
+        # 现有复合索引以 project_id 打头，单 shot_id 查询无法使用，原为全表扫描。
+        Index("ix_pss_shot_id", "shot_id"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: ids.new_id("pss"))

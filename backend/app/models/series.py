@@ -89,6 +89,8 @@ class Series(TimestampMixin, Base):
 
 
 Index("ix_series_status", Series.status)
+# 系列列表：order_by(updated_at DESC, created_at DESC) 原为全表扫描 + 临时排序。
+Index("ix_series_updated_created", Series.updated_at, Series.created_at)
 
 
 class SeriesEpisode(TimestampMixin, Base):

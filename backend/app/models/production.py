@@ -36,6 +36,9 @@ class Asset(Base):
 
 
 Index("ix_asset_project_type_validity", Asset.__table__.c.project_id, Asset.__table__.c.asset_type, Asset.__table__.c.validity)
+# 版本历史查询：filter(project_id, name).order_by(version) —— 现有索引只能消掉
+# project_id，name 与 version 仍要回表过滤 + 临时排序。
+Index("ix_asset_project_name_version", Asset.__table__.c.project_id, Asset.__table__.c.name, Asset.__table__.c.version)
 
 
 class AssetRef(Base):
@@ -77,6 +80,12 @@ class Workflow(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="published", server_default="published")
     validation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
     runtime_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
+
+
+# 工作流选择：filter(workflow_type, is_default) / order_by(is_default, is_builtin, created_at)
+# 原为全表扫描（workflow 表此前只有主键索引）。
+Index("ix_workflow_type_default", Workflow.__table__.c.workflow_type, Workflow.__table__.c.is_default)
+Index("ix_workflow_type_created", Workflow.__table__.c.workflow_type, Workflow.__table__.c.created_at)
 
 
 class WorkflowVersion(Base):
@@ -138,6 +147,19 @@ Index("ix_job_prompt_id", Job.__table__.c.prompt_id)
 Index("ix_job_status_type", Job.__table__.c.status, Job.__table__.c.job_type)
 Index("ix_job_created_at", Job.__table__.c.created_at)
 Index("ix_job_status_priority", Job.__table__.c.status, Job.__table__.c.priority)
+# 列表页/项目页按 project_id 过滤后按 created_at 倒序分页：现有
+# ix_job_project_status 只能消掉过滤，ORDER BY 仍走临时 B-Tree。
+Index("ix_job_project_created", Job.__table__.c.project_id, Job.__table__.c.created_at)
+# 任务中心按状态筛选 + 时间倒序（status + created_at 同序，避免临时排序）。
+Index("ix_job_status_created", Job.__table__.c.status, Job.__table__.c.created_at)
+# 按镜头反查任务（进度/重拍/状态推导）：全表扫描热点。
+Index("ix_job_shot_id", Job.__table__.c.shot_id)
+# 今日统计按 finished_at 过滤（stats 每 5s 轮询）。
+Index("ix_job_status_finished", Job.__table__.c.status, Job.__table__.c.finished_at)
+# 增量补齐 list_jobs(updated_since_seq) 走 event_seq 升序：原为全表扫描。
+Index("ix_job_event_seq", Job.__table__.c.event_seq)
+# 任务中心按类型筛选 + 时间倒序（job_type + created_at 同序，避免临时排序）。
+Index("ix_job_type_created", Job.__table__.c.job_type, Job.__table__.c.created_at)
 
 
 class ParseVersion(Base):
@@ -226,6 +248,13 @@ class JobEvent(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+# 事件查询恒为 (job_id, event_type) 组合 + event_seq 倒序取最新一条
+# （progress 换算、agent.llm_delta 回放）：只建 event_type 单列没有收益，
+# 因为所有调用点都同时约束 job_id；复合索引才能同时消掉过滤与排序。
+Index("ix_job_event_job_type_seq", JobEvent.__table__.c.job_id,
+      JobEvent.__table__.c.event_type, JobEvent.__table__.c.event_seq)
+
+
 class UploadRecord(Base):
     """上传记录：本地文件到 ComfyUI 文件名的映射。"""
 
@@ -272,3 +301,7 @@ class Export(Base):
     size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="exporting", server_default="exporting")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+# 进度查询：filter(composition_id, status.in_(...)) 原为全表扫描。
+Index("ix_export_composition_status", Export.__table__.c.composition_id, Export.__table__.c.status)

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 作品卡片：封面 + 状态 + 标题 + 元信息 + 进度。整卡可点，右上角「⋯」走操作菜单。 */
 import { computed } from 'vue'
-import { NButton, NDropdown, NProgress, NTag } from 'naive-ui'
+import { NButton, NDropdown, NProgress } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import type { CreationType, Project } from '@/types/project'
 import { stageLabel } from '@/constants/stages'
@@ -17,10 +17,10 @@ const emit = defineEmits<{
   action: [key: string, project: Project]
 }>()
 
-const STATUS_META: Record<Project['status'], { label: string; type: 'default' | 'success' | 'warning' }> = {
-  draft: { label: '草稿', type: 'warning' },
-  active: { label: '进行中', type: 'success' },
-  archived: { label: '已归档', type: 'default' },
+const STATUS_LABEL: Record<Project['status'], string> = {
+  draft: '草稿',
+  active: '进行中',
+  archived: '已归档',
 }
 const CREATION_LABEL: Record<CreationType, string> = {
   novel: '小说改编',
@@ -29,7 +29,7 @@ const CREATION_LABEL: Record<CreationType, string> = {
 
 /* 状态徽标只反映后端 project.status（与筛选计数同源，不允许前端另立口径）；
    「是否完成」由进度区的 is-done 表达，两个信息不混在同一个徽标里。 */
-const statusMeta = computed(() => STATUS_META[props.project.status])
+const statusLabel = computed(() => STATUS_LABEL[props.project.status])
 const creationLabel = computed(() => CREATION_LABEL[props.project.creation_type])
 const coverChar = computed(() => {
   const ch = props.project.name.trim().charAt(0)
@@ -42,7 +42,7 @@ const ratioLabel = computed(() => {
   const dir = map[props.project.aspect_ratio]
   return dir ? `${props.project.aspect_ratio} ${dir}` : props.project.aspect_ratio
 })
-const animationDelay = computed(() => `${Math.min(props.index, 12) * 0.04}s`)
+const animationDelay = computed(() => `${Math.min(props.index, 12) * 0.045}s`)
 const updatedTitle = computed(() => new Date(props.project.updated_at).toLocaleString('zh-CN'))
 const updatedText = computed(() => relativeTime(props.project.updated_at))
 
@@ -69,8 +69,8 @@ const stageText = computed(() => stageLabel(props.project.current_stage))
 const menuOptions = computed<DropdownOption[]>(() => [
   { key: 'copy', label: '复制（后续版本支持）', disabled: true },
   { key: 'archive', label: '归档', disabled: props.project.status === 'archived' },
-  { key: 'delete', label: '删除（仅从列表移除）', props: { style: 'color: var(--danger);' } },
-  { key: 'purge', label: '彻底删除（含媒体文件）', props: { style: 'color: var(--danger);' } },
+  { key: 'delete', label: '删除（仅从列表移除）', props: { style: 'color: var(--danger-text);' } },
+  { key: 'purge', label: '彻底删除（含媒体文件）', props: { style: 'color: var(--danger-text);' } },
 ])
 
 function onCardKey(e: KeyboardEvent) {
@@ -92,12 +92,14 @@ function onCardKey(e: KeyboardEvent) {
     @keydown="onCardKey"
   >
     <div class="cover" :class="ratioClass">
+      <!-- 封面：画幅暗示的发光核 + 首字水印，两层都只是身份标识，不承载信息 -->
+      <span class="cover-orb" aria-hidden="true" />
       <span class="cover-char" aria-hidden="true">{{ coverChar }}</span>
-      <n-tag class="status-tag" :type="statusMeta.type" size="small" round>
-        {{ statusMeta.label }}
-      </n-tag>
+
+      <span class="status-badge" :class="`is-${project.status}`">{{ statusLabel }}</span>
       <span class="cover-ratio">{{ ratioLabel }}</span>
     </div>
+
     <div class="card-body">
       <div class="card-title-row">
         <h3 class="card-title" :title="project.name">{{ project.name }}</h3>
@@ -110,17 +112,20 @@ function onCardKey(e: KeyboardEvent) {
           <n-button quaternary size="tiny" class="more-btn" aria-label="更多操作" @click.stop>⋯</n-button>
         </n-dropdown>
       </div>
+
       <div class="card-meta">
-        <span>{{ creationLabel }}</span>
+        <span class="meta-kind">{{ creationLabel }}</span>
+        <span class="meta-dot" aria-hidden="true">·</span>
         <span :title="updatedTitle">更新于 {{ updatedText }}</span>
       </div>
+
       <!-- 进度区固定两行：上行阶段 + 计数，下行通栏进度条，保证跨卡纵向可比 -->
       <div class="progress-block" :class="`is-${progressState}`">
         <div class="progress-head">
-          <span class="stage-chip" :title="`当前阶段：${stageText}`">{{ stageText }}</span>
+          <span class="stage-chip" :title="`当前阶段：${stageText}`">{{ stageText || '未开始' }}</span>
           <span class="progress-text">
             <template v-if="hasShots">{{ shotDone }}/{{ shotTotal }} 镜</template>
-            <template v-else>未开始</template>
+            <template v-else>未规划</template>
           </span>
         </div>
         <div v-if="hasShots" class="progress-track">
@@ -128,11 +133,11 @@ function onCardKey(e: KeyboardEvent) {
             class="progress-bar"
             type="line"
             :percentage="percent"
-            :height="4"
-            :border-radius="2"
+            :height="5"
+            :border-radius="3"
             :show-indicator="false"
             :color="progressState === 'done' ? 'var(--state-success)' : 'var(--brand-primary)'"
-            :rail-color="progressState === 'zero' ? 'var(--muted-line)' : 'var(--border-subtle)'"
+            :rail-color="progressState === 'zero' ? 'var(--neutral-line)' : 'var(--border-subtle)'"
             :aria-label="`镜头完成 ${shotDone} / ${shotTotal}`"
           />
           <span
@@ -149,22 +154,26 @@ function onCardKey(e: KeyboardEvent) {
 
 <style scoped>
 .project-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--card-sheen);
   overflow: hidden;
   cursor: pointer;
-  /* 深色界面用边框与背景明度表达层级，不叠投影（DESIGN.md §1.1） */
-  box-shadow: none;
   transition:
     border-color var(--transition-fast),
-    background-color var(--transition-fast);
-  animation: card-fade-up 0.35s ease both;
+    background-color var(--transition-fast),
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast);
+  animation: card-fade-up 0.4s var(--ease-out) both;
 }
 @keyframes card-fade-up {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -172,11 +181,10 @@ function onCardKey(e: KeyboardEvent) {
   }
 }
 .project-card:hover {
-  border-color: var(--border-strong);
+  border-color: var(--brand-line);
   background: var(--bg-elevated);
-}
-.project-card:hover .cover {
-  border-bottom-color: var(--border-strong);
+  box-shadow: var(--card-sheen-strong), var(--shadow-glow);
+  transform: translateY(-2px);
 }
 .project-card:focus-visible {
   outline: 2px solid var(--brand-hover);
@@ -188,61 +196,138 @@ function onCardKey(e: KeyboardEvent) {
     animation: none;
     transition: none;
   }
+  .project-card:hover {
+    transform: none;
+  }
 }
+
+/* 封面：固定 116px。深色渐变 + 中心发光核，代替一张空占位图 */
 .cover {
   position: relative;
-  /* 封面只做身份标识，不占半张卡：固定 104px，信息密度让给标题与进度 */
-  height: 104px;
+  height: 116px;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-sunken);
+  background: linear-gradient(160deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
+
+/* 发光核：径向渐变，只用令牌变量拼，不引入新色值 */
+.cover-orb {
+  position: absolute;
+  width: 190px;
+  height: 190px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 46%,
+    var(--brand-line) 0%,
+    var(--brand-soft) 34%,
+    transparent 70%
+  );
+  transition: background var(--transition-base);
+}
+.project-card:hover .cover-orb {
+  background: radial-gradient(
+    circle at 50% 46%,
+    var(--brand-hover) 0%,
+    var(--brand-line) 30%,
+    transparent 72%
+  );
+}
+
 .cover-char {
+  position: relative;
   font-family: var(--font-display);
-  font-size: 40px;
-  font-weight: 600;
+  font-size: 42px;
+  font-weight: 700;
   line-height: 1;
-  /* 水印式首字：可见但不抢标题，比原 0.08 透明度提升到可辨识档 */
-  color: var(--border-strong);
+  letter-spacing: -0.02em;
+  color: var(--text-tertiary);
+  text-shadow: 0 0 24px var(--brand-glow);
   user-select: none;
+  transition: color var(--transition-base);
 }
+.project-card:hover .cover-char {
+  color: var(--text-primary);
+}
+
+/* 画幅差异：竖屏更「冷」，横屏偏中性，方形偏暖 —— 靠渐变角度与底色档位区分 */
 .cover-9-16 {
-  background: linear-gradient(180deg, var(--brand-soft) 0%, var(--bg-sunken) 100%);
+  background: linear-gradient(165deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
 .cover-16-9 {
-  background: var(--bg-sunken);
+  background: linear-gradient(180deg, var(--bg-panel) 0%, var(--bg-sunken) 100%);
 }
 .cover-1-1 {
-  background: var(--bg-elevated);
+  background: linear-gradient(135deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
-.status-tag {
+
+/* 状态徽标：胶囊 + 圆点，只翻译后端 status（与筛选计数同源） */
+.status-badge {
   position: absolute;
   top: 10px;
   left: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  line-height: 17px;
+  font-weight: 500;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  white-space: nowrap;
 }
+.status-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.status-badge.is-draft {
+  color: var(--state-warning);
+  background: var(--warning-soft);
+  border-color: var(--warning-line);
+}
+.status-badge.is-active {
+  color: var(--brand-hover);
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
+}
+.status-badge.is-archived {
+  color: var(--text-tertiary);
+  background: var(--muted-soft);
+  border-color: var(--muted-line);
+}
+
 .cover-ratio {
   position: absolute;
-  right: 8px;
-  bottom: 8px;
-  padding: 0 6px;
+  right: 10px;
+  bottom: 10px;
+  padding: 0 7px;
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 17px;
+  font-size: 10.5px;
+  line-height: 18px;
   border-radius: var(--radius-sm);
-  /* 角标压在封面图上，需要自身底衬保证可读（--bg-sunken 上 --text-secondary 已过 4.5:1） */
   background: var(--bg-sunken);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
 }
+
 .card-body {
-  padding: var(--sp-3);
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  padding: var(--sp-4);
 }
+
 .card-title-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--sp-2);
 }
@@ -250,9 +335,11 @@ function onCardKey(e: KeyboardEvent) {
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 16px;
-  line-height: 24px;
+  font-family: var(--font-display);
+  font-size: 15.5px;
+  line-height: 22px;
   font-weight: 600;
+  letter-spacing: -0.008em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -263,27 +350,33 @@ function onCardKey(e: KeyboardEvent) {
   /* 触摸目标不小于 28px（视觉仍是 tiny 图标按钮） */
   min-width: 28px;
   min-height: 28px;
+  margin-top: -3px;
 }
 .more-btn:hover {
   color: var(--text-primary);
 }
+
 .card-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  margin-top: 2px;
-  font-size: 12.5px;
-  line-height: 19px;
+  gap: 5px;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
 }
-/* 进度区：上行阶段+计数，下行通栏进度条 —— 行结构与边距固定，跨卡对齐。
-   min-height 预留轨道行高，使「无镜头」的卡与有进度的卡等高。 */
+.meta-dot {
+  color: var(--border-strong);
+}
+
+/* 进度区：上行阶段+计数，下行通栏进度条 —— 行结构固定，跨卡对齐。
+   min-height 预留轨道行高，使「未规划」的卡与有进度的卡等高。 */
 .progress-block {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-2);
-  border-top: 1px solid var(--border-subtle);
-  min-height: 48px;
+  margin-top: auto;
+  padding-top: var(--sp-3);
+  min-height: 50px;
 }
 .progress-head {
   display: flex;
@@ -291,12 +384,11 @@ function onCardKey(e: KeyboardEvent) {
   justify-content: space-between;
   gap: var(--sp-2);
 }
-/* 阶段 chip 用中性色：品牌青只留给可操作元素与进度填充，
-   避免「阶段名 / 状态 / CTA」三种语义挤在同一色相上 */
+/* 阶段 chip 用中性色：品牌青只留给可操作元素与进度填充 */
 .stage-chip {
   flex: none;
-  padding: 1px 7px;
-  border-radius: var(--radius-sm);
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
   background: var(--neutral-soft);
   color: var(--text-secondary);
   font-size: 11.5px;
@@ -317,19 +409,25 @@ function onCardKey(e: KeyboardEvent) {
   gap: 6px;
   /* 固定高度：有无 ✓ 图标都不改变行高，保证四张卡进度条基线一致 */
   height: 12px;
-  margin-top: 5px;
+  margin-top: 6px;
 }
 .progress-bar {
   flex: 1;
   min-width: 0;
 }
+/* ✓ 占据固定 14px 槽位：所有卡的进度条右端都在同一 x，满格卡不因勾选而缩短 */
 .progress-done {
   flex: none;
+  width: 14px;
+  text-align: center;
   font-size: 12px;
   line-height: 1;
   color: var(--state-success);
 }
-/* 无镜头（未规划分镜）：轨道隐藏，进度区只保留阶段名 + 「未开始」，
+.progress-done.is-placeholder {
+  visibility: hidden;
+}
+/* 无镜头（未规划分镜）：轨道隐藏，进度区只保留阶段名 + 「未规划」，
    避免出现一条和「0% 已规划」难以区分的空轨道。 */
 .progress-track.is-empty {
   display: none;
@@ -341,18 +439,8 @@ function onCardKey(e: KeyboardEvent) {
 .progress-block.is-zero .progress-text {
   color: var(--text-tertiary);
 }
-/* 已完成：只让进度条（绿 + ✓）表达完成，阶段 chip 保持中性。
-   避免「进行中」徽标与「已完成」阶段名同时染绿造成语义打架。 */
+/* 已完成：只让进度条（绿 + ✓）表达完成，阶段 chip 保持中性 */
 .progress-block.is-done .progress-text {
   color: var(--state-success);
-}
-/* ✓ 占据固定 14px 槽位：所有卡的进度条右端都在同一 x，满格卡不因勾选而缩短 */
-.progress-done {
-  flex: none;
-  width: 14px;
-  text-align: center;
-}
-.progress-done.is-placeholder {
-  visibility: hidden;
 }
 </style>

@@ -5,7 +5,7 @@ export type SortKey = 'updated' | 'name'
 </script>
 
 <script setup lang="ts">
-/** 作品列表筛选条：状态 chips（左）+ 排序切换（右） */
+/** 作品列表筛选条：状态 chips（主轴，品牌色）+ 排序切换（次轴，中性色） */
 defineProps<{
   /** 各状态数量，用于在 chips 上给出规模感 */
   counts?: Record<StatusFilter, number>
@@ -46,6 +46,7 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
         >{{ counts[c.value] }}</span>
       </button>
     </div>
+
     <div class="sort-group" role="group" aria-label="排序方式">
       <button
         v-for="s in SORT_OPTIONS"
@@ -68,18 +69,22 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
-  margin-bottom: var(--sp-4);
+  margin-bottom: var(--sp-5);
 }
 .filter-chips {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
+
+/* 主轴筛选：胶囊；激活 = 品牌 soft 底 + 品牌字 + 内描边 + 加粗（四重编码） */
 .filter-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  padding: 5px 13px;
+  font-family: inherit;
   font-size: 13px;
   line-height: 20px;
   border-radius: var(--radius-pill);
@@ -95,18 +100,20 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 .filter-chip:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
+  background: var(--bg-elevated);
 }
-/* 激活态双编码：品牌描边 + 品牌底 + 加粗，避免只靠颜色区分 */
 .filter-chip.active {
-  border-color: var(--brand-primary);
+  border-color: transparent;
   color: var(--brand-primary);
   background: var(--brand-soft);
-  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--brand-line);
+  font-weight: 600;
 }
 .filter-chip:focus-visible {
   outline: 2px solid var(--brand-hover);
   outline-offset: 2px;
 }
+
 .chip-count {
   font-size: 11px;
   line-height: 16px;
@@ -120,21 +127,27 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 .chip-count.is-zero {
   opacity: 0.45;
 }
+
+/* 次轴排序：分段控件，激活走中性底 —— 与主轴品牌色分级，避免两个「当前选中」抢主次 */
 .sort-group {
   display: flex;
   align-items: center;
   margin-left: auto;
+  padding: 2px;
+  gap: 2px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
-  overflow: hidden;
+  background: var(--bg-panel);
 }
 .sort-btn {
-  padding: 4px 14px;
-  font-size: 13px;
+  padding: 3px 13px;
+  font-family: inherit;
+  font-size: 12.5px;
   line-height: 20px;
   border: none;
-  background: var(--bg-panel);
-  color: var(--text-secondary);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-tertiary);
   cursor: pointer;
   transition:
     color var(--transition-fast),
@@ -143,17 +156,25 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 .sort-btn:hover {
   color: var(--text-primary);
 }
-.sort-btn + .sort-btn {
-  border-left: 1px solid var(--border-subtle);
-}
-/* 排序激活态：品牌底 + 品牌字 + 加粗（原来与未选态同底，只差颜色） */
 .sort-btn.active {
-  color: var(--brand-primary);
-  background: var(--brand-soft);
+  color: var(--text-primary);
+  background: var(--neutral-soft);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   font-weight: 500;
 }
 .sort-btn:focus-visible {
   outline: 2px solid var(--brand-hover);
-  outline-offset: -2px;
+  outline-offset: 2px;
+}
+
+@media (max-width: 480px) {
+  .sort-group {
+    margin-left: 0;
+    width: 100%;
+  }
+  .sort-btn {
+    flex: 1;
+    text-align: center;
+  }
 }
 </style>

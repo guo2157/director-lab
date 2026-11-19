@@ -191,6 +191,15 @@ class Shot(TimestampMixin, Base):
 from sqlalchemy import Index  # noqa: E402
 
 Index("ix_shot_scene_episode", Shot.__table__.c.scene_id, Shot.__table__.c.episode)
+# 按集取镜头（ordered_episode_shots / audio_plan / continuity 等高频路径）：
+# filter(Shot.episode).order_by(...) 原为全表扫描。
+Index("ix_shot_episode", Shot.__table__.c.episode)
+# 按状态筛选镜头（合成/审核：filter(status.in_([...]))）。
+Index("ix_shot_status", Shot.__table__.c.status)
+# 场景内镜头排序：filter(scene_id).order_by(seq) 原需临时 B-Tree。
+Index("ix_shot_scene_seq", Shot.__table__.c.scene_id, Shot.__table__.c.seq)
+# 集内场景播放顺序：filter(episode).order_by(seq_in_episode) 原为全表扫描 + 临时排序。
+Index("ix_scene_episode_episode_seq", SceneEpisode.__table__.c.episode, SceneEpisode.__table__.c.seq_in_episode)
 
 
 class EpisodeParseRecord(Base):

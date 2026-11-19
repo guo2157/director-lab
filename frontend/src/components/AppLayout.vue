@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 import logoUrl from '@/assets/logo.svg'
 import { useRoute, useRouter } from 'vue-router'
-import { NLayout, NLayoutHeader, NLayoutContent } from 'naive-ui'
+import { NLayout, NLayoutContent } from 'naive-ui'
 import { useAgentStore } from '@/stores/agent'
 import { useQuery } from '@tanstack/vue-query'
 import { getProject } from '@/api/projects'
@@ -96,12 +96,15 @@ function goProjects() {
 
 <template>
   <n-layout class="app-layout">
-    <n-layout-header bordered class="app-header">
-      <div class="header-inner">
-        <div class="brand" @click="router.push('/')">
-          <img class="brand-mark" :src="logoUrl" alt="Director Lab" />
+    <!-- 顶部品牌渐变细线：整页唯一常驻的装饰，标记「这是一个产品」 -->
+    <div class="top-hairline" aria-hidden="true" />
+
+    <header class="app-header">
+      <div class="header-pill">
+        <button type="button" class="brand" aria-label="返回作品列表" @click="router.push('/')">
+          <img class="brand-mark" :src="logoUrl" alt="" />
           <span class="brand-name">Director Lab</span>
-        </div>
+        </button>
 
         <nav class="top-nav" aria-label="主导航">
           <button
@@ -110,6 +113,7 @@ function goProjects() {
             type="button"
             class="nav-item"
             :class="{ 'is-active': activeKey === item.key }"
+            :aria-current="activeKey === item.key ? 'page' : undefined"
             @click="goMenu(item.key)"
           >
             {{ item.label }}
@@ -117,14 +121,16 @@ function goProjects() {
         </nav>
 
         <div v-if="isProjectPage" class="crumb-bar">
-          <button type="button" class="crumb-back" @click="goProjects()">项目列表</button>
+          <button type="button" class="crumb-back" @click="goProjects()">作品</button>
           <template v-if="projectName">
-            <span class="crumb-sep" aria-hidden="true"></span>
+            <span class="crumb-sep" aria-hidden="true">/</span>
             <span class="crumb-current">{{ projectName }}</span>
           </template>
         </div>
+        <!-- 第三列占位：grid 1fr auto 1fr 必须三格齐全，导航才能真正落在容器几何中心 -->
+        <div v-else class="header-spacer" aria-hidden="true" />
       </div>
-    </n-layout-header>
+    </header>
 
     <n-layout-content class="app-content" :class="{ 'is-fixed': isFixedViewport }">
       <div
@@ -146,24 +152,47 @@ function goProjects() {
 .app-layout {
   height: 100vh;
   height: 100dvh;
+  background: var(--bg-base);
 }
 
+/* 顶部渐变发丝线：贴在视口最上沿，1px */
+.top-hairline {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  z-index: 20;
+  background: var(--brand-gradient-line);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* 悬浮胶囊导航：与页面底色分离，靠边框 + 半透明底建立「浮在内容之上」 */
 .app-header {
-  height: var(--app-header-height, 52px);
+  position: sticky;
+  top: 0;
+  z-index: 15;
   display: flex;
   align-items: center;
-  background: var(--bg-sunken);
-  border-bottom: 1px solid var(--border-subtle);
+  justify-content: center;
+  padding: 10px var(--sp-6) 0;
+  background: linear-gradient(180deg, var(--bg-base) 62%, transparent 100%);
 }
 
-.header-inner {
-  display: flex;
+.header-pill {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 36px;
+  gap: var(--sp-4);
   width: 100%;
-  max-width: 1680px;
-  margin: 0 auto;
-  padding: 0 24px 0 20px;
+  max-width: 1440px;
+  height: 52px;
+  padding: 0 var(--sp-2) 0 var(--sp-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  background: var(--bg-panel);
+  box-shadow: var(--card-sheen);
   min-width: 0;
 }
 
@@ -172,23 +201,28 @@ function goProjects() {
   align-items: center;
   gap: 9px;
   flex-shrink: 0;
+  justify-self: start;
   cursor: pointer;
   user-select: none;
-  padding-right: 4px;
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
 }
 
 .brand-mark {
   width: 22px;
   height: 22px;
   display: block;
-  filter: saturate(0.9);
 }
 
 .brand-name {
   font-family: var(--font-display);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--text-primary);
   white-space: nowrap;
 }
@@ -196,8 +230,9 @@ function goProjects() {
 .top-nav {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 2px;
-  flex: 1;
+  justify-self: center;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -206,6 +241,7 @@ function goProjects() {
   display: none;
 }
 
+/* 导航项：胶囊形，激活态 = 品牌 soft 底 + 品牌字 + 内描边（三重编码） */
 .nav-item {
   position: relative;
   flex-shrink: 0;
@@ -213,54 +249,41 @@ function goProjects() {
   background: none;
   border: 0;
   padding: 0 14px;
-  height: var(--app-header-height, 52px);
+  height: 34px;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   color: var(--text-secondary);
+  border-radius: var(--radius-pill);
   cursor: pointer;
-  transition: color var(--transition-fast);
-}
-
-.nav-item::after {
-  content: '';
-  position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: -1px;
-  height: 1px;
-  background: transparent;
-  transition: background var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .nav-item:hover {
   color: var(--text-primary);
-}
-
-.nav-item.is-active {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.nav-item.is-active::after {
-  background: var(--brand-primary);
-  height: 2px;
-  border-radius: 1px 1px 0 0;
-}
-
-/* 激活项再加一层极淡底色，避免只靠字重+1px 线（深色底上辨识度不足） */
-.nav-item.is-active {
   background: var(--overlay-hover);
+}
+
+.nav-item.is-active {
+  color: var(--brand-primary);
+  background: var(--brand-soft);
+  box-shadow: inset 0 0 0 1px var(--brand-line);
+  font-weight: 600;
 }
 
 .crumb-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-self: end;
+  gap: 8px;
   flex-shrink: 0;
   min-width: 0;
-  padding-left: 18px;
+  max-width: 320px;
+  padding-left: var(--sp-4);
   border-left: 1px solid var(--border-subtle);
 }
 
@@ -270,27 +293,30 @@ function goProjects() {
   border: 0;
   padding: 0;
   font-family: inherit;
-  font-size: 13px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-tertiary);
   cursor: pointer;
   transition: color var(--transition-fast);
+  white-space: nowrap;
 }
 
 .crumb-back:hover {
-  color: var(--brand-hover);
+  color: var(--brand-primary);
+}
+
+.header-spacer {
+  min-width: 0;
 }
 
 .crumb-sep {
-  width: 1px;
-  height: 12px;
-  background: var(--border-strong);
+  color: var(--border-strong);
+  font-size: 12px;
 }
 
 .crumb-current {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text-primary);
-  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -298,8 +324,8 @@ function goProjects() {
 
 .app-content {
   background: var(--bg-base);
-  height: calc(100vh - var(--app-header-height, 52px));
-  height: calc(100dvh - var(--app-header-height, 52px));
+  height: calc(100vh - var(--app-header-height, 64px));
+  height: calc(100dvh - var(--app-header-height, 64px));
   overflow-y: auto;
 }
 
@@ -329,7 +355,7 @@ function goProjects() {
     position: sticky;
     top: 0;
     align-self: flex-start;
-    height: calc(100dvh - var(--app-header-height, 52px));
+    height: calc(100dvh - var(--app-header-height, 64px));
   }
 }
 /* 右侧常驻 Agent 面板：内容区高度锁定，滚动交给 .content-main */
@@ -344,7 +370,6 @@ function goProjects() {
   overflow-y: auto;
 }
 
-
 .app-content.is-fixed {
   overflow: hidden;
 }
@@ -358,23 +383,22 @@ function goProjects() {
 }
 
 @media (max-width: 768px) {
-  .header-inner {
-    gap: 8px;
-    padding: 0 10px;
+  .app-header {
+    padding: 8px var(--sp-3) 0;
+  }
+  .header-pill {
+    gap: var(--sp-3);
+    height: 48px;
+    padding: 0 var(--sp-2) 0 var(--sp-3);
   }
   .brand-name {
-    font-size: 14px;
+    font-size: 13.5px;
   }
   .nav-item {
-    padding: 0 7px;
+    padding: 0 10px;
     font-size: 13px;
   }
-  .nav-item::after {
-    left: 7px;
-    right: 7px;
-  }
-  .crumb-sep,
-  .crumb-current {
+  .crumb-bar {
     display: none;
   }
   .content-body {

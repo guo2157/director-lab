@@ -1,74 +1,86 @@
 /* ============================================================
-   Director Lab · 设计令牌 v2
-   方向：暗房墨青底 + 青瓷工艺色，服务漫剧制作台
+   Director Lab · 设计令牌 v3
+   方向：暗场监看室 —— 近纯黑底 + 电青→薄荷渐变，服务漫剧制作台
+   参考：pixmax.cn 的暗黑科技语汇（近黑底 / 大圆角胶囊 / 发光边缘），
+         但只取其「结构」，色板与字体仍由本文件单点定义。
    ============================================================ */
 :root {
   /* 布局常量 */
-  --app-header-height: 52px;
-  --app-rail-width: 212px;
+  --app-header-height: 64px;
+  --app-rail-width: 216px;
 
-  /* 背景层级：墨青，而非中性近黑 */
-  --bg-base: #0f1618;
-  --bg-panel: #151e21;
-  --bg-elevated: #1d272b;
-  --bg-sunken: #0a1113;
+  /* 背景层级：近纯黑，四级明度差极小 —— 靠边框与内高光建立层级 */
+  --bg-base: #080809;
+  --bg-panel: #111113;
+  --bg-elevated: #1a1a1d;
+  --bg-sunken: #050506;
 
   /* 边框：层级的主要载体 */
-  --border-subtle: #243035;
-  --border-strong: #37454c;
+  --border-subtle: #232328;
+  --border-strong: #34343c;
 
-  /* 品牌：青瓷 */
-  --brand-primary: #35b3a6;
-  --brand-hover: #4fd1c2;
-  --brand-deep: #1f7a71;
-  --brand-glow: rgba(53, 179, 166, 0.18);
-  --brand-gradient: linear-gradient(135deg, #35b3a6 0%, #1f7a71 100%);
-  --text-on-brand: #06201d;
+  /* 品牌：电青 → 薄荷（取自参考站点的真实渐变端点） */
+  --brand-primary: #05cefe;
+  --brand-hover: #4ce2f3;
+  --brand-deep: #0a7f9e;
+  --brand-mint: #bffee1;
+  --brand-glow: rgba(5, 206, 254, 0.22);
+  --brand-gradient: linear-gradient(135deg, #05cefe 0%, #bffee1 100%);
+  --brand-gradient-line: linear-gradient(90deg, #05cefe 0%, #bffee1 100%);
+  --text-on-brand: #04191f;
 
   /* 语义色 */
-  --danger: #e04e39;
-  /* 小号错误文字专用（深色背景上 ≥5.5:1）；--danger / --state-danger 仅用于描边、图标、填充 */
-  --danger-text: #f07a68;
+  --danger: #ff5c47;
+  /* 小号错误文字专用（深色背景上 >= 5.5:1）；--danger / --state-danger 仅用于描边、图标、填充 */
+  --danger-text: #ff7a66;
   --brand-error: var(--danger);
-  --state-success: #57c98a;
-  --state-warning: #d9a03c;
+  --state-success: #3ddc97;
+  --state-warning: #f0b429;
   --state-danger: var(--danger);
   --state-generating: #ff8a72;
-  --accent-amber: #c79a3b;
+  --accent-amber: #d9a33c;
 
   /* 语义色派生层：同色相的低透明度填充与描边。
      页面里禁止手写 rgba()，一律引用这里的 soft / line 令牌。 */
-  --brand-soft: rgba(53, 179, 166, 0.1);
-  --brand-line: rgba(53, 179, 166, 0.28);
-  --success-soft: rgba(87, 201, 138, 0.1);
-  --success-line: rgba(87, 201, 138, 0.26);
-  --warning-soft: rgba(217, 160, 60, 0.1);
-  --warning-line: rgba(217, 160, 60, 0.26);
-  --danger-soft: rgba(224, 78, 57, 0.1);
-  --danger-line: rgba(224, 78, 57, 0.3);
-  --neutral-soft: rgba(147, 165, 172, 0.08);
-  --neutral-line: rgba(147, 165, 172, 0.24);
-  --muted-soft: rgba(90, 108, 116, 0.12);
-  --muted-line: rgba(90, 108, 116, 0.3);
+  --brand-soft: rgba(5, 206, 254, 0.1);
+  --brand-line: rgba(5, 206, 254, 0.3);
+  --brand-mint-soft: rgba(191, 254, 225, 0.1);
+  --success-soft: rgba(61, 220, 151, 0.1);
+  --success-line: rgba(61, 220, 151, 0.28);
+  --warning-soft: rgba(240, 180, 41, 0.1);
+  --warning-line: rgba(240, 180, 41, 0.28);
+  --danger-soft: rgba(255, 92, 71, 0.1);
+  --danger-line: rgba(255, 92, 71, 0.32);
+  --neutral-soft: rgba(160, 172, 180, 0.08);
+  --neutral-line: rgba(160, 172, 180, 0.24);
+  --muted-soft: rgba(104, 116, 124, 0.12);
+  --muted-line: rgba(104, 116, 124, 0.32);
 
   /* 交互覆盖层：用透明度叠在任意背景层级上，不引入新底色 */
-  --overlay-hover: rgba(230, 236, 238, 0.045);
-  --overlay-active: rgba(230, 236, 238, 0.08);
-  --overlay-selected: rgba(53, 179, 166, 0.08);
-  --scrim: rgba(10, 17, 19, 0.72);
-  /* 视频/图片预览的黑场：唯一允许的纯黑，仅用于媒体播放区letterbox */
+  --overlay-hover: rgba(240, 246, 250, 0.05);
+  --overlay-active: rgba(240, 246, 250, 0.09);
+  --overlay-selected: rgba(5, 206, 254, 0.09);
+  --scrim: rgba(4, 5, 6, 0.78);
+  /* 视频/图片预览的黑场：唯一允许的纯黑，仅用于媒体播放区 letterbox */
   --media-backdrop: #000000;
 
-  /* 文本层级 */
-  --text-primary: #e6ecee;
-  --text-secondary: #93a5ac;
-  --text-tertiary: #7f929a;
-  /* 原 text-tertiary，仅用于禁用态（WCAG 豁免） */
-  --text-disabled: #5a6c74;
+  /* 卡片内高光：深色卡面顶缘的一道极淡亮线，替代阴影表达「抬起」 */
+  --card-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --card-sheen-strong: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 
-  /* 字体 */
-  --font-display: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'STSong', serif;
-  --font-ui: 'HarmonyOS Sans SC', 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+  /* 文本层级 */
+  --text-primary: #f2f5f6;
+  --text-secondary: #a3aeb4;
+  --text-tertiary: #8a959b;
+  /* 仅用于禁用态（WCAG 豁免） */
+  --text-disabled: #5a6165;
+
+  /* 字体：display 与 ui 同族（参考站点用无衬线特粗做大标题），
+     display 靠字重 + 负字距拉开层级，不靠换衬线 */
+  --font-display: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Noto Sans SC',
+    'Source Han Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-ui: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Noto Sans SC',
+    'Source Han Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 
   /* 间距体系 */
@@ -83,28 +95,30 @@
   --sp-12: 48px;
   --sp-16: 64px;
 
-  /* 圆角体系：收紧，避免统一大圆角 */
-  --radius-sm: 2px;
-  --radius: 3px;
-  --radius-lg: 4px;
-  --radius-xl: 6px;
-  --radius-pill: 2px;
+  /* 圆角体系：三档 + 胶囊（与参考站点的 10/12/20 语汇对齐，去掉 2/3px 锐角） */
+  --radius-sm: 8px;
+  --radius: 10px;
+  --radius-md: 12px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
 
-  /* 阴影：深色界面改用边框表达层级 */
+  /* 阴影：深色界面主要用边框 + 内高光；阴影只给真正浮起的层 */
   --shadow-xs: none;
   --shadow-sm: none;
   --shadow-card: none;
-  --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.42);
-  --shadow-lift: 0 8px 28px rgba(0, 0, 0, 0.48);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.55);
+  --shadow-lift: 0 18px 48px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 0 1px var(--brand-line), 0 0 24px var(--brand-glow);
 
   /* 动效 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --transition-fast: 150ms var(--ease-out);
-  --transition-base: 220ms var(--ease-out);
+  --transition-fast: 160ms var(--ease-out);
+  --transition-base: 240ms var(--ease-out);
 
   /* 焦点环：键盘可见焦点，不允许页面自行定义 outline 颜色 */
   --focus-ring: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--brand-hover);
-  --selection-bg: rgba(53, 179, 166, 0.28);
+  --selection-bg: rgba(5, 206, 254, 0.3);
 }
 
 /* ===== 基础重置 ===== */
@@ -133,7 +147,7 @@ body {
 
 ::selection {
   background: var(--selection-bg);
-  color: #ffffff;
+  color: var(--text-primary);
 }
 
 /* ===== 滚动条 ===== */
@@ -142,12 +156,12 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg-sunken);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border-strong);
-  border: 3px solid var(--bg-sunken);
-  border-radius: 6px;
+  border: 3px solid var(--bg-base);
+  border-radius: var(--radius-pill);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-tertiary);
@@ -165,25 +179,26 @@ body {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--sp-4);
-  padding-bottom: var(--sp-3);
-  margin-bottom: var(--sp-5);
+  padding-bottom: var(--sp-4);
+  margin-bottom: var(--sp-6);
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* 大标题：无衬线特粗 + 负字距，是整页唯一「喊出来」的元素 */
 .page-title {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 27px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.2;
   color: var(--text-primary);
 }
 
 .page-subtitle {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.55;
   color: var(--text-secondary);
   max-width: 68ch;
 }
@@ -207,20 +222,28 @@ body {
   padding: var(--sp-6) var(--sp-8) var(--sp-16);
 }
 
-/* ===== 统一状态标签：小方标 + 左侧色条 ===== */
+/* ===== 统一状态标签：胶囊 + 圆点双通道（颜色 + 形状） ===== */
 .status-tag {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 1px 8px 1px 7px;
+  padding: 2px 10px;
   font-size: 12px;
   font-weight: 500;
-  line-height: 19px;
+  line-height: 18px;
   letter-spacing: 0.01em;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
-  border-left-width: 2px;
   white-space: nowrap;
+}
+
+.status-tag::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
 }
 
 .status-tag.is-pending {
@@ -239,7 +262,7 @@ body {
   border-color: var(--success-line);
 }
 .status-tag.is-failed {
-  color: var(--danger);
+  color: var(--danger-text);
   background: var(--danger-soft);
   border-color: var(--danger-line);
 }
@@ -255,7 +278,7 @@ body {
     opacity: 1;
   }
   50% {
-    opacity: 0.6;
+    opacity: 0.62;
   }
 }
 .status-tag.is-locked {
@@ -269,20 +292,22 @@ body {
   border-color: var(--muted-line);
 }
 
-/* ===== 统一卡片：以边框分隔，不堆阴影 ===== */
+/* ===== 统一卡片：卡面 + 顶缘内高光，不堆阴影 ===== */
 .panel-card {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+  box-shadow: var(--card-sheen);
   padding: var(--sp-5);
 }
 
 /* ===== 分节标题 ===== */
 .section-title {
   margin: 0 0 var(--sp-3);
-  font-size: 15px;
+  font-family: var(--font-display);
+  font-size: 16px;
   font-weight: 600;
-  letter-spacing: 0.005em;
+  letter-spacing: -0.008em;
   color: var(--text-primary);
 }
 
@@ -290,16 +315,57 @@ body {
 .n-card,
 .n-modal,
 .n-dialog {
-  border-radius: var(--radius-lg) !important;
+  border-radius: var(--radius-xl) !important;
 }
 .n-card {
   border: 1px solid var(--border-subtle) !important;
-  box-shadow: none !important;
+  box-shadow: var(--card-sheen) !important;
 }
 .n-input,
 .n-base-selection,
 .n-button {
   border-radius: var(--radius) !important;
+}
+
+/* ===== 主操作按钮：品牌渐变底 + 深色字（品牌青当填充时必须配 --text-on-brand） ===== */
+.btn-brand {
+  background: var(--brand-gradient) !important;
+  color: var(--text-on-brand) !important;
+  border: 1px solid transparent !important;
+  font-weight: 600 !important;
+  box-shadow: 0 0 0 0 transparent;
+  transition:
+    filter var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast);
+}
+.btn-brand:hover,
+.btn-brand:focus-visible {
+  filter: brightness(1.07);
+  box-shadow: 0 0 22px var(--brand-glow);
+  transform: translateY(-1px);
+}
+.btn-brand:active {
+  transform: translateY(0);
+}
+
+/* ===== 渐变描边容器：双背景技术（内层实底 + 外层 1px 渐变），
+   用于「重点但非主操作」的区块（尾部新建入口、提示面板）。
+   用 var() 拼渐变不触发 check:colors 的 hex 统计。 ===== */
+.gradient-frame {
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xl);
+  background:
+    radial-gradient(60% 120% at 8% 100%, var(--brand-soft) 0%, transparent 62%) padding-box,
+    linear-gradient(var(--bg-panel), var(--bg-panel)) padding-box,
+    var(--brand-gradient-line) border-box;
+}
+.gradient-frame:hover {
+  background:
+    radial-gradient(60% 120% at 8% 100%, var(--brand-line) 0%, transparent 65%) padding-box,
+    linear-gradient(var(--bg-elevated), var(--bg-elevated)) padding-box,
+    var(--brand-gradient-line) border-box;
 }
 
 /* ===== 全局字号兜底 ===== */
@@ -342,6 +408,6 @@ body {
     padding: var(--sp-4) var(--sp-4) var(--sp-12);
   }
   .page-title {
-    font-size: 22px;
+    font-size: 23px;
   }
 }

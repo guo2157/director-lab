@@ -56,6 +56,8 @@ class Task(Base, TimestampMixin):
 
 Index("ix_task_session_status", Task.__table__.c.session_id, Task.__table__.c.status)
 Index("ix_task_project_type", Task.__table__.c.project_id, Task.__table__.c.task_type)
+# 任务按意图倒序（filter agent_task_id + order_by created_at）原需临时 B-Tree。
+Index("ix_task_agent_task_id_created", Task.__table__.c.agent_task_id, Task.__table__.c.created_at)
 
 
 class TaskStage(Base, TimestampMixin):

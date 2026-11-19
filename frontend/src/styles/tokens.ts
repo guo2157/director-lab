@@ -42,8 +42,8 @@ export function buildThemeOverrides(): GlobalThemeOverrides {
     common: {
       fontFamily: token('--font-ui'),
       fontSize: '14px',
-      borderRadius: '3px',
-      borderRadiusSmall: '2px',
+      borderRadius: token('--radius'),
+      borderRadiusSmall: token('--radius-sm'),
 
       primaryColor: token('--brand-primary'),
       primaryColorHover: token('--brand-hover'),
@@ -53,6 +53,8 @@ export function buildThemeOverrides(): GlobalThemeOverrides {
       infoColorHover: token('--brand-hover'),
       infoColorPressed: token('--brand-deep'),
       successColor: token('--state-success'),
+      successColorHover: token('--state-success'),
+      successColorPressed: token('--state-success'),
       warningColor: token('--state-warning'),
       errorColor: token('--state-danger'),
 
@@ -81,7 +83,36 @@ export function buildThemeOverrides(): GlobalThemeOverrides {
     },
     Button: {
       fontWeight: '500',
-      fontWeightStrong: '600'
+      fontWeightStrong: '600',
+      /* 主按钮走品牌渐变底 + 深色字：品牌青当大面积填充时不能用浅字（对比仅 1.9:1） */
+      colorPrimary: token('--brand-primary'),
+      textColorPrimary: token('--text-on-brand'),
+      textColorHoverPrimary: token('--text-on-brand'),
+      textColorPressedPrimary: token('--text-on-brand'),
+      textColorFocusPrimary: token('--text-on-brand'),
+      borderPrimary: '1px solid transparent',
+      borderHoverPrimary: '1px solid transparent',
+      borderPressedPrimary: '1px solid transparent',
+      borderFocusPrimary: '1px solid transparent'
+    },
+    Input: {
+      border: `1px solid ${token('--border-strong')}`,
+      borderHover: `1px solid ${token('--text-tertiary')}`,
+      borderFocus: `1px solid ${token('--brand-primary')}`,
+      boxShadowFocus: `0 0 0 2px ${token('--brand-soft')}`
+    },
+    Tag: {
+      borderRadius: token('--radius-pill')
+    },
+    Modal: {
+      color: token('--bg-elevated')
+    },
+    Dropdown: {
+      color: token('--bg-elevated'),
+      optionColorHover: token('--overlay-hover')
+    },
+    Progress: {
+      railColor: token('--border-subtle')
     },
     Menu: {
       itemTextColor: token('--text-secondary')

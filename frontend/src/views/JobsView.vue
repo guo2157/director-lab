@@ -171,13 +171,23 @@ function fmtDuration(job: Job): string {
   const start = new Date(job.created_at).getTime()
   const end = job.finished_at ? new Date(job.finished_at).getTime() : Date.now()
   if (Number.isNaN(start) || Number.isNaN(end) || end < start) return '—'
-  const sec = Math.round((end - start) / 1000)
+  return fmtSeconds(Math.round((end - start) / 1000))
+}
+
+/** 秒 → 人类可读时长。统计卡与表格共用同一函数，避免「93 秒」与「2m57s」两种写法并存。 */
+function fmtSeconds(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '—'
   if (sec < 60) return `${sec}s`
   const m = Math.floor(sec / 60)
   const s = sec % 60
   if (m < 60) return `${m}m${String(s).padStart(2, '0')}s`
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
 }
+
+/** 统计卡的平均耗时：与表格耗时列同格式 */
+const avgDurationText = computed(() =>
+  fmtSeconds(Math.round(statsQuery.data.value?.avg_duration_seconds ?? 0)),
+)
 
 /** 状态筛选：与统计卡片共用同一个 statusFilter */
 const statusTabs = [
@@ -262,15 +272,23 @@ const columns = computed<DataTableColumns<Job>>(() => {
 
 <template>
   <div class="jobs-page">
-    <div class="page-header">
-      <div>
-        <h2 class="page-title">任务中心</h2>
+    <header class="jobs-head">
+      <div class="head-copy">
+        <h1 class="jobs-title">任务中心</h1>
+        <p class="jobs-sub">
+          共 {{ jobsQuery.data.value?.total ?? 0 }} 个任务 · 每页 {{ pageSize }} 条
+        </p>
       </div>
-      <div class="sse-indicator" :class="sseConnected ? 'on' : 'off'">
-        <span class="sse-dot"></span>
-        {{ sseConnected ? '实时连接' : '轮询模式' }}
+      <div class="head-actions">
+        <span class="sse-indicator" :class="sseConnected ? 'on' : 'off'">
+          <span class="sse-dot" aria-hidden="true"></span>
+          {{ sseConnected ? '实时连接' : '轮询模式' }}
+        </span>
+        <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">
+          刷新
+        </n-button>
       </div>
-    </div>
+    </header>
 
     <!-- Stats cards（点击联动过滤） -->
     <div class="stats-row">
@@ -284,7 +302,9 @@ const columns = computed<DataTableColumns<Job>>(() => {
         <n-statistic label="进行中" :value="statsQuery.data.value?.in_progress ?? 0" />
       </n-card>
       <n-card class="stat-card" :bordered="false">
-        <n-statistic label="平均耗时(秒)" :value="Math.round(statsQuery.data.value?.avg_duration_seconds ?? 0)" />
+        <!-- 用同一个 n-statistic 组件承载时长（value 支持字符串），
+             自绘 div 会因 Naive 内部 .n-statistic-value 的行高盒模型差 2px，四卡基线对不齐 -->
+        <n-statistic label="平均耗时" :value="avgDurationText" />
       </n-card>
     </div>
 
@@ -305,10 +325,6 @@ const columns = computed<DataTableColumns<Job>>(() => {
                   @click="setType(t.value)"
                 >{{ t.label }}</button>
               </div>
-              <span class="result-hint">
-                共 {{ jobsQuery.data.value?.total ?? 0 }} 个任务 · 每页 {{ pageSize }} 条
-              </span>
-              <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
             </div>
             <!-- 状态筛选：类型与状态两条独立轴，避免只能靠统计卡片点进去 -->
             <div class="filter-row is-status">
@@ -354,7 +370,7 @@ const columns = computed<DataTableColumns<Job>>(() => {
             :bordered="false"
             :single-line="false"
             size="small"
-            :max-height="'calc(100vh - 430px)'"
+            :max-height="'calc(100vh - 470px)'"
             :pagination="{
               page: page,
               pageSize: pageSize,
@@ -372,18 +388,47 @@ const columns = computed<DataTableColumns<Job>>(() => {
 
 <style scoped>
 .jobs-page {
-  padding: var(--sp-6);
+  padding: var(--sp-6) var(--sp-6) var(--sp-16);
   max-width: 1440px;
   margin: 0 auto;
-  min-height: calc(100vh - var(--app-header-height, 56px));
+  min-height: calc(100vh - var(--app-header-height, 64px));
 }
-.page-header {
+
+/* ---------- 页头：与作品列表同构（大标题 + 副标题 + 右侧状态/操作） ---------- */
+.jobs-head {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--sp-4);
-  margin: var(--sp-1) 0 var(--sp-4);
+  margin: 2px 0 var(--sp-6);
 }
+.head-copy {
+  min-width: 0;
+}
+.jobs-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
+  color: var(--text-primary);
+}
+.jobs-sub {
+  margin: 7px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
 .sse-indicator {
   display: flex;
   align-items: center;
@@ -392,7 +437,7 @@ const columns = computed<DataTableColumns<Job>>(() => {
   color: var(--text-secondary);
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius-pill);
-  background: var(--bg-elevated);
+  background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
@@ -444,8 +489,11 @@ const columns = computed<DataTableColumns<Job>>(() => {
   font-size: 24px;
   line-height: 1.2;
 }
-.stat-card :deep(.n-statistic-label) {
+/* Naive 的 label 类名是 .n-statistic__label（双下划线）。
+   写成 .n-statistic-label 会静默失效，四卡 label 行高不同 → 数值基线错开。 */
+.stat-card :deep(.n-statistic__label) {
   font-size: 12.5px;
+  line-height: 22px;
   color: var(--text-tertiary);
   margin-bottom: 2px;
 }
@@ -487,7 +535,8 @@ const columns = computed<DataTableColumns<Job>>(() => {
   font-weight: 500;
   box-shadow: inset 0 0 0 1px var(--brand-line);
 }
-/* 状态轴与类型轴分级：类型是主筛选（实心感），状态是次筛选（描边感） */
+/* 状态轴与类型轴分级：类型是主筛选（品牌 soft + 品牌字），状态是次筛选（中性 soft + 正文色）。
+   两条轴都用品牌色会出现两个「当前选中」，用户分不清哪个是主筛选。 */
 .type-tabs .status-tab.is-status.active {
   background: var(--neutral-soft);
   color: var(--text-primary);
@@ -591,9 +640,10 @@ const columns = computed<DataTableColumns<Job>>(() => {
 /* 两条筛选轴的显式标签：不靠位置区分「类型」与「状态」，深色底上更需要文字锚点 */
 .filter-label {
   flex: none;
+  min-width: 28px;
   font-size: 12px;
   line-height: 18px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   letter-spacing: 0.02em;
 }
 .result-hint {
@@ -693,6 +743,20 @@ const columns = computed<DataTableColumns<Job>>(() => {
 /* 行悬停反馈：宽表格靠它防止串行 */
 :deep(.n-data-table-tr:hover .n-data-table-td) {
   background: var(--overlay-hover);
+}
+
+/* 分页器靠左：右下角被固定的 AI 助手悬浮按钮占据，
+   实测分页器 (x1261–1361, y866–894) 与 FAB (x1288–1416, y839–876) 直接重叠，
+   点击「下一页」会命中 FAB。靠左后彻底避开，也更符合数据表惯例。 */
+:deep(.n-data-table__pagination) {
+  justify-content: flex-start;
+  padding-top: var(--sp-2);
+}
+:deep(.n-pagination) {
+  color: var(--text-secondary);
+}
+:deep(.n-pagination-item) {
+  border-radius: var(--radius-sm);
 }
 
 /* 失败原因：允许长错误换行，避免 tooltip 单行溢出不可读 */
