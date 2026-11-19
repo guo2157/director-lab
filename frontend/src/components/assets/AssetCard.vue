@@ -166,21 +166,30 @@ function onDragStart(e: DragEvent) {
   border-color: var(--danger-line);
 }
 
-/* 图为卡片主体：固定比例，网格对齐不跳动 */
+/* 图为卡片主体：固定比例，网格对齐不跳动。
+   min-height: 0 必须显式声明 —— flex item 默认 min-height:auto，
+   会让内容（img 的固有尺寸）把容器撑破 aspect-ratio。
+   img 必须绝对定位 —— 否则 height:100% 相对 aspect-ratio 推导出的高度
+   形成循环依赖，浏览器回退到 img 固有比例，实测把 3:4 的 368px 撑到 482px。 */
 .a-thumb {
   position: relative;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 4 / 5;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg-sunken);
   border-bottom: 1px solid var(--border-subtle);
 }
 .a-thumb.k-character {
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 4 / 5;
 }
 .a-thumb img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: center top;
   display: block;
 }
 .a-thumb-empty {

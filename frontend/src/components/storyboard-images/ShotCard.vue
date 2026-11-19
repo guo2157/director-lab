@@ -165,15 +165,26 @@ function onPick(e: Event) {
   border-color: var(--danger-line);
 }
 
-/* 图为卡片主体：比例跟随项目画幅（--sb-thumb-ratio），图片未到时高度不变 */
+/* 图为卡片主体：比例跟随项目画幅（--sb-thumb-ratio），图片未到时高度不变。
+   min-height: 0 必须显式声明 —— flex item 默认 min-height:auto，会让内容
+   把容器撑破 aspect-ratio。img 必须绝对定位 —— 否则 height:100% 相对
+   aspect-ratio 推导高度形成循环依赖，浏览器回退到图片固有比例。
+   受控实验（215px 宽）：把比例改 1:1 应 215px、改 16:9 应 121px，
+   修前两者实测都是 377px —— 说明 aspect-ratio 完全没生效，高度由图片固有
+   229×400 决定。本例看起来「正常」纯属巧合（0.573 ≈ 9:16 的 0.5625），
+   一旦项目是横屏画幅就会高出 3 倍。 */
 .sb-thumb {
   position: relative;
   width: 100%;
   aspect-ratio: var(--sb-thumb-ratio, 16 / 9);
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg-sunken);
   border-bottom: 1px solid var(--border-subtle);
 }
 .sb-thumb img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
