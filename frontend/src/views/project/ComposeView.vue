@@ -406,6 +406,21 @@ const compositionOptions = computed(() =>
 const compositions = computed(() => compositionsQuery.data.value ?? [])
 const exportsList = computed(() => exportsQuery.data.value ?? [])
 
+/*
+ * 默认选中最新的可用合成版本。
+ * 为什么：只有一个版本时若让用户先手动选，「导出 MP4」会一直处于禁用态，
+ * 用户会判断成功能坏了。自动选中不等于自动导出，仍需点「导出 MP4」并二次确认。
+ */
+watch(
+  compositionOptions,
+  (opts) => {
+    if (!opts.length) return
+    const stillValid = opts.some((o) => o.value === exportCompositionId.value)
+    if (!stillValid) exportCompositionId.value = opts[0].value
+  },
+  { immediate: true },
+)
+
 function goStoryboard() {
   router.push(`/project/${projectId.value}/storyboard`)
 }
