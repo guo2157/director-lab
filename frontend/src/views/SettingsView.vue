@@ -371,10 +371,10 @@ const downloadWorkflow = (wf: Workflow) => {
                 <span class="col-actions">操作</span>
               </div>
               <div v-for="(inst, idx) in editInstances" :key="idx" class="wf-tr">
-                <span class="col-name inst-url">{{ inst.base_url || '（未填写）' }}</span>
-                <span class="col-weight"><n-input-number v-model:value="inst.weight" :min="1" size="small" style="width: 90px" @update:value="handleInstanceChange" /></span>
-                <span class="col-enabled"><n-switch v-model:value="inst.enabled" size="small" @update:value="handleInstanceChange" /></span>
-                <span class="col-test">
+                <span class="col-name inst-url" data-label="实例地址">{{ inst.base_url || '（未填写）' }}</span>
+                <span class="col-weight" data-label="权重"><n-input-number v-model:value="inst.weight" :min="1" size="small" style="width: 90px" @update:value="handleInstanceChange" /></span>
+                <span class="col-enabled" data-label="启用"><n-switch v-model:value="inst.enabled" size="small" @update:value="handleInstanceChange" /></span>
+                <span class="col-test" data-label="测试结果">
                   <n-tag
                     v-if="instanceTestResults[inst.base_url]"
                     :type="instanceTestResults[inst.base_url].ok ? 'success' : 'error'"
@@ -385,7 +385,7 @@ const downloadWorkflow = (wf: Workflow) => {
                   </n-tag>
                   <span v-else class="hint-text">未测试</span>
                 </span>
-                <span class="col-actions">
+                <span class="col-actions" data-label="操作">
                   <n-button size="tiny" quaternary @click="testInstanceMutation.mutate(inst.base_url)" :loading="testingUrl === inst.base_url">测试</n-button>
                   <n-popconfirm @positive-click="removeInstance(idx)">
                     <template #trigger>
@@ -544,7 +544,7 @@ const downloadWorkflow = (wf: Workflow) => {
                 <span class="col-actions">操作</span>
               </div>
               <div v-for="wf in workflowList" :key="wf.id" class="wf-tr">
-                <span class="col-name">
+                <span class="col-name" data-label="名称">
                   <n-tooltip trigger="hover" placement="top-start" :disabled="!wf.description">
                     <template #trigger>
                       <span class="wf-name wf-name-hover">{{ wf.name }}</span>
@@ -552,13 +552,13 @@ const downloadWorkflow = (wf: Workflow) => {
                     <div class="wf-tooltip">{{ wf.description || '暂无描述' }}</div>
                   </n-tooltip>
                 </span>
-                <span class="col-type">
+                <span class="col-type" data-label="类型">
                   <n-tag size="small" :bordered="false">{{ wf.workflow_type }}</n-tag>
                   <n-tag v-if="wf.is_builtin" type="warning" size="small" :bordered="false">内置</n-tag>
                   <n-tag v-if="wf.is_default" type="success" size="small" :bordered="false">默认</n-tag>
                 </span>
-                <span class="col-time hint-text">{{ new Date(wf.updated_at).toLocaleString() }}</span>
-                <span class="col-actions">
+                <span class="col-time hint-text" data-label="更新时间">{{ new Date(wf.updated_at).toLocaleString() }}</span>
+                <span class="col-actions" data-label="操作">
                   <n-button size="tiny" quaternary @click="downloadWorkflow(wf)">下载</n-button>
                   <n-button size="tiny" quaternary @click="validateWorkflowMutation.mutate(wf.id)" :loading="validateWorkflowMutation.isPending.value">校验</n-button>
                 </span>
@@ -1075,6 +1075,66 @@ const downloadWorkflow = (wf: Workflow) => {
   }
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* 表格转卡片：两张表都是 CSS grid 固定列宽（实例表合计 600px、
+     工作流表合计 620px），390px 下只能横向滚动，而移动端滚动条隐藏、
+     右侧「测试/删除/下载/校验」等于不存在。
+     改法：thead 隐藏，每行变成一张卡，列名由 data-label 的 ::before 提供 —— 
+     不用 JS 重排，也不用改数据，纯 CSS 降级。 */
+  .wf-thead {
+    display: none;
+  }
+  .wf-table {
+    gap: var(--sp-2);
+  }
+  .wf-tr {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: var(--sp-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+  }
+  /* 卡片之间不要重复分隔线，边框已经表达了边界 */
+  .wf-tr + .wf-tr {
+    border-top: 1px solid var(--border-subtle);
+  }
+  /* 每个字段：标签在左、值在右，纵向堆叠。列名来自 data-label。 */
+  .wf-tr > [data-label] {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    min-width: 0;
+  }
+  .wf-tr > [data-label]::before {
+    content: attr(data-label);
+    flex: none;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.02em;
+  }
+  /* 实例地址是长 URL，独占一行并允许换行，不参与「左标签右值」 */
+  .wf-tr > .col-name[data-label] {
+    display: block;
+  }
+  .wf-tr > .col-name[data-label]::before {
+    display: block;
+    margin-bottom: 4px;
+  }
+  .inst-table .wf-tr .inst-url {
+    white-space: normal;
+    word-break: break-all;
+    font-size: 12.5px;
+    color: var(--text-primary);
+  }
+  /* 操作按钮在窄屏下右对齐且不被压缩 */
+  .wf-tr > .col-actions[data-label] {
+    justify-content: flex-end;
+    padding-top: 2px;
   }
 }
 </style>

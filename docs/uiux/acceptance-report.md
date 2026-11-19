@@ -199,6 +199,58 @@ npm run check:contrast      → 全部文本令牌 ≥ 4.5:1
 | 项 | 说明 |
 |---|---|
 | 代码提交 | 未 commit，工作区有并行会话痕迹，需按文件白名单分批提交 |
-| 其余页面视觉复核 | 本轮只覆盖 4 页 |
+| 其余页面视觉复核 | ~~本轮只覆盖 4 页~~ → 第六轮已补齐 12 页，见 `round6-full-page-review.md` |
 | 资产库角色图裁切 | 属生成内容问题，未改容器 |
 | 库层面 a11y | 见 `page-improvement-plan.md` §8.3 |
+
+---
+
+## 9. 第六轮验收（全站页面视觉复核）
+
+详细记录见 `round6-full-page-review.md`。本节只列结论与证据。
+
+### 9.1 覆盖面
+
+`src/router/index.ts` 全部真实路由，12 页 × 5 档视口 = **60 张截图**。
+
+### 9.2 修复前后对比（390×844）
+
+| 页面 | 问题 | 修复前 | 修复后 |
+|---|---|---|---|
+| script | 操作按钮被裁 | clipped=1（溢出 80px，无滚动容器） | clipped=0 |
+| jobs | 表格右侧操作不可达 | clipped=15（溢出 355px） | clipped=0，卡片视图 |
+| settings | 表格右侧操作不可达 | clipped=2（溢出 269–309px） | clipped=0，卡片视图 |
+| jobs | 首屏空间浪费 | 首张卡 top=731 | top=514（上移 217px） |
+| jobs | 失败原因不可见 | 只有「重试」 | 中文解释 + 原文 + 查看原因 |
+
+### 9.3 静态门禁
+
+```
+vue-tsc -b            0 error
+npm run build         ✓ 9.90s
+check:colors:strict   hex 0 / rgba 0
+check:breakpoints     全部标准档（1100 / 768 / 480）
+check:contrast        全部 ≥ 4.5:1
+```
+
+### 9.4 功能验证（真实浏览器，390px）
+
+```
+hasTable: false         表格已隐藏
+hasCards: true          卡片视图生效
+cardCount: 20           20 张卡
+hasPager: true          分页器存在
+expandResult:           展开显示 llm_invalid_output 原文
+scrollResult: 313/313   筛选轴滚到末尾
+FAB 遮挡:               20 张卡所有操作按钮零覆盖
+```
+
+### 9.5 本轮发现的后端缺陷（未修，属后端改动）
+
+**SSE 长连接耗尽 DB 连接池**：`app/api/v1/events.py:42-67` 把 `yield` 写在 `try` 内，
+`finally: db.close()` 要等生成器再次推进才执行，导致每条 SSE 连接持续占住一个 DB 连接。
+SQLAlchemy 默认池 15 个，SSE 单连接最长 300s → 开 15 个任务页即耗尽，全站请求在
+`QueuePool._do_get` 排队卡死。已用 `py-spy dump` 定位到 `events.py:54`。
+
+截图脚本已加 `page.route('**/api/events*', abort)` 规避；正式修法见
+`round6-full-page-review.md` §7.5。**本轮只做前端，未改后端。**

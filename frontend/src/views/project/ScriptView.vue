@@ -432,7 +432,16 @@ watch(
 .panes.is-split > .reader { flex: 1 1 50%; }
 @media (max-width: 768px) {
   .script-page { height: auto; min-height: calc(100vh - var(--app-header-height, 56px)); }
-  .script-header { flex-wrap: wrap; gap: 8px; }
-  .header-actions { flex-wrap: wrap; }
+  /* 竖排：窄屏下标题行和操作行必须分行，横排时操作组最小宽度就有 454px，
+     超过 390px 视口，父级 flex-wrap 对「单个超宽 flex 项」不生效 */
+  .script-header { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 8px; }
+  /* flex-shrink 必须从 0 改成 1、min-width 从 auto 改成 0，
+     否则按钮组按内容宽度定宽、拒绝收缩，换行也救不回来 */
+  .header-actions {
+    flex-shrink: 1;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
 }
 </style>

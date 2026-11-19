@@ -401,6 +401,59 @@ sudo -n chown -R ubuntu:ubuntu frontend/src frontend/dist
 | 项 | 说明 |
 |---|---|
 | 代码提交 | 全部改动仍在工作区，未 commit |
-| 其余页面视觉复核 | 本轮只覆盖 首页 / 解析 / 资产库 / 分镜看板 |
+| 其余页面视觉复核 | ~~本轮只覆盖 首页 / 解析 / 资产库 / 分镜看板~~ → 第六轮已补齐 12 页，见 §12 |
 | 资产库角色图裁切 | 视觉复核提到「人物占幅偏小、白底对比过硬」，属生成内容问题，未改容器 |
 | Naive UI 库层面 a11y | `n-card` 双层 heading、`n-collapse` 键盘不可操作，见 §8.3 |
+
+---
+
+## 12. 第六轮（2026-11-19）：全站页面视觉复核
+
+详细技术记录见 `round6-full-page-review.md`。本节只列页面状态。
+
+### 12.1 覆盖面
+
+从 `src/router/index.ts` 取全部真实路由，12 页 × 5 档 = 60 张截图。
+
+### 12.2 页面状态
+
+| 页面 | 状态 | 本轮变更 |
+|---|---|---|
+| home | ✅ | 未改（第五轮已处理封面） |
+| script | ✅ 已修 | 窄屏 header 改纵向，操作组可收缩 |
+| parse | ✅ | 未改（第五轮已处理） |
+| assets | ✅ | 未改 |
+| storyboard | ✅ | 未改（第五轮已处理） |
+| sb-images | ✅ | 未改 |
+| compose | ✅ | 未改 |
+| series | ✅ | 未改 |
+| series-detail | ✅ | 未改 |
+| jobs | ✅ 已修 | 窄屏卡片视图 + 首屏空间压缩 + 失败原因可见 |
+| settings | ✅ 已修 | 两张表窄屏降级为卡片 |
+| director | ✅ | 未改 |
+
+### 12.3 改动文件
+
+```
+frontend/src/views/project/ScriptView.vue     窄屏 header 布局
+frontend/src/views/JobsView.vue               卡片视图 + 错误可见 + 首屏压缩
+frontend/src/views/SettingsView.vue           表格降级卡片
+frontend/scripts/uiux-shots.mjs               12 页 + 错误嗅探 + SSE 拦截 + 判据修正
+```
+
+新增验证脚本（非产物，可留作回归工具）：
+
+```
+frontend/scripts/probe-clipped.mjs            定位被裁按钮及其滚动祖先
+frontend/scripts/probe-script.mjs             script 页 header 几何
+frontend/scripts/probe-error-visibility.mjs   错误块可见性（含遮挡命中测试）
+frontend/scripts/verify-jobs-mobile.mjs       390px 功能验证
+frontend/scripts/diag-jobs.mjs                首屏各区块纵向占用
+```
+
+### 12.4 未修（需后端或产品决策）
+
+| 项 | 说明 |
+|---|---|
+| SSE 耗尽连接池 | 后端 `events.py:42-67` yield 在 try 内，连接不释放。见 `round6-full-page-review.md` §7.5 |
+| `isEnvError` 语义错误 | 表格视图仍把 `llm_invalid_output` 等配置错误显示为「可重试」 |

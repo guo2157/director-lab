@@ -180,3 +180,44 @@ npm run check:contrast:strict
 | 无亮色主题 | — | **不建议新增**：`FRONTEND.md` 明确深色为默认，半成品亮色反而制造维护负担 |
 | `check:contrast` 只覆盖文本令牌，未覆盖状态标签背景上的文字 | 极端情况可能不足 | 扩展脚本覆盖 `.status-tag` 组合 |
 | 动效无统一封装 | 各组件 transition 写法略有差异 | 低优先，`--transition-*` 已足够 |
+
+### 5.3 宽表格在窄屏必须真降级，不能只给滚动提示
+
+多列表格（列宽合计 > 600px）在 390px 下只能横向滚动，而**移动端滚动条默认隐藏**，
+右侧操作列（重试 / 取消 / 测试 / 删除）等于不存在。加滚动提示不够 ——
+操作按钮在最右端，用户必须先滑动才能点，属于「能看见但难用」。
+
+判定标准：**操作列是否在滚动区内**。若在，必须降级为卡片。
+
+两种实现，按组件类型选：
+
+| 组件 | 做法 | 实例 |
+|---|---|---|
+| `n-data-table` | JS 断点切卡片视图（列宽由内部 `colgroup` 决定，纯 CSS 无法把 `<tr>` 变卡片） | `JobsView.vue` `isNarrow` |
+| 自绘 CSS grid | 纯 CSS：`thead` 隐藏 + 每行变卡片 + 列名由 `data-label` 的 `::before` 提供 | `SettingsView.vue` |
+
+对比：图片浏览类横向滚动（分镜看板）加提示是对的，横向滑动本身是自然交互。
+
+### 5.4 三个会静默失效的写法
+
+都不报错、不警告，只是不生效。排查时先怀疑这三处。
+
+| 写法 | 正确写法 | 后果 |
+|---|---|---|
+| `.n-card__content` | **`.n-card-content`**（单横线） | padding 覆盖失效，390px 下卡片多 42px 高 |
+| `.n-statistic-label` | **`.n-statistic__label`**（双下划线） | label 行高不生效，多卡数值基线错开 |
+| `flex: 0 1 auto` + `overflow-x` | **`flex: 1 1 0%`** | 基准宽 = 内容宽，拒绝收缩，整条父链被顶破 |
+
+第三条的实测证据：`.type-tabs` 用 `auto` 时 `w=529 sw=527`，
+把 `.wf-toolbar`(252) 和 `.n-card-content`(300) 全部撑破；
+改 `flex: 1 1 0%` 后 `w=216 cw=214 sw=527`，父链恢复。
+
+**验证方法**：DOM 逐层打印 `className + padding + flex + scrollWidth`，不要靠猜。
+
+### 5.5 固定定位的 FAB 必须给页面留底部安全区
+
+`DirectorAgentPanel` 的「AI 助手」按钮是 `position: fixed; right/bottom: var(--sp-6)`，
+高 38px，会压住任何页面底部内容（最后一行的操作按钮、失败原因等）。
+
+任何有底部内容的页面都要留 **62px**（24 bottom + 38 高）底部内边距。
+已有先例：`ScriptReader.vue:87`、`JobsView.vue` `.job-cards`。

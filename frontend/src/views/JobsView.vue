@@ -18,6 +18,19 @@ const statusFilter = ref('')
 const page = ref(1)
 const pageSize = 20
 
+/**
+ * 窄屏切卡片视图。
+ * 为什么用 JS 而不是纯 CSS：表格是 n-data-table，列宽由内部 colgroup 决定，
+ * 纯 CSS 无法把 <tr> 变成卡片（列宽、边框、colspan 都在组件内部）。
+ * 断点用 768（与 check:breakpoints 白名单一致）。
+ */
+const isNarrow = ref(typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches)
+const onResize = () => {
+  isNarrow.value = window.matchMedia('(max-width: 768px)').matches
+}
+/** 窄屏展开中的错误详情行（无 hover，tooltip 不可达） */
+const showErrorJob = ref<Job | null>(null)
+
 const typeTabs = [
   { label: '全部', value: '' },
   { label: '图像', value: 'generate_keyframe' },
@@ -71,6 +84,7 @@ const sseConnected = ref(false)
 let eventSource: EventSource | null = null
 
 onMounted(() => {
+  window.addEventListener('resize', onResize)
   try {
     eventSource = new EventSource('/api/events')
     eventSource.onopen = () => {
@@ -96,6 +110,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
   eventSource?.close()
 })
 
@@ -155,6 +170,34 @@ function isStalled(job: Job): boolean {
 function isEnvError(job: Job): boolean {
   // 环境类失败：连接超时、ComfyUI 不可达等；配置类：参数错误、工作流缺失等
   return job.retryable === true
+}
+
+/**
+ * error_code → 人话。后端 error_msg 常以英文技术细节为主
+ * （实测 comfy_unreachable 带完整实例 URL、llm_invalid_output 带 JSON 解析位置），
+ * 普通用户看不出「该修什么」。这里只解释「是什么问题、该做什么」，
+ * 原文仍然完整保留在 error_msg 里，供排查使用。
+ */
+const errorHints: Record<string, string> = {
+  comfy_unreachable: 'ComfyUI 实例连不上，检查实例地址或重新启用',
+  comfy_execution_error: 'ComfyUI 工作流执行报错，检查节点参数',
+  llm_invalid_output: '模型返回内容无法解析，可重试或降低输出长度',
+  llm_output_truncated: '模型输出被截断，可提高 max_tokens 或缩短输入',
+}
+
+function errorHint(code?: string | null): string | null {
+  return code ? (errorHints[code] ?? null) : null
+}
+
+/**
+ * 失败原因摘要：卡片默认只显示一行，展开后看全文。
+ * 后端的 error_msg 常带很长的 URL / JSON 片段（实测 comfy_unreachable 里有完整实例地址），
+ * 不截断会把卡片撑高。
+ */
+function truncateError(msg?: string | null): string {
+  if (!msg) return '未记录错误原因'
+  const one = msg.replace(/\s+/g, ' ').trim()
+  return one.length > 60 ? `${one.slice(0, 60)}…` : one
 }
 
 /** 时间列：只留月-日 时:分:秒，年份对任务中心没意义 */
@@ -362,6 +405,59 @@ const columns = computed<DataTableColumns<Job>>(() => {
             <n-button secondary @click="() => jobsQuery.refetch()">重试</n-button>
           </div>
           <n-empty v-else-if="jobsQuery.data.value?.items?.length === 0" description="暂无任务" style="padding: 24px 0" />
+
+          <!-- 移动端：表格 6 列合计 724px，390px 视口下只能横向滚动，
+               而移动端滚动条默认隐藏、无任何提示，右侧「重试/取消」等于不存在。
+               改为卡片：一行主信息 + 一行状态元信息 + 操作，全部纵向可见。 -->
+          <div v-else-if="isNarrow" class="job-cards">
+            <article v-for="job in jobsQuery.data.value?.items || []" :key="job.id" class="job-card">
+              <div class="job-card-top">
+                <span class="job-card-type">{{ typeLabels[job.job_type] || job.job_type }}</span>
+                <span class="job-status" :class="`is-${job.status}`">
+                  <span class="job-status-dot" />
+                  {{ statusLabels[job.status] || job.status }}
+                </span>
+              </div>
+              <p class="job-card-context">{{ jobContext(job) }}</p>
+              <div class="job-card-meta">
+                <span>{{ fmtDuration(job) }}</span>
+                <span>{{ fmtTime(job.created_at) }}</span>
+                <span v-if="(job.attempts ?? 1) > 1">第 {{ job.attempts }} 次</span>
+                <span v-if="job.status === 'running' && job.progress != null">{{ job.progress }}%</span>
+                <span v-if="isStalled(job)" class="is-stall">可能已中断</span>
+              </div>
+              <div v-if="job.status === 'failed' || job.status === 'lost' || job.status === 'queued' || job.status === 'running' || job.status === 'chained_wait'" class="job-card-actions">
+                <n-button
+                  v-if="job.status === 'failed' || job.status === 'lost'"
+                  size="tiny"
+                  type="primary"
+                  quaternary
+                  @click="retryMutation.mutate(job.id)"
+                >重试</n-button>
+                <n-button
+                  v-else
+                  size="tiny"
+                  type="error"
+                  quaternary
+                  @click="cancelMutation.mutate(job.id)"
+                >取消</n-button>
+                <n-button
+                  v-if="job.status === 'failed' || job.status === 'lost'"
+                  size="tiny"
+                  quaternary
+                  @click="showErrorJob = showErrorJob?.id === job.id ? null : job"
+                >{{ showErrorJob?.id === job.id ? '收起原因' : '查看原因' }}</n-button>
+              </div>
+              <!-- 失败原因常驻展示首行：窄屏没有 hover，若只在「查看原因」里，
+                   用户看到「失败 + 重试」但永远不知道错在哪。
+                   先给中文解释（error_code 映射），再给后端原文。 -->
+              <div v-if="(job.status === 'failed' || job.status === 'lost') && (job.error_msg || job.error_code)" class="job-card-error is-inline">
+                <span v-if="errorHint(job.error_code)" class="err-hint">{{ errorHint(job.error_code) }}</span>
+                <span class="err-raw">{{ showErrorJob?.id === job.id ? (job.error_msg || '未记录错误原因') : truncateError(job.error_msg) }}</span>
+              </div>
+            </article>
+          </div>
+
           <n-data-table
             v-else
             :columns="columns"
@@ -379,6 +475,12 @@ const columns = computed<DataTableColumns<Job>>(() => {
               showSizePicker: false,
             }"
           />
+          <!-- 卡片视图没有表格内建分页，单独给一个 -->
+          <div v-if="isNarrow && (jobsQuery.data.value?.total ?? 0) > pageSize" class="card-pager">
+            <n-button size="small" :disabled="page <= 1" @click="page--">上一页</n-button>
+            <span class="card-pager-text">{{ page }} / {{ Math.ceil((jobsQuery.data.value?.total ?? 0) / pageSize) }}</span>
+            <n-button size="small" :disabled="page >= Math.ceil((jobsQuery.data.value?.total ?? 0) / pageSize)" @click="page++">下一页</n-button>
+          </div>
         </n-card>
       </div>
 
@@ -628,11 +730,167 @@ const columns = computed<DataTableColumns<Job>>(() => {
 @media (max-width: 768px) {
   .stats-row {
     grid-template-columns: repeat(2, 1fr);
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-3);
+  }
+  /* 统计卡在窄屏压缩：4 张卡 206px 吃掉首屏 1/4，
+     而它们是「概览」不是「主操作」，不值得占这么多高度 */
+  .stat-card {
+    border-radius: var(--radius-md);
+  }
+  /* Naive 的 card 内容容器类名是 .n-card-content（单横线），
+     不是 .n-card__content —— 后者是 Vue 3 常见误写，写了也不报错、只是不生效。
+     实测 390px 下默认 padding 20px 24px 让卡片多出 42px 高度。 */
+  .stat-card :deep(.n-card-content) {
+    padding: 10px 12px;
+  }
+  .stat-card :deep(.n-statistic-value__content) {
+    font-size: 20px;
+  }
+  /* 类名必须是 .n-statistic__label（双下划线）。写成 .n-statistic-label 会静默失效，
+     文件里 557 行已有同样的教训注释。 */
+  .stat-card :deep(.n-statistic__label) {
+    font-size: 11.5px;
+    line-height: 18px;
   }
   .wf-toolbar {
     flex-direction: column;
     align-items: stretch;
+    gap: var(--sp-2);
   }
+  /* 筛选轴改横向滚动单行。
+     15 个按钮 wrap 成 5 行要 240px（首屏 28%），而筛选是低频操作；
+     横向滑动是移动端 tab 的通行交互，比纵向堆 5 行更省空间也更好扫。
+     关键：type-tabs 必须 flex: 1 1 0%（basis 0 而非 auto）。
+     用 auto 时基准宽 = 内容宽 527px，它拒绝收缩，整条链一路撑到 565px，
+     实测把 .wf-toolbar(252px) 和 .n-card-content(300px) 全部顶破。
+     basis 0 才能让它在剩余空间里定位、由 overflow-x 自己滚。 */
+  .filter-row {
+    flex-wrap: nowrap;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .filter-row .type-tabs {
+    flex: 1 1 0%;
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .type-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .status-tab {
+    flex: none;
+    white-space: nowrap;
+  }
+}
+
+/* --- 窄屏任务卡片（替代表格，见 template 内注释） --- */
+.job-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  /* 底部必须避开右下角固定的 AI 助手 FAB（bottom 24 + 高 38 = 62px 占位）。
+     与 ScriptReader.vue:87 同一处理：FAB 是 position:fixed，会压住最后一张卡的
+     操作按钮和错误原文，而失败原因恰恰在卡片最底部。 */
+  padding-bottom: 62px;
+}
+.job-card {
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+.job-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.job-card-type {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+/* 归属信息可能很长（项目 · 第N集 · 场景 · 分镜#N），允许两行后省略，
+   不强制 nowrap：窄屏下强撑单行会把整卡顶宽 */
+.job-card-context {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.job-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.job-card-meta .is-stall {
+  color: var(--warning-text, var(--text-secondary));
+}
+.job-card-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: 10px;
+}
+/* 错误原文：等宽不必要，但必须能换行完整阅读（这是用户点「查看原因」的唯一去处） */
+.job-card-error {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--danger-text);
+  word-break: break-word;
+}
+/* 常驻摘要态：视觉上比展开态轻，避免每张失败卡都像报警框 */
+.job-card-error.is-inline {
+  margin-top: 8px;
+  padding: 6px 9px;
+  background: transparent;
+  border-left: 2px solid var(--danger);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* 中文解释在前、后端原文在后：先让人看懂，再给排查线索 */
+.job-card-error .err-hint {
+  color: var(--danger-text);
+  font-weight: 500;
+}
+.job-card-error .err-raw {
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+.card-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0 0;
+}
+.card-pager-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 .filter-row.is-status {
   margin-top: var(--sp-2);
