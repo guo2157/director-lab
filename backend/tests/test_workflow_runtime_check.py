@@ -15,6 +15,7 @@ from app.main import app
 from app.core.database import make_engine
 from app.models import Base
 from app.services.workflow import runtime_checker as rc
+from app.services.workflow.capabilities import normalize
 from app.services.workflow.versions import _dependency_snapshot
 
 WF_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
@@ -75,9 +76,9 @@ def _object_info_for(definition: dict, extra_files: list[str] | None = None) -> 
 # --- 依赖检查 -----------------------------------------------------------
 
 def test_check_ready_when_nodes_and_models_present():
-    definition, meta = _load("wf_video_h3_ref2va_std_5s")
+    definition, _ = _load("wf_video_h3_ref2va_std_5s")
     client = FakeClient(object_info=_object_info_for(definition))
-    result = rc.check_definition(definition, meta["capabilities"], client=client)
+    result = rc.check_definition(definition, normalize("video", definition), client=client)
     assert result["runtime_status"] == "ready"
     assert result["missing_node_types"] == []
     assert result["missing_models"] == []
@@ -118,9 +119,9 @@ def test_check_unreachable_instance_is_not_reported_as_broken_workflow():
 # --- 测试提交 -----------------------------------------------------------
 
 def test_submit_test_prunes_optional_media_and_injects_defaults():
-    definition, meta = _load("wf_video_h3_ref2va_std_5s")
+    definition, _ = _load("wf_video_h3_ref2va_std_5s")
     client = FakeClient(object_info=_object_info_for(definition))
-    result = rc.submit_test(definition, meta["capabilities"], trigger=meta["trigger"], client=client)
+    result = rc.submit_test(definition, normalize("video", definition), client=client)
     assert result["submitted"] is True
     assert result["prompt_id"] == "pid-test-1"
     assert len(result["pruned_slots"]) == 12  # 9 图 + 3 音频全部未注入，剔除
@@ -131,8 +132,8 @@ def test_submit_test_prunes_optional_media_and_injects_defaults():
 
 
 def test_submit_test_refuses_when_required_media_missing():
-    definition, meta = _load("wf_video_h3_flf2v")  # $first_frame.~image! 为必填媒体
-    result = rc.submit_test(definition, meta["capabilities"], trigger=meta.get("trigger"),
+    definition, _ = _load("wf_video_h3_flf2v")  # $first_frame.~image! 为必填媒体
+    result = rc.submit_test(definition, normalize("video", definition),
                             client=FakeClient())
     assert result["submitted"] is False
     assert result["reason"] == "workflow_test_requires_media"
@@ -163,6 +164,7 @@ def client(tmp_path, monkeypatch):
 
 def _upload(client: TestClient, name: str, wf_type: str = "video"):
     definition, meta = _load(name)
+    # meta 不再存在，能力与 trigger 均由定义推导
     resp = client.post(
         "/api/workflows",
         data={"name": f"运行检查-{name}", "workflow_type": wf_type,

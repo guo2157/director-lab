@@ -58,12 +58,18 @@ def _slot_role(param: str) -> str | None:
 def normalize_reference_slots(capabilities: dict | None) -> list[dict]:
     """归一化工作流 capabilities.reference_slots。
 
-    兼容两种真实声明格式：
+    兼容三种真实声明格式：
     - 字符串数组：["ref_identity", "ref_character_2"]
-    - 对象数组：[{"param": "ref_identity", "input_key": "...", "optional": true}]
+    - 对象数组（旧扁平结构）：[{"param": "ref_identity", "input_key": "...", "optional": true}]
+    - 归一化后的嵌套结构：capabilities["reference"]["slots"]
+      （`capabilities.normalize()` 的输出，`.meta.json` 移除后生产库存的就是它）
     仅以工作流真实声明为准，不补造槽位。
     """
-    raw = (capabilities or {}).get("reference_slots") or []
+    caps = capabilities or {}
+    raw = caps.get("reference_slots")
+    if raw is None:
+        # 新结构：reference.slots，与 reference_slots 语义相同但字段更全
+        raw = (caps.get("reference") or {}).get("slots") or []
     slots: list[dict] = []
     for item in raw:
         if isinstance(item, dict):

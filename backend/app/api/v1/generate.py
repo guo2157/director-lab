@@ -17,6 +17,7 @@ from app.core.database import get_db
 from app.models import (Asset, AssetRef, Character, Job, JobEvent, Project, Prop, Scene,
                        Shot, Workflow, ids)
 from app.services import errors
+from app.services.execution_verifier import find_active_job_by_request_key
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -465,12 +466,19 @@ def _apply_tier_frame_size(wf: Workflow, params: dict) -> dict:
 
 def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
                 wf: Workflow, params: dict, generation_mode: str | None = None,
-                priority: int = 0) -> Job:
+                priority: int = 0, request_key: str | None = None) -> Job:
     """创建生成任务并持久化 effective_inputs 快照。
 
     priority 越大越先被 worker 取到（同优先级按入队顺序），用于人工发起的
     重新生成插队；普通任务保持 0。
+    request_key 非空时按提交级幂等：同键已存在未终态任务则直接复用，
+    避免前端重复点击产生重复任务（D13）。
     """
+    # 幂等查重（D13）：同 request_key 已有任务直接复用
+    if request_key:
+        existing = find_active_job_by_request_key(db, request_key)
+        if existing:
+            return existing
     job_type = f"generate_{target}" if target != "keyframe" else "generate_keyframe"
     if shot_id and target in ("keyframe", "clip"):
         # 出分镜前资产预检：缺失资产自动补生成并阻断本次提交，避免必然失败的任务
@@ -521,6 +529,7 @@ def _create_job(db: Session, project_id: str, shot_id: str | None, target: str,
         params=params,
         status="queued",
         priority=priority,
+        request_key=request_key,
         created_at=_now(),
         input_snapshot={
             "workflow_version": wf.version,
@@ -1149,7 +1158,8 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
     # 镜间尾帧依赖（P0）：非首镜使用前序镜头实际尾帧，缺失时按声明决定拦截或记录
     prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
-                      generation_mode=payload.get("generation_mode"))
+                      generation_mode=payload.get("generation_mode"),
+                      request_key=payload.get("idempotency_key"))
     _attach_compilation(job, compilation)
     if _reference_manifest is not None:
         _snap = dict(job.input_snapshot or {})
@@ -1250,7 +1260,8 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
             params["__media__"] = _existing
     # 镜间尾帧依赖（P0）：重做与单镜生成行为一致
     prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
-    job = _create_job(db, scene.project_id, shot.id, target, wf, params)
+    job = _create_job(db, scene.project_id, shot.id, target, wf, params,
+                      request_key=payload.get("idempotency_key"))
     if target == "clip" or chain_info or _reference_manifest is not None:
         _snap = dict(job.input_snapshot or {})
         if target == "clip":
@@ -1322,7 +1333,8 @@ def regenerate_shot_clip(shot_id: str, payload: dict | None = None,
     prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
                       generation_mode=payload.get("generation_mode"),
-                      priority=_REGENERATE_CLIP_PRIORITY)
+                      priority=_REGENERATE_CLIP_PRIORITY,
+                      request_key=payload.get("idempotency_key"))
     _attach_compilation(job, compilation)
     _snap = dict(job.input_snapshot or {})
     _snap["prev_frame"] = prev_frame_info
@@ -1350,7 +1362,8 @@ def generate_character(character_id: str, payload: dict | None = None, db: Sessi
     from app.services.asset_prompts import ASSET_PROMPTS_VERSION
     params, compilation = _compile_asset_prompt(db, "character", ch.id, wf, params)
     params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-    job = _create_job(db, ch.project_id, None, "keyframe", wf, params)
+    job = _create_job(db, ch.project_id, None, "keyframe", wf, params,
+                      request_key=(payload or {}).get("idempotency_key"))
     _attach_compilation(job, compilation)
     job.params = {**job.params, "__character_id__": ch.id}
     # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
@@ -1374,7 +1387,8 @@ def generate_prop(prop_id: str, payload: dict | None = None, db: Session = Depen
     from app.services.asset_prompts import ASSET_PROMPTS_VERSION
     params, compilation = _compile_asset_prompt(db, "prop", p.id, wf, params)
     params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-    job = _create_job(db, p.project_id, None, "keyframe", wf, params)
+    job = _create_job(db, p.project_id, None, "keyframe", wf, params,
+                      request_key=(payload or {}).get("idempotency_key"))
     _attach_compilation(job, compilation)
     job.params = {**job.params, "__prop_id__": p.id}
     # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
@@ -1415,7 +1429,8 @@ def generate_scene_baseline(scene_id: str, payload: dict | None = None, db: Sess
     from app.services.asset_prompts import ASSET_PROMPTS_VERSION
     params, compilation = _compile_asset_prompt(db, "scene", sc.id, wf, params)
     params["__asset_prompt_version__"] = ASSET_PROMPTS_VERSION
-    job = _create_job(db, sc.project_id, None, "keyframe", wf, params)
+    job = _create_job(db, sc.project_id, None, "keyframe", wf, params,
+                      request_key=(payload or {}).get("idempotency_key"))
     _attach_compilation(job, compilation)
     job.params = {**job.params, "__scene_id__": sc.id}
     # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
@@ -1505,7 +1520,10 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
                         params["__media__"], slots)
         # 镜间尾帧依赖（P0）：批量与单镜生成行为一致
         prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
-        _job = _create_job(db, sc.project_id, shot.id, target, shot_wf, params)
+        _job = _create_job(db, sc.project_id, shot.id, target, shot_wf, params,
+                           request_key=(
+                               f"{payload.get('idempotency_key')}/{shot.id}"
+                               if payload.get('idempotency_key') else None))
         if target == "clip":
             _snap = dict(_job.input_snapshot or {})
             _snap["prev_frame"] = prev_frame_info
@@ -1631,7 +1649,10 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
         prev_frame_info = None
         if target == "clip" and chain_mode is None:
             prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
-        _job = _create_job(db, project_id, shot.id, target, shot_wf, params)
+        _job = _create_job(db, project_id, shot.id, target, shot_wf, params,
+                           request_key=(
+                               f"{payload.get('idempotency_key')}/{shot.id}"
+                               if payload.get('idempotency_key') else None))
         _attach_compilation(_job, compilation)
         if _reference_manifest is not None:
             _snap = dict(_job.input_snapshot or {})

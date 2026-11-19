@@ -15,6 +15,7 @@ from app.main import app
 from app.core.database import make_engine
 from app.models import Base
 from app.services.workflow import build_schema, public_schema, validate_definition
+from app.services.workflow.capabilities import normalize
 
 WF_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
 
@@ -63,9 +64,9 @@ def test_t2i_schema_has_prompt_size_seed_and_cover_output():
 
 
 def test_video_schema_marks_reference_audio_and_frame_range_from_capabilities():
-    definition, meta = _load("wf_video_h3_ref2va_std_5s")
-    caps = meta["capabilities"]
-    schema = build_schema(definition, capabilities=caps, trigger=meta["trigger"])
+    definition, _ = _load("wf_video_h3_ref2va_std_5s")
+    caps = normalize("video", definition)
+    schema = build_schema(definition, capabilities=caps)
     params = schema["params"]
     # 9 个参考图槽位 + 3 个参考音频槽位都应识别为媒体参数
     ref_images = [k for k, v in params.items() if v["type"] == "image"]
@@ -74,10 +75,9 @@ def test_video_schema_marks_reference_audio_and_frame_range_from_capabilities():
     assert set(ref_audios) == {"ref_audio_0", "ref_audio_1", "ref_audio_2"}
     assert params["ref_identity"]["semantic"] == "character_identity"
     assert params["ref_prev_frame"]["semantic"] == "previous_shot_last_frame"
-    # 帧数范围取自 capabilities，不写死
-    lo, hi = caps["frame_count_range"]
-    assert params["length"]["min"] == lo and params["length"]["max"] == hi
-    assert params["length"]["step"] == caps["frame_count_step"]
+    # 帧率与长度默认值来自计算图本身（.meta.json 已移除，不再由能力声明提供）
+    assert caps["video"]["fps"] == 24.0
+    assert params["length"]["default"] == 124
     assert schema["outputs"][0]["key"] == "clip"
     assert schema["outputs"][0]["media_type"] == "video"
 

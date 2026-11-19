@@ -21,8 +21,12 @@ WF_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
 
 def _load(name: str) -> tuple[dict, dict]:
     definition = json.loads((WF_DIR / f"{name}.json").read_text(encoding="utf-8"))
-    meta_path = WF_DIR / f"{name}.meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    # 自动生成能力与触发条件（不再依赖 .meta.json）
+    caps = normalize("unknown", definition, capabilities=None, trigger=None)
+    wf_type = caps.get("workflow_type", "unknown")
+    _trigger_targets = {"image": "keyframe", "video": "clip"}
+    trigger = {"target": _trigger_targets.get(wf_type, wf_type), "required_params": [], "priority": 10}
+    meta = {"capabilities": caps, "trigger": trigger, "workflow_type": wf_type}
     return definition, meta
 
 
@@ -154,7 +158,7 @@ def test_dependency_snapshot_records_node_types_and_models(client: TestClient):
 
 def test_h3_capabilities_expose_tts_audio_input_without_name_inference():
     definition, meta = _load("wf_video_h3_ref2va_std_5s")
-    caps = normalize("video", definition, capabilities=meta["capabilities"], trigger=meta["trigger"])
+    caps = normalize("video", definition)
     assert caps["workflow_type"] == "video"
     assert caps["modalities"]["audio_input"] is True
     assert caps["modalities"]["image_input"] is True
@@ -175,7 +179,7 @@ def test_h3_capabilities_expose_tts_audio_input_without_name_inference():
 
 def test_t2i_capabilities_have_no_audio_input():
     definition, meta = _load("wf_image_t2i_qwen21_turbo")
-    caps = normalize("image", definition, capabilities=meta["capabilities"], trigger=meta["trigger"])
+    caps = normalize("image", definition)
     assert caps["modalities"]["audio_input"] is False
     assert caps["audio"]["accepts_tts_reference_audio"] is False
     assert caps["modalities"]["image_output"] is True
@@ -184,7 +188,7 @@ def test_t2i_capabilities_have_no_audio_input():
 
 def test_capability_matches_reports_missing_paths():
     t2i_def, t2i_meta = _load("wf_image_t2i_qwen21_turbo")
-    t2i = normalize("image", t2i_def, capabilities=t2i_meta["capabilities"], trigger=t2i_meta["trigger"])
+    t2i = normalize("image", t2i_def)
     ok, missing = capability_matches(t2i, {"modalities.audio_input": True})
     assert ok is False
     assert missing == ["modalities.audio_input"]

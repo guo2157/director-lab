@@ -21,9 +21,15 @@ from app.main import app
 from app.core.database import make_engine
 from app.models import Asset, Base, Job, Scene, Shot, Workflow
 from app.services import regeneration as regen
+from app.services.workflow.capabilities import normalize as normalize_capabilities
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = BACKEND_DIR / "data" / "workflows"
+
+# 自动解析能力（不再依赖 .meta.json）
+_H3_DEF = json.loads((WORKFLOW_DIR / "wf_video_h3_ref2va_std_5s.json").read_text("utf-8"))
+_T2I_DEF = json.loads((WORKFLOW_DIR / "wf_image_t2i_qwen21_turbo.json").read_text("utf-8"))
+_MULTI_DEF = json.loads((WORKFLOW_DIR / "wf_image_ref_qwen21_multi.json").read_text("utf-8"))
 
 
 @pytest.fixture()
@@ -102,7 +108,7 @@ def _seed(client, tmp_path, slots_meta: dict, refs_files: list[str]):
     return {"project_id": pid, "shot_id": shot["id"], "ref_ids": ref_ids}
 
 
-H3_SLOTS = json.loads((WORKFLOW_DIR / "wf_video_h3_ref2va_std_5s.meta.json").read_text("utf-8"))["capabilities"]
+H3_SLOTS = normalize_capabilities("video", _H3_DEF, capabilities=None, trigger=None)
 
 
 def test_real_workflow_slots_are_authoritative():
@@ -127,13 +133,13 @@ def test_real_workflow_slots_are_authoritative():
 
 def test_t2i_workflow_has_no_reference_slots():
     """t2i 工作流不声明任何参考槽位，不得凭空补造。"""
-    caps = json.loads((WORKFLOW_DIR / "wf_image_t2i_qwen21_turbo.meta.json").read_text("utf-8"))["capabilities"]
+    caps = normalize_capabilities("image", _T2I_DEF, capabilities=None, trigger=None)
     assert regen.normalize_reference_slots(caps) == []
 
 
 def test_qwen_multi_supports_nine_slots():
     """多参考图版声明 9 槽（单角色版 wf_image_ref_qwen21_turbo 已下线，由 multi 覆盖）。"""
-    caps = json.loads((WORKFLOW_DIR / "wf_image_ref_qwen21_multi.meta.json").read_text("utf-8"))["capabilities"]
+    caps = normalize_capabilities("image", _MULTI_DEF, capabilities=None, trigger=None)
     slots = regen.normalize_reference_slots(caps)
     assert [s["param"] for s in slots] == [
         "ref_scene", "ref_identity", "ref_character_2",

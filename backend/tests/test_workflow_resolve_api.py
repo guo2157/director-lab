@@ -80,10 +80,13 @@ def test_get_workflow_config_lists_candidates_by_slot(client):
     # 两个 image 工作流都进入 image 槽位候选
     image_ids = {c["id"] for c in data["candidates"]["image"]}
     assert len(image_ids) == 2
-    # 每个候选都带 usable 与能力摘要
+    # 每候选都带 usable 与能力摘要；含参考槽位的工作流标记为不可用（资产纯度规则）
+    usable_count = 0
     for cand in data["candidates"]["image"]:
         assert "usable" in cand and "modalities" in cand
-        assert cand["usable"] is True
+        if cand["usable"]:
+            usable_count += 1
+    assert usable_count == 1, "仅纯净文生图工作流（无 reference_slots）应为 usable"
 
 
 def test_put_workflow_config_saves_and_roundtrips(client):

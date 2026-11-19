@@ -19,14 +19,19 @@ from app.models.narrative import Project
 from app.models.production import Workflow, ids
 from app.services import errors
 from app.services.workflow import matcher
+from app.services.workflow.capabilities import normalize as normalize_capabilities
 
 WF_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
 
 
 def _load(name: str) -> tuple[dict, dict]:
     definition = json.loads((WF_DIR / f"{name}.json").read_text(encoding="utf-8"))
-    meta_path = WF_DIR / f"{name}.meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    # 自动生成能力与触发条件（不再依赖 .meta.json）
+    caps = normalize_capabilities("unknown", definition, capabilities=None, trigger=None)
+    wf_type = caps.get("workflow_type", "unknown")
+    _trigger_targets = {"image": "keyframe", "video": "clip"}
+    trigger = {"target": _trigger_targets.get(wf_type, wf_type), "required_params": [], "priority": 10}
+    meta = {"capabilities": caps, "trigger": trigger, "workflow_type": wf_type}
     return definition, meta
 
 

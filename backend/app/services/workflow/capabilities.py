@@ -72,10 +72,71 @@ def _generation_modes(workflow_type: str, has_image_slots: bool, has_audio_slots
 
 
 def _multi(has_slots: bool) -> bool:
-    return bool(has_slots)
+    return has_slots
 
 
-def _slot_entries(capabilities: dict, schema: dict) -> list[dict]:
+def _has_native_audio(definition: dict) -> bool:
+    """计算图是否产出**带音轨的视频**（原生音轨）。
+
+    判据是结构事实，不是名称推断：必须同时存在
+    - `*DecodeAudio` 节点：解码出音频 latent
+    - `CreateVideo` / `SaveVideo` / `VHS_VideoCombine` 且带 audio 输入：把音频混进视频
+
+    为什么需要：`.meta.json` 移除后，H3 的 `audio: true` 标记没有替代来源，
+    所有 H3 工作流会被判定为无原生音轨，前端「原生音轨」标识消失、
+    `audio_output_mode` 退化为 none。该信息本就在计算图里，应在此推导。
+    """
+    decode_audio = False
+    mux_audio = False
+    for node in definition.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type") or ""
+        inputs = node.get("inputs") or {}
+        if "DecodeAudio" in class_type:
+            decode_audio = True
+        if class_type in ("CreateVideo", "SaveVideo", "VHS_VideoCombine"):
+            if any("audio" in str(k).lower() for k in inputs):
+                mux_audio = True
+    return decode_audio and mux_audio
+
+
+def _consumer_input_keys(definition: dict) -> dict[str, str]:
+    """反向索引：媒体加载节点 id → 消费方输入路径（如 `ref_images.ref_image_2`）。
+
+    为什么需要：`.meta.json` 移除后，槽位的 `input_key` 失去声明来源，
+    但它是计算图里的连线事实——某节点输入 `ref_images.ref_image_2` 指向
+    LoadImage 节点 32，则节点 32 对应槽位的 input_key 即该路径。
+    再生链路按 input_key 换算图片编号（images.image_N → N），缺了会错位。
+    """
+    out: dict[str, str] = {}
+    for node in definition.values():
+        if not isinstance(node, dict):
+            continue
+        for key, val in (node.get("inputs") or {}).items():
+            if isinstance(val, list) and val and isinstance(val[0], str):
+                out.setdefault(val[0], key)
+    return out
+
+
+def _detect_fps(definition: dict) -> float | None:
+    """从计算图读取视频帧率（CreateVideo/SaveVideo 的 fps 输入）。
+
+    帧率是图的真实属性，不依赖 .meta.json；读不到就返回 None，
+    由调用方显式处理，不做默认值猜测。
+    """
+    for node in definition.values():
+        if not isinstance(node, dict):
+            continue
+        if (node.get("class_type") or "") in ("CreateVideo", "SaveVideo", "VHS_VideoCombine"):
+            fps = (node.get("inputs") or {}).get("fps")
+            if isinstance(fps, (int, float)) and fps > 0:
+                return float(fps)
+    return None
+
+
+def _slot_entries(capabilities: dict, schema: dict,
+                  definition: dict | None = None) -> list[dict]:
     """参考槽位统一成对象数组。
 
     来源有两处，必须合并——这是避免「按名称推断能力」的关键：
@@ -98,6 +159,8 @@ def _slot_entries(capabilities: dict, schema: dict) -> list[dict]:
                     "optional": bool(item.get("optional", True)),
                 }
 
+    consumer_keys = _consumer_input_keys(definition) if definition else {}
+
     entries: list[dict] = []
     for name, param in (schema.get("params") or {}).items():
         media_type = param.get("type")
@@ -112,9 +175,12 @@ def _slot_entries(capabilities: dict, schema: dict) -> list[dict]:
         elif semantic is None:
             semantic, media_type = _SLOT_SEMANTIC.get(name, (None, None))
         info = declared_by_param.get(name) or {}
+        # input_key 优先取声明，缺失时用计算图连线还原（meta 移除后的唯一来源）
+        binding = param.get("binding") or {}
+        input_key = info.get("input_key") or consumer_keys.get(binding.get("node_id"))
         entries.append({
             "param": name,
-            "input_key": info.get("input_key"),
+            "input_key": input_key,
             "optional": info.get("optional", not bool(param.get("required"))),
             "semantic": semantic,
             "media_type": media_type,
@@ -127,7 +193,7 @@ def normalize(workflow_type: str, definition: dict,
     """返回归一化能力。definition 必须真实存在——能力从标记与节点读，不从名字读。"""
     caps = dict(capabilities or {})
     schema = build_schema(definition, capabilities=caps, trigger=trigger)
-    slots = _slot_entries(caps, schema)
+    slots = _slot_entries(caps, schema, definition)
     image_slots = [s for s in slots if s["media_type"] == "image"]
     audio_slots = [s for s in slots if s["media_type"] == "audio"]
     video_slots = [s for s in slots if s["media_type"] == "video"]
@@ -135,8 +201,10 @@ def normalize(workflow_type: str, definition: dict,
 
     outputs = {o["key"]: o for o in (schema.get("outputs") or [])}
     out_types = {o.get("media_type") for o in outputs.values()}
+    # 原生音轨：meta 的 audio 标记优先，否则从计算图推导（DecodeAudio + 混流节点）
+    has_audio = bool(caps.get("audio")) or _has_native_audio(definition)
     audio_output_mode = caps.get("audio_output_mode") or (
-        "embedded" if caps.get("audio") and "video" in out_types else
+        "embedded" if has_audio and "video" in out_types else
         "separate" if "voice" in outputs else
         "none" if out_types else None
     )
@@ -144,6 +212,9 @@ def normalize(workflow_type: str, definition: dict,
     tier = caps.get("tier")
 
     return {
+        # 顶层 reference_slots（仅图片槽）：向后兼容 regeneration 等旧服务，
+        # 它们先读该键再回退到 reference.slots。全量槽位请用 reference.slots。
+        "reference_slots": image_slots,
         "workflow_type": workflow_type,
         "generation_modes": _generation_modes(
             workflow_type,
@@ -165,7 +236,7 @@ def normalize(workflow_type: str, definition: dict,
             "accepts_tts_reference_audio": bool(audio_slots),
             "max_audio_inputs": len(audio_slots),
             "audio_output_mode": audio_output_mode,
-            "supports_native_audio": bool(caps.get("audio")),
+            "supports_native_audio": has_audio,
             "voice_mode": caps.get("voice_mode"),
         },
         "video": {
@@ -174,7 +245,7 @@ def normalize(workflow_type: str, definition: dict,
             "supports_previous_tail_frame": "ref_prev_frame" in param_names,
             "duration_control": bool(frame_range or caps.get("duration_param")),
             "frame_count_range": frame_range,
-            "fps": caps.get("fps"),
+            "fps": caps.get("fps") or _detect_fps(definition),
             "resolution_constraints": caps.get("resolution_constraints"),
         },
         "reference": {

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from app.services.workflow_inject import inject_params, parse_workflow
+from app.services.workflow.capabilities import normalize as normalize_capabilities
 
 WORKFLOW_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
 # 单角色版 wf_image_ref_qwen21_turbo 已下线：multi 是它的超集且为默认工作流，
@@ -26,8 +27,9 @@ def _load(name: str) -> dict:
 
 
 def _caps(name: str) -> dict:
-    meta = json.loads((WORKFLOW_DIR / f"{name}.meta.json").read_text("utf-8"))
-    return meta["capabilities"]
+    """从工作流定义自动解析能力（不再依赖 .meta.json）。"""
+    definition = _load(name)
+    return normalize_capabilities("unknown", definition, capabilities=None, trigger=None)
 
 
 def test_image_workflows_bind_negative():
@@ -55,10 +57,10 @@ def test_negative_actually_injected_into_text_encode():
 def test_multi_workflow_has_nine_reference_slots():
     """multi 工作流需与视频侧对齐到 9 槽，覆盖第 5/6 个角色。"""
     caps = _caps("wf_image_ref_qwen21_multi")
-    params = [s["param"] if isinstance(s, dict) else s for s in caps["reference_slots"]]
+    params = [s["param"] if isinstance(s, dict) else s for s in caps["reference"]["slots"]]
     assert len(params) == 9, params
     assert "ref_character_5" in params and "ref_character_6" in params
-    assert caps["max_reference_images"] == 9
+    assert caps["reference"]["max_image_references"] == 9
 
 
 def test_multi_workflow_declares_load_image_nodes_for_all_slots():
@@ -66,7 +68,7 @@ def test_multi_workflow_declares_load_image_nodes_for_all_slots():
     parsed = parse_workflow(_load("wf_image_ref_qwen21_multi"))
     caps = _caps("wf_image_ref_qwen21_multi")
     media_slots = {k for k, v in parsed.params.items() if v.media}
-    for item in caps["reference_slots"]:
+    for item in caps["reference"]["slots"]:
         param = item["param"] if isinstance(item, dict) else item
         assert param in media_slots, f"槽位 {param} 未在定义中声明为媒体槽"
     assert len(media_slots) == 9, sorted(media_slots)

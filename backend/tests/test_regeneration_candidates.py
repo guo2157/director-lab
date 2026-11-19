@@ -16,11 +16,14 @@ from app.main import app
 from app.core.database import make_engine
 from app.models import Asset, Base, Job, Workflow
 from app.services import regeneration as regen
+from app.services.workflow.capabilities import normalize as normalize_capabilities
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-H3_CAPS = json.loads(
-    (BACKEND_DIR / "data" / "workflows" / "wf_video_h3_ref2va_std_5s.meta.json").read_text("utf-8")
-)["capabilities"]
+_H3_DEF = json.loads(
+    (BACKEND_DIR / "data" / "workflows" / "wf_video_h3_ref2va_std_5s.json").read_text("utf-8")
+)
+# 自动解析能力（不再依赖 .meta.json）
+H3_CAPS = normalize_capabilities("video", _H3_DEF, capabilities=None, trigger=None)
 
 
 @pytest.fixture()

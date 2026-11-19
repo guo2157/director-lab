@@ -1,13 +1,55 @@
 # Director-Lab 动态工作流系统 — 现状审计报告（P0）
 
-> 审计对象：`/home/ubuntu/director-lab`（HEAD `bb9799d`）
-> 审计时间：2026-11-18
+> **V1.0 重构完成**：2026-11-19，Phase 0-3 全部完成，全链路 109 测试通过。详见下方「V1.0 完成摘要」。
+
+> 审计对象：`/home/ubuntu/director-lab`（HEAD `479d5a9`）
+> 审计时间：2026-11-18，完成报告更新：2026-11-19
 > 审计方法：读 `docs/WORKFLOW.md` / `docs/API.md` / `docs/DATABASE.md` / `docs/AGENTS.md` → 读真实代码 → 查真实 DB（`backend/data/director_lab.db`）→ 查真实工作流 JSON → 调运行中实例（`http://127.0.0.1:8000/api/workflows`）→ 跑测试基线。
 > **本报告只描述已验证的事实。计划里的设计意图不等于已实现，反之亦然。**
 
 ---
 
-## 0. 一句话结论
+## V1.0 完成摘要（2026-11-19）
+
+### 已完成的改造
+
+| 阶段 | 内容 | 状态 | 关键变更 |
+|------|------|------|----------|
+| **Phase 0** | 代码审计 | ✅ | 产出本报告，明确差距 |
+| **DB 迁移** | Alembic `64bc5ce8a27f` | ✅ | `workflow` 新增 `description_source` 列 |
+| **Phase 1** | 后端改造 | ✅ | 模型映射、seed 去 `.meta.json`、PATCH 描述接口、generate 接入 matcher |
+| **Phase 2** | 前端改造 | ✅ | `SettingsView` 反转展示、`WorkflowSelector` 加 `slot` prop、`ProjectWorkflowConfigPanel` |
+| **Phase 3** | 回归验证 + 技术债务 | ✅ | 10 个 `.meta.json` 物理删除、9 个测试文件适配、109/109 全通过 |
+
+### 缺陷修复清单
+
+| 缺陷 ID | 描述 | 修复方式 |
+|---------|------|----------|
+| **D3** | 版本不可变契约失效 | PATCH 改为定义变化生成新版本 |
+| **D4** | 前端上传只传 name+type | `SettingsView` 完整上传流程已实现 |
+| **D5** | 按工作流名称推断档位 | `StoryboardView` 改用 `capabilities.tier` |
+| **D7** | `parsed_schema` 双格式 | `build_schema` 统一为 dict 形状 |
+| **D8** | 项目级默认工作流 | `matcher.project_defaults` + `project.settings["default_workflows"]` |
+| — | `.meta.json` 硬依赖 | seed 改为 `normalize_capabilities` 自动解析；测试全部适配 |
+| — | 用户描述与种子冲突 | `description_source` (seed/user) 控制不覆盖 |
+| — | `generate.py` 硬编码工作流 ID | 接入 `_match_workflow` / `match_pure_asset_workflow` |
+
+### 保留的技术债务
+
+- **reference_slots → Adapter 深度迁移**：`normalize_capabilities` 返回顶层 `reference_slots` 向后兼容键，全量移除该键需先为 10 个工作流 JSON 内嵌 Adapter 配置
+- **D1/D2/M1**：上传校验/标记解析/validator 已部分修复，待下一轮
+- **D10**：运行环境检查（`/object_info`）已实现但测试覆盖率待提升
+- **D12-D14**：`job_input_ref` 全链路写入、幂等键、安全上限待后续
+
+### 数据库与种子
+
+- 10 个工作流全部 `description_source='seed'`，内置描述（千问文生图、首尾帧视频 等）
+- seed 脚本幂等：重复执行「新增 0，更新 0，未变化 10」
+- `description_source='user'` 的记录不被子种覆盖
+
+### 测试基线（更新）
+
+
 
 **计划里认为「待建设」的大部分能力，本项目已经实现，只是实现形态与计划设想不同；真正缺失的是「上传即产出可用 Schema」「不可变版本表」「参数 Schema 可用性（label/type/range）」「统一工作流选择器 UI」「运行环境依赖检查」这 5 处。**
 因此本项目的正确做法是**扩展**（extend），不是**重建**。若按计划原文从零搭 `WorkflowManager/WorkflowParser/WorkflowCompiler/WorkflowOutputParser`，会与现有 4 个已在生产链路里的模块重复建设，并直接违反自身「禁止重复建设」条款。

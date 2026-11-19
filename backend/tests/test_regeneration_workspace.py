@@ -23,12 +23,14 @@ from app.models.ids import job_input_ref_id
 from app.models.regen_config import StoryboardRegenConfig
 from app.services import regeneration as regen
 from app.services import regen_workspace as ws
+from app.services.workflow.capabilities import normalize as normalize_capabilities
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = BACKEND_DIR / "data" / "workflows"
 
 H3_DEF = json.loads((WORKFLOW_DIR / "wf_video_h3_ref2va_std_5s.json").read_text("utf-8"))
-H3_CAPS = json.loads((WORKFLOW_DIR / "wf_video_h3_ref2va_std_5s.meta.json").read_text("utf-8"))["capabilities"]
+# 自动解析能力（不再依赖 .meta.json）
+H3_CAPS = normalize_capabilities("video", H3_DEF, capabilities=None, trigger=None)
 
 IMAGE_SLOTS = [
     "ref_prev_frame", "ref_image", "ref_identity", "ref_character_2", "ref_prop",
