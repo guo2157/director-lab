@@ -21,6 +21,7 @@ import {
   listReviews,
   listSessions,
   resolveApproval,
+  restoreSession,
   updateSession,
 } from '@/api/agent'
 import type { AgentApproval, AgentMessage, AgentSession, ReviewCard } from '@/api/agent'
@@ -83,6 +84,39 @@ async function loadSessions() {
   }
 }
 
+/*
+ * 已归档会话（「最近删除」）。
+ * 为什么需要：删除会话实际是置 archived，接口默认只返回 active，
+ * 没有这个入口时用户会以为会话被彻底删除、无法找回。
+ */
+const archivedSessions = ref<AgentSession[]>([])
+const archivedLoading = ref(false)
+
+async function loadArchivedSessions() {
+  if (archivedLoading.value) return
+  archivedLoading.value = true
+  try {
+    const res = await listSessions({ include_archived: true, page_size: 100 })
+    archivedSessions.value = (res.items ?? []).filter((s) => s.status === 'archived')
+  } catch {
+    // 归档列表是辅助入口，失败不打断主流程
+    archivedSessions.value = []
+  } finally {
+    archivedLoading.value = false
+  }
+}
+
+async function restoreArchivedSession(s: AgentSession) {
+  try {
+    await restoreSession(s.id)
+    await Promise.all([loadSessions(), loadArchivedSessions()])
+    activeSessionId.value = s.id
+    message.success(`已恢复会话「${s.title}」`)
+  } catch (e) {
+    message.error(`恢复会话失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
 async function newSession() {
   try {
     const s = await createSession({ title: '新会话' })
@@ -114,7 +148,8 @@ async function renameSession(s: AgentSession, title: string) {
 async function removeSession(s: AgentSession) {
   try {
     await archiveSession(s.id)
-    await loadSessions()
+    // 删除即归档：同步刷新已归档列表，用户才能在同屏看到并可恢复
+    await Promise.all([loadSessions(), loadArchivedSessions()])
     if (activeSessionId.value === s.id) {
       activeSessionId.value = sessions.value[0]?.id ?? null
       messages.value = []
@@ -147,6 +182,7 @@ watch(
 )
 onMounted(() => {
   connectTaskEvents()
+  void loadArchivedSessions()
 })
 
 const inputText = ref('')
@@ -537,10 +573,12 @@ onMounted(() => {
         :loading="sessionsLoading"
         :active-id="activeSessionId"
         :error="sessionsError"
+        :archived="archivedSessions"
         @select="selectSession"
         @create="newSession"
         @rename="renameSession"
         @remove="removeSession"
+        @restore="restoreArchivedSession"
         @collapse="sessionsCollapsed = true"
         @retry="loadSessions"
       />

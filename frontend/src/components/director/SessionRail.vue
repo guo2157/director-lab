@@ -17,6 +17,8 @@ const props = defineProps<{
   activeId: string | null
   /** 加载失败信息（空串表示无错误） */
   error: string
+  /** 已归档会话（删除即归档，可从这里恢复） */
+  archived: AgentSession[]
 }>()
 
 const emit = defineEmits<{
@@ -24,6 +26,7 @@ const emit = defineEmits<{
   create: []
   rename: [session: AgentSession, title: string]
   remove: [session: AgentSession]
+  restore: [session: AgentSession]
   collapse: []
   retry: []
 }>()
@@ -31,6 +34,7 @@ const emit = defineEmits<{
 const keyword = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
+const showArchived = ref(false)
 
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -136,6 +140,25 @@ function confirmRename(s: AgentSession): void {
               删除后该会话将从列表移除。确认删除？
             </NPopconfirm>
           </template>
+        </div>
+      </div>
+
+      <!-- 已归档：删除即归档，没有这个入口用户会以为数据被彻底删掉 -->
+      <div v-if="archived.length" class="archived-block">
+        <button
+          class="archived-toggle"
+          type="button"
+          :aria-expanded="showArchived"
+          @click="showArchived = !showArchived"
+        >
+          <span class="archived-label">已归档 {{ archived.length }}</span>
+          <span class="archived-chev" aria-hidden="true">{{ showArchived ? '▾' : '▸' }}</span>
+        </button>
+        <div v-if="showArchived" class="archived-list">
+          <div v-for="s in archived" :key="s.id" class="archived-item">
+            <span class="archived-title" :title="s.title">{{ s.title }}</span>
+            <NButton size="tiny" quaternary @click="emit('restore', s)">恢复</NButton>
+          </div>
         </div>
       </div>
     </div>
@@ -262,5 +285,70 @@ function confirmRename(s: AgentSession): void {
 
 .archive-btn:focus-visible {
   opacity: 1;
+}
+
+/* 已归档折叠区：常驻在列表底部，不抢占主列表视线 */
+.archived-block {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.archived-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.archived-toggle:hover {
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+}
+
+.archived-toggle:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 1px;
+}
+
+.archived-chev {
+  font-size: 10px;
+}
+
+.archived-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--sp-1);
+}
+
+.archived-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius);
+}
+
+.archived-item:hover {
+  background: var(--overlay-hover);
+}
+
+.archived-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>
