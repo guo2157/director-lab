@@ -2,22 +2,19 @@
 - GET /api/events：SSE 实时事件流，从 job_event outbox 轮询增量事件
 - 事件带全局递增 seq（event_seq 自增），跨项目连续；断线重连以 seq 严格大于判定
 - 本期不鉴权；每个事件含 event_type、id、status、updated_at
-"""
-import asyncio
-import json
 
+实现纪律见 app/services/event_stream.py 模块 docstring：
+Session 必须在任何 yield 之前关闭，阻塞查询不得跑在事件循环线程上。
+"""
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.core.database import SessionLocal, get_db
+from app.core.database import get_db
 from app.models import Job, JobEvent
+from app.services.event_stream import MAX_BATCH, sse_event_stream, sse_response
 
 router = APIRouter(prefix="/api", tags=["events"])
-
-# SSE 轮询间隔（秒）与单连接最长持续时间（秒，防止连接无限挂起）
-_POLL_INTERVAL = 1.0
-_MAX_STREAM_SECONDS = 300
 
 
 def _event_payload(ev: JobEvent, job: Job | None) -> dict:
@@ -35,60 +32,33 @@ def _event_payload(ev: JobEvent, job: Job | None) -> dict:
     return data
 
 
+def _fetch_job_events(db: Session, seq: int, limit: int = MAX_BATCH) -> list[dict]:
+    """按 seq 严格大于读取一批 job 事件，物化为纯 dict（Session 由调用方关闭）。"""
+    rows = (
+        db.query(JobEvent)
+        .filter(JobEvent.event_seq > seq)
+        .order_by(JobEvent.event_seq)
+        .limit(limit)
+        .all()
+    )
+    out = []
+    for ev in rows:
+        job = db.get(Job, ev.job_id)
+        out.append(_event_payload(ev, job))
+    return out
+
+
 @router.get("/events")
 async def event_stream(last_seq: int = Query(0, ge=0)) -> StreamingResponse:
     """SSE 事件流：从 last_seq 之后开始推送，客户端断线重连时传最后收到的 seq。"""
-
-    async def gen():
-        seq = last_seq
-        elapsed = 0.0
-        # 独立会话，避免长连接占用请求级会话
-        while elapsed < _MAX_STREAM_SECONDS:
-            db = SessionLocal()
-            try:
-                rows = (
-                    db.query(JobEvent)
-                    .filter(JobEvent.event_seq > seq)
-                    .order_by(JobEvent.event_seq)
-                    .limit(200)
-                    .all()
-                )
-                for ev in rows:
-                    job = db.get(Job, ev.job_id)
-                    data = _event_payload(ev, job)
-                    seq = max(seq, ev.event_seq)
-                    # 不发送 event: 名称行：带名称的事件不会触发前端 onmessage，
-                    # 事件类型已包含在 data.event_type 中，前端统一用 onmessage 处理
-                    yield f"id: {ev.event_seq}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
-            finally:
-                db.close()
-            # 心跳注释，防代理断连
-            yield ": ping\n\n"
-            await asyncio.sleep(_POLL_INTERVAL)
-            elapsed += _POLL_INTERVAL
-
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return sse_response(sse_event_stream(_fetch_job_events, last_seq=last_seq))
 
 
 @router.get("/events/backfill")
 def events_backfill(updated_since_seq: int = Query(..., ge=0),
                     db: Session = Depends(get_db)) -> dict:
     """断线补齐：返回 seq 严格大于给定值的事件，按 seq 升序（§12 重连约定）。"""
-    rows = (
-        db.query(JobEvent)
-        .filter(JobEvent.event_seq > updated_since_seq)
-        .order_by(JobEvent.event_seq)
-        .limit(1000)
-        .all()
-    )
-    items = []
-    for ev in rows:
-        job = db.get(Job, ev.job_id)
-        items.append(_event_payload(ev, job))
+    items = _fetch_job_events(db, updated_since_seq, limit=1000)
     return {"total": len(items), "items": items}
 
 
@@ -109,56 +79,32 @@ def _task_event_payload(ev, task) -> dict:
     return data
 
 
+def _fetch_task_events(db: Session, seq: int, limit: int = MAX_BATCH) -> list[dict]:
+    from app.models.task import Task, TaskEvent
+
+    rows = (
+        db.query(TaskEvent)
+        .filter(TaskEvent.event_seq > seq)
+        .order_by(TaskEvent.event_seq)
+        .limit(limit)
+        .all()
+    )
+    out = []
+    for ev in rows:
+        task = db.get(Task, ev.task_id)
+        out.append(_task_event_payload(ev, task))
+    return out
+
+
 @router.get("/tasks/events")
 async def task_event_stream(last_seq: int = Query(0, ge=0)) -> StreamingResponse:
     """统一任务事件流：task_event outbox 增量推送，语义与 /api/events 一致（seq 严格大于判定）。"""
-    from app.models.task import Task, TaskEvent
-
-    async def gen():
-        seq = last_seq
-        elapsed = 0.0
-        while elapsed < _MAX_STREAM_SECONDS:
-            db = SessionLocal()
-            try:
-                rows = (
-                    db.query(TaskEvent)
-                    .filter(TaskEvent.event_seq > seq)
-                    .order_by(TaskEvent.event_seq)
-                    .limit(200)
-                    .all()
-                )
-                for ev in rows:
-                    task = db.get(Task, ev.task_id)
-                    data = _task_event_payload(ev, task)
-                    seq = max(seq, ev.event_seq)
-                    yield f"id: {ev.event_seq}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
-            finally:
-                db.close()
-            yield ": ping\n\n"
-            await asyncio.sleep(_POLL_INTERVAL)
-            elapsed += _POLL_INTERVAL
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return sse_response(sse_event_stream(_fetch_task_events, last_seq=last_seq))
 
 
 @router.get("/tasks/events/backfill")
 def task_events_backfill(updated_since_seq: int = Query(..., ge=0),
                           db: Session = Depends(get_db)) -> dict:
     """任务事件断线补齐：seq 严格大于给定值，按 seq 升序。"""
-    from app.models.task import Task, TaskEvent
-
-    rows = (
-        db.query(TaskEvent)
-        .filter(TaskEvent.event_seq > updated_since_seq)
-        .order_by(TaskEvent.event_seq)
-        .limit(1000)
-        .all()
-    )
-    items = []
-    for ev in rows:
-        task = db.get(Task, ev.task_id)
-        items.append(_task_event_payload(ev, task))
+    items = _fetch_task_events(db, updated_since_seq, limit=1000)
     return {"total": len(items), "items": items}

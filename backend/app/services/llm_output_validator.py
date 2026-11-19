@@ -40,7 +40,7 @@ _TRUNCATION_MARKERS = (
     "Expecting ':' delimiter",
     "Expecting property name enclosed in double quotes",
     "Expecting value",
-    "Invalid \uXXXX escape",
+    "Invalid \\uXXXX escape",
     "EOF while parsing",
     "Unterminated array",
     "Unterminated object",

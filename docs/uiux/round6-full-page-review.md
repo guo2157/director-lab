@@ -307,22 +307,9 @@ SSE 单连接最长 `_MAX_STREAM_SECONDS = 300` 秒。
 规避（`uiux-shots.mjs`）：`page.route('**/api/events*', route => route.abort())`。
 截图不需要实时推送。加拦截后 60 张跑完，后端仍 `200 / 0.012s` 健康。
 
-### 7.5 建议的正式修法（未实施，属后端改动）
+### 7.5 正式修法（已实施，见 §10）
 
-把 DB 查询移出生成器持有期 —— 查完立即 `db.close()`，再 `yield`：
-
-```python
-while elapsed < _MAX_STREAM_SECONDS:
-    with SessionLocal() as db:
-        rows = db.query(JobEvent)...all()
-        payloads = [_event_payload(ev, db.get(Job, ev.job_id)) for ev in rows]
-    # 会话已关闭
-    for p in payloads:
-        yield f"id: {p['seq']}\ndata: {json.dumps(p)}\n\n"
-```
-
-或改用 `poolclass=NullPool` 给 SSE 单独引擎。
-本轮只做前端，未改后端。
+本轮前端改造期间记录的建议修法已在后续轮次落地，详见 §10。
 
 ## 8. 最终验证
 
@@ -354,8 +341,119 @@ FAB 遮挡验证（`_chk-fab3.mjs`）：滚到底后 20 张卡的所有操作按
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| SSE 连接池耗尽 | ⚠️ 后端缺陷，未修 | 见 §7.5，建议单独处理 |
+| SSE 连接池耗尽 | ✅ 已修 | 见 §10，含归因修正与实测对照 |
 | `isEnvError` 语义错误 | ✅ 已修 | 删除该函数，失败任务同时给「重试」+「查看原因」，不再臆断错误分类 |
 | 视觉 AI 误判「筛选未压缩」 | — | 实测 `filterRows=2` 正确：两条独立轴各一行，行内横向滚动 |
 | 第三张卡底部被视口截断 | — | 正常滚动，非缺陷 |
 | 截图脚本 `networkidle` 超时 | ✅ 已修 | settings/jobs 有常驻轮询，`networkidle` 永远等不到，改 `domcontentloaded` |
+
+---
+
+## 10. 后端 SSE 修复与归因修正（本轮补做）
+
+§7 的事故现象是真实的，但**§7.3 的归因是错的**。本轮用对照实验推翻了原假设，
+并定位到真正的机制。
+
+### 10.1 原假设为何不成立
+
+§7.3 断言：「每条 SSE 在 yield 期间持续占住一个 DB 连接，15 条即耗尽」。
+
+实测推翻。用 `pool.checkedout()` 直接测量（连接池压到 `pool_size=2`，
+开 15 条并发流，采样 10 次）：
+
+| 实现 | 15 条并发流占用连接峰值 |
+|---|---|
+| 旧实现 | **0** |
+| 修复后 | 0 |
+
+旧实现在流正常消费时并不长期占用连接。原因：`_MAX_BATCH=200` 批次很小，
+事件很快发完，生成器紧接着推进到 `finally`，`db.close()` 立即执行。
+「空闲流占连接」在正常消费下不成立。
+
+真正的机制见 §10.2。
+
+### 10.2 真正的机制：阻塞查询卡死事件循环
+
+`py-spy` 栈是 `QueuePool._do_get ← event_stream.<locals>.gen (events.py:54)`，
+line 54 是 `.all()` —— 生成器在**等待获取**连接（池已被别人占满），
+不是自己长期占着。这指向另一条路径：
+
+**旧实现把阻塞的 SQLAlchemy 查询直接跑在 uvicorn 事件循环线程上。**
+
+SQLite 配置 `PRAGMA busy_timeout=30000`（`core/database.py:19`）。一旦查询变慢
+（worker 持写锁、WAL checkpoint、大表扫描），这个 `time.sleep` 语义的等待
+**会把整个事件循环阻塞最多 30 秒**。期间 uvicorn 无法处理任何请求，
+表现为：所有接口超时、LISTEN 积压几十个、进程 CPU 极低（在等 I/O 不在算）。
+这正是事故现场的特征。
+
+### 10.3 对照实验（确定性）
+
+注入 3s 慢查询（包装 `SessionLocal.query()`），期间探测一个纯内存的探针接口
+`/api/__pool`，看它是否还能响应。同一把尺子测新旧实现：
+
+| 实现 | 探针延迟 4 次 | 判定 |
+|---|---|---|
+| 旧实现 | 2584 / 104 / **2933** / 108 ms | 事件循环被阻塞 |
+| 修复后 | 103 / 102 / 103 / 107 ms | 事件循环保持响应 |
+
+旧实现的延迟恰好是慢查询时长（3s），证明探针在排队等事件循环；
+修复后恒定 ~100ms（探针自身开销），完全不受慢查询影响。
+
+**这是本次修复唯一能在 HTTP 层确定性验证的不变量。**
+
+### 10.4 修法
+
+新增 `backend/app/services/event_stream.py`，三个端点共用：
+
+1. **查询移出事件循环**：`await asyncio.to_thread(_poll_once, fetch, seq)`
+2. **Session 不跨 yield**：结果先物化为纯 dict，`db.close()` 在任何 `yield` 之前执行
+3. **异常不杀流**：单次查询失败按指数退避节流记录，连续 30 次才关闭交前端重连
+4. **会话工厂延迟解析**：`db_module.SessionLocal()` 而非模块导入时绑定，
+   否则测试 monkeypatch 后静默连生产库
+
+改造范围（三个端点同源缺陷，全部收敛到共享实现）：
+
+| 文件 | 变化 |
+|---|---|
+| `app/services/event_stream.py` | 新增 |
+| `app/api/v1/events.py` | −138 / +50，两个端点 |
+| `app/api/v1/workspace.py` | −40 / +12，一个端点 |
+
+`seq` 语义、`last_seq` 续传、backfill 1000 条上限、事件字段全部不变。
+
+### 10.5 回归测试
+
+`backend/tests/test_event_stream_pool.py`，7 个用例全通过：
+
+```
+test_no_connection_held_while_suspended            PASSED
+test_many_concurrent_streams_do_not_exhaust_pool   PASSED
+test_no_connection_leak_on_client_disconnect       PASSED
+test_fetch_runs_off_event_loop_thread              PASSED
+test_fetch_error_does_not_kill_stream              PASSED
+test_seq_is_monotonic_and_deduplicated             PASSED
+test_resumes_from_last_seq                         PASSED
+```
+
+**测试有效性已验证**：用临时脚本复刻旧实现跑同一套断言，
+`test_no_connection_held_while_suspended` 与
+`test_fetch_runs_off_event_loop_thread` 均 FAIL，确认能抓到缺陷。
+
+### 10.6 顺带修复的仓库既有缺陷
+
+`backend/app/services/llm_output_validator.py:43` 在 HEAD 上就是**语法错误**：
+
+```python
+"Invalid \uXXXX escape",   # 单个反斜杠，Python 当 Unicode 转义 → SyntaxError
+```
+
+该文件是死代码（`app.main` 未引用），但会让 pytest 收集阶段直接中断。
+已改为 `"Invalid \\uXXXX escape"`（运行时单个反斜杠，正确匹配 json 报错文本）。
+
+### 10.7 遗留
+
+| 项 | 状态 |
+|---|---|
+| SSE 阻塞事件循环 | ✅ 已修，含新旧对照实测 |
+| SSE 长期占用连接 | ✅ 已修（Session 不跨 yield），但旧实现下未复现，非事故主因 |
+| `data/workflows/*.meta.json` 10 个文件被删 | ⚠️ 并行会话改动，未碰。导致 3 个测试模块收集失败 |

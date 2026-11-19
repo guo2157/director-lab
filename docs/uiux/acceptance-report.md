@@ -245,12 +245,34 @@ scrollResult: 313/313   筛选轴滚到末尾
 FAB 遮挡:               20 张卡所有操作按钮零覆盖
 ```
 
-### 9.5 本轮发现的后端缺陷（未修，属后端改动）
+### 9.5 本轮发现的后端缺陷（已修，归因已修正）
 
-**SSE 长连接耗尽 DB 连接池**：`app/api/v1/events.py:42-67` 把 `yield` 写在 `try` 内，
-`finally: db.close()` 要等生成器再次推进才执行，导致每条 SSE 连接持续占住一个 DB 连接。
-SQLAlchemy 默认池 15 个，SSE 单连接最长 300s → 开 15 个任务页即耗尽，全站请求在
-`QueuePool._do_get` 排队卡死。已用 `py-spy dump` 定位到 `events.py:54`。
+> **归因修正**：本节初版把根因写成「每条 SSE 在 yield 期间占住一个 DB 连接」，
+> 经对照实验**推翻**。真正机制见下，完整记录见
+> `round6-full-page-review.md` §10。
 
-截图脚本已加 `page.route('**/api/events*', abort)` 规避；正式修法见
-`round6-full-page-review.md` §7.5。**本轮只做前端，未改后端。**
+**真因：阻塞查询跑在 uvicorn 事件循环线程上。**
+
+旧实现把 SQLAlchemy 查询直接写在 SSE 生成器里，生成器由事件循环驱动，
+于是阻塞查询就在事件循环线程上执行。SQLite 配置 `PRAGMA busy_timeout=30000`，
+一旦查询变慢（worker 持写锁、WAL checkpoint、大表扫描），
+**整个 uvicorn 会被阻塞最多 30 秒**——所有接口超时、LISTEN 积压、CPU 极低。
+这正是事故现场特征。
+
+`py-spy` 栈 `QueuePool._do_get ← events.py:54`（line 54 是 `.all()`）
+说明生成器在**等待获取**连接，而非自己长期占着，与原假设相反。
+
+**对照实验**（注入 3s 慢查询，探测纯内存接口 `/api/__pool`）：
+
+| 实现 | 探针延迟 | 判定 |
+|---|---|---|
+| 旧实现 | 2584 / 104 / **2933** / 108 ms | 事件循环被阻塞 |
+| 修复后 | 103 / 102 / 103 / 107 ms | 保持响应 |
+
+**修法**：新增 `app/services/event_stream.py`，三个 SSE 端点
+（`/api/events`、`/api/tasks/events`、`/api/workspace/events`）共用：
+查询走 `asyncio.to_thread`；结果物化为纯 dict 后先 `db.close()` 再 `yield`；
+异常节流不杀流；会话工厂延迟解析。
+
+**回归测试**：`tests/test_event_stream_pool.py` 7 个用例全通过，
+且已用旧实现验证测试确实能抓到缺陷（2 个用例在旧实现上 FAIL）。

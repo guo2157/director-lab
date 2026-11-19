@@ -15,6 +15,8 @@ const props = withDefaults(defineProps<{
   modelValue?: string
   /** 缺省不按类型过滤（管理/测试场景需要跨类型选择） */
   workflowType?: WorkflowType
+  /** 业务槽位名（image / storyboard_image / video / tts / bgm / sfx），父组件借此识别选择上下文 */
+  slot?: string
   disabled?: boolean
   placeholder?: string
   size?: 'small' | 'medium' | 'large'
@@ -25,13 +27,14 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string | undefined): void
-  (e: 'selected', workflow: { id: string; name: string; capabilities?: WorkflowCapability }): void
+  (e: 'selected', workflow: { id: string; name: string; slot?: string; capabilities?: WorkflowCapability }): void
 }>()
 
 interface WorkflowRow {
   id: string
   name: string
   alias?: string | null
+  description?: string | null
   version: number
   workflow_type: WorkflowType
   runtime_status?: string
@@ -59,8 +62,9 @@ const options = computed(() => rows.value.map((w) => {
   if (w.runtime_status && w.runtime_status !== 'ready' && w.runtime_status !== 'unchecked') {
     flags.push(w.runtime_status === 'unreachable' ? '实例不可达' : '缺依赖')
   }
+  const displayName = w.description || w.name
   return {
-    label: `${w.name}${flags.length ? ' · ' + flags.join(' / ') : ''} · v${w.version}`,
+    label: `${displayName}${flags.length ? ' · ' + flags.join(' / ') : ''} · v${w.version}`,
     value: w.id,
   }
 }))
@@ -89,7 +93,7 @@ function onChange(value: string | null) {
   emit('update:modelValue', id)
   const row = rows.value.find((w) => w.id === id)
   if (row) {
-    emit('selected', { id: row.id, name: row.name, capabilities: capability.value ?? undefined })
+    emit('selected', { id: row.id, name: row.name, slot: props.slot, capabilities: capability.value ?? undefined })
   }
 }
 </script>

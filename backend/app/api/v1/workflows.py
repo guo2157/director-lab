@@ -58,6 +58,7 @@ def _to_dict(wf: Workflow, db: Session) -> dict:
         "capabilities": wf.capabilities,
         "version": wf.version,
         "current_version_id": wf.current_version_id,
+        "description_source": wf.description_source,
         "status": wf.status,
         "validation_status": wf.validation_status,
         "runtime_status": wf.runtime_status,
@@ -321,6 +322,7 @@ async def upload_workflow(
         status="draft",
         validation_status="static_validated",
         is_default=False,
+        description_source="user",
     )
     if is_default:
         db.query(Workflow).filter(
@@ -441,7 +443,40 @@ def update_workflow(
     if "alias" in payload:
         wf.alias = payload["alias"]
     if "description" in payload:
-        wf.description = payload["description"]
+        desc = payload["description"]
+        if desc is not None and not isinstance(desc, str):
+            raise errors.AppError("invalid_request", "description 必须是字符串", 422)
+        if desc is not None:
+            desc_stripped = desc.strip()
+            if not desc_stripped:
+                raise errors.AppError("invalid_request", "description 不能为空", 422)
+            # 长度校验：≤20 汉字 或 ≤40 ASCII 字符
+            char_count = len(desc_stripped)
+            ascii_count = sum(1 for c in desc_stripped if ord(c) < 128)
+            non_ascii_count = char_count - ascii_count
+            if non_ascii_count > 20 or ascii_count > 40:
+                raise errors.AppError(
+                    "invalid_request",
+                    "description 不超过 20 个汉字或 40 个英文字符",
+                    422,
+                )
+            # 唯一性校验：排除自身
+            existing = (
+                db.query(Workflow)
+                .filter(Workflow.description == desc_stripped, Workflow.id != wf.id)
+                .first()
+            )
+            if existing:
+                raise errors.AppError(
+                    "invalid_request",
+                    f"description 已被工作流「{existing.name}」使用，请使用不同的描述",
+                    422,
+                )
+            wf.description = desc_stripped
+            wf.description_source = "user"
+        else:
+            wf.description = None
+            wf.description_source = None
     if "is_default" in payload:
         if payload["is_default"]:
             db.query(Workflow).filter(

@@ -48,8 +48,11 @@ export type WorkflowType = 'image' | 'video' | 'tts' | 'bgm' | 'sfx'
 export interface Workflow {
   id: string
   name: string
+  alias?: string | null
   workflow_type: WorkflowType
   description?: string
+  /** 描述来源：seed（内置播种）/ user（用户修改）；用于 Seed 不覆盖用户描述 */
+  description_source?: 'seed' | 'user' | null
   version: number
   is_default: boolean
   is_builtin?: boolean

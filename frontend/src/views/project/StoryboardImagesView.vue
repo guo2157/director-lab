@@ -542,6 +542,17 @@ function onFirstGenerate(shot: Shot, prompt: string) {
         </span>
         <span v-if="keyframeProgress.error.value" class="gen-state fail">{{ keyframeProgress.error.value }}</span>
         <span class="gen-spacer" />
+        <!-- 出图工作流与进度条同一行：两者都是「这一批怎么出图」的控制项，
+             拆成两块各占 28~48px 纯属浪费首屏（实测省下 36px） -->
+        <span class="gen-wf">
+          <span class="gen-wf-label">出图工作流</span>
+          <WorkflowSelector
+            v-model="generateWorkflowId"
+            workflow-type="image"
+            size="small"
+            placeholder="按能力自动匹配"
+          />
+        </span>
         <n-button size="tiny" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
           刷新进度
         </n-button>
@@ -558,23 +569,15 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       </div>
     </section>
 
-    <!-- 审核闸门：未通过时不能生成，按钮直接指向资产库 -->
+    <!-- 审核闸门：未通过时不能生成，按钮直接指向资产库。
+         通过后降级为单行细条 —— 它此时只是在陈述一件已经完成的事，
+         不该和「未通过」这种阻断态占用同样的垂直空间（实测吃掉 40px）。 -->
     <section class="gate-banner" :class="{ ok: reviewApproved, bad: reviewRejected }">
       <span class="gate-text">{{ gateText }}</span>
-      <n-button size="tiny" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
+      <n-button v-if="!reviewApproved" size="tiny" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
     </section>
 
     <!-- 批量操作：吸附在顶部，滚动 26 个镜头时也不跑掉 -->
-    <div class="wf-bar">
-      <span class="wf-bar-label">出图工作流</span>
-      <WorkflowSelector
-        v-model="generateWorkflowId"
-        workflow-type="image"
-        size="small"
-        placeholder="缺省按能力自动匹配"
-      />
-    </div>
-
     <BatchToolbar
       :total="allShots.length"
       :selected="selectedList.length"
@@ -664,16 +667,17 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 </template>
 
 <style scoped>
-.wf-bar {
-  display: flex;
+/* 出图工作流：并进 gen-strip 后与进度条同行，右侧贴着刷新按钮 */
+.gen-wf {
+  display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-bottom: var(--sp-2);
-}
-.wf-bar-label {
   flex: none;
-  font-size: 12px;
-  color: var(--text-secondary);
+}
+.gen-wf-label {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
 }
 .sb-images-page {
   min-height: calc(100vh - var(--app-header-height, 52px));
@@ -779,9 +783,19 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
 }
+/* 通过态：已经完成的事只需一句话，压到单行细条。
+   实测原实现占 40px 高、还在提醒「可以生成分镜图」——
+   用户此时已经在分镜图页了，这条提示的剩余价值接近零。 */
 .gate-banner.ok {
+  padding: 4px var(--sp-3);
+  margin-bottom: var(--sp-2);
   border-color: var(--success-line);
-  background: var(--success-soft);
+  background: transparent;
+  border-radius: var(--radius);
+}
+.gate-banner.ok .gate-text {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
 }
 .gate-banner.bad {
   border-color: var(--danger-line);

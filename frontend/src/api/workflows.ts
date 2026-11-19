@@ -28,18 +28,20 @@ export function uploadWorkflow(file: File, payload: { name: string; workflow_typ
 }
 
 /** 更新工作流（生成新不可变版本；设默认自动取消同类型其他默认） */
-export function updateWorkflow(id: string, payload: { name?: string; is_default?: boolean; file?: File }) {
+export function updateWorkflow(id: string, payload: { name?: string; alias?: string; description?: string; is_default?: boolean; file?: File }) {
   if (payload.file) {
     const form = new FormData()
     form.append('file', payload.file)
     if (payload.name) form.append('name', payload.name)
+    if (payload.alias) form.append('alias', payload.alias)
+    if (payload.description !== undefined) form.append('description', payload.description)
     if (payload.is_default !== undefined) form.append('is_default', String(payload.is_default))
     return apiClient.patch<Workflow>(`/workflows/${id}`, form, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 60000,
     }).then((res) => res.data)
   }
-  return patch<Workflow>(`/workflows/${id}`, { name: payload.name, is_default: payload.is_default })
+  return patch<Workflow>(`/workflows/${id}`, { name: payload.name, alias: payload.alias, description: payload.description, is_default: payload.is_default })
 }
 
 /** 校验工作流（前端先本地解析再后端二次校验） */

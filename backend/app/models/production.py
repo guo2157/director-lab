@@ -80,6 +80,8 @@ class Workflow(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="published", server_default="published")
     validation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
     runtime_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unchecked", server_default="unchecked")
+    # 描述来源：seed（内置播种）/ user（用户修改），用于 Seed 不覆盖用户描述
+    description_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 # 工作流选择：filter(workflow_type, is_default) / order_by(is_default, is_builtin, created_at)

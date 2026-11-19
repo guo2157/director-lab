@@ -545,11 +545,11 @@ const downloadWorkflow = (wf: Workflow) => {
               </div>
               <div v-for="wf in workflowList" :key="wf.id" class="wf-tr">
                 <span class="col-name" data-label="名称">
-                  <n-tooltip trigger="hover" placement="top-start" :disabled="!wf.description">
+                  <n-tooltip trigger="hover" placement="top-start" :disabled="!wf.name">
                     <template #trigger>
-                      <span class="wf-name wf-name-hover">{{ wf.name }}</span>
+                      <span class="wf-name wf-name-hover">{{ wf.description || wf.name }}</span>
                     </template>
-                    <div class="wf-tooltip">{{ wf.description || '暂无描述' }}</div>
+                    <div class="wf-tooltip">{{ wf.name || '暂无名称' }}</div>
                   </n-tooltip>
                 </span>
                 <span class="col-type" data-label="类型">

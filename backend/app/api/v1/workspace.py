@@ -8,15 +8,13 @@
 本期不鉴权（与既有事件接口一致）；事件只来自 workspace_event outbox，
 不做任何业务决策，也不生成进度数值。
 """
-import asyncio
-import json
-
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.core.database import SessionLocal, get_db
+from app.core.database import get_db
 from app.services import workspace_page_context as page_ctx
+from app.services.event_stream import sse_event_stream, sse_response
 from app.services.workspace_event import (
     fetch_events_after,
     serialize_event,
@@ -25,10 +23,6 @@ from app.services.workspace_event import (
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
-# 与 events.py 保持一致：轮询间隔与单连接最长持续时间
-_POLL_INTERVAL = 1.0
-_MAX_STREAM_SECONDS = 300
-
 
 @router.get("/events")
 async def workspace_event_stream(
@@ -36,30 +30,12 @@ async def workspace_event_stream(
     session_id: str | None = Query(None),
 ) -> StreamingResponse:
     """工作台事件流：从 last_seq 之后增量推送。"""
-
-    async def gen():
-        seq = last_seq
-        elapsed = 0.0
-        # 独立会话：长连接不占用请求级 Session
-        while elapsed < _MAX_STREAM_SECONDS:
-            db = SessionLocal()
-            try:
-                rows = fetch_events_after(db, seq, session_id=session_id)
-                for ev in rows:
-                    seq = max(seq, ev.event_seq)
-                    data = serialize_event(ev)
-                    yield f"id: {ev.event_seq}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
-            finally:
-                db.close()
-            # 心跳：即使无新事件也保持连接
-            yield ": ping\n\n"
-            await asyncio.sleep(_POLL_INTERVAL)
-            elapsed += _POLL_INTERVAL
-
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    return sse_response(
+        sse_event_stream(
+            lambda db, seq: [serialize_event(ev) for ev in
+                             fetch_events_after(db, seq, session_id=session_id)],
+            last_seq=last_seq,
+        )
     )
 
 

@@ -203,6 +203,7 @@ export function saveProjectStyleConfig(projectId: string, config: StyleConfig) {
 export interface WorkflowCandidate {
   id: string
   name: string
+  description?: string | null
   alias?: string | null
   workflow_type: string
   version: number

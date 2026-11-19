@@ -75,8 +75,9 @@ function optionsFor(slot: string) {
     if (c.is_default) flags.push('系统默认')
     if (c.tier) flags.push(c.tier)
     if (!c.usable) flags.push(`缺 ${c.missing.join('/')}`)
+    const displayName = c.description || c.name
     return {
-      label: `${c.name} · v${c.version}${flags.length ? ' · ' + flags.join(' / ') : ''}`,
+      label: `${displayName} · v${c.version}${flags.length ? ' · ' + flags.join(' / ') : ''}`,
       value: c.id,
       disabled: !c.usable,
       candidate: c,
