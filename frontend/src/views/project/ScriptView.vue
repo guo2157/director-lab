@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
 import { NButton, useMessage } from 'naive-ui'
@@ -89,8 +89,17 @@ const showWorkflowPanel = ref(false)
 const text = ref('')
 const textValid = computed(() => text.value.length >= 1 && text.value.length <= MAX_CHARS)
 
+/**
+ * 从服务端回填正文时置 true，阻止下方的 text watch 把刚恢复的「已保存版本」状态清掉。
+ * 为什么必须有：scriptData watch 会先写 text 再写 savedVersion/stage，
+ * 而 text 的 watch 在下一轮 flush 才执行，此时 stage 已是 'saved'，
+ * 于是被判定为「用户改了正文」，把 savedVersion 置空 —— 「开始分析」在刷新后永远禁用。
+ */
+let hydrating = false
+
 /* 正文变更：除非是「采用优化稿」引起的变化，否则回退到初始剧本阶段并作废校验与保存结果 */
 watch(text, (val) => {
+  if (hydrating) return
   const res = normalizeResult.value
   if (res && val === res.normalized_text) return
   if (stage.value !== 'draft') {
@@ -268,6 +277,8 @@ watch(
   () => scriptData.value,
   (sv) => {
     if (sv?.exists && sv.script_version_id) {
+      // 回填期间屏蔽 text watch：它的 reset 逻辑针对「用户改正文」，不适用于服务端回填
+      hydrating = true
       text.value = sv.text ?? ''
       flow.scriptVersionId = sv.script_version_id
       flow.scriptText = sv.text ?? ''
@@ -282,6 +293,10 @@ watch(
         }
         stage.value = 'saved'
       }
+      // watcher 默认 pre-flush，会在本轮渲染前执行；nextTick 晚于它，可安全解除屏蔽
+      void nextTick(() => {
+        hydrating = false
+      })
     }
   },
   { immediate: true },
