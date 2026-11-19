@@ -39,7 +39,11 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
         @click="statusFilter = c.value"
       >
         {{ c.label }}
-        <span v-if="counts && counts[c.value] !== undefined" class="chip-count">{{ counts[c.value] }}</span>
+        <span
+          v-if="counts && counts[c.value] !== undefined"
+          class="chip-count"
+          :class="{ 'is-zero': counts[c.value] === 0 }"
+        >{{ counts[c.value] }}</span>
       </button>
     </div>
     <div class="sort-group" role="group" aria-label="排序方式">
@@ -84,18 +88,20 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   color: var(--text-secondary);
   cursor: pointer;
   transition:
-    border-color 0.2s ease,
-    color 0.2s ease,
-    background-color 0.2s ease;
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    background-color var(--transition-fast);
 }
 .filter-chip:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
+/* 激活态双编码：品牌描边 + 品牌底 + 加粗，避免只靠颜色区分 */
 .filter-chip.active {
   border-color: var(--brand-primary);
   color: var(--brand-primary);
   background: var(--brand-soft);
+  font-weight: 500;
 }
 .filter-chip:focus-visible {
   outline: 2px solid var(--brand-hover);
@@ -109,6 +115,10 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   background: var(--overlay-hover);
   color: inherit;
   font-variant-numeric: tabular-nums;
+}
+/* 计数为 0 降权：不让「已归档 0」看起来和「进行中 3」同等重要 */
+.chip-count.is-zero {
+  opacity: 0.45;
 }
 .sort-group {
   display: flex;
@@ -127,8 +137,8 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   color: var(--text-secondary);
   cursor: pointer;
   transition:
-    color 0.2s ease,
-    background-color 0.2s ease;
+    color var(--transition-fast),
+    background-color var(--transition-fast);
 }
 .sort-btn:hover {
   color: var(--text-primary);
@@ -136,9 +146,11 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 .sort-btn + .sort-btn {
   border-left: 1px solid var(--border-subtle);
 }
+/* 排序激活态：品牌底 + 品牌字 + 加粗（原来与未选态同底，只差颜色） */
 .sort-btn.active {
   color: var(--brand-primary);
   background: var(--brand-soft);
+  font-weight: 500;
 }
 .sort-btn:focus-visible {
   outline: 2px solid var(--brand-hover);

@@ -245,6 +245,13 @@ function goProjects() {
 
 .nav-item.is-active::after {
   background: var(--brand-primary);
+  height: 2px;
+  border-radius: 1px 1px 0 0;
+}
+
+/* 激活项再加一层极淡底色，避免只靠字重+1px 线（深色底上辨识度不足） */
+.nav-item.is-active {
+  background: var(--overlay-hover);
 }
 
 .crumb-bar {

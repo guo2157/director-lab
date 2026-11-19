@@ -88,13 +88,12 @@ const filteredProjects = computed(() => {
   }
   return sorted
 })
-const activeCount = computed(() => counts.value.active)
 const isFiltering = computed(() => searchKeyword.value.trim() !== '' || statusFilter.value !== 'all')
 const headerSubtitle = computed(() => {
   if (!projects.value.length) return '从剧本到成片，一集一集往下走'
   if (isFiltering.value) return `筛选出 ${filteredProjects.value.length} / ${projects.value.length} 个作品`
-  const done = counts.value.archived
-  return `共 ${projects.value.length} 个作品 · ${activeCount.value} 个进行中 · ${done} 个已归档`
+  // 与筛选 Tab 同口径：四个状态都给数，不只挑两个说
+  return `共 ${projects.value.length} 个作品 · 草稿 ${counts.value.draft} · 进行中 ${counts.value.active} · 已归档 ${counts.value.archived}`
 })
 
 /* ---------- 列表级操作 ---------- */
@@ -263,11 +262,6 @@ function clearFilters() {
         />
 
         <div v-else class="project-grid">
-          <button type="button" class="launch-card" @click="openCreateModal">
-            <span class="launch-plus" aria-hidden="true">+</span>
-            <span class="launch-text">新建作品</span>
-            <span class="launch-sub">开始新的漫剧创作</span>
-          </button>
           <ProjectCard
             v-for="(p, idx) in filteredProjects"
             :key="p.id"
@@ -276,7 +270,14 @@ function clearFilters() {
             @open="goProject"
             @action="onCardAction"
           />
+          <!-- 新建入口排在列表末尾，避免与页头主 CTA 争夺首屏第一视觉位 -->
         </div>
+        <!-- 尾部新建条：不占栅格格位，避免 4 张卡 + 1 个孤儿格造成的参差 -->
+        <button type="button" class="launch-strip" @click="openCreateModal">
+          <span class="launch-plus" aria-hidden="true">+</span>
+          <span class="launch-text">新建作品</span>
+          <span class="launch-sub">开始新的漫剧创作</span>
+        </button>
       </template>
     </template>
 
@@ -303,6 +304,14 @@ function clearFilters() {
 .search-input {
   width: 240px;
 }
+/* 搜索框在深色底上需要有可见边界，否则只剩一块极淡填充 */
+.search-input :deep(.n-input__border),
+.search-input :deep(.n-input__state-border) {
+  border: 1px solid var(--border-strong) !important;
+}
+.search-input:hover :deep(.n-input__border) {
+  border-color: var(--text-tertiary) !important;
+}
 .config-banner {
   display: flex;
   align-items: center;
@@ -326,44 +335,57 @@ function clearFilters() {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: var(--sp-4);
+  align-items: stretch;
 }
-.launch-card {
+/* 尾部新建条：通栏虚线，不占栅格格位；权重低于页头主 CTA，只做「补位」提示 */
+.launch-strip {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-height: 240px;
+  gap: var(--sp-2);
+  width: 100%;
+  margin-top: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
   border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
   transition:
-    border-color 0.2s ease,
-    background-color 0.2s ease,
-    color 0.2s ease;
+    border-color var(--transition-fast),
+    background-color var(--transition-fast),
+    color var(--transition-fast);
 }
-.launch-card:hover {
-  border-color: var(--brand-primary);
+.launch-strip:hover {
+  border-color: var(--brand-line);
   background: var(--brand-soft);
   color: var(--brand-primary);
 }
-.launch-card:focus-visible {
+.launch-strip:focus-visible {
   outline: 2px solid var(--brand-hover);
   outline-offset: 2px;
 }
 .launch-plus {
-  font-size: 32px;
+  font-size: 17px;
   line-height: 1;
-  font-weight: 300;
+  font-weight: 400;
 }
 .launch-text {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 500;
 }
 .launch-sub {
   font-size: 12px;
+  color: var(--text-tertiary);
+}
+.launch-strip:hover .launch-sub {
+  color: var(--brand-primary);
+}
+/* 窄屏：隐藏副文案，只留「+ 新建作品」 */
+@media (max-width: 480px) {
+  .launch-sub {
+    display: none;
+  }
 }
 </style>
 

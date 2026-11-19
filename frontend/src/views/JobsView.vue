@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, h } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
-  NCard, NButton, NSpin, NEmpty, NTag, NDataTable,
+  NCard, NButton, NSpin, NEmpty, NDataTable,
   NTooltip, NStatistic, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -125,12 +125,8 @@ const runningJobs = computed<Job[]>(() =>
   )
 )
 
-// --- Labels & colors ---
-const statusColors: Record<string, string> = {
-  queued: 'var(--brand-primary)', running: 'var(--brand-primary)', chained_wait: 'var(--text-secondary)',
-  submission_unknown: 'var(--state-warning)', succeeded: 'var(--state-success)',
-  failed: 'var(--state-danger)', lost: 'var(--state-danger)', cancelled: 'var(--text-secondary)',
-}
+// --- Labels ---
+/* 状态颜色由 .job-status.is-* 类决定（见 <style>），此处不再维护色值表 */
 const statusLabels: Record<string, string> = {
   queued: '排队中', running: '执行中', chained_wait: '等待前序',
   submission_unknown: '提交未知', succeeded: '成功',
@@ -203,18 +199,21 @@ const hasActionable = computed(() =>
 
 const columns = computed<DataTableColumns<Job>>(() => {
   const cols: DataTableColumns<Job> = [
-  { title: '归属', key: 'project_name', minWidth: 240, ellipsis: { tooltip: true },
+  { title: '归属', key: 'project_name', minWidth: 200, ellipsis: { tooltip: true },
     render: (row) => jobContext(row) },
   { title: '类型', key: 'job_type', width: 76,
     render: (row) => typeLabels[row.job_type] || row.job_type },
   // 状态列兼带重试次数与进度：进度条只对执行中有意义
-  { title: '状态', key: 'status', width: 132,
+  { title: '状态', key: 'status', width: 148,
     render: (row) => {
-      const tag = h(NTag, {
-        size: 'small',
-        round: true,
-        color: { color: statusColors[row.status], textColor: 'var(--text-primary)' },
-      }, { default: () => statusLabels[row.status] || row.status })
+      // 状态标记：圆点 + 文字双通道。颜色一律由 CSS 类决定（内联 style 会压过类规则，
+      // 导致「成功态降权」失效），这里只挂语义类名。
+      const tag = h('span', {
+        class: ['job-status', `is-${row.status}`],
+      }, [
+        h('span', { class: 'job-status-dot' }),
+        statusLabels[row.status] || row.status,
+      ])
       const extra: Array<ReturnType<typeof h>> = []
       if ((row.attempts ?? 1) > 1) {
         extra.push(h('span', { class: 'cell-note' }, `第 ${row.attempts} 次`))
@@ -228,9 +227,11 @@ const columns = computed<DataTableColumns<Job>>(() => {
       if (!extra.length) return tag
       return h('span', { class: 'cell-status' }, [tag, ...extra])
     } },
-  { title: '耗时', key: 'duration', width: 82,
+  { title: '耗时', key: 'duration', width: 84, align: 'right',
+    className: 'col-num',
     render: (row) => fmtDuration(row) },
-  { title: '创建时间', key: 'created_at', width: 116,
+  { title: '创建时间', key: 'created_at', width: 124, align: 'right',
+    className: 'col-num',
     render: (row) => fmtTime(row.created_at) },
   ]
   if (!hasActionable.value) return cols
@@ -250,7 +251,8 @@ const columns = computed<DataTableColumns<Job>>(() => {
         return h(NButton, { size: 'tiny', type: 'error', quaternary: true,
           onClick: () => cancelMutation.mutate(row.id) }, { default: () => '取消' })
       }
-      return '-'
+      // 无可用操作：留空白而不是 '-'，避免把空值读成数据
+      return h('span', { class: 'cell-empty', 'aria-hidden': 'true' })
     },
   })
   return cols
@@ -292,34 +294,35 @@ const columns = computed<DataTableColumns<Job>>(() => {
         <n-card class="panel-card" :bordered="false">
           <div class="wf-toolbar">
             <div class="filter-row">
+              <span class="filter-label" aria-hidden="true">类型</span>
               <div class="type-tabs">
                 <button
                   v-for="t in typeTabs"
                   :key="t.value"
                   type="button"
-                  class="status-tab"
+                  class="status-tab is-type"
                   :class="{ active: typeFilter === t.value }"
                   @click="setType(t.value)"
                 >{{ t.label }}</button>
               </div>
+              <span class="result-hint">
+                共 {{ jobsQuery.data.value?.total ?? 0 }} 个任务 · 每页 {{ pageSize }} 条
+              </span>
               <n-button size="small" :loading="jobsQuery.isFetching.value" @click="() => jobsQuery.refetch()">刷新</n-button>
             </div>
             <!-- 状态筛选：类型与状态两条独立轴，避免只能靠统计卡片点进去 -->
             <div class="filter-row is-status">
+              <span class="filter-label" aria-hidden="true">状态</span>
               <div class="type-tabs">
                 <button
                   v-for="s in statusTabs"
                   :key="s.value"
                   type="button"
-                  class="status-tab"
+                  class="status-tab is-status"
                   :class="{ active: statusFilter === s.value }"
                   @click="setStatus(s.value)"
                 >{{ s.label }}</button>
               </div>
-              <span class="result-hint">
-                共 {{ jobsQuery.data.value?.total ?? 0 }} 个任务
-                · 每页 {{ pageSize }} 条
-              </span>
             </div>
           </div>
 
@@ -411,16 +414,40 @@ const columns = computed<DataTableColumns<Job>>(() => {
   gap: var(--sp-3);
   margin-bottom: var(--sp-4);
 }
+/* 统计卡：用边框而非投影分层；可点卡片给出明确的悬停与指针语义 */
 .stat-card {
   border-radius: var(--radius-lg);
-  transition: border-color var(--transition-fast);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
 }
 .stat-card.clickable {
   cursor: pointer;
 }
-/* 深色界面用边框明度变化表达可点击，不做位移与投影 */
 .stat-card.clickable:hover {
-  border-color: var(--brand-primary);
+  border-color: var(--brand-line);
+  background: var(--bg-elevated);
+}
+.stat-card.clickable:hover :deep(.n-statistic-value__content) {
+  color: var(--brand-primary);
+}
+.stat-card.clickable:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 2px;
+}
+/* 统计值统一等宽数字，四张卡的数字基线一致 */
+.stat-card :deep(.n-statistic-value__content) {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  font-size: 24px;
+  line-height: 1.2;
+}
+.stat-card :deep(.n-statistic-label) {
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+  margin-bottom: 2px;
 }
 .jobs-layout {
   display: block;
@@ -453,9 +480,18 @@ const columns = computed<DataTableColumns<Job>>(() => {
 .status-tab:hover {
   color: var(--text-primary);
 }
+/* 激活态：品牌底 + 品牌字（原实心品牌底 + 浅字对比不足 3:1），并加粗做第二编码 */
 .status-tab.active {
-  background: var(--brand-primary);
+  background: var(--brand-soft);
+  color: var(--brand-primary);
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--brand-line);
+}
+/* 状态轴与类型轴分级：类型是主筛选（实心感），状态是次筛选（描边感） */
+.type-tabs .status-tab.is-status.active {
+  background: var(--neutral-soft);
   color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 .filter-row {
   display: flex;
@@ -552,17 +588,78 @@ const columns = computed<DataTableColumns<Job>>(() => {
 .filter-row.is-status {
   margin-top: var(--sp-2);
 }
+/* 两条筛选轴的显式标签：不靠位置区分「类型」与「状态」，深色底上更需要文字锚点 */
+.filter-label {
+  flex: none;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
 .result-hint {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 /* 状态列内的次要信息（重试次数 / 进度） */
 :deep(.cell-status) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+/* 状态标记：圆点 + 文字，颜色只作辅助通道，避免整块填充抢走表格阅读节奏。
+   颜色必须由类驱动（内联 style 优先级更高会让下面的降权规则全部失效）。 */
+:deep(.job-status) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+:deep(.job-status-dot) {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+/* 逐状态配色：文字色 + 圆点色分开控制，成功态走中性灰（默认结果不该刷存在感） */
+:deep(.job-status.is-succeeded) {
+  color: var(--text-secondary);
+}
+:deep(.job-status.is-succeeded .job-status-dot) {
+  background: var(--state-success);
+}
+:deep(.job-status.is-failed),
+:deep(.job-status.is-lost) {
+  color: var(--danger-text);
+}
+:deep(.job-status.is-failed .job-status-dot),
+:deep(.job-status.is-lost .job-status-dot) {
+  background: var(--danger);
+}
+:deep(.job-status.is-queued),
+:deep(.job-status.is-running) {
+  color: var(--brand-primary);
+}
+:deep(.job-status.is-submission_unknown) {
+  color: var(--state-warning);
+}
+:deep(.job-status.is-cancelled),
+:deep(.job-status.is-chained_wait) {
+  color: var(--text-tertiary);
+}
+/* 执行中：脉冲，与「排队中」区分 */
+:deep(.job-status.is-running .job-status-dot) {
+  animation: job-dot-pulse 1.6s ease-in-out infinite;
+}
+@keyframes job-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 :deep(.cell-note.is-stall) {
   color: var(--state-warning);
@@ -572,14 +669,30 @@ const columns = computed<DataTableColumns<Job>>(() => {
   font-size: 10px;
   color: var(--text-tertiary);
 }
+/* 空操作位：留白，不显示 '-' */
+:deep(.cell-empty) {
+  display: inline-block;
+  min-width: 1px;
+}
+/* 数字列：右对齐 + 等宽数字，方便纵向比较耗时与时间 */
+:deep(.col-num) {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
 /* 表格：行高收紧一档，长列表一屏多看几条 */
 :deep(.n-data-table-td) {
-  padding-top: 7px;
-  padding-bottom: 7px;
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 :deep(.n-data-table-th) {
   font-size: 12px;
   color: var(--text-tertiary);
+}
+/* 行悬停反馈：宽表格靠它防止串行 */
+:deep(.n-data-table-tr:hover .n-data-table-td) {
+  background: var(--overlay-hover);
 }
 
 /* 失败原因：允许长错误换行，避免 tooltip 单行溢出不可读 */
