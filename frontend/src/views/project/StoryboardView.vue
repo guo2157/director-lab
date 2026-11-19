@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
@@ -8,6 +8,7 @@ import {
 } from 'naive-ui'
 import { Checkmark, Ellipse, TimeOutline } from '@vicons/ionicons5'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots } from '@/api/script'
+import { getProject } from '@/api/projects'
 import { generateProjectShots } from '@/api/storyboard'
 import { listJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
@@ -399,6 +400,100 @@ const { data: propsData } = useQuery({
   queryKey: ['props', projectId],
   queryFn: () => listProps(projectId.value),
 })
+/**
+ * 项目画幅 → 缩略图 aspect-ratio。
+ * 9:16 竖屏项目的分镜图是竖构图，若缩略图窗口按近方形裁切，
+ * 人物头脚会被 cover 掉，用户看不到真实构图。
+ * 用 CSS 变量注入而非逐卡算样式，保证所有卡片同一比例。
+ */
+const { data: projectData } = useQuery({
+  queryKey: ['project', projectId],
+  queryFn: () => getProject(projectId.value),
+})
+const shotThumbRatio = computed(() => {
+  const map: Record<string, string> = { '9:16': '9 / 16', '16:9': '16 / 9', '1:1': '1 / 1' }
+  return map[projectData.value?.aspect_ratio ?? ''] ?? '4 / 5'
+})
+/**
+ * 卡片宽度：与画幅配合，让整卡高度稳定在 ~360px 左右。
+ * 竖屏 168px → 缩略图 299px；横屏 320px → 缩略图 180px；方形 240px → 缩略图 240px。
+ * 目的是「同屏可见张数」在不同画幅项目间尽量接近，而不是让卡片高矮差一倍。
+ */
+const shotCardWidth = computed(() => {
+  const map: Record<string, string> = { '9:16': '168px', '16:9': '320px', '1:1': '240px' }
+  return map[projectData.value?.aspect_ratio ?? ''] ?? '200px'
+})
+
+/* ---------- 分镜行横向溢出检测 ----------
+ * 目的：7 镜的场景在 1366 宽下只能看到 6 张，没有任何提示时用户会以为场景只有 6 镜。
+ * 右侧渐隐 mask 在近黑背景上不可见（淡出成透明仍是黑色），所以改用显式提示按钮。
+ * 检测在挂载 / 尺寸变化 / 数据变化时各跑一次，滚动时实时更新「是否还能继续右滑」。
+ */
+const rowRefs = ref<HTMLElement[]>([])
+/** 监听行容器尺寸变化（卡片增删、画幅切换都会改变宽度） */
+let rowObserver: ResizeObserver | null = null
+/** sceneId → 是否还有未滚动到的内容（false 表示已滑到底，提示应隐藏） */
+const rowOverflow = ref<Record<string, boolean>>({})
+
+function measureRow(el: HTMLElement): { scene: string; more: boolean } | null {
+  const scene = el.dataset.scene
+  if (!scene) return null
+  // 留 2px 容差：亚像素取整会让 scrollWidth 比 clientWidth 大 1
+  return { scene, more: el.scrollWidth - el.scrollLeft - el.clientWidth > 2 }
+}
+
+function refreshOverflow() {
+  const next: Record<string, boolean> = {}
+  for (const el of rowRefs.value) {
+    const m = measureRow(el)
+    if (m) next[m.scene] = m.more
+  }
+  rowOverflow.value = next
+}
+
+function onRowScroll(e: Event, sceneId: string) {
+  const el = e.target as HTMLElement
+  const m = measureRow(el)
+  if (!m) return
+  // 只更新这一行，避免每次滚动都重算所有场景
+  if (rowOverflow.value[sceneId] !== m.more) {
+    rowOverflow.value = { ...rowOverflow.value, [sceneId]: m.more }
+  }
+}
+
+function scrollRowRight(sceneId: string) {
+  const el = rowRefs.value.find((r) => r.dataset.scene === sceneId)
+  if (!el) return
+  const remaining = el.scrollWidth - el.clientWidth - el.scrollLeft
+  // 一次滚过约 3 张卡；剩余量不足时直接滚到底。
+  // 实测「固定滚 3 卡」会停在距底 10px 处，提示按钮不消失（判定条件是 >2px）。
+  const cardW = el.querySelector<HTMLElement>('.shot-card-wrapper')?.offsetWidth ?? 180
+  const step = Math.min((cardW + 12) * 3, remaining)
+  el.scrollBy({ left: step, behavior: 'smooth' })
+}
+
+// 数据/视口变化后重新测量（卡片数量或宽度变了，溢出状态也会变）。
+// 必须 deep: true —— shotsMap 是「先赋空对象、再逐场景塞 key」的写法，
+// 只改属性不改引用，浅层 watch 永远不触发（实测过：按钮一直不出现）。
+watch(
+  [() => shotsMap.value, shotCardWidth, shotThumbRatio],
+  () => nextTick(refreshOverflow),
+  { deep: true },
+)
+onMounted(() => {
+  nextTick(refreshOverflow)
+  window.addEventListener('resize', refreshOverflow)
+  // 卡片图片加载会改变行高但不改宽度，ResizeObserver 兜住容器尺寸变化
+  if (typeof ResizeObserver !== 'undefined') {
+    rowObserver = new ResizeObserver(() => refreshOverflow())
+    nextTick(() => rowRefs.value.forEach((el) => rowObserver?.observe(el)))
+  }
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', refreshOverflow)
+  rowObserver?.disconnect()
+  rowObserver = null
+})
 const readiness = computed(() => {
   const cs = (charsData.value?.items ?? []) as Array<{ portrait_asset_id?: string | null }>
   const ss = (scenesQuery.data.value?.items ?? []) as Array<{ baseline_asset_id?: string | null }>
@@ -687,9 +782,17 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         </div>
 
         <div
-          class="shots-row"
-          @dragover="onDragOver($event, scene.id)"
+          class="shots-scroll"
+          :class="{ 'is-overflow': rowOverflow[scene.id] }"
         >
+          <div
+            ref="rowRefs"
+            class="shots-row"
+            :data-scene="scene.id"
+            :style="{ '--shot-thumb-ratio': shotThumbRatio, '--shot-card-w': shotCardWidth }"
+            @scroll="onRowScroll($event, scene.id)"
+            @dragover="onDragOver($event, scene.id)"
+          >
           <n-spin v-if="loadingShots[scene.id]" size="small" />
           <template v-else>
             <div
@@ -733,6 +836,19 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
               </div>
             </div>
           </template>
+          </div>
+          <!-- 横向溢出提示：右侧渐隐在近黑底上几乎不可见（淡出成透明 = 还是黑的），
+               改用显式计数 + 箭头，用户一眼知道「还有 N 镜在右边」。 -->
+          <button
+            v-if="rowOverflow[scene.id]"
+            type="button"
+            class="row-more"
+            :aria-label="`${scene.title} 还有更多镜头，向右滚动`"
+            @click="scrollRowRight(scene.id)"
+          >
+            <span class="row-more-text">还有更多</span>
+            <span class="row-more-arrow" aria-hidden="true">→</span>
+          </button>
         </div>
       </div>
     </div>
@@ -900,19 +1016,84 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   color: var(--text-secondary);
   margin-left: auto;
 }
+/* 横向滚动容器：外层负责定位提示按钮，内层负责滚动 */
+.shots-scroll {
+  position: relative;
+}
 .shots-row {
   display: flex;
   gap: var(--sp-3);
   overflow-x: auto;
   padding-bottom: var(--sp-2);
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.shots-row::-webkit-scrollbar {
+  height: 6px;
+}
+.shots-row::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 0;
+  border-radius: var(--radius-pill);
+}
+.shots-row::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* 溢出提示：右侧浮一枚「还有更多 →」。
+   曾用 mask-image 渐隐，但近黑背景下淡出成透明与背景同色，
+   视觉上完全看不出（1920/1366 截图均证实），因此改为显式可点击提示。 */
+.row-more {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--brand-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--brand-line);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+.row-more:hover {
+  color: var(--text-on-brand);
+  background: var(--brand-gradient);
+  border-color: transparent;
+}
+.row-more:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 2px;
+}
+.row-more-arrow {
+  font-size: 13px;
+  line-height: 1;
 }
 .shot-card-wrapper {
   position: relative;
   flex-shrink: 0;
+  scroll-snap-align: start;
 }
+/* 卡片高度由内容决定（此前写死 320px）：缩略图 200px + 信息区约 54px ≈ 254px，
+   底部固定留出 66px 空白，26 张卡叠起来就是一片「空卡片」观感。 */
+/* 卡片宽度随画幅自适应（--shot-card-w）：
+   9:16 竖屏若沿用 220px 宽，缩略图会被撑到 391px 高、整卡 450px，
+   一屏只能看到 5 张多，26 镜的场景要横滑很久。竖屏收窄到 168px，
+   缩略图约 299px、整卡约 360px，同屏可见 7 张且构图不被裁。
+   横屏反之需要更宽，方形居中。 */
 .shot-card {
-  width: 220px;
-  height: 320px;
+  width: var(--shot-card-w, 200px);
+  height: auto;
   background: var(--bg-panel);
   border-radius: var(--radius-xl);
   overflow: hidden;
@@ -945,16 +1126,24 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   white-space: nowrap;
   border: 0;
 }
+/* 缩略图比例跟随项目画幅（--shot-thumb-ratio），不再固定 200px：
+   9:16 项目在近方形窗口里会被 object-fit:cover 裁掉上下构图。
+   min-height:0 必须显式声明，否则 flex item 的 min-height:auto 会撑破比例。 */
 .shot-thumb {
-  width: 100%;
-  height: 200px;
   position: relative;
+  width: 100%;
+  aspect-ratio: var(--shot-thumb-ratio, 4 / 5);
+  min-height: 0;
   background: var(--bg-elevated);
+  overflow: hidden;
 }
 .shot-thumb img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 .thumb-placeholder {
   width: 100%;

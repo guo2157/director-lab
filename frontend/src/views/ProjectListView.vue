@@ -22,6 +22,7 @@ import EmptyState from '@/components/ui/EmptyState.vue'
 import ErrorRetry from '@/components/ui/ErrorRetry.vue'
 import SkeletonList from '@/components/ui/SkeletonList.vue'
 import ProjectCard from '@/components/projects/ProjectCard.vue'
+import { useProjectCovers } from '@/components/projects/useProjectCovers'
 import ProjectFilterBar from '@/components/projects/ProjectFilterBar.vue'
 import type { SortKey, StatusFilter } from '@/components/projects/ProjectFilterBar.vue'
 import CreateProjectModal from '@/components/projects/CreateProjectModal.vue'
@@ -56,6 +57,11 @@ const { data, isPending, isError, error, refetch } = useQuery({
   queryFn: () => listProjects({ page: 1, page_size: 100 }),
 })
 const projects = computed(() => data.value?.items ?? [])
+/**
+ * 项目封面：从各项目已有资产里挑一张图（keyframe > scene > character）。
+ * 未解析/未出图的项目拿不到封面，卡片自动回退到占位封面，不伪造图片。
+ */
+const projectCovers = useProjectCovers(computed(() => projects.value.map((p) => p.id)))
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : '操作失败，请稍后重试'
 }
@@ -276,6 +282,7 @@ function clearFilters() {
             :key="p.id"
             :project="p"
             :index="idx"
+            :cover-url="projectCovers[p.id] ?? ''"
             @open="goProject"
             @action="onCardAction"
           />

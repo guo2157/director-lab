@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 作品卡片：封面 + 状态 + 标题 + 元信息 + 进度。整卡可点，右上角「⋯」走操作菜单。 */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NButton, NDropdown, NProgress } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import type { CreationType, Project } from '@/types/project'
@@ -11,6 +11,8 @@ const props = defineProps<{
   project: Project
   /** 列表序号，用于错峰入场动画 */
   index: number
+  /** 真实封面地址（来自项目已有资产）；空串表示该项目还没有任何可用图片 */
+  coverUrl?: string
 }>()
 const emit = defineEmits<{
   open: [id: string]
@@ -43,6 +45,55 @@ const ratioLabel = computed(() => {
   return dir ? `${props.project.aspect_ratio} ${dir}` : props.project.aspect_ratio
 })
 const animationDelay = computed(() => `${Math.min(props.index, 12) * 0.045}s`)
+/** 封面不可用（加载失败 / 画面近乎纯色）时回退占位，避免裂图或「黑块」 */
+const coverFailed = ref(false)
+/** 真正展示图片：有地址且未被判定为不可用 */
+const showImage = computed(() => Boolean(props.coverUrl) && !coverFailed.value)
+watch(
+  () => props.coverUrl,
+  () => {
+    coverFailed.value = false
+  },
+)
+/**
+ * 封面加载完成后的可用性判定。
+ *
+ * 为什么需要：库里存在 `[MOCK] job xxx out cover` 这类测试图，
+ * 尺寸合规（400×225）、接口 200、DB 无可判别字段，
+ * 但画面只是一块深色 + 一行小字 + 一圈黄边，铺在卡片上像坏了。
+ *
+ * 实测（24×24 降采样、每通道量化到 5bit 后的不同颜色数）：
+ *   · mock 占位图      19 种   ← 需排除
+ *   · 暗色星云分镜图   58 种   ← 真实内容，需保留
+ *   · 人物夜景分镜图  230 种
+ * 阈值取 28：既排除 mock，又给「低细节但真实」的图留出余量。
+ *
+ * 判定失败（canvas 被污染 / 解码异常）时一律按可用处理 ——
+ * 宁可显示一张普通图，也不能因为检测本身出错把真实封面隐藏掉。
+ */
+const MIN_DISTINCT_COLORS = 28
+function onCoverLoad(e: Event) {
+  const img = e.target as HTMLImageElement
+  try {
+    const S = 24
+    const canvas = document.createElement('canvas')
+    canvas.width = S
+    canvas.height = S
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return
+    ctx.drawImage(img, 0, 0, S, S)
+    const { data } = ctx.getImageData(0, 0, S, S)
+    // 量化到 5bit/通道后再统计，避免照片噪点把颜色数虚高
+    const seen = new Set<number>()
+    for (let i = 0; i < data.length; i += 4) {
+      const key = ((data[i] >> 3) << 10) | ((data[i + 1] >> 3) << 5) | (data[i + 2] >> 3)
+      seen.add(key)
+    }
+    if (seen.size < MIN_DISTINCT_COLORS) coverFailed.value = true
+  } catch {
+    // canvas 被污染或解码失败：不做判定，保留图片
+  }
+}
 const updatedTitle = computed(() => new Date(props.project.updated_at).toLocaleString('zh-CN'))
 const updatedText = computed(() => relativeTime(props.project.updated_at))
 
@@ -91,10 +142,24 @@ function onCardKey(e: KeyboardEvent) {
     @click="emit('open', project.id)"
     @keydown="onCardKey"
   >
-    <div class="cover" :class="ratioClass">
-      <!-- 封面：画幅暗示的发光核 + 首字水印，两层都只是身份标识，不承载信息 -->
-      <span class="cover-orb" aria-hidden="true" />
-      <span class="cover-char" aria-hidden="true">{{ coverChar }}</span>
+    <div class="cover" :class="[ratioClass, { 'has-image': showImage }]">
+      <!-- 有真实资产图时直接铺满：作品列表的第一落点应该是画面本身。
+           无图 / 加载失败 / 画面近乎纯色（mock 占位图）时退回占位，不伪造图片。 -->
+      <img
+        v-if="coverUrl"
+        v-show="showImage"
+        class="cover-img"
+        :src="coverUrl"
+        :alt="`${project.name} 封面`"
+        loading="lazy"
+        decoding="async"
+        @load="onCoverLoad"
+        @error="coverFailed = true"
+      />
+      <template v-if="!showImage">
+        <span class="cover-orb" aria-hidden="true" />
+        <span class="cover-char" aria-hidden="true">{{ coverChar }}</span>
+      </template>
 
       <span class="status-badge" :class="`is-${project.status}`">{{ statusLabel }}</span>
       <!-- 画幅角标：左侧画一个真实的画幅形状（竖条/横条/方框），
@@ -222,12 +287,12 @@ function onCardKey(e: KeyboardEvent) {
   }
 }
 
-/* 封面：固定 116px。深色渐变 + 网格 + 发光核，代替一张空占位图。
-   三层叠起来（网格 / 光晕 / 首字），任何一层单独看都只是装饰，
-   合起来才表达「这是一个还没有封面图的待生产作品」。 */
+/* 封面：占位态与有图态必须同高，否则同一行卡片高矮不齐
+   （实测占位 116px vs 有图 251px，第 1 张卡被拉伸到 381px 且内容区多出空白）。
+   统一用 4:3 比例，由卡片宽度推导高度，跨卡自然对齐。 */
 .cover {
   position: relative;
-  height: 116px;
+  aspect-ratio: 4 / 3;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -235,8 +300,16 @@ function onCardKey(e: KeyboardEvent) {
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(160deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
+/* 有图时容器比例已一致，无需再单独覆盖；按项目画幅微调容器比例 */
+.cover.has-image.cover-16-9 {
+  aspect-ratio: 16 / 9;
+}
+.cover.has-image.cover-1-1 {
+  aspect-ratio: 1 / 1;
+}
 
-/* 网格底纹：24px 细线，给「空封面」一点材质，而不是一块死黑 */
+/* 网格底纹：24px 细线，给「空封面」一点材质，而不是一块死黑。
+   有真实封面图时不需要，直接隐藏（否则会和图片纹理打架）。 */
 .cover::before {
   content: '';
   position: absolute;
@@ -246,6 +319,40 @@ function onCardKey(e: KeyboardEvent) {
     linear-gradient(to bottom, var(--neutral-line) 1px, transparent 1px);
   background-size: 24px 24px;
   opacity: 0.5;
+  pointer-events: none;
+}
+.cover.has-image::before {
+  display: none;
+}
+
+/* 真实封面图：铺满 + 轻微上暗下亮渐变，保证压在图上角标始终可读 */
+.cover-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 竖屏源图裁成横向容器时，默认居中会把头裁掉；偏上取景保住面部 */
+  object-position: center 22%;
+  display: block;
+  transition: transform var(--transition-base);
+}
+.project-card:hover .cover-img {
+  transform: scale(1.03);
+}
+/* 角标可读性底衬：图上的文字必须有局部暗场，否则浅色画面会把字吃掉 */
+.cover.has-image::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    var(--scrim) 0%,
+    transparent 34%,
+    transparent 68%,
+    var(--scrim) 100%
+  );
+  opacity: 0.72;
   pointer-events: none;
 }
 

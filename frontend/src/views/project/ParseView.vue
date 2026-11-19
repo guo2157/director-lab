@@ -541,17 +541,36 @@ function formatResult(r: Record<string, any> | null | undefined): string {
  * 从后端补回「最近一次成功解析」的 result。
  * 为什么需要：确认解析后 flow.resetAfterConfirmParse() 会清掉 parseJobId，
  * 分析窗（含原文）随之消失，刷新后也没有原文可查。这里独立取一次，只读不写 store。
+ *
+ * 为什么查两种 job_type：解析入口有两条真实链路 ——
+ *   · `/parse` 走 worker 的 parse_executor，落 `job_type='parse'`
+ *   · 「Agent 智能分析」走 script_agent，落 `job_type='script_agent'`
+ * 两者 result 结构相同（scenes[] / characters[] / props[]）。此前只查 'parse'，
+ * 导致 script_agent 解析的项目（如 prj_257406918e63）历史结果永远取不到，
+ * 分镜分组恒为 0，与场景 shot_count 合计 26 冲突。
  */
+const PARSE_JOB_TYPES = ['parse', 'script_agent'] as const
 const { data: archivedParseJobs } = useQuery({
   queryKey: computed(() => ['jobs', 'parse-archive', projectId.value]),
-  queryFn: () => listJobs({ project_id: projectId.value, job_type: 'parse', page: 1, page_size: 50 }),
+  queryFn: async () => {
+    const pages = await Promise.all(
+      PARSE_JOB_TYPES.map((t) =>
+        listJobs({ project_id: projectId.value, job_type: t, page: 1, page_size: 50 }),
+      ),
+    )
+    const items = pages.flatMap((p) => p.items ?? [])
+    // 跨类型按创建时间倒序，保证「最近一次成功解析」判定与单类型查询一致
+    items.sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
+    return { total: items.length, items }
+  },
   enabled: computed(() => !!projectId.value),
 })
-const archivedParseText = computed(() => {
-  const items = archivedParseJobs.value?.items ?? []
-  const hit = items.find((j: Job) => j.status === 'succeeded' && j.result)
-  return formatResult((hit?.result ?? null) as Record<string, any> | null)
-})
+/**
+ * 解析原文：与结果分组必须同源（都用覆盖最完整的成功结果）。
+ * 若这里仍按「最近一次」取，会出现「原文只含 3 镜、分组列出 26 镜」的新矛盾。
+ * 数据源见下方 archivedParseResult。
+ */
+const archivedParseText = computed(() => formatResult(archivedParseResult.value))
 /** 原文全文：优先当前任务结果，其次后端历史结果 */
 const rawReportText = computed(() => formattedResult.value || archivedParseText.value)
 
@@ -560,11 +579,39 @@ const rawReportText = computed(() => formattedResult.value || archivedParseText.
  * 不额外请求 GET /projects/{id}/shots —— 该接口必须传 episode，多集需 N 次请求，
  * 而解析页只需要「解析出的结构」，完整分镜编辑仍由分镜图/分镜看板负责。
  */
-/** 历史解析结果对象（与 archivedParseText 同一查询，只读，不写 store） */
+/**
+ * 历史解析结果对象（与 archivedParseText 同一查询，只读，不写 store）。
+ *
+ * 选取策略：不是「最近一次成功」，而是「覆盖最完整的那次成功」。
+ * 为什么：解析支持分批（batch），一次任务可能只覆盖 1 集的一部分场景。
+ * 实测 prj_257406918e63 最近一次成功任务 job_3d136de3f7f1 只含 1 场景 3 镜，
+ * 而更早的 job_6de74a09a025 含完整 5 场景 26 镜。若按「最近」取，
+ * 页面就会显示 3 个分镜，与场景 shot_count 合计 26 直接矛盾。
+ *
+ * 排序键：分镜总数 → 场景数 → 角色数 → 创建时间（同分时取更新的一次）。
+ * 这样既保证明细完整，又在多个完整结果之间取最新。
+ */
+function resultWeight(j: Job): number[] {
+  const r = (j.result ?? {}) as Record<string, any>
+  const scenes = (r.scenes as any[] | undefined) ?? []
+  const shots = scenes.reduce((n, sc) => n + ((sc?.shots as any[] | undefined)?.length ?? 0), 0)
+  const chars = (r.characters as any[] | undefined)?.length ?? 0
+  return [shots, scenes.length, chars]
+}
 const archivedParseResult = computed<Record<string, any> | null>(() => {
-  const items = archivedParseJobs.value?.items ?? []
-  const hit = items.find((j: Job) => j.status === 'succeeded' && j.result)
-  return (hit?.result ?? null) as Record<string, any> | null
+  const items = (archivedParseJobs.value?.items ?? []).filter(
+    (j: Job) => j.status === 'succeeded' && j.result,
+  )
+  if (!items.length) return null
+  const best = [...items].sort((a, b) => {
+    const wa = resultWeight(a)
+    const wb = resultWeight(b)
+    for (let i = 0; i < wa.length; i += 1) {
+      if (wb[i] !== wa[i]) return wb[i] - wa[i]
+    }
+    return String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''))
+  })[0]
+  return (best?.result ?? null) as Record<string, any> | null
 })
 /** 展示用解析结果：当前任务优先，其次后端历史 */
 const effectiveParseResult = computed<Record<string, any> | null>(
@@ -626,6 +673,31 @@ const parseShots = computed<ParseShotRow[]>(() => {
   const num = (v: unknown) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10) || 0)
   return out.sort((a, b) => a.ep - b.ep || a.sceneSeq - b.sceneSeq || num(a.shotNo) - num(b.shotNo))
 })
+
+/**
+ * 每集真实分镜数：以解析明细 scenes[].shots[] 为唯一口径。
+ *
+ * 为什么不用后端 episode_parse_record.asset_count：
+ * 该字段是「解析那一刻写下的快照」，一旦后续重新解析（或历史任务失败重试），
+ * 记录行里的旧值不会随最新解析结果更新。实测 prj_257406918e63 该值为 3，
+ * 而当前解析结果里是 26 个分镜（5 场景 shot_count 合计 7+4+4+5+6），
+ * 页面同屏出现「26 分镜」和「第 1 集 3 个分镜」两个矛盾数字。
+ * 明细取不到时（历史 result 已不可用）才回退快照值，并在 tooltip 里标注来源。
+ */
+const shotsPerEpisode = computed<Map<number, number>>(() => {
+  const m = new Map<number, number>()
+  for (const s of parseShots.value) {
+    if (!s.ep) continue
+    m.set(s.ep, (m.get(s.ep) ?? 0) + 1)
+  }
+  return m
+})
+/** 集卡片的真实分镜数：明细优先，无明细时回退后端快照 */
+function episodeShotCount(ep: { episode_no: number; asset_count: number }): number | null {
+  const fromDetail = shotsPerEpisode.value.get(ep.episode_no)
+  if (fromDetail != null) return fromDetail
+  return ep.asset_count || null
+}
 
 interface DialogueRow {
   ep: number
@@ -754,18 +826,26 @@ const resultState = computed<{ label: string; tone: string }>(() => {
   if (statusTotalEpisodes.value > 0) return { label: '待解析', tone: 'pending' }
   return { label: '暂无结果', tone: 'pending' }
 })
-/** 概览统计：全部来自真实解析结果，pendingIssueCount 只统计真实失败集
- *  group 存在即可点击切到对应分组；「集」不是结果分组（任务状态在上方面板），故不给 group
- */
-const overviewStats = computed(() => [
-  { key: 'episode', label: '集', value: statusTotalEpisodes.value, group: null },
-  { key: 'scene', label: '场景', value: scenes.value.length, group: 'scene' as const },
-  { key: 'character', label: '角色', value: characters.value.length, group: 'character' as const },
-  { key: 'prop', label: '道具', value: props.value.length, group: 'prop' as const },
-  { key: 'shot', label: '分镜', value: totalShots.value, group: 'shot' as const },
-  { key: 'dialogue', label: '台词', value: dialogueRows.value.length, group: 'dialogue' as const },
-])
 const pendingIssueCount = computed(() => failedEpisodes.value.length)
+/**
+ * 概览统计：只放分组导航**没有**的信息。
+ *
+ * 此前 6 项里有 4 项（场景/角色/道具/分镜/台词）与左侧分组导航的计数完全重复，
+ * 同屏两处相同数字既占空间又让人怀疑哪个才是准的。
+ * 现只保留：
+ *   · 集        —— 分组导航不覆盖（它是「解析了几个剧本集」，不是结果类型）
+ *   · 待处理    —— 失败集数量，唯一的告警级信息
+ * 其余计数一律由分组导航承担（它同时也是筛选入口，数字放在那里更自然）。
+ */
+const overviewStats = computed(() => {
+  const items: Array<{ key: string; label: string; value: number; tone?: string }> = [
+    { key: 'episode', label: '集', value: statusTotalEpisodes.value },
+  ]
+  if (pendingIssueCount.value) {
+    items.push({ key: 'issue', label: '待处理', value: pendingIssueCount.value, tone: 'issue' })
+  }
+  return items
+})
 
 /* ---------- 刷新恢复：从后端最近一次 script_agent 任务恢复运行态 ----------
  * 依赖 GET /projects/{id}/script-agent/status（返回最近一个 script_agent 任务的 id/status）。
@@ -1099,10 +1179,10 @@ async function copyRawReport() {
                 :key="ep.episode_no"
                 class="episode-cell"
                 :class="`is-${ep.status}`"
-                :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${ep.asset_count ? '，解析出 ' + ep.asset_count + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
+                :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${episodeShotCount(ep) ? '，解析出 ' + episodeShotCount(ep) + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
               >
                 <span class="episode-cell-no">第 {{ ep.episode_no }} 集</span>
-                <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? ep.asset_count + ' 个分镜' : statusLabel(ep.status) }}</span>
+                <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? (episodeShotCount(ep) ?? 0) + ' 个分镜' : statusLabel(ep.status) }}</span>
               </div>
             </div>
             <div class="episode-legend">
@@ -1133,22 +1213,17 @@ async function copyRawReport() {
             </NButton>
           </header>
 
+          <!-- 概览条：只承载「集」与「待处理」——分组导航没覆盖的两项。
+               场景/角色/道具/分镜/台词的计数统一在下方分组导航里，不重复展示。 -->
           <div class="overview-stats">
-            <component
-              :is="s.group ? 'button' : 'div'"
+            <div
               v-for="s in overviewStats"
               :key="s.key"
               class="ov-item"
-              :class="{ 'is-clickable': !!s.group, 'is-current': !!s.group && activeGroup === s.group }"
-              :type="s.group ? 'button' : undefined"
-              @click="s.group ? (activeGroup = s.group) : undefined"
+              :class="{ 'is-issue': s.tone === 'issue' }"
             >
               <span class="ov-value">{{ s.value }}</span>
               <span class="ov-label">{{ s.label }}</span>
-            </component>
-            <div v-if="pendingIssueCount" class="ov-item is-issue">
-              <span class="ov-value">{{ pendingIssueCount }}</span>
-              <span class="ov-label">待处理</span>
             </div>
           </div>
 

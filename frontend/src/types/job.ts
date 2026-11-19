@@ -1,4 +1,6 @@
-/** 任务类型（job_type 枚举） */
+/** 任务类型（job_type 枚举，与后端实际产出的全量取值对齐）
+ *  script_agent / series_agent 是 Agent 链路落库的真实类型：
+ *  「Agent 智能分析」走 script_agent，其 result 与 parse 同构（scenes/characters/props）。 */
 export type JobType =
   | 'generate_keyframe'
   | 'generate_clip'
@@ -6,6 +8,8 @@ export type JobType =
   | 'generate_bgm'
   | 'generate_sfx'
   | 'parse'
+  | 'script_agent'
+  | 'series_agent'
   | 'compose'
   | 'export'
 
