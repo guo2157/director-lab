@@ -219,10 +219,24 @@ retryable = j.status in ("failed", "lost") and (j.attempts or 0) < settings.job_
 `truncateError` 必要性：`comfy_unreachable` 的 `error_msg` 里带完整实例 URL，
 不截断会把卡片撑高。
 
-### 6.3 表格视图未改（遗留）
+### 6.3 表格视图（第六轮补修）
 
-`isEnvError` 语义问题在表格视图仍然存在。要不要把判定从「能不能再试」
-改成「是不是环境问题」（例如按 `error_code` 白名单），属于产品决策，本轮不动。
+原本表格视图仍用 `isEnvError`（= `retryable`）二选一，导致 `llm_invalid_output`
+这类配置错误只显示「重试」，看不到失败原因。
+
+第六轮已改为：失败任务**同时**给「重试」+「查看原因」，不再臆断错误分类。
+操作列宽 92 → 132px。
+
+验证（1440px，`verify-jobs-desktop.mjs`）：
+
+```
+失败行操作列  ["重试", "查看原因"]   ← 两个都在
+overflowX     false
+scrollW       1440 / clientW 1440
+```
+
+`isEnvError()` 已删除。判据改为直接用 `row.retryable` 决定「重试」是否可用 ——
+这才是该字段的真实语义（能不能再试），不再冒充错误分类。
 
 ## 7. 后端缺陷：SSE 长连接耗尽连接池
 
@@ -341,7 +355,7 @@ FAB 遮挡验证（`_chk-fab3.mjs`）：滚到底后 20 张卡的所有操作按
 | 项 | 状态 | 说明 |
 |---|---|---|
 | SSE 连接池耗尽 | ⚠️ 后端缺陷，未修 | 见 §7.5，建议单独处理 |
-| `isEnvError` 语义错误 | ⚠️ 仅卡片视图绕开 | 表格视图仍把配置错误显示为「可重试」 |
+| `isEnvError` 语义错误 | ✅ 已修 | 删除该函数，失败任务同时给「重试」+「查看原因」，不再臆断错误分类 |
 | 视觉 AI 误判「筛选未压缩」 | — | 实测 `filterRows=2` 正确：两条独立轴各一行，行内横向滚动 |
 | 第三张卡底部被视口截断 | — | 正常滚动，非缺陷 |
 | 截图脚本 `networkidle` 超时 | ✅ 已修 | settings/jobs 有常驻轮询，`networkidle` 永远等不到，改 `domcontentloaded` |

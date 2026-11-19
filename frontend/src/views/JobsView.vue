@@ -167,10 +167,12 @@ function isStalled(job: Job): boolean {
   return !Number.isNaN(start) && Date.now() - start > STALL_THRESHOLD_MS
 }
 
-function isEnvError(job: Job): boolean {
-  // 环境类失败：连接超时、ComfyUI 不可达等；配置类：参数错误、工作流缺失等
-  return job.retryable === true
-}
+/**
+ * 注意：不要用后端 retryable 判断错误性质 —— 它只表示「还能再试」
+ * （failed/lost && attempts < max_attempts），与环境错误无关。
+ * 实测 comfy_unreachable(23) 和 llm_invalid_output(12) 的 retryable 都是 true，
+ * 所以失败任务一律同时给「重试」+「查看原因」，不做错误分类臆断。
+ */
 
 /**
  * error_code → 人话。后端 error_msg 常以英文技术细节为主
@@ -288,17 +290,28 @@ const columns = computed<DataTableColumns<Job>>(() => {
     render: (row) => fmtTime(row.created_at) },
   ]
   if (!hasActionable.value) return cols
-  cols.push({ title: '操作', key: 'actions', width: 92,
+  cols.push({ title: '操作', key: 'actions', width: 132,
     render: (row) => {
       if (row.status === 'failed' || row.status === 'lost') {
-        if (isEnvError(row)) {
-          return h(NButton, { size: 'tiny', type: 'primary', quaternary: true,
-            onClick: () => retryMutation.mutate(row.id) }, { default: () => '重试' })
+        /**
+         * 失败任务同时给「重试」和「查看原因」。
+         * 原实现用 isEnvError 二选一，但 isEnvError 的实现是 `retryable === true`，
+         * 而后端 retryable 的定义只是 `failed/lost && attempts < job_max_attempts`
+         * （api/v1/jobs.py:29）—— 跟「是不是环境错误」无关。
+         * 结果：llm_invalid_output（DB 实测 12 条）这类配置错误也被判成
+         * 「环境错误」，只显示「重试」，用户永远看不到失败原因。
+         * 这里不臆断错误分类，两个动作都给，与窄屏卡片视图一致。
+         */
+        const btns = []
+        if (row.retryable) {
+          btns.push(h(NButton, { size: 'tiny', type: 'primary', quaternary: true,
+            onClick: () => retryMutation.mutate(row.id) }, { default: () => '重试' }))
         }
-        return h(NTooltip, { style: { maxWidth: '460px' } }, {
+        btns.push(h(NTooltip, { style: { maxWidth: '460px' } }, {
           trigger: () => h(NButton, { size: 'tiny', quaternary: true }, { default: () => '查看原因' }),
           default: () => h('div', { class: 'err-tip' }, row.error_msg || '未记录错误原因'),
-        })
+        }))
+        return h('span', { class: 'cell-actions' }, btns)
       }
       if (row.status === 'queued' || row.status === 'running' || row.status === 'chained_wait') {
         return h(NButton, { size: 'tiny', type: 'error', quaternary: true,
@@ -916,6 +929,13 @@ const columns = computed<DataTableColumns<Job>>(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+/* 失败任务的操作列同时放「重试」+「查看原因」，需要横排且不换行 */
+:deep(.cell-actions) {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
 }
 /* 状态标记：圆点 + 文字，颜色只作辅助通道，避免整块填充抢走表格阅读节奏。
    颜色必须由类驱动（内联 style 优先级更高会让下面的降权规则全部失效）。 */

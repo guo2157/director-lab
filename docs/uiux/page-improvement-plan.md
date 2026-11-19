@@ -456,4 +456,4 @@ frontend/scripts/diag-jobs.mjs                首屏各区块纵向占用
 | 项 | 说明 |
 |---|---|
 | SSE 耗尽连接池 | 后端 `events.py:42-67` yield 在 try 内，连接不释放。见 `round6-full-page-review.md` §7.5 |
-| `isEnvError` 语义错误 | 表格视图仍把 `llm_invalid_output` 等配置错误显示为「可重试」 |
+| `isEnvError` 语义错误 | ✅ 已修：删除该函数，失败任务同时给「重试」+「查看原因」 |
