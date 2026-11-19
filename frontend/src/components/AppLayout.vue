@@ -344,6 +344,14 @@ function goProjects() {
   min-width: 0;
   overflow-x: hidden;
 }
+/*
+ * 右下角有 position:fixed 的「AI 助手」浮钮（bottom 24 + 高约 36）。
+ * 可滚动页面必须预留避让，否则页面最后一个可点元素会被浮钮压住；
+ * 固定视口页面（is-fixed）自己管理内部滚动区，不叠加，避免把内容挤窄。
+ */
+.app-content:not(.is-fixed) .content-main {
+  padding-bottom: 72px;
+}
 /* 助手面板展开时：面板占据自身宽度，主内容只收缩可用部分，左侧轨道与起始位置保持不变 */
 .content-body.is-agent-docked .content-main {
   transition: flex-basis var(--transition-base);
