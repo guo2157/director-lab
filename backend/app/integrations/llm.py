@@ -492,6 +492,10 @@ def parse_llm_json(content: str) -> dict:
     空内容返回 ``llm_empty_content``（而非笼统的 llm_invalid_output）；
     ``Expecting value`` 不再被判为截断；markdown 代码块、前后夹文本、
     真正的截断各有独立处理分支。
+
+    注意：**截断不补齐**。补齐后的 JSON 虽然语法合法，但会缺字段
+    （例如只写了一半的 appearance），一旦落库就是残缺数据。这里宁可抛
+    ``llm_output_truncated`` 让上层放大 max_tokens 重试。
     """
     meta = LLMResponseMeta(content=content)
     obj, result = parse_json_safely(content, expect=dict, meta=meta)
@@ -500,49 +504,3 @@ def parse_llm_json(content: str) -> dict:
                        result.error_message or "语言模型输出无法解析为 JSON",
                        meta=meta)
     return obj
-
-
-def _repair_truncated_json(text: str) -> str:
-    """启发式修复被截断的 JSON 文本。
-
-    用栈跟踪括号打开顺序，按逆序补齐：先闭合内层再闭合外层。
-    同时处理字符串内逗号缺失（行尾截断时常见）。
-    """
-    if not text:
-        return text
-    bracket_stack: list[str] = []
-    in_str = False
-    escaped = False
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if escaped:
-            escaped = False
-            i += 1
-            continue
-        if ch == "\\":
-            escaped = True
-            i += 1
-            continue
-        if ch == '"':
-            in_str = not in_str
-            i += 1
-            continue
-        if in_str:
-            i += 1
-            continue
-        if ch == "{":
-            bracket_stack.append("}")
-        elif ch == "[":
-            bracket_stack.append("]")
-        elif ch in ("}", "]"):
-            if bracket_stack and bracket_stack[-1] == ch:
-                bracket_stack.pop()
-        i += 1
-    suffix = ""
-    if in_str:
-        suffix += '"'
-    # 按逆序补齐：先闭合最后打开的内层括号
-    while bracket_stack:
-        suffix += bracket_stack.pop()
-    return text + suffix if suffix else text

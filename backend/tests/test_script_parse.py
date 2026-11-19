@@ -166,7 +166,9 @@ def test_parse_job_lifecycle(client, monkeypatch):
     # 任务详情可读，状态为 queued
     job = client.get(f"/api/jobs/{job_id}").json()
     assert job["status"] == "queued"
-    assert job["job_type"] == "parse"
+    # 解析任务类型在 2026-11-18 统一为 script_agent（scheduler 仍兼容历史
+    # parse 记录，见 worker/scheduler.py 的 in_(("script_agent", "parse"))）。
+    assert job["job_type"] == "script_agent"
     # 用替身替换语言模型后执行解析
     import app.worker.parse_executor as pe_mod
 
@@ -223,10 +225,13 @@ def test_parse_version_confirm_optimistic_lock(client, monkeypatch):
                     json={"current_parse_version_id": "pv_not_exist"})
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "parse_version_conflict"
+    # 携带正确的 current_parse_version_id 时乐观锁放行。本用例的版本由
+    # script_agent 任务产出，属于「多批次增量确认」允许范围，因此重复确认
+    # 是幂等成功（200）而不是 409——409 只由乐观锁不匹配触发，见上一段。
     r = client.post(f"/api/projects/{pid}/parse-versions/{pv_id}/confirm",
                     json={"current_parse_version_id": pv_id})
-    assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "parse_version_conflict"
+    assert r.status_code == 200
+    assert client.get(f"/api/projects/{pid}").json()["current_parse_version_id"] == pv_id
 
 
 FAKE_PARSE_OUTPUT_V2 = {

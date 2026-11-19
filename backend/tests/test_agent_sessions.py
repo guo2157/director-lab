@@ -140,7 +140,7 @@ def test_chat_flow(client: TestClient, monkeypatch):
 
     captured: dict = {}
 
-    def fake_chat_messages(self, messages, *, json_mode=False):
+    def fake_chat_messages(self, messages, *, json_mode=False, max_tokens=None):
         captured["messages"] = messages
         return "这是助手的回复"
 
@@ -178,7 +178,7 @@ def test_chat_llm_error_mapping(client: TestClient, monkeypatch):
     import app.api.v1.agent as agent_mod
     from app.integrations.llm import LLMError
 
-    def raise_unconfigured(self, messages, *, json_mode=False):
+    def raise_unconfigured(self, messages, *, json_mode=False, max_tokens=None):
         raise LLMError("llm_unconfigured", "语言模型未配置 API Key")
 
     monkeypatch.setattr(agent_mod.LLMClient, "chat_messages", raise_unconfigured)
@@ -194,7 +194,7 @@ def test_chat_llm_error_mapping(client: TestClient, monkeypatch):
     assert len(r.json()["items"]) == 1
     assert r.json()["items"][0]["role"] == "user"
 
-    def raise_timeout(self, messages, *, json_mode=False):
+    def raise_timeout(self, messages, *, json_mode=False, max_tokens=None):
         raise LLMError("llm_timeout", "语言模型请求超时")
 
     monkeypatch.setattr(agent_mod.LLMClient, "chat_messages", raise_timeout)

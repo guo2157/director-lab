@@ -618,7 +618,7 @@ const effectiveParseResult = computed<Record<string, any> | null>(
   () => (candidateResult.value as Record<string, any> | null) ?? archivedParseResult.value,
 )
 
-type ResultGroupKey = 'scene' | 'character' | 'prop' | 'shot' | 'dialogue' | 'audio'
+type ResultGroupKey = 'scene' | 'character' | 'prop' | 'shot' | 'dialogue'
 const activeGroup = ref<ResultGroupKey>('scene')
 
 interface ParseShotRow {
@@ -731,16 +731,15 @@ const emotionMap: Record<string, string> = {
 }
 const emotionLabel = (e: string) => emotionMap[e] ?? e
 
-/** 分组目录：数量为真实解析条数；音频规划在解析结果中没有对应字段，故不给数字 */
+/** 分组目录：数量为真实解析条数 */
 const resultGroups = computed<
-  Array<{ key: ResultGroupKey; label: string; count: number | null }>
+  Array<{ key: ResultGroupKey; label: string; count: number }>
 >(() => [
   { key: 'scene', label: '场景', count: scenes.value.length },
   { key: 'character', label: '角色', count: characters.value.length },
   { key: 'prop', label: '道具', count: props.value.length },
   { key: 'shot', label: '分镜', count: parseShots.value.length },
   { key: 'dialogue', label: '台词', count: dialogueRows.value.length },
-  { key: 'audio', label: '音频规划', count: null },
 ])
 const activeGroupLabel = computed(
   () => resultGroups.value.find((g) => g.key === activeGroup.value)?.label ?? '',
@@ -1239,7 +1238,7 @@ async function copyRawReport() {
                 @click="activeGroup = g.key"
               >
                 <span class="group-label">{{ g.label }}</span>
-                <span class="group-count" :class="{ 'is-text': g.count === null }">{{ g.count === null ? '未生成' : g.count }}</span>
+                <span class="group-count">{{ g.count }}</span>
               </button>
             </nav>
 
@@ -1330,17 +1329,6 @@ async function copyRawReport() {
                 <p v-else class="pane-empty">
                   {{ shotsWithoutDetail ? '解析结果明细已不可用，台词明细请到分镜看板查看' : '未解析出台词' }}
                 </p>
-              </template>
-
-              <template v-else-if="activeGroup === 'audio'">
-                <div class="pane-note">
-                  <p>
-                    解析结果不含音频规划。配音、BGM、音效在资产与分镜确认后按台词生成；TTS 音频与 H3 视频参考槽位相互独立。
-                  </p>
-                  <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/assets`)">
-                    去资产库 →
-                  </NButton>
-                </div>
               </template>
             </div>
           </div>
@@ -1719,14 +1707,10 @@ async function copyRawReport() {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
-/* 无数字的占位（如「音频规划 未生成」）用更小的字号，避免和真实计数一样抢眼 */
-.group-count.is-text { font-size: 10.5px; letter-spacing: 0.02em; }
 .group-item.is-active .group-count { color: var(--brand-hover); }
 .group-pane { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .pane-empty { margin: 0; padding: var(--sp-4) 0; font-size: 12.5px; color: var(--text-tertiary); }
 .pane-foot { display: flex; justify-content: flex-end; }
-.pane-note { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-3) 0; }
-.pane-note p { margin: 0; max-width: 62ch; font-size: 12.5px; line-height: 1.7; color: var(--text-secondary); }
 .is-tall { max-height: 460px; }
 
 /* 分镜表：列由内容决定，镜号/景别/时长定宽，画面自适应 */
