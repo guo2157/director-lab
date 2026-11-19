@@ -281,9 +281,10 @@ function clearFilters() {
           />
         </div>
 
-        <!-- 尾部新建条：不占栅格格位，避免 4 张卡 + 1 个孤儿格造成的参差；
-             权重低于页头主 CTA，用渐变描边做「还有一步」的提示而非第二个主按钮 -->
-        <button type="button" class="launch-strip gradient-frame" @click="openCreateModal">
+        <!-- 尾部新建条：不占栅格格位，避免 4 张卡 + 1 个孤儿格造成的参差。
+             权重必须低于页头主 CTA：收窄居中 + 虚线描边，不做渐变发光
+             （通栏渐变条在实测里被读成「比主按钮还抢眼」）。 -->
+        <button type="button" class="launch-strip" @click="openCreateModal">
           <span class="launch-plus" aria-hidden="true">+</span>
           <span class="launch-text">新建作品</span>
           <span class="launch-sub">从剧本开始，走完整条生产流程</span>
@@ -390,32 +391,40 @@ function clearFilters() {
   align-items: stretch;
 }
 
-/* ---------- 尾部新建条 ---------- */
+/* ---------- 尾部新建条 ----------
+   收窄居中（max-width 520px）+ 虚线描边：视觉权重严格低于页头主 CTA。
+   通栏 + 渐变描边会形成第二个高亮焦点，把视线从卡片区拽走。 */
 .launch-strip {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
   width: 100%;
-  margin-top: var(--sp-4);
-  padding: var(--sp-4);
+  max-width: 520px;
+  margin: var(--sp-4) auto 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-xl);
+  background: transparent;
   font-family: inherit;
   color: var(--text-secondary);
   cursor: pointer;
   transition:
-    color var(--transition-fast),
-    transform var(--transition-fast);
+    border-color var(--transition-fast),
+    background-color var(--transition-fast),
+    color var(--transition-fast);
 }
 .launch-strip:hover {
+  border-color: var(--brand-line);
+  background: var(--brand-soft);
   color: var(--brand-primary);
-  transform: translateY(-1px);
 }
 .launch-strip:focus-visible {
   outline: 2px solid var(--brand-hover);
   outline-offset: 2px;
 }
 .launch-plus {
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1;
   font-weight: 500;
 }

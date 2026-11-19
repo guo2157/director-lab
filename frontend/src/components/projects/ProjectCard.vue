@@ -97,7 +97,12 @@ function onCardKey(e: KeyboardEvent) {
       <span class="cover-char" aria-hidden="true">{{ coverChar }}</span>
 
       <span class="status-badge" :class="`is-${project.status}`">{{ statusLabel }}</span>
-      <span class="cover-ratio">{{ ratioLabel }}</span>
+      <!-- 画幅角标：左侧画一个真实的画幅形状（竖条/横条/方框），
+           文字只是补充。只用「9:16 竖屏」五个字而封面是横条，语义是矛盾的。 -->
+      <span class="cover-ratio">
+        <span class="ratio-frame" :class="ratioClass" aria-hidden="true" />
+        {{ ratioLabel }}
+      </span>
     </div>
 
     <div class="card-body">
@@ -137,7 +142,7 @@ function onCardKey(e: KeyboardEvent) {
             :border-radius="3"
             :show-indicator="false"
             :color="progressState === 'done' ? 'var(--state-success)' : 'var(--brand-primary)'"
-            :rail-color="progressState === 'zero' ? 'var(--neutral-line)' : 'var(--border-subtle)'"
+            :rail-color="progressState === 'zero' ? 'var(--border-strong)' : 'var(--border-subtle)'"
             :aria-label="`镜头完成 ${shotDone} / ${shotTotal}`"
           />
           <span
@@ -157,15 +162,29 @@ function onCardKey(e: KeyboardEvent) {
   position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
+  /* 渐变描边：顶部亮、底部暗，模拟环境光从左上方打下来。
+     纯 1px 实色边框在 --bg-base 上明度差太小，卡面会读成「贴在黑板上的色块」。 */
+  border: 1px solid transparent;
   border-radius: var(--radius-xl);
+  /* 卡面用 --bg-elevated（而非 --bg-panel）：与 --bg-base 的明度差从 1.05:1 提到 1.28:1，
+     否则卡片"面"在近黑底上完全看不见，只剩一圈描边在撑结构。
+     面内再叠一层自上而下的极淡渐变，给卡面一点材质而不是一块平色。 */
+  background:
+    linear-gradient(
+        180deg,
+        var(--overlay-hover) 0%,
+        transparent 38%,
+        transparent 100%
+      )
+      padding-box,
+    linear-gradient(var(--bg-elevated), var(--bg-elevated)) padding-box,
+    linear-gradient(180deg, var(--border-strong) 0%, var(--border-subtle) 42%, var(--border-subtle) 100%)
+      border-box;
   box-shadow: var(--card-sheen);
   overflow: hidden;
   cursor: pointer;
   transition:
-    border-color var(--transition-fast),
-    background-color var(--transition-fast),
+    background var(--transition-fast),
     transform var(--transition-fast),
     box-shadow var(--transition-fast);
   animation: card-fade-up 0.4s var(--ease-out) both;
@@ -180,16 +199,18 @@ function onCardKey(e: KeyboardEvent) {
     transform: translateY(0);
   }
 }
+/* 悬停：描边转品牌渐变 + 外发光 + 抬起 2px */
 .project-card:hover {
-  border-color: var(--brand-line);
-  background: var(--bg-elevated);
+  background:
+    linear-gradient(180deg, var(--overlay-active) 0%, transparent 42%) padding-box,
+    linear-gradient(var(--bg-elevated), var(--bg-elevated)) padding-box,
+    linear-gradient(180deg, var(--brand-line) 0%, var(--border-strong) 100%) border-box;
   box-shadow: var(--card-sheen-strong), var(--shadow-glow);
   transform: translateY(-2px);
 }
 .project-card:focus-visible {
   outline: 2px solid var(--brand-hover);
   outline-offset: 2px;
-  border-color: var(--brand-primary);
 }
 @media (prefers-reduced-motion: reduce) {
   .project-card {
@@ -201,7 +222,9 @@ function onCardKey(e: KeyboardEvent) {
   }
 }
 
-/* 封面：固定 116px。深色渐变 + 中心发光核，代替一张空占位图 */
+/* 封面：固定 116px。深色渐变 + 网格 + 发光核，代替一张空占位图。
+   三层叠起来（网格 / 光晕 / 首字），任何一层单独看都只是装饰，
+   合起来才表达「这是一个还没有封面图的待生产作品」。 */
 .cover {
   position: relative;
   height: 116px;
@@ -211,6 +234,19 @@ function onCardKey(e: KeyboardEvent) {
   overflow: hidden;
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(160deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
+}
+
+/* 网格底纹：24px 细线，给「空封面」一点材质，而不是一块死黑 */
+.cover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--neutral-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--neutral-line) 1px, transparent 1px);
+  background-size: 24px 24px;
+  opacity: 0.5;
+  pointer-events: none;
 }
 
 /* 发光核：径向渐变，只用令牌变量拼，不引入新色值 */
@@ -236,20 +272,21 @@ function onCardKey(e: KeyboardEvent) {
   );
 }
 
+/* 首字水印：降到 --border-strong 档（水印语义），不再靠它当唯一视觉焦点 */
 .cover-char {
   position: relative;
   font-family: var(--font-display);
-  font-size: 42px;
+  font-size: 38px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: -0.02em;
-  color: var(--text-tertiary);
-  text-shadow: 0 0 24px var(--brand-glow);
+  color: var(--border-strong);
+  text-shadow: 0 0 20px var(--brand-glow);
   user-select: none;
   transition: color var(--transition-base);
 }
 .project-card:hover .cover-char {
-  color: var(--text-primary);
+  color: var(--text-tertiary);
 }
 
 /* 画幅差异：竖屏更「冷」，横屏偏中性，方形偏暖 —— 靠渐变角度与底色档位区分 */
@@ -263,11 +300,12 @@ function onCardKey(e: KeyboardEvent) {
   background: linear-gradient(135deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
 
-/* 状态徽标：胶囊 + 圆点，只翻译后端 status（与筛选计数同源） */
+/* 状态徽标：胶囊 + 圆点，只翻译后端 status（与筛选计数同源）。
+   放右上角，把左上角让给画幅角标 —— 两者都压在同一侧会互相削弱。 */
 .status-badge {
   position: absolute;
   top: 10px;
-  left: 10px;
+  right: 10px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -278,6 +316,7 @@ function onCardKey(e: KeyboardEvent) {
   border-radius: var(--radius-pill);
   border: 1px solid transparent;
   white-space: nowrap;
+  backdrop-filter: blur(4px);
 }
 .status-badge::before {
   content: '';
@@ -305,9 +344,12 @@ function onCardKey(e: KeyboardEvent) {
 
 .cover-ratio {
   position: absolute;
-  right: 10px;
-  bottom: 10px;
-  padding: 0 7px;
+  left: 10px;
+  top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 0 6px;
   font-family: var(--font-mono);
   font-size: 10.5px;
   line-height: 18px;
@@ -316,6 +358,30 @@ function onCardKey(e: KeyboardEvent) {
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   letter-spacing: 0.2px;
+  backdrop-filter: blur(4px);
+}
+/* 画幅形状：用真实比例的小矩形表达 9:16 / 16:9 / 1:1，
+   比「9:16 竖屏」五个字更直接（横向封面 + 竖屏文字曾是语义矛盾）。 */
+.ratio-frame {
+  flex: none;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+  opacity: 0.75;
+}
+.ratio-frame.cover-9-16 {
+  width: 6px;
+  height: 10px;
+  background: transparent;
+}
+.ratio-frame.cover-16-9 {
+  width: 11px;
+  height: 6px;
+  background: transparent;
+}
+.ratio-frame.cover-1-1 {
+  width: 8px;
+  height: 8px;
+  background: transparent;
 }
 
 .card-body {
@@ -345,7 +411,7 @@ function onCardKey(e: KeyboardEvent) {
   text-overflow: ellipsis;
 }
 .more-btn {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   flex: none;
   /* 触摸目标不小于 28px（视觉仍是 tiny 图标按钮） */
   min-width: 28px;
@@ -435,7 +501,8 @@ function onCardKey(e: KeyboardEvent) {
 .progress-block.is-empty .progress-text {
   color: var(--text-tertiary);
 }
-/* 有镜头但 0%：轨道由 rail-color 提到 --muted-line，避免看起来像一条分隔线 */
+/* 有镜头但 0%：轨道由 rail-color 提到 --border-strong，避免在近黑卡面上完全消失
+   （原 --muted-line 在 --bg-panel 上实测几乎不可见，扫视时区分不出「未开始」与「0%」） */
 .progress-block.is-zero .progress-text {
   color: var(--text-tertiary);
 }

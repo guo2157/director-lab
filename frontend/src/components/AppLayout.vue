@@ -188,7 +188,9 @@ function goProjects() {
   width: 100%;
   max-width: 1440px;
   height: 52px;
-  padding: 0 var(--sp-2) 0 var(--sp-4);
+  /* 左右 padding 必须对称：grid 1fr auto 1fr 下不对称 padding 会把中列整体推偏
+     （实测 左16/右8 时导航中心比胶囊中心偏右 4px） */
+  padding: 0 var(--sp-4);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xl);
   background: var(--bg-panel);
