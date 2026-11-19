@@ -20,7 +20,7 @@ function valid(): boolean {
 
 <template>
   <div class="pane-toolbar">
-    <span class="pane-label">Markdown 剧本</span>
+    <span class="pane-label">正文</span>
     <div class="view-switch" role="tablist" aria-label="剧本视图">
       <button
         v-for="m in modes"

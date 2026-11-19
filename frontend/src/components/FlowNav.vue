@@ -78,71 +78,97 @@ function goStep(key: string) {
 
 <template>
   <nav class="flow-nav" aria-label="剧本阶段流程">
-    <template v-for="(s, i) in steps" :key="s.key">
-      <span v-if="i > 0" class="flow-sep" aria-hidden="true">/</span>
-      <button
-        type="button"
-        class="flow-step"
-        :class="{ active: activeKey === s.key, done: stepDone[s.key], disabled: !reachable(s.key) }"
-        :disabled="!reachable(s.key)"
-        :aria-current="activeKey === s.key ? 'step' : undefined"
-        @click="goStep(s.key)"
-      >
-        <span v-if="stepDone[s.key]" class="step-check" aria-hidden="true"><n-icon :component="Checkmark" :size="13" /></span>
-        {{ s.label }}
-      </button>
-    </template>
+    <button
+      v-for="s in steps"
+      :key="s.key"
+      type="button"
+      class="flow-step"
+      :class="{ active: activeKey === s.key, done: stepDone[s.key], blocked: !reachable(s.key) }"
+      :disabled="!reachable(s.key)"
+      :aria-current="activeKey === s.key ? 'page' : undefined"
+      :title="!reachable(s.key) ? '需先保存剧本版本才能进入解析' : undefined"
+      @click="goStep(s.key)"
+    >
+      <span v-if="stepDone[s.key]" class="step-check" aria-hidden="true">
+        <n-icon :component="Checkmark" :size="11" />
+      </span>
+      {{ s.label }}
+    </button>
   </nav>
 </template>
 
 <style scoped>
+/* 页面级切换：必须是页头最强的导航元素。
+   原实现是无边框裸文字 + 「/」分隔，读起来像面包屑，导致真正的换页入口
+   比下面的步骤条和视图切换都弱（层级倒挂）。
+   深色底上「轨道」不能靠明度差：--bg-sunken 在页底上只有 1.02:1，等于没画。
+   改用 --bg-panel 填充 + --border-strong 描边（1.57:1）才能看见容器边界。 */
 .flow-nav {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  color: var(--text-secondary);
-  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  flex-shrink: 0;
+  box-shadow: var(--card-sheen);
 }
-.flow-sep {
-  color: var(--text-tertiary);
-}
+
 .flow-step {
-  cursor: pointer;
-  padding: 2px 8px;
-  border: none;
-  background: none;
-  font: inherit;
-  border-radius: 6px;
-  transition: background 0.15s, color 0.15s;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  padding: 0 14px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
-.flow-step:hover:not(.disabled) {
-  background: var(--bg-elevated);
+
+.flow-step:hover:not(.blocked):not(.active) {
+  background: var(--overlay-hover);
   color: var(--text-primary);
 }
-.flow-step:focus-visible {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
-}
+
+/* 当前页：品牌渐变填充 + 深色文字。这是「我在哪一页」，必须一眼可见 */
 .flow-step.active {
-  color: var(--brand-primary);
+  background: var(--brand-gradient);
+  border-color: transparent;
+  color: var(--text-on-brand);
   font-weight: 600;
 }
-.flow-step.done {
-  color: var(--text-primary);
+
+.flow-step:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
-.flow-step.disabled {
-  color: var(--text-tertiary);
+
+/* 不可达：降到禁用档并去 cursor 暗示，避免用户以为能点 */
+.flow-step.blocked {
+  color: var(--text-disabled);
   cursor: not-allowed;
 }
-.step-check {
+
+/* 已完成：对勾用成功色；激活态里对勾跟随反色文字，不再额外着色 */
+.flow-step.done:not(.active) .step-check {
   color: var(--state-success);
-  font-weight: 700;
-  font-size: 16px;
-  line-height: 1;
-  margin-right: 2px;
+}
+.step-check {
+  display: inline-flex;
+  align-items: center;
+}
+
+@media (max-width: 768px) {
+  .flow-step {
+    padding: 0 10px;
+  }
 }
 </style>

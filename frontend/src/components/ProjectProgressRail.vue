@@ -113,7 +113,9 @@ function goStep(key: string) {
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--text-tertiary);
+  /* 原 --text-tertiary 在 --bg-sunken 上只有 6.65:1，但 12px 小字仍偏弱；
+     提到 --text-secondary 让它作为「栏目标题」站得住 */
+  color: var(--text-secondary);
 }
 
 /* 「当前阶段 xxx」：前缀用小号弱色标注，避免这行字被误读为可点的步骤项 */
@@ -227,6 +229,22 @@ function goStep(key: string) {
 
 .rail-step.is-done .step-label {
   color: var(--text-secondary);
+}
+
+/* 未到达的步骤（既非当前、也未完成）：明确降权。
+   原实现里「未开始」和「可点击但没去」是同一套灰，用户看不出哪些是真不能去。
+   做法：序号压到最弱档 + 文字降到 tertiary，与 is-done / is-active 形成三档。 */
+.rail-step:not(.is-done):not(.is-active) .step-index {
+  color: var(--text-disabled);
+  background: transparent;
+  border-color: var(--border-subtle);
+}
+.rail-step:not(.is-done):not(.is-active) .step-label {
+  color: var(--text-tertiary);
+}
+/* 未到达步骤的 hover 仍要有反馈（它们可以点，只是还没做） */
+.rail-step:not(.is-done):not(.is-active) .step-hit:hover .step-label {
+  color: var(--text-primary);
 }
 
 /* 当前步骤：soft 品牌底 + 左侧竖条 + 编号反色 —— 三重编码，深色底上单靠明度差不可读 */

@@ -976,8 +976,10 @@ async function copyRawReport() {
   <section class="parse-page">
     <header class="parse-header">
       <div class="parse-header-left">
-        <h1 class="visually-hidden">解析</h1>
-        <FlowNav :project-id="projectId" />
+        <div class="title-block">
+          <h1 class="detail-title">解析</h1>
+          <FlowNav :project-id="projectId" />
+        </div>
       </div>
       <div class="parse-header-actions">
         <NButton v-if="rawReportText" quaternary @click="showRawReport = true">
@@ -1351,6 +1353,21 @@ async function copyRawReport() {
   flex-shrink: 0;
 }
 .parse-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
+/* 页面标题：与作品列表页同档（无衬线特粗 + 负字距）。
+   原实现把 H1 写成 .visually-hidden，详情页在视觉上没有标题层级，
+   用户只能靠顶栏小字面包屑判断「我在哪一页」。
+   gap 用 8px：FlowNav 是有填充和描边的控件，2px 会让它贴死标题像副标题。 */
+.title-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.detail-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
 
 .parse-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .parse-body { display: flex; flex: 1; min-height: 0; min-width: 0; }

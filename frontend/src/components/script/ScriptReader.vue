@@ -84,7 +84,11 @@ function characters(value: string): string[] {
 .re-doc {
   max-width: 46em;
   margin: 0 auto;
-  padding: var(--sp-8) var(--sp-6) var(--sp-16);
+  /* 底部留白必须避开右下角固定的 AI 助手 FAB（bottom 24 + 高 38 = 62px 占位）。
+     原 sp-16（64px）在 reader 自己滚动的场景下刚好被 FAB 压住最后 2 行
+     （elementFromPoint 实测命中 .re-doc 与 .ln.is-para）。
+     改成 96px 留出滚到底后的安全区。 */
+  padding: var(--sp-8) var(--sp-6) 96px;
 }
 .re-doc-meta {
   margin: 0 0 var(--sp-4);
