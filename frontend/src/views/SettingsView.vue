@@ -2,6 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import WorkflowTestPanel from '@/components/workflow/WorkflowTestPanel.vue'
+import ProjectWorkflowConfigPanel from '@/components/ProjectWorkflowConfigPanel.vue'
 import {
   NCard, NButton, NSpin, NInput, NInputNumber, NSelect, NSwitch,
   NTag, NEmpty, NUpload, NTooltip, NModal, NPopconfirm, NIcon, useMessage,
@@ -15,6 +16,7 @@ import {
 import {
   listWorkflows, uploadWorkflow, validateWorkflow,
 } from '@/api/workflows'
+import { listProjects } from '@/api/projects'
 import type { LlmInstance, ComfyUIInstance, ComfyUIInstanceTestResult } from '@/types/compose'
 import type { Workflow, WorkflowType } from '@/types/asset'
 
@@ -226,6 +228,18 @@ const fetchLlmModels = async (inst: LlmInstance) => {
 }
 
 // --- 工作流管理 ---
+/**
+ * 项目默认工作流：按项目覆盖各生成槽位（公共资产图/分镜图/视频/配音/BGM/音效）。
+ * 入口统一放在本页，剧本页不再承载配置（方案 §7.3 / §7.12）。
+ */
+const workflowProjectId = ref<string | null>(null)
+const projectsForWorkflowQuery = useQuery({
+  queryKey: ['projects', 'workflow-config-options'],
+  queryFn: () => listProjects({ page: 1, page_size: 100 }),
+})
+const workflowProjectOptions = computed(() =>
+  (projectsForWorkflowQuery.data.value?.items ?? []).map((p) => ({ label: p.name, value: p.id })),
+)
 const workflowTypeFilter = ref<WorkflowType | ''>('')
 const workflowTypeOptions: Array<{ label: string; value: WorkflowType | '' }> = [
   { label: '全部', value: '' },
@@ -604,6 +618,30 @@ const downloadWorkflow = (wf: Workflow) => {
               <n-button quaternary @click="showUploadModal = false">取消</n-button>
             </div>
           </n-modal>
+
+          <!-- 项目默认工作流：原在剧本页，按方案 §7.3 / §7.12 统一到工作流管理 -->
+          <n-card class="settings-card" :bordered="false">
+            <div class="page-header">
+              <h3 class="page-title">项目默认工作流</h3>
+              <p class="page-subtitle">按项目覆盖各生成环节使用的默认工作流；留空表示用系统默认。只影响后续生成，不会重跑已有任务。</p>
+            </div>
+            <n-select
+              v-model:value="workflowProjectId"
+              :options="workflowProjectOptions"
+              placeholder="选择要配置的项目"
+              clearable
+              filterable
+              style="max-width: 320px"
+            />
+            <ProjectWorkflowConfigPanel
+              v-if="workflowProjectId"
+              :project-id="workflowProjectId"
+              style="margin-top: 16px"
+            />
+            <p v-else class="page-subtitle" style="margin-top: 12px">
+              选择项目后即可配置该项目在各环节使用的默认工作流。
+            </p>
+          </n-card>
         </template>
 
         <!-- About -->

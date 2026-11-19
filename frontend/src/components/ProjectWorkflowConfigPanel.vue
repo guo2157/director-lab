@@ -184,7 +184,7 @@ const loadError = computed(() => {
             {{ selectionWarning(slot) }}
           </NAlert>
           <div v-else-if="!candidatesFor(slot).length" class="slot-empty">
-            还没有该类型的工作流，请先到「设置 → 工作流」上传
+            该槽位暂无可用工作流，需先上传并对应该类型的工作流
           </div>
         </div>
       </div>

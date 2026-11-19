@@ -13,7 +13,6 @@ import {
 import type { ScriptVersion } from '@/types/script'
 import { useScriptFlowStore } from '@/stores/scriptFlow'
 import StyleConfigPanel from '@/components/StyleConfigPanel.vue'
-import ProjectWorkflowConfigPanel from '@/components/ProjectWorkflowConfigPanel.vue'
 import FlowNav from '@/components/FlowNav.vue'
 import ScriptEditor from '@/components/script/ScriptEditor.vue'
 import ScriptToolbar from '@/components/script/ScriptToolbar.vue'
@@ -83,7 +82,6 @@ watch(
    项目名由 AppLayout 面包屑统一持有（同一个 ['project', id] 缓存），此页不再重复取用 */
 /* ---------- 创作风格配置（项目级唯一基线） ---------- */
 const showStylePanel = ref(false)
-const showWorkflowPanel = ref(false)
 
 /* ---------- 编辑器 ---------- */
 const text = ref('')
@@ -318,9 +316,6 @@ watch(
         <NButton size="small" quaternary @click="showStylePanel = !showStylePanel">
           {{ showStylePanel ? '收起风格配置' : '创作风格配置' }}
         </NButton>
-        <NButton size="small" quaternary @click="showWorkflowPanel = !showWorkflowPanel">
-          {{ showWorkflowPanel ? '收起工作流配置' : '工作流配置' }}
-        </NButton>
         <NButton
           size="small"
           :loading="normalizing"
@@ -361,9 +356,7 @@ watch(
     <div v-if="showStylePanel" class="style-drawer">
       <StyleConfigPanel :project-id="projectId" />
     </div>
-    <div v-if="showWorkflowPanel" class="style-drawer">
-      <ProjectWorkflowConfigPanel :project-id="projectId" />
-    </div>
+    <!-- 项目默认工作流已移到「设置 → 工作流」，剧本页不再重复承载配置入口 -->
     <div class="script-body">
       <ScriptToolbar
         :view-mode="viewMode"
