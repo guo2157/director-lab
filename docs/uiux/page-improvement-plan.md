@@ -334,3 +334,73 @@ sudo -n chown -R ubuntu:ubuntu frontend/src frontend/dist
 
 **规则**：任何写入失败先查属主，不要当成工具 bug 重试；改完立刻 commit，避免被下一次 root 写入覆盖。
 本轮 `git checkout -- <file>` 还误删了同文件里未提交的复制按钮改动——回退应精确到片段，不要整文件 checkout。
+
+---
+
+## 11. 第五轮（2026-11-19）：数据口径 + 内容优先
+
+> 完整记录见 `round5-data-and-content.md`。本节只列状态。
+
+### 11.1 解析页 `/project/:id/parse`
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 分镜数三处矛盾（26 / 0 / 3） | ✅ | 根因二连：①只查 `job_type='parse'`，漏掉 `script_agent`；②`find(最近一次成功)` 取到的是分批解析的最后一批。改为并行查两种类型 + 取「覆盖最完整」的结果 |
+| 集卡片分镜数语义 | ✅ | `episode_parse_record.asset_count` 是解析时的快照，不随后续重解析更新。改为以 `scenes[].shots[]` 聚合为唯一口径，无明细时回退快照 |
+| 概览条与分组导航重复计数 | ✅ | 6 项中 4 项重复。概览条收敛为「集」+「待处理」，其余 5 项只由分组导航承担 |
+| 台词数 | ✅ | 从 0 变为真实的 21（同被 job_type 卡住） |
+
+### 11.2 分镜看板 `/project/:id/storyboard`
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 卡片下方 66px 固定空白 | ✅ | `.shot-card` 写死 320px，内容只占 254px。改 `height: auto`，实测留白 66 → 2px |
+| 缩略图裁掉构图 | ✅ | 固定 200px 高 → `aspect-ratio` 跟随项目画幅，实测 0.563 = 精确 9:16 |
+| 卡片过高（450px） | ✅ | 卡片宽度随画幅自适应（竖屏 168px），整卡降到 357px，首行完整可见 5 → 6 张 |
+| 横向滚动无提示 | ✅ | **渐隐 mask 是无效方案**（近黑底淡出成透明＝还是黑的，1920/1366 截图均证实）。改显式「还有更多 →」按钮，仅溢出时出现，滚到底自动隐藏 |
+| 溢出检测 watch 不触发 | ✅ | `shotsMap` 只改属性不改引用，`deep: false` 时永不触发。改 `deep: true` + ResizeObserver |
+| 点击提示滚不到底 | ✅ | 固定滚 3 卡会停在距底 10px 处，按钮不消失。改 `Math.min(step, remaining)` |
+
+### 11.3 作品列表 `/`
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 封面是占位网格，无创作内容可读 | ✅ | 新增 `useProjectCovers.ts`，优先级 `keyframe > scene > character`，只读现有 `/api/assets` 接口 |
+| 竖屏图被裁成横带 | ✅ | 容器 168px 高（2:1）→ `aspect-ratio: 4/3` + `object-position: center 22%` |
+| 占位卡与有图卡高矮不齐 | ✅ | 实测 116px vs 251px。占位态统一 4:3 |
+| 库里混着 `[MOCK]` 测试图 | ✅ | 1340 字节纯色图，DB 无可判别字段。canvas 24×24 采样统计颜色数，阈值 28（mock 实测 19，真实 58–230） |
+
+### 11.4 五档视口验收（首次补齐）
+
+此前 `acceptance-report.md` 明确记录「1280/1024/768 未截图，属未完成项」。本轮补齐并超出：
+
+```
+1920×1080 / 1440×900 / 1366×768 / 768×1024 / 390×844 × 4 页 = 20 张
+全部 PASS：零横向溢出、零按钮裁切、卡片留白稳定 2px
+栅格正确降级：4 → 4 → 4 → 2 → 1 列
+```
+
+截图：`docs/uiux/screenshots/round5/`，量测数据 `_measure.json`。
+脚本：`frontend/scripts/uiux-shots.mjs`（`node scripts/uiux-shots.mjs [baseUrl] [outDir]`）。
+
+### 11.5 工程侧（第三次复现同类问题）
+
+**root 属主**：`docs/uiux/screenshots/`、`docs/plan/` 再次是 root 属主，创建目录 `PermissionError`。
+`page-improvement-plan.md` §7 与 §10.4 已记录两次，本次是第三次。**建议在 CI 或 pre-commit 加一条
+`find frontend/src docs -user root` 检查**，而不是每次靠人工发现。
+
+**playwright 装不上**：`npm i -D playwright` 报 ECONNRESET（registry 是 `mirrors.tencentyun.com`）。
+改 `npm i -D playwright-core --registry=https://registry.npmmirror.com` 3 秒成功，
+配合 `channel: 'chrome'` 复用系统 `/usr/bin/google-chrome`，零浏览器下载。
+
+**颜色门禁连注释也扫**：`mask-image` 写 `#000` 被拦（正确），把注释改成「而非 #000 字面量」后
+**仍被拦** —— 脚本扫全文而非 CSS 值。注释里也不能出现 hex。
+
+### 11.6 仍未做
+
+| 项 | 说明 |
+|---|---|
+| 代码提交 | 全部改动仍在工作区，未 commit |
+| 其余页面视觉复核 | 本轮只覆盖 首页 / 解析 / 资产库 / 分镜看板 |
+| 资产库角色图裁切 | 视觉复核提到「人物占幅偏小、白底对比过硬」，属生成内容问题，未改容器 |
+| Naive UI 库层面 a11y | `n-card` 双层 heading、`n-collapse` 键盘不可操作，见 §8.3 |

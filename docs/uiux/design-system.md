@@ -151,6 +151,29 @@ npm run check:contrast:strict
 
 ## 5. 已知差距（未做）
 
+> **2026-11-19 第五轮补充**：新增两条约定 —— 见 §5.1 封面策略、§5.2 横向溢出提示。
+> 详见 `round5-data-and-content.md`。
+
+### 5.1 作品封面必须用真实资产图，占位态与有图态同高
+
+`components/projects/useProjectCovers.ts` 从项目已有资产里挑封面，优先级
+`keyframe > scene > character`，同类型取版本最新。三条硬约束：
+
+1. **不伪造图片**：项目没有任何可用图时回退占位封面（发光核 + 首字水印 + 网格）。
+2. **占位态与有图态必须同比例**（当前统一 4:3）。实测占位 116px / 有图 251px 时，
+   同一行卡片高矮不齐，矮卡被拉伸且内容区多出空白。
+3. **必须过滤 mock 测试图**：库里存在 `[MOCK] job xxx out cover` 这类 1340 字节的
+   纯色带边框图，DB 无可判别字段。用 canvas 24×24 采样统计不同颜色数，
+   阈值 28（mock 实测 19，真实图 58–230）。
+
+### 5.2 横向溢出提示不能用渐隐 mask
+
+近黑背景（`--bg-base`）下，`mask-image` 把内容淡出成透明 = 还是黑的，
+**视觉上完全不可见**（1920/1366 截图均证实）。必须用显式可点击提示。
+
+实现要点：`watch` 要 `deep: true`（`shotsMap` 只改属性不改引用）、
+溢出判定留 2px 容差、滚动量 `Math.min(step, remaining)` 才能精确到底。
+
 | 差距 | 影响 | 建议 |
 |---|---|---|
 | Naive UI `themeOverrides` 部分组件未完全对齐（`n-data-table` 行高、`n-tag` 圆角） | 表格与标签存在细微不一致 | 在 `styles/tokens.ts` 补齐，勿在页面覆盖 |
