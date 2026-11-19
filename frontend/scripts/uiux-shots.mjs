@@ -48,7 +48,9 @@ const PAGES = [
   { key: 'compose', path: `/project/${PRJ}/compose`, ready: '.compose-page' },
   { key: 'series', path: '/series', ready: '.series-grid' },
   { key: 'series-detail', path: `/series/${SRS}`, ready: '.series-detail-page' },
-  { key: 'jobs', path: '/jobs', ready: '.jobs-page' },
+  // 任务中心已下线：/jobs 保留为到作品列表的重定向（旧书签不白屏），
+  // 因此这里按作品页的选择器验收，等于顺带验证重定向链路可用。
+  { key: 'jobs-redirect', path: '/jobs', ready: '.project-card' },
   { key: 'settings', path: '/settings', ready: '.settings-page' },
   { key: 'director', path: '/director', ready: '.console-page' },
 ]

@@ -434,10 +434,10 @@ function statusTagClass(status: string) {
 
 <template>
   <div class="compose-page">
-    <header class="page-header">
-      <div class="header-left">
-        <h1 class="page-title">合成与导出</h1>
-      </div>
+    <!-- 左侧「制作流程」栏已高亮 05 合成与导出，页内不再重复同名大标题。
+         页头保留为单行工具条：右侧是画幅/项目标识与回退入口。 -->
+    <h1 class="visually-hidden">合成与导出</h1>
+    <header class="compose-bar">
       <n-space :size="8" align="center">
         <n-tag size="small" round :bordered="false">
           {{ aspectRatio }} · {{ projectQuery.data.value?.name ?? '当前项目' }}
@@ -691,7 +691,14 @@ function statusTagClass(status: string) {
   min-height: calc(100vh - var(--app-header-height, 56px));
   box-sizing: border-box;
 }
-.page-header { margin: 0 0 var(--sp-4); }
+/* 页头退化为单行工具条：只有画幅标识与回退入口，右对齐 */
+.compose-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 0 0 var(--sp-4);
+}
+
 .page-alert { margin-bottom: var(--sp-4); }
 
 .compose-grid {

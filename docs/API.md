@@ -443,6 +443,7 @@
 | params | object | 否 | 不得包含结构参数 |
 | generation_mode | string | 否 | 枚举 text_only / image_to_video / reference_guided；缺省按 target 与项目设置确定，并在响应/任务快照中返回最终模式 |
 | use_reference | bool | 否 | 兼容字段；新接口优先使用 generation_mode。reference_guided 下缺少必需参考图时返回 422，不得静默降级；显式确认降级后才可改为 text_only |
+| idempotency_key | string | 否 | 提交级幂等键，最长 64 字符。前端生成唯一标识（如 UUID），重复提交同一键时直接复用已存在的未终态任务，不重复创建。覆盖全部生成端点（单镜/重做/批量/资产预检）。D13 |
 
 返回 202 与 job 对象，并返回/持久化 `effective_inputs`（实际注入的资产 ID 与版本、工作流版本、参数）。一致性模式下锚定资产存在但未锁定时返回 409；缺少必需参考图时返回 422 `workflow_media_missing` 或 `no_matching_workflow`。单镜、批量和重做共享同一输入解析器。
 
@@ -471,6 +472,15 @@
 - 已存在的 keyframe/clip 产物按状态跳过，不重复生成
 
 **POST /api/shots/{id}/regenerate**：重做单镜，旧资产转为历史版本，不物理删除。@引用注入（D-16）：keyframe/clip 重做时同样解析提示词中的 @角色/@场景 携带参考图，与单镜生成行为一致。
+
+### 幂等键（D13）
+
+全部生成端点（`POST /api/shots/{id}/generate`、`POST /api/shots/{id}/regenerate`、`POST /api/shots/{id}/regenerate-clip`、`POST /api/characters/{id}/generate`、`POST /api/props/{id}/generate`、`POST /api/scenes/{id}/generate-baseline`、`POST /api/scenes/{id}/generate`、`POST /api/projects/{id}/generate`）均支持请求体中的可选字段 `idempotency_key`。
+
+- **语义**：提交级幂等，同键重复请求直接复用已存在的未终态（queued/running）任务，返回已有 job 而非创建新任务。用于防止前端重复点击、网络重试等场景产生重复任务。
+- **存储**：写入 `job.request_key` 列（VARCHAR(64)），通过条件唯一索引 `ux_job_request_key`（WHERE request_key IS NOT NULL）保唯一。
+- **批量端点特殊处理**：`/scenes/{id}/generate` 与 `/projects/{id}/generate` 的循环内每镜生成独立幂等键，规则为 `{idempotency_key}/{shot_id}`，保证同批量内各镜头可独立去重。
+- **注意事项**：`request_key` 由前端生成（推荐 UUID），不得使用业务语义字段拼接；无 `idempotency_key` 时正常创建新任务，不受影响。
 
 ### 同一镜头多版本 job 的有效性判定
 

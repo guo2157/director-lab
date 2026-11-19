@@ -45,19 +45,31 @@ _SLOT_SEMANTIC = {
 
 # workflow_type + 槽位/音频输入 → 细分生成模式（AGENTS.md #6：细分类型只放这里）
 def _generation_modes(workflow_type: str, has_image_slots: bool, has_audio_slots: bool,
-                      has_first_frame: bool, has_last_frame: bool) -> list[str]:
+                      has_first_frame: bool, has_last_frame: bool,
+                      has_h3_reference_video: bool = False) -> list[str]:
+    """细分生成模式。
+
+    图片分类以真实图片输入槽位为准：存在图片输入的图生图工作流不再声明
+    text_to_image，否则设置页会把图生图错误归入纯文生图分类。
+    工作流名称与描述一律不参与判断。
+    """
     modes: list[str] = []
     if workflow_type == "image":
-        modes.append("text_to_image")
         if has_image_slots:
             modes.append("image_to_image")
             modes.append("multi_reference") if _multi(has_image_slots) else None
+        else:
+            modes.append("text_to_image")
     elif workflow_type == "video":
         modes.append("text_to_video")
         if has_image_slots:
             modes.append("image_to_video")
             modes.append("reference_to_video")
             modes.append("multi_reference")
+        # H3 多参考图视频协议：计算图里存在 MiniMaxH3ReferenceToVideo 才声明，
+        # 分镜看板依赖该标记过滤，不按工作流名称判断
+        if has_h3_reference_video:
+            modes.append("multi_reference_to_video")
         if has_first_frame:
             modes.append("first_last_frame_to_video")
         if has_audio_slots:
@@ -73,6 +85,23 @@ def _generation_modes(workflow_type: str, has_image_slots: bool, has_audio_slots
 
 def _multi(has_slots: bool) -> bool:
     return has_slots
+
+
+def _has_h3_reference_video(definition: dict) -> bool:
+    """是否注册了 H3 多参考图视频节点（MiniMaxH3ReferenceToVideo）。
+
+    这是能否接分镜多参考图视频协议的唯一可信依据：普通文生视频、首尾帧、
+    单参考图图生视频都不含该节点，因此不会被误放进分镜看板。
+    """
+    for node in (definition or {}).values():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        if class_type == "MiniMaxH3ReferenceToVideo" or class_type.endswith(
+            ":MiniMaxH3ReferenceToVideo"
+        ):
+            return True
+    return False
 
 
 def _has_native_audio(definition: dict) -> bool:
@@ -210,6 +239,9 @@ def normalize(workflow_type: str, definition: dict,
     )
     frame_range = caps.get("frame_count_range")
     tier = caps.get("tier")
+    has_h3_reference_video = (
+        _has_h3_reference_video(definition) if workflow_type == "video" else False
+    )
 
     return {
         # 顶层 reference_slots（仅图片槽）：向后兼容 regeneration 等旧服务，
@@ -222,6 +254,7 @@ def normalize(workflow_type: str, definition: dict,
             has_audio_slots=bool(audio_slots),
             has_first_frame="first_frame" in param_names,
             has_last_frame=bool({"end_frame", "last_frame"} & param_names),
+            has_h3_reference_video=has_h3_reference_video,
         ),
         "modalities": {
             "image_input": bool(image_slots),
@@ -261,6 +294,7 @@ def normalize(workflow_type: str, definition: dict,
             "tier": tier,
             "local_only": caps.get("local_only"),
             "cost": caps.get("cost"),
+            "h3_reference_video": has_h3_reference_video,
             "schema_errors": list(schema.get("errors") or []),
         },
     }

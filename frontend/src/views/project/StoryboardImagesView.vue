@@ -2,10 +2,10 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
-import { NButton, NProgress, useMessage } from 'naive-ui'
+import { NButton, NIcon, NProgress, useMessage } from 'naive-ui'
+import { ArrowForwardOutline } from '@vicons/ionicons5'
 import { listScenes, listSceneShots, confirmShotKeyframe, unconfirmShotKeyframe } from '@/api/script'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
-import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { lockAsset, unlockAsset, replaceAsset } from '@/api/assets'
 import { getProject } from '@/api/projects'
@@ -14,7 +14,7 @@ import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Shot } from '@/types/script'
 import type { KeyframeGenerationJob, KeyframeGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
-import PageHeader from '@/components/ui/PageHeader.vue'
+import StageCard from '@/components/ui/StageCard.vue'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import SkeletonList from '@/components/ui/SkeletonList.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
@@ -22,7 +22,6 @@ import ErrorRetry from '@/components/ui/ErrorRetry.vue'
 import ShotCard from '@/components/storyboard-images/ShotCard.vue'
 import BatchToolbar from '@/components/storyboard-images/BatchToolbar.vue'
 import ShotDetailDialog from '@/components/storyboard-images/ShotDetailDialog.vue'
-import { matchFilter, type ShotFilter } from '@/components/storyboard-images/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -142,11 +141,6 @@ const failedByShot = computed(() => {
   return map
 })
 
-/** 在途任务涉及的场景名（用于提示「哪些场景正在出图」） */
-const inflightSceneNames = computed(
-  () => [...new Set((keyframeProgress.data.value?.inflight ?? []).map((j) => j.scene_title).filter(Boolean))] as string[],
-)
-
 /** 顶部进度条数值：已出图 / 全部镜头 */
 const progressPercent = computed(() => {
   const total = allShots.value.length
@@ -154,33 +148,20 @@ const progressPercent = computed(() => {
   return Math.round((keyframeShots.value.length / total) * 100)
 })
 
-const genHeadline = computed(() => {
-  const p = keyframeProgress.data.value
-  const total = allShots.value.length
-  const done = keyframeShots.value.length
-  const inflight = p?.inflight_count ?? 0
-  if (inflight > 0) {
-    const scenes = inflightSceneNames.value.slice(0, 3).join('、')
-    return `正在生成 ${inflight} 张分镜图${scenes ? `（${scenes}${inflightSceneNames.value.length > 3 ? ' 等' : ''}）` : ''}`
-  }
-  if (total > 0 && done === total) return '全部分镜图已生成完成'
-  if (!total) return '暂无镜头'
-  return `还有 ${total - done} 张分镜图未生成`
-})
-
-const headerSubtitle = computed(
-  () =>
-    `${genHeadline.value} · 分镜图 ${keyframeShots.value.length}/${allShots.value.length}（${progressPercent.value}%）· 已确认 ${confirmedShots.value.length}`,
+/** 顶部进度数字：已出图 / 全部镜头（百分比）。状态句已删除——
+ *  「正在生成 N 张」「已全部生成完成」这类叙述与数字、进度条、卡片状态标签重复。 */
+const progressNums = computed(
+  () => `${keyframeShots.value.length}/${allShots.value.length}（${progressPercent.value}%）`,
 )
 
+/** 审核标签只在未通过时出现：通过后它是已完成的事，标签本身没有信息量 */
 const reviewTag = computed(() => {
-  if (reviewApproved.value) return { kind: 'succeeded' as const, label: '审核已通过' }
   if (reviewRejected.value) return { kind: 'failed' as const, label: '审核已驳回' }
   return { kind: 'pending' as const, label: '待审核' }
 })
 
+/** 仅在审核未通过时渲染（模板有 v-if 守卫），因此不再需要「已通过」分支 */
 const gateText = computed(() => {
-  if (reviewApproved.value) return '公共资产已通过人工审核，可生成分镜图；分镜图逐镜确认无误后进入分镜看板生成视频'
   if (reviewRejected.value) return '公共资产审核被驳回：请返回资产库修改或替换资产后重新提交审核'
   return '公共资产尚未通过人工审核：请先在资产库完成审核，才能生成分镜图'
 })
@@ -227,9 +208,11 @@ void keyframeProgress.bootstrap()
 const pendingShotId = ref('')
 
 /**
- * 本页出图工作流（P5-c）：缺省 null 时后端按能力/默认匹配；
- * 选中后单张与批量都带上 workflow_id，参数仍由后端 Schema 编译，前端不碰节点。
- * 只列 image 类型，能力标签由 /capabilities 提供（不按名称猜）。
+ * 本页出图工作流（storyboard_image 槽位）。
+ * 候选由后端 /workflows/candidates 按真实能力过滤：必须能接多张参考图
+ * （角色 / 场景 / 道具），纯文生图不会进入候选。
+ * 选择器位于批量生成按钮左侧，未选择时自动落到默认工作流；
+ * 单张、批量、重新生成、失败重试共用这一份选择，不再有隐式按能力匹配。
  */
 const generateWorkflowId = ref<string | undefined>(undefined)
 
@@ -284,7 +267,12 @@ function refreshAll() {
 }
 
 const batchMutation = useMutation({
-  mutationFn: (ids: string[]) => generateProjectShots(projectId.value, { shot_ids: ids, target: 'keyframe' }),
+  mutationFn: (ids: string[]) =>
+    generateProjectShots(projectId.value, {
+      shot_ids: ids,
+      target: 'keyframe',
+      workflow_id: generateWorkflowId.value,
+    }),
   onSuccess: async (res: any) => {
     message.success(`已提交 ${res?.count ?? 0} 个分镜图任务，正在生成（进度见顶部进度条）`)
     await trackAfterSubmit()
@@ -445,16 +433,9 @@ async function handleBatchConfirm() {
   refreshAll()
 }
 
-// --- 状态筛选与网格分组 ---
-const filter = ref<ShotFilter>('all')
-const filterCounts = computed<Record<ShotFilter, number>>(() => ({
-  all: allShots.value.length,
-  done: confirmedShots.value.length,
-  pending: keyframeShots.value.length - confirmedShots.value.length,
-  failed: failedByShot.value.size,
-}))
-
-/** 场景分组：组内按全片镜号顺序，筛选后为空的场景整组隐藏 */
+// --- 网格分组 ---
+/** 场景分组：组内按全片镜号顺序。状态筛选 chips 已删除，
+ *  所有镜头始终全量展示——进度卡的数字与卡片自身的状态标签已足够定位。 */
 const sceneGroups = computed(() =>
   [...(scenesQuery.data.value?.items ?? [])]
     .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
@@ -463,14 +444,6 @@ const sceneGroups = computed(() =>
       episode: scene.episodes?.[0] ?? 1,
       shots: [...(shotsMap.value[scene.id] ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)),
     })),
-)
-const filteredGroups = computed(() =>
-  sceneGroups.value
-    .map((g) => ({
-      ...g,
-      shots: g.shots.filter((s) => matchFilter(filter.value, s, { failed: failedByShot.value.has(s.id) })),
-    }))
-    .filter((g) => g.shots.length > 0),
 )
 
 /** 场景列表（详情弹窗需要场景名与基准图用于推导参考图） */
@@ -499,96 +472,86 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 
 <template>
   <div class="page sb-images-page">
-    <PageHeader eyebrow="分镜 · 逐镜出图" title="分镜图" :subtitle="headerSubtitle">
-      <template #status>
-        <StatusTag :status="reviewTag.kind" :label="reviewTag.label" />
+    <!-- 左侧「制作流程」栏已高亮 03 分镜图，页内不再重复同名大标题。
+         审核状态与「去分镜看板」已并入下方进度卡的右端，页头不再单独占一行。 -->
+    <h1 class="visually-hidden">分镜图</h1>
+
+    <input ref="fileInputRef" type="file" accept="image/*" class="hidden-file" @change="onReplaceFileChange" />
+
+    <!-- 卡一：执行进度。只留数字 + 进度条 + 在途/失败状态，
+         状态句（正在生成 N 张 / 已全部生成完成）与审核通过标签已删除：
+         数字与进度条已经回答「做到哪了」，通过后的审核标签是已完成的事。
+         正在生成的镜头明细并入本卡第二行，不再单独占一条横带。 -->
+    <StageCard label="执行进度">
+      <span class="gen-nums">{{ progressNums }}</span>
+      <n-progress
+        class="gen-bar"
+        type="line"
+        :percentage="progressPercent"
+        :height="6"
+        :border-radius="3"
+        :show-indicator="false"
+        :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success)' : 'var(--brand-primary)'"
+        rail-color="var(--border-subtle)"
+      />
+      <StatusTag v-if="!reviewApproved" :status="reviewTag.kind" :label="reviewTag.label" />
+      <span v-if="keyframeProgress.data.value?.inflight_queued" class="gen-state queued">
+        排队 {{ keyframeProgress.data.value.inflight_queued }}
+      </span>
+      <span v-if="keyframeProgress.data.value?.inflight_running" class="gen-state running">
+        生成中 {{ keyframeProgress.data.value.inflight_running }}
+      </span>
+      <span v-if="failedByShot.size" class="gen-state fail">
+        最近失败 {{ failedByShot.size }} 张
+        <n-button size="tiny" type="warning" :loading="retryingFailed" @click="retryFailedShots">重试</n-button>
+      </span>
+      <span v-if="keyframeProgress.error.value" class="gen-state fail">{{ keyframeProgress.error.value }}</span>
+
+      <template #meta>
+        <!-- 正在生成的镜头明细：场景 + 镜号 + 百分比 -->
+        <div v-if="keyframeProgress.data.value?.inflight?.length" class="gen-inflight">
+          <span v-for="job in keyframeProgress.data.value.inflight" :key="job.job_id" class="gen-inflight-item">
+            <span class="gen-inflight-name">{{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}</span>
+            <span class="gen-inflight-state" :class="job.status">
+              {{ job.status === 'running' ? (job.progress != null ? `生成中 ${job.progress}%` : '生成中') : job.status === 'queued' ? '排队中' : '提交确认中' }}
+            </span>
+          </span>
+        </div>
+        <!-- 审核未通过时，阻断原因放在进度卡第二行：它与「做到哪了」同属状态陈述 -->
+        <span v-if="!reviewApproved" class="gate-text">{{ gateText }}</span>
       </template>
+
       <template #actions>
+        <n-button v-if="!reviewApproved" size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">
+          去资产库
+        </n-button>
+        <n-button size="small" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
+          刷新进度
+        </n-button>
+        <n-button size="small" quaternary @click="refreshAll">刷新镜头</n-button>
         <n-button
+          size="small"
           type="primary"
           :disabled="!allConfirmed"
           :title="allConfirmed ? '进入分镜看板生成视频' : '需先逐镜确认全部分镜图'"
           @click="router.push(`/project/${projectId}/storyboard`)"
         >
-          去分镜看板 →
+          去分镜看板 <n-icon :component="ArrowForwardOutline" :size="14" />
         </n-button>
       </template>
-    </PageHeader>
+    </StageCard>
 
-    <input ref="fileInputRef" type="file" accept="image/*" class="hidden-file" @change="onReplaceFileChange" />
-
-    <!-- 生成总体进度：全片 X/Y、正在生成哪几镜、失败项 -->
-    <section class="gen-strip">
-      <div class="gen-line">
-        <n-progress
-          class="gen-bar"
-          type="line"
-          :percentage="progressPercent"
-          :height="6"
-          :border-radius="3"
-          :show-indicator="false"
-          :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success)' : 'var(--brand-primary)'"
-          rail-color="var(--border-subtle)"
-        />
-        <span v-if="keyframeProgress.data.value?.inflight_queued" class="gen-state queued">
-          排队 {{ keyframeProgress.data.value.inflight_queued }}
-        </span>
-        <span v-if="keyframeProgress.data.value?.inflight_running" class="gen-state running">
-          生成中 {{ keyframeProgress.data.value.inflight_running }}
-        </span>
-        <span v-if="failedByShot.size" class="gen-state fail">
-          最近失败 {{ failedByShot.size }} 张
-          <n-button size="tiny" type="warning" :loading="retryingFailed" @click="retryFailedShots">重试</n-button>
-        </span>
-        <span v-if="keyframeProgress.error.value" class="gen-state fail">{{ keyframeProgress.error.value }}</span>
-        <span class="gen-spacer" />
-        <!-- 出图工作流与进度条同一行：两者都是「这一批怎么出图」的控制项，
-             拆成两块各占 28~48px 纯属浪费首屏（实测省下 36px） -->
-        <span class="gen-wf">
-          <span class="gen-wf-label">出图工作流</span>
-          <WorkflowSelector
-            v-model="generateWorkflowId"
-            workflow-type="image"
-            size="small"
-            placeholder="按能力自动匹配"
-          />
-        </span>
-        <n-button size="tiny" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
-          刷新进度
-        </n-button>
-        <n-button size="tiny" quaternary @click="refreshAll">刷新镜头</n-button>
-      </div>
-      <!-- 正在生成的镜头明细：场景 + 镜号 + 百分比 -->
-      <div v-if="keyframeProgress.data.value?.inflight?.length" class="gen-inflight">
-        <span v-for="job in keyframeProgress.data.value.inflight" :key="job.job_id" class="gen-inflight-item">
-          <span class="gen-inflight-name">{{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}</span>
-          <span class="gen-inflight-state" :class="job.status">
-            {{ job.status === 'running' ? (job.progress != null ? `生成中 ${job.progress}%` : '生成中') : job.status === 'queued' ? '排队中' : '提交确认中' }}
-          </span>
-        </span>
-      </div>
-    </section>
-
-    <!-- 审核闸门：未通过时不能生成，按钮直接指向资产库。
-         通过后降级为单行细条 —— 它此时只是在陈述一件已经完成的事，
-         不该和「未通过」这种阻断态占用同样的垂直空间（实测吃掉 40px）。 -->
-    <section class="gate-banner" :class="{ ok: reviewApproved, bad: reviewRejected }">
-      <span class="gate-text">{{ gateText }}</span>
-      <n-button v-if="!reviewApproved" size="tiny" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
-    </section>
-
-    <!-- 批量操作：吸附在顶部，滚动 26 个镜头时也不跑掉 -->
+    <!-- 卡二：批量出图（工作流 / 全选 / 状态筛选 / 批量生成与审核） -->
     <BatchToolbar
       :total="allShots.length"
       :selected="selectedList.length"
       :all-selected="allSelected"
-      :filter="filter"
-      :counts="filterCounts"
       :can-generate="reviewApproved"
       :batch-loading="batchMutation.isPending.value"
       :confirm-loading="batchConfirming"
       :inflight-count="keyframeProgress.data.value?.inflight_count ?? 0"
-      @update:filter="(v) => (filter = v)"
+      :workflow-id="generateWorkflowId"
+      @update:workflow-id="(v: string | undefined) => (generateWorkflowId = v)"
       @toggle-all="toggleSelectAll"
       @generate="handleBatchGenerate"
       @confirm="handleBatchConfirm"
@@ -611,17 +574,8 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       @action="router.push(`/project/${projectId}/parse`)"
     />
 
-    <EmptyState
-      v-else-if="!filteredGroups.length"
-      compact
-      title="该筛选下没有镜头"
-      description="换个状态筛选看看，或先回到「全部」批量生成分镜图。"
-      :action-text="filter === 'all' ? '' : '查看全部镜头'"
-      @action="filter = 'all'"
-    />
-
     <div v-else class="scene-list">
-      <section v-for="g in filteredGroups" :key="g.scene.id" class="scene-group">
+      <section v-for="g in sceneGroups" :key="g.scene.id" class="scene-group">
         <header class="scene-header">
           <span class="scene-seq">#{{ g.scene.seq }}</span>
           <span class="scene-title">{{ g.scene.title }}</span>
@@ -667,51 +621,14 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 </template>
 
 <style scoped>
-/* 出图工作流：并进 gen-strip 后与进度条同行，右侧贴着刷新按钮 */
-.gen-wf {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex: none;
-}
-.gen-wf-label {
-  font-size: 11.5px;
-  color: var(--text-tertiary);
-  white-space: nowrap;
-}
 .sb-images-page {
   min-height: calc(100vh - var(--app-header-height, 52px));
 }
 
-/* ===== 生成总体进度 ===== */
-.gen-strip {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
-  margin-bottom: var(--sp-3);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-}
+/* ===== 执行进度卡内容（容器样式由 StageCard 提供） ===== */
 .gen-bar {
   flex: 1;
   min-width: 120px;
-}
-.gen-spacer {
-  flex: none;
-  width: var(--sp-2);
-}
-.gen-line {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-}
-.gen-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
 }
 .gen-nums {
   font-size: 12px;
@@ -772,41 +689,11 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   color: var(--accent-amber);
 }
 
-/* ===== 审核闸门 ===== */
-.gate-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  margin-bottom: var(--sp-3);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-}
-/* 通过态：已经完成的事只需一句话，压到单行细条。
-   实测原实现占 40px 高、还在提醒「可以生成分镜图」——
-   用户此时已经在分镜图页了，这条提示的剩余价值接近零。 */
-.gate-banner.ok {
-  padding: 4px var(--sp-3);
-  margin-bottom: var(--sp-2);
-  border-color: var(--success-line);
-  background: transparent;
-  border-radius: var(--radius);
-}
-.gate-banner.ok .gate-text {
-  font-size: 11.5px;
-  color: var(--text-tertiary);
-}
-.gate-banner.bad {
-  border-color: var(--danger-line);
-  background: var(--danger-soft);
-}
+/* 审核未通过时的阻断说明：位于进度卡第二行，不再是独立横幅 */
 .gate-text {
-  flex: 1;
-  min-width: 0;
   font-size: 12px;
   line-height: 1.6;
-  color: var(--text-primary);
+  color: var(--danger-text, var(--state-danger));
 }
 
 /* ===== 场景分组 + 镜头网格 ===== */

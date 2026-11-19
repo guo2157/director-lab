@@ -4,14 +4,22 @@ import type { Paginated, PaginationParams } from '@/types/common'
 import type { Workflow, WorkflowType } from '@/types/asset'
 import type {
   RuntimeCheckResult,
+  WorkflowCandidateResponse,
   WorkflowCapability,
+  WorkflowClassificationResponse,
   WorkflowSchema,
+  WorkflowSlotKey,
   WorkflowVersionItem,
 } from '@/types/workflow'
 
 /** 工作流列表（workflow_type 筛选；工作流切换时传 workflow_id 覆盖自动匹配） */
 export function listWorkflows(params?: PaginationParams & { workflow_type?: WorkflowType }) {
   return get<Paginated<Workflow>>('/workflows', params)
+}
+
+/** 单个工作流详情（含完整 definition，下载与详情展示使用） */
+export function getWorkflow(id: string) {
+  return get<Workflow>(`/workflows/${id}`)
 }
 
 /** 上传工作流（multipart，file ≤10MB，返回 parsed_schema.params/outputs） */
@@ -59,6 +67,22 @@ export async function deleteWorkflow(id: string) {
 /** 渲染用 Schema：参数按 order 排序、不含 node 绑定；传 version 取历史版本 */
 export function getWorkflowSchema(id: string, version?: number) {
   return get<WorkflowSchema>(`/workflows/${id}/schema`, version ? { version } : undefined)
+}
+
+/**
+ * 工作流细分分类（文生图 / 图生图 / 首尾帧 / 文生视频 / 参考图生视频 / TTS / BGM / SFX）。
+ * 分组依据是后端 capabilities.normalize() 的真实能力，判不出来的进 uncategorized。
+ */
+export function getWorkflowClassification() {
+  return get<WorkflowClassificationResponse>('/workflows/classification')
+}
+
+/**
+ * 按业务槽位取候选工作流：usable / missing 由后端按真实能力解析得出，
+ * 前端只负责展示与禁用，不在页面里各写一套按名称判断的过滤规则。
+ */
+export function listWorkflowCandidates(slot: WorkflowSlotKey) {
+  return get<WorkflowCandidateResponse>('/workflows/candidates', { slot })
 }
 
 /** 归一化能力：generation_modes / modalities / audio / video / reference */

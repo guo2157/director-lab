@@ -2,8 +2,12 @@
 /**
  * 「生成」标签页：按当前阶段只展示可行的生成动作
  * （未确认分镜图先出图，确认后再出视频），并保留镜头音频面板入口。
+ *
+ * 视频工作流不在这里选择：分镜看板顶部的「视频工作流」选择器是唯一入口，
+ * 批量生成、这里的生成与重新生成共用同一份选择，避免出现批量用标准版、
+ * 单个重新生成却换成另一套工作流的情况。
  */
-import { NButton, NSelect, NTooltip } from 'naive-ui'
+import { NButton, NTooltip } from 'naive-ui'
 import ShotAudioPanel from '@/components/ShotAudioPanel.vue'
 
 defineProps<{
@@ -16,10 +20,7 @@ defineProps<{
   clipActionIsRegenerate: boolean
   generating: boolean
   directRegenLoading: boolean
-  tierOptions: Array<{ label: string; value: string }>
 }>()
-
-const tier = defineModel<string>('tier', { required: true })
 
 const emit = defineEmits<{ 'generate-keyframe': []; 'clip-action': [] }>()
 </script>
@@ -38,14 +39,10 @@ const emit = defineEmits<{ 'generate-keyframe': []; 'clip-action': [] }>()
     </div>
 
     <div class="gen-line">
-      <span class="line-label">视频档位</span>
-      <n-select
-        v-model:value="tier"
-        :options="tierOptions"
-        size="small"
-        class="tier-select"
-      />
-      <span class="line-hint">极速/标准 5s、质量 10s 分别对应一套 4 步工作流</span>
+      <span class="line-label">视频工作流</span>
+      <span class="line-hint">
+        由分镜看板顶部的「视频工作流」选择器决定；批量生成与这里的生成、重新生成共用同一份选择
+      </span>
     </div>
 
     <div class="gen-actions">
@@ -76,7 +73,7 @@ const emit = defineEmits<{ 'generate-keyframe': []; 'clip-action': [] }>()
         {{
           readinessAll
             ? clipActionIsRegenerate
-              ? '重新生成视频：使用当前提示词、参考图与档位重新生成，完成后替换原视频'
+              ? '重新生成视频：使用当前提示词、参考图与所选视频工作流重新生成，完成后替换原视频'
               : '提交视频生成任务'
             : '公共资产尚未齐全，暂不能生成视频'
         }}
@@ -125,9 +122,6 @@ const emit = defineEmits<{ 'generate-keyframe': []; 'clip-action': [] }>()
 .line-hint {
   font-size: 12px;
   color: var(--text-tertiary);
-}
-.tier-select {
-  width: 210px;
 }
 .gen-actions {
   display: flex;

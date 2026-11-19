@@ -99,6 +99,61 @@ export interface WorkflowCapability {
   source: Record<string, unknown>
 }
 
+/** 业务槽位：资产库出图 / 分镜图 / 分镜视频 */
+export type WorkflowSlotKey = 'asset_image' | 'storyboard_image' | 'video'
+
+/** GET /api/workflows/candidates 的候选项（usable 由后端按真实能力算好） */
+export interface WorkflowCandidateItem {
+  id: string
+  name: string
+  description: string
+  workflow_type: WorkflowType
+  version: number
+  is_default: boolean
+  is_builtin?: boolean
+  runtime_status?: string | null
+  generation_modes: string[]
+  usable: boolean
+  missing: string[]
+}
+
+export interface WorkflowCandidateResponse {
+  slot: string
+  workflow_type: WorkflowType
+  items: WorkflowCandidateItem[]
+  usable_count: number
+}
+
+/** GET /api/workflows/classification 的单项（分类依据来自后端能力解析） */
+export interface WorkflowClassifiedItem {
+  id: string
+  name: string
+  description: string
+  workflow_type: WorkflowType
+  version: number
+  is_default: boolean
+  is_builtin?: boolean
+  runtime_status?: string | null
+  validation_status?: string | null
+  generation_modes: string[]
+  supports_multi_reference: boolean
+}
+
+/** 细分分类分组：文生图 / 图生图 / 首尾帧 / 文生视频 / 参考图生视频 / TTS / BGM / SFX */
+export interface WorkflowClassificationGroup {
+  key: string
+  label: string
+  workflow_type: WorkflowType
+  items: WorkflowClassifiedItem[]
+}
+
+export interface WorkflowClassificationResponse {
+  groups: WorkflowClassificationGroup[]
+  /** 能力判不出来的工作流：单独展示，不硬塞进任何分类 */
+  uncategorized: WorkflowClassifiedItem[]
+  total: number
+}
+
 export interface WorkflowVersionItem {
   id: string
   workflow_id: string
@@ -135,6 +190,7 @@ export const MODE_LABELS: Record<string, string> = {
   image_to_video: '图生视频',
   reference_to_video: '参考生视频',
   first_last_frame_to_video: '首尾帧',
+  multi_reference_to_video: '多参考图视频',
   audio_conditioned_video: '音频条件',
   text_to_speech: '语音合成',
   text_to_music: '音乐生成',

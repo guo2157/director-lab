@@ -4,21 +4,20 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
   NButton, NSpin, NEmpty, NTag,
-  NCheckbox, NModal, NRadioGroup, NRadio, NSelect, NProgress, NIcon, useMessage,
+  NCheckbox, NModal, NRadioGroup, NRadio, NProgress, useMessage,
 } from 'naive-ui'
-import { Checkmark, Ellipse, TimeOutline } from '@vicons/ionicons5'
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots } from '@/api/script'
 import { getProject } from '@/api/projects'
 import { generateProjectShots } from '@/api/storyboard'
 import { listJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
-import { listWorkflows } from '@/api/workflows'
 import { getClipGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Scene, Shot, ShotKind } from '@/types/script'
 import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import ShotDetailModal from '@/components/storyboard/ShotDetailModal.vue'
-import type { ClipTier } from '@/components/storyboard/useShotDetail'
+import StageCard from '@/components/ui/StageCard.vue'
+import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,30 +26,12 @@ const queryClient = useQueryClient()
 
 const projectId = computed(() => route.params.id as string)
 
-// --- 视频生成档位：极速 5s / 标准 5s / 质量 10s（对应库里三套 4 步工作流） ---
-const clipTier = ref<ClipTier>('std_5s')
-const clipTierOptions = [
-  { label: '极速 5s（最快，480×864）', value: 'fast_5s' },
-  { label: '标准 5s（推荐，640×1120）', value: 'std_5s' },
-  { label: '质量 10s（最清晰，768×1344）', value: 'quality_10s' },
-]
-const clipWorkflowsQuery = useQuery({
-  queryKey: ['workflows', 'video'],
-  queryFn: () => listWorkflows({ workflow_type: 'video', page_size: 50 }),
-  staleTime: 5 * 60 * 1000,
-})
-/**
- * 当前档位对应的 workflow_id。
- * 只按 `capabilities.tier` 匹配——按工作流名称后缀猜测能力是明令禁止的（AGENTS.md 审计 D5），
- * 改名就会断链。没有声明 tier 的工作流一律返回 undefined，交由后端按能力/默认匹配。
- */
-const clipWorkflowId = computed(() => {
-  // /api/workflows 返回的是数组（非分页对象），这里两种形态都兼容
-  const data: any = clipWorkflowsQuery.data.value
-  const items: Array<{ id: string; name: string; capabilities?: { tier?: string } | null }> =
-    Array.isArray(data) ? data : (data?.items ?? [])
-  return items.find((w) => (w.capabilities?.tier ?? '') === clipTier.value)?.id
-})
+// --- 分镜视频工作流（video 槽位） ---
+// 候选由后端 /workflows/candidates 按真实能力过滤：输出为视频、能接参考图，
+// 且计算图里注册了 H3 多参考图节点（multi_reference_to_video）。
+// 下拉主文本是工作流管理页维护的 description，不在前端硬编码档位文案；
+// 未选择时自动落到默认工作流，批量 / 单个 / 重新生成 / 失败重试共用这一份选择。
+const clipWorkflowId = ref<string | undefined>(undefined)
 
 // --- Data fetching ---
 const scenesQuery = useQuery({
@@ -231,10 +212,7 @@ const failedClipByShot = computed(() => {
   return map
 })
 
-/** 正在执行的镜头（running）与排队镜头数 */
-const runningClipJob = computed(
-  () => (clipProgress.data.value?.inflight ?? []).find((j) => j.status === 'running') ?? null,
-)
+/** 排队镜头数（排队 + 等待前序） */
 const queuedClipCount = computed(() => {
   const p = clipProgress.data.value
   return (p?.inflight_queued ?? 0) + (p?.inflight_chained_wait ?? 0)
@@ -250,22 +228,6 @@ const estimatedWaitText = computed(() => {
 })
 
 const clipsDoneCount = computed(() => clipProgress.data.value?.with_clip ?? allShots.value.filter((s) => !!s.current_assets?.clip).length)
-
-const clipHeadline = computed(() => {
-  const p = clipProgress.data.value
-  const total = allShots.value.length || p?.total || 0
-  const done = clipsDoneCount.value
-  const running = runningClipJob.value
-  if (running) {
-    const pct = typeof running.progress === 'number' ? ` ${running.progress}%` : ''
-    const scene = running.scene_title ? `${running.scene_title} · ` : ''
-    return `正在生成视频：${scene}镜 ${running.shot_seq ?? '—'}${pct}`
-  }
-  if (p?.inflight_count) return `已排队 ${p.inflight_count} 个视频任务，等待开始渲染`
-  if (total > 0 && done === total) return '全部分镜视频已生成完成'
-  if (!total) return '暂无镜头'
-  return `还有 ${total - done} 个镜头未生成视频`
-})
 
 /** 单镜在途状态文案：生成中 42% / 排队第 3 位 / 等待前序镜头 */
 function clipInflightText(job?: ClipGenerationJob): string {
@@ -641,14 +603,13 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 
 <template>
   <div class="storyboard-page">
-    <header class="page-header">
-      <div class="header-left">
-        <h1 class="page-title">分镜看板</h1>
-      </div>
-    </header>
-    <!-- 集选择器 -->
-    <div v-if="allEpisodes.length" class="episode-bar">
-      <span class="episode-label">集数</span>
+    <!-- 左侧「制作流程」栏已高亮 04 分镜看板，页内不再重复同名大标题 -->
+    <h1 class="visually-hidden">分镜看板</h1>
+    <!-- 卡一：执行进度。只留集数选择 + 数字 + 进度条 + 在途/失败状态，
+         状态句（正在生成视频 / 全部分镜视频已生成完成）与「最近完成于」已删除：
+         数字与进度条已经回答「做到哪了」，「集数」二字与下方 chip 自身重复。
+         在途明细并入本卡第二行，不再单独占一条横带。 -->
+    <StageCard label="执行进度">
       <button
         v-for="ep in allEpisodes"
         :key="ep"
@@ -656,34 +617,22 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         :class="{ active: activeEpisode === ep }"
         @click="activeEpisode = ep"
       >第 {{ ep }} 集</button>
-    </div>
-    <!-- 视频生成总体进度：X/Y、正在跑哪一镜、队列名次与预计等待、是否全部完成 -->
-    <div
-      class="gen-panel"
-      :class="{
-        done: clipsDoneCount > 0 && clipsDoneCount === (allShots.length || clipProgress.data.value?.total || 0) && !clipProgress.hasInflight.value,
-        fail: failedClipByShot.size > 0,
-      }"
-    >
-      <div class="gen-head">
-        <span class="gen-badge"><n-icon :component="clipProgress.hasInflight.value ? TimeOutline : clipsDoneCount > 0 && clipsDoneCount === (allShots.length || 0) ? Checkmark : Ellipse" :size="14" /></span>
-        <span class="gen-title">{{ clipHeadline }}</span>
-        <span class="gen-nums">
-          视频 {{ clipsDoneCount }}/{{ allShots.length || clipProgress.data.value?.total || 0 }}（{{ clipProgress.data.value?.percent ?? 0 }}%）
-        </span>
-        <n-button size="tiny" quaternary :loading="clipProgress.loading.value" @click="clipProgress.refresh()">刷新进度</n-button>
-      </div>
+      <span v-if="allEpisodes.length" class="gen-sep" aria-hidden="true" />
+      <span class="gen-nums">
+        视频 {{ clipsDoneCount }}/{{ allShots.length || clipProgress.data.value?.total || 0 }}（{{ clipProgress.data.value?.percent ?? 0 }}%）
+      </span>
       <n-progress
         type="line"
         :percentage="clipProgress.data.value?.percent ?? 0"
-        :height="8"
-        :border-radius="4"
+        :height="6"
+        :border-radius="3"
         :show-indicator="false"
         :color="clipProgress.data.value?.all_done ? 'var(--state-success)' : 'var(--brand-primary)'"
         rail-color="var(--border-subtle)"
         class="gen-bar"
       />
-      <div class="gen-sub">
+
+      <template #meta>
         <span v-if="clipProgress.data.value?.inflight_running" class="gen-state running">
           渲染中 {{ clipProgress.data.value.inflight_running }}
         </span>
@@ -691,68 +640,71 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           排队/等待前序 {{ queuedClipCount }}
         </span>
         <span v-if="estimatedWaitText" class="gen-state">预计剩余 {{ estimatedWaitText }}</span>
-        <span v-if="clipProgress.data.value?.all_done && clipProgress.data.value?.last_completed_at" class="gen-state ok">
-          最近完成于 {{ new Date(clipProgress.data.value.last_completed_at).toLocaleTimeString('zh-CN', { hour12: false }) }}
-        </span>
-        <span v-else-if="allShots.length && !clipProgress.data.value?.all_done" class="gen-state">未生成 {{ allShots.length - clipsDoneCount }}</span>
         <span v-if="failedClipByShot.size" class="gen-state fail">
           最近失败 {{ failedClipByShot.size }} 个
         </span>
         <span v-if="clipProgress.error.value" class="gen-state fail">{{ clipProgress.error.value }}</span>
-      </div>
-      <!-- 在途明细：正在渲染的那一镜 + 接下来排队的几镜 -->
-      <div v-if="clipProgress.data.value?.inflight?.length" class="gen-inflight">
-        <span
-          v-for="job in clipProgress.data.value.inflight.slice(0, 6)"
-          :key="job.job_id"
-          class="gen-inflight-item"
-        >
-          <span class="gen-inflight-name">
-            {{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}
-          </span>
+        <!-- 资产未齐全时的阻断说明：与进度同属状态陈述，放第二行 -->
+        <span v-if="!readiness.all" class="gate-text">
+          公共资产未齐全：{{ readiness.done }}/{{ readiness.total }}，生成分镜图前请先在资产库完成生成
+        </span>
+        <!-- 在途明细：正在渲染的那一镜 + 接下来排队的几镜 -->
+        <span v-for="job in clipProgress.data.value?.inflight?.slice(0, 6) ?? []" :key="job.job_id" class="gen-inflight-item">
+          <span class="gen-inflight-name">{{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}</span>
           <span class="gen-inflight-state" :class="job.status">{{ clipInflightText(job) }}</span>
         </span>
-        <span v-if="clipProgress.data.value.inflight.length > 6" class="gen-inflight-more">
-          等 {{ clipProgress.data.value.inflight.length }} 个任务
+        <span v-if="(clipProgress.data.value?.inflight?.length ?? 0) > 6" class="gen-inflight-more">
+          等 {{ clipProgress.data.value?.inflight?.length }} 个任务
         </span>
-      </div>
-    </div>
-    <!-- 公共资产齐全度门禁横幅 -->
-    <div class="gate-banner" :class="{ ok: readiness.all }">
-      <span class="gate-badge"><n-icon :component="readiness.all ? Checkmark : TimeOutline" :size="14" /></span>
-      <span class="status-tag" :class="readiness.all ? 'is-succeeded' : 'is-pending'">
-        {{ readiness.all ? '资产已齐全' : '资产未齐全' }}
+      </template>
+
+      <template #actions>
+        <n-button v-if="!readiness.all" size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">
+          去资产库
+        </n-button>
+        <n-button size="small" quaternary :loading="clipProgress.loading.value" @click="clipProgress.refresh()">
+          刷新进度
+        </n-button>
+        <n-button
+          size="small"
+          type="primary"
+          :disabled="!clipsDone"
+          @click="router.push(`/project/${projectId}/compose`)"
+        >
+          去合成导出
+        </n-button>
+      </template>
+    </StageCard>
+
+    <!-- 卡二：批量出视频（工作流 / 全选 / 批量出视频） -->
+    <StageCard label="批量出视频">
+      <span class="clip-wf-pick">
+        <WorkflowSelector
+          v-model="clipWorkflowId"
+          slot="video"
+          size="small"
+          placeholder="选择分镜视频工作流"
+        />
       </span>
-      <span class="gate-text">
-        {{ readiness.all ? '公共资产已齐全，可生成分镜图与分镜视频' : `公共资产未齐全：${readiness.done}/${readiness.total}，生成分镜图前请先在资产库完成生成` }}
-      </span>
-      <n-button v-if="!readiness.all" size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">去资产库</n-button>
       <n-checkbox
         :checked="allShotsSelected"
         :disabled="!allShots.length"
         @update:checked="toggleSelectAllShots"
       >全选</n-checkbox>
-      <n-select
-        v-model:value="clipTier"
-        :options="clipTierOptions"
-        size="small"
-        style="width: 210px"
-        title="批量出视频使用的档位（极速/标准/质量）"
-      />
-      <n-button
-        size="medium"
-        :type="clipsDone ? 'default' : 'primary'"
-        :disabled="!readiness.all || !selectedShotIds.length"
-        :loading="batchClipMutation.isPending.value"
-        @click="handleBatchClip"
-      >批量出视频（{{ selectedShotIds.length }}）</n-button>
-      <n-button
-        size="small"
-        :type="clipsDone ? 'primary' : 'default'"
-        :disabled="!clipsDone"
-        @click="router.push(`/project/${projectId}/compose`)"
-      >去合成导出</n-button>
-    </div>
+      <span class="sel-count">已选 <b>{{ selectedShotIds.length }}</b> / {{ allShots.length }}</span>
+
+      <template #actions>
+        <n-button
+          size="small"
+          type="primary"
+          :disabled="!readiness.all || !selectedShotIds.length"
+          :loading="batchClipMutation.isPending.value"
+          @click="handleBatchClip"
+        >
+          批量出视频（{{ selectedShotIds.length }}）
+        </n-button>
+      </template>
+    </StageCard>
     <!-- Loading -->
     <n-spin v-if="scenesQuery.isLoading.value" class="page-loading" />
 
@@ -857,7 +809,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     <ShotDetailModal
       v-model:show="detailVisible"
       v-model:shot-id="detailShotId"
-      v-model:clip-tier="clipTier"
       :shots="orderedShots"
       :project-id="projectId"
       :readiness-all="readiness.all"
@@ -866,7 +817,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       :kind-label="activeShot ? shotKindLabels[activeShot.shot_kind] : ''"
       :clip-job-active="detailClipJobActive"
       :clip-workflow-id="clipWorkflowId"
-      :clip-tier-options="clipTierOptions"
       :scenes="scenesQuery.data.value?.items ?? []"
       :characters="charsData?.items ?? []"
       :prop-items="propsData?.items ?? []"
@@ -884,12 +834,12 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     >
       <div style="margin: 12px 0 4px">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px">
-          <span style="font-size: 13px; color: var(--text-secondary)">视频档位</span>
-          <n-select
-            v-model:value="clipTier"
-            :options="clipTierOptions"
+          <span style="font-size: 13px; color: var(--text-secondary)">视频工作流</span>
+          <WorkflowSelector
+            v-model="clipWorkflowId"
+            slot="video"
             size="small"
-            style="width: 210px"
+            style="width: 240px"
           />
         </div>
         <n-radio-group v-model:value="chainMode">
@@ -930,41 +880,35 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   color: var(--text-secondary);
   font-size: 14px;
 }
-.episode-bar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-3); }
-.episode-label { font-size: 13px; color: var(--text-secondary); }
 .episode-chip { border: 1px solid var(--border-subtle); background: var(--bg-panel); border-radius: var(--radius); padding: 6px var(--sp-4); font-size: 14px; color: var(--text-secondary); cursor: pointer; transition: border-color var(--transition-fast), color var(--transition-fast); }
 .episode-chip:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
 .episode-chip.active { background: var(--brand-soft); border-color: var(--brand-primary); color: var(--brand-primary); font-weight: 600; }
-.gate-banner { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-3); background: var(--bg-panel); }
-.gate-banner.ok { border-color: var(--success-line); background: var(--success-soft); }
-.gate-badge { font-size: 14px; }
-.gate-text { font-size: 13px; color: var(--text-primary); margin-right: auto; }
 
-/* ===== 视频生成总体进度面板 ===== */
-.gen-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  padding: var(--sp-3) var(--sp-4);
-  margin-bottom: var(--sp-3);
-  background: var(--bg-panel);
+/* ===== 执行进度卡内容（容器样式由 StageCard 提供） ===== */
+.gen-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-subtle);
+  flex: none;
 }
-.gen-panel.done { border-color: var(--success-line); background: var(--success-soft); }
-.gen-panel.fail { border-color: var(--danger-line); }
-.gen-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
-.gen-badge { font-size: 14px; }
-.gen-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.gen-nums { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
-.gen-bar { width: 100%; }
-.gen-sub { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; font-size: 12px; }
+.gen-nums { font-size: 12px; color: var(--text-secondary); }
+.gen-bar { width: 100%; flex: 1 1 160px; min-width: 120px; }
 .gen-state { color: var(--text-secondary); }
 .gen-state.queued { color: var(--state-warning); }
 .gen-state.running { color: var(--brand-primary); }
-.gen-state.ok { color: var(--state-success); font-weight: 500; }
 .gen-state.fail { color: var(--state-danger); }
-.gen-inflight { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
+.gate-text { color: var(--danger-text, var(--state-danger)); }
+
+/* 工作流选择器槽位：给最小宽度，避免 loading spinner 或错误态把槽位塌缩成 12px。
+   实测后端 /workflows/candidates 失败时，选择器渲染成 n-spin，无 min-width 时
+   整个槽位只有 12px，卡二看起来像「标签与内容错位」。 */
+.clip-wf-pick {
+  display: block;
+  flex: 0 1 210px;
+  min-width: 170px;
+  max-width: 260px;
+}
+
 .gen-inflight-item {
   display: inline-flex;
   align-items: center;

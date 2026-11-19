@@ -6,7 +6,8 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
-import { NButton, NInput, useMessage } from 'naive-ui'
+import { NButton, NIcon, NInput, useMessage } from 'naive-ui'
+import { AddOutline, SearchOutline } from '@vicons/ionicons5'
 import {
   archiveProject,
   deleteProject,
@@ -24,7 +25,7 @@ import SkeletonList from '@/components/ui/SkeletonList.vue'
 import ProjectCard from '@/components/projects/ProjectCard.vue'
 import { useProjectCovers } from '@/components/projects/useProjectCovers'
 import ProjectFilterBar from '@/components/projects/ProjectFilterBar.vue'
-import type { SortKey, StatusFilter } from '@/components/projects/ProjectFilterBar.vue'
+import type { StatusFilter } from '@/components/projects/ProjectFilterBar.vue'
 import CreateProjectModal from '@/components/projects/CreateProjectModal.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
@@ -66,10 +67,12 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : '操作失败，请稍后重试'
 }
 
-/* ---------- 搜索 / 筛选 / 排序 ---------- */
+/* ---------- 搜索 / 筛选 ----------
+ * 排序轴已移除（2026-11-19）：只有「最近更新 / 名称」两个选项、默认就是最近更新，
+ * 用户几乎不会切；而它占着工具栏右侧一整个分段控件的宽度。固定按 updated_at 倒序，
+ * 与「最近更新」是同一结果，功能无损失。 */
 const searchKeyword = ref('')
 const statusFilter = ref<StatusFilter>('all')
-const sortKey = ref<SortKey>('updated')
 const counts = computed<Record<StatusFilter, number>>(() => ({
   all: projects.value.length,
   draft: projects.value.filter((p) => p.status === 'draft').length,
@@ -85,22 +88,14 @@ const filteredProjects = computed(() => {
   if (statusFilter.value !== 'all') {
     list = list.filter((p) => p.status === statusFilter.value)
   }
-  const sorted = [...list]
-  if (sortKey.value === 'name') {
-    sorted.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
-  } else {
-    sorted.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-  }
-  return sorted
+  // 固定按更新时间倒序（原「最近更新」选项，现为唯一顺序）
+  return [...list].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
 })
-const isFiltering = computed(() => searchKeyword.value.trim() !== '' || statusFilter.value !== 'all')
-const headerSubtitle = computed(() => {
-  if (!projects.value.length) return '从剧本到成片，一集一集往下走'
-  if (isFiltering.value) return `筛选出 ${filteredProjects.value.length} / ${projects.value.length} 个作品`
-  // 与筛选 Tab 同口径：四个状态都给数，不只挑两个说
-  return `共 ${projects.value.length} 个作品 · 草稿 ${counts.value.draft} · 进行中 ${counts.value.active} · 已归档 ${counts.value.archived}`
-})
-
+/* 页头元信息与 isFiltering 已移除（2026-11-19）：
+   - 「共 N 个作品」与筛选 chip 上的「全部 N」是同一个数，说两遍不提供新信息，
+     规模感由 chips 的计数徽标承担；
+   - 原来的 isFiltering 只服务于那句被删掉的副标题，空态判断走
+     `filteredProjects.length === 0`，不需要额外布尔。 */
 /* ---------- 列表级操作 ---------- */
 function invalidateProjects() {
   void queryClient.invalidateQueries({ queryKey: ['projects'] })
@@ -208,28 +203,9 @@ function clearFilters() {
 
 <template>
   <section class="page project-list-page">
-    <header class="list-head">
-      <div class="head-copy">
-        <h1 class="list-title">作品</h1>
-        <p class="list-sub">{{ headerSubtitle }}</p>
-      </div>
-      <div class="head-actions">
-        <n-input
-          v-model:value="searchKeyword"
-          placeholder="搜索作品"
-          clearable
-          class="search-input"
-          size="medium"
-        >
-          <template #prefix>
-            <span class="search-mark" aria-hidden="true">⌕</span>
-          </template>
-        </n-input>
-        <n-button class="btn-brand new-btn" @click="openCreateModal">
-          <span class="new-plus" aria-hidden="true">+</span>新建作品
-        </n-button>
-      </div>
-    </header>
+    <!-- 页标题不再重复顶栏已高亮的「作品」：顶栏胶囊就是本页的身份。
+         H1 语义保留给读屏与文档大纲，视觉上不占位。 -->
+    <h1 class="visually-hidden">作品</h1>
 
     <div v-if="missingConfigs.length" class="config-banner">
       <span class="banner-text">
@@ -260,11 +236,30 @@ function clearFilters() {
       />
 
       <template v-else>
-        <ProjectFilterBar
-          v-model:status-filter="statusFilter"
-          v-model:sort-key="sortKey"
-          :counts="counts"
-        />
+        <!-- 单行工具栏（2026-11-19）：状态筛选 + 搜索 + 新建并排。
+             左端筛选是「看哪些」，右端搜索/新建是「找」和「造」，两组语义不同，
+             中间靠 flex 弹性留白分隔，不需要额外分隔线。
+             顺序固定：筛选（主轴，品牌色）→ 弹性留白 → 搜索 → 主 CTA。 -->
+        <div class="list-toolbar">
+          <ProjectFilterBar v-model:status-filter="statusFilter" :counts="counts" />
+
+          <n-input
+            v-model:value="searchKeyword"
+            placeholder="搜索作品"
+            clearable
+            class="search-input"
+            size="medium"
+          >
+            <template #prefix>
+              <n-icon :component="SearchOutline" :size="15" class="search-mark" />
+            </template>
+          </n-input>
+
+          <n-button class="btn-brand new-btn" @click="openCreateModal">
+            <n-icon :component="AddOutline" :size="16" class="new-plus" />
+            <span class="new-text">新建作品</span>
+          </n-button>
+        </div>
 
         <!-- 空：筛选后无匹配 -->
         <EmptyState
@@ -317,56 +312,58 @@ function clearFilters() {
   color: var(--text-primary);
 }
 
-/* ---------- 页头 ---------- */
-.list-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--sp-4);
-  margin: 2px 0 var(--sp-6);
-}
-.head-copy {
-  min-width: 0;
-}
-.list-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 34px;
-  font-weight: 700;
-  letter-spacing: -0.028em;
-  line-height: 1.15;
-  color: var(--text-primary);
-}
-.list-sub {
-  margin: 7px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-.head-actions {
+/* ---------- 单行工具栏 ----------
+   三行压成一行：状态筛选 + 搜索 + 新建并排。
+   左侧筛选是「看哪些」（主轴，品牌色），右侧搜索/新建是「找」和「造」，
+   中间用 flex: 1 的留白隔开，不画分隔线——分隔线会多出一条视觉噪音。
+
+   高度：所有控件锁 36px，与顶栏导航项同高，页面顶部形成一条统一的
+   控件带（原来搜索框 34px + chips 30px 高低不齐）。 */
+.list-toolbar {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
+  margin: 0 0 var(--sp-5);
+}
+.list-toolbar > :first-child {
+  min-width: 0;
+}
+/* 弹性留白：把搜索/新建推到右端，不占任何可见面积 */
+.list-toolbar::after {
+  content: '';
+  flex: 1 1 0;
+  order: 1;
+  min-width: var(--sp-2);
 }
 .search-input {
-  width: 240px;
-}
-.search-mark {
-  font-size: 14px;
-  line-height: 1;
-  color: var(--text-tertiary);
+  order: 2;
+  width: 220px;
+  flex: 0 0 auto;
 }
 .new-btn {
-  height: 34px;
+  order: 3;
+  height: 36px;
   padding: 0 16px;
+  flex: 0 0 auto;
+}
+/* gap 必须加在 .n-button__content 上，不能加在 .new-btn：
+   Naive 把按钮内容包在 .n-button__content 里，外层 flex 的 gap 作用不到
+   图标与文字之间（实测 gap 声明为 6px 但实际间距 0，加号紧贴文字）。 */
+.new-btn :deep(.n-button__content) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .new-plus {
-  margin-right: 6px;
-  font-size: 15px;
-  line-height: 1;
-  font-weight: 600;
+  flex: none;
+}
+.new-text {
+  white-space: nowrap;
+}
+.search-mark {
+  display: flex;
+  color: var(--text-tertiary);
 }
 
 /* ---------- 配置横幅 ---------- */
@@ -451,16 +448,28 @@ function clearFilters() {
   .project-list-page {
     padding: var(--sp-4) var(--sp-4) var(--sp-12);
   }
-  .list-title {
-    font-size: 26px;
+  /* 窄屏工具栏：筛选 chips 独占第一行（4 个 chip + 计数约 300px，
+     和搜索框挤一行会把搜索压到不可用），搜索 + 新建第二行。
+     chips 自身在窄屏改为单行横向滚动（见 ProjectFilterBar 内的媒体查询）。 */
+  .list-toolbar {
+    gap: var(--sp-2);
   }
-  .head-actions {
-    width: 100%;
+  .list-toolbar::after {
+    display: none;
+  }
+  .list-toolbar > :first-child {
+    order: 0;
+    flex: 1 1 100%;
+    min-width: 0;
   }
   .search-input {
-    flex: 1;
+    order: 2;
+    flex: 1 1 auto;
     width: auto;
     min-width: 0;
+  }
+  .new-btn {
+    order: 3;
   }
 }
 /* 窄屏：隐藏副文案，只留「+ 新建作品」 */

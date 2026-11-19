@@ -39,9 +39,3 @@ export interface BatchProgressView {
   failed: number
   percent: number
 }
-
-export interface ProgressGroupView {
-  label: string
-  done: number
-  total: number
-}

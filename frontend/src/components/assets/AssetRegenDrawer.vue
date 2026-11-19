@@ -14,6 +14,8 @@ import type { Asset } from '@/types/asset'
 const props = defineProps<{
   show: boolean
   asset: Asset | null
+  /** 当前选中的资产出图工作流（asset_image 槽位）；未传时由后端按默认解析 */
+  workflowId?: string
 }>()
 
 const emit = defineEmits<{
@@ -117,9 +119,11 @@ async function submit() {
   submitting.value = true
   errorMsg.value = ''
   try {
+    // 重新生成必须与批量生成使用同一份工作流选择，不能在这里回落成别的默认
     const res = await regenerateAsset(asset.id, {
       prompt: prompt.value,
       negative_prompt: negative.value,
+      workflow_id: props.workflowId,
       idempotency_key: `asset_regen_${asset.id}_${Date.now()}`,
     })
     jobStatus.value = res.status

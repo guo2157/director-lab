@@ -21,8 +21,6 @@ import {
 import type { Shot } from '@/types/script'
 import type { GenerateShotPayload } from '@/types/job'
 
-/** 视频生成档位：对应库里三套 4 步工作流 */
-export type ClipTier = 'fast_5s' | 'std_5s' | 'quality_10s'
 
 /**
  * 系统级默认负向提示词：统一维护，用户未自定义时作为默认值；
@@ -58,8 +56,6 @@ export interface ShotDetailDeps extends AssetOptionSource {
   shot: () => Shot | null
   readinessAll: () => boolean
   clipWorkflowId: () => string | undefined
-  clipTier: () => ClipTier
-  setClipTier: (tier: ClipTier) => void
   /** 该镜头是否已有在途 generate_clip 任务（决定按钮是「生成视频」还是「重新生成」） */
   clipJobActive: () => boolean
   /** 提交成功：页面刷新场景/任务列表并启动进度轮询 */
@@ -140,10 +136,6 @@ export function useShotDetail(deps: ShotDetailDeps) {
       const ws = await fetchRegenerateWorkspace(shotId, 'clip')
       bindings.value = ws.references ?? []
       chainFrameStatus.value = ws.chain_frame?.status ?? null
-      // 档位跟随该镜头实际使用的工作流，避免打开详情后被默认档位覆盖
-      const wfName = ws.workflow?.name ?? ''
-      const tier = (['fast_5s', 'std_5s', 'quality_10s'] as const).find((t) => wfName.endsWith(t))
-      if (tier) deps.setClipTier(tier)
       slots.value = (ws.available_slots ?? []).map((s) => ({
         param: s.param,
         node_id: s.node_id,

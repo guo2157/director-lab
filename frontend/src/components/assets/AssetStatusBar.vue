@@ -1,27 +1,31 @@
 <script setup lang="ts">
 /**
- * 资产库状态条：一行回答三件事——做到哪了（进度）、能不能往下走（审核状态）、下一步点什么。
- * 主按钮始终只有一个（去分镜图）；审核通过/驳回返工降级为同一条内的次要操作。
+ * 资产库顶部两卡之一：执行进度（只读）。
+ *
+ * 改造前这里是四条独立横幅：PageHeader 状态行 / 生成状态句 / 分项 chips / 审核说明句，
+ * 加上 AssetBatchToolbar 自成一条，视觉上四层横条叠加，层级相同、信息互相重复。
+ * 现在：进度卡只回答「做到哪了」，操作卡只回答「接下来批量做什么」。
+ *
+ * 卡内只留三样：总分 X/Y + 进度条 + 审核状态标签。
+ * 「公共资产图已全部生成完成（最近完成于 04:49:04）」「角色定妆图 2/2 / 场景基准图 5/5 /
+ * 道具锚定图 4/4」已删除——总分与进度条已经回答同一件事，分项拆解属于资产卡片自身信息，
+ * 放在进度条旁边只是把「已完成」这个结论重复三遍。
+ *
+ * 审核动作（通过 / 驳回返工）留在进度卡右端：它是「放行下一步」的闸门，
+ * 与「去分镜图」同属推进流程，不属于批量生成。
  */
 import { NButton, NIcon, NProgress } from 'naive-ui'
 import { ArrowForwardOutline } from '@vicons/ionicons5'
-import PageHeader from '@/components/ui/PageHeader.vue'
+import StageCard from '@/components/ui/StageCard.vue'
 import StatusTag from '@/components/ui/StatusTag.vue'
-import type { ProgressGroupView } from './types'
 
 const props = withDefaults(
   defineProps<{
-    title: string
-    eyebrow?: string
-    /** 生成状态一句话（正在生成什么 / 已全部生成完成） */
-    headline?: string
     done: number
     total: number
     allDone: boolean
     reviewStatus: string
     reviewText: string
-    /** 角色 / 场景 / 道具分项进度 */
-    groups?: ProgressGroupView[]
     inflightCount?: number
     /** 审核请求进行中 */
     reviewing?: boolean
@@ -29,9 +33,6 @@ const props = withDefaults(
     loading?: boolean
   }>(),
   {
-    eyebrow: '',
-    headline: '',
-    groups: () => [],
     inflightCount: 0,
     reviewing: false,
     loading: false,
@@ -56,94 +57,78 @@ const reviewLabel = () => {
   if (props.reviewStatus === 'rejected') return '已驳回'
   return '待审核'
 }
+/** 未通过时才需要审核动作与说明；通过后这两个按钮/这句话都是已完成的事 */
+const needsReview = () => props.reviewStatus !== 'approved'
 </script>
 
 <template>
-  <section class="status-bar">
-    <PageHeader :title="title" :eyebrow="eyebrow">
-      <template #subtitle>{{ headline }}</template>
+  <StageCard label="执行进度">
+    <span class="nums" :class="{ 'is-done': allDone }">
+      <b>{{ done }}</b><span class="sep">/</span>{{ total }}
+      <span class="pct">{{ percent() }}%</span>
+    </span>
+    <n-progress
+      class="bar"
+      type="line"
+      :percentage="percent()"
+      :height="4"
+      :border-radius="2"
+      :show-indicator="false"
+      :color="allDone ? 'var(--state-success)' : 'var(--brand-primary)'"
+      rail-color="var(--border-subtle)"
+    />
+    <StatusTag :status="reviewKind()" :label="reviewLabel()" />
+    <span v-if="inflightCount" class="inflight">生成中 {{ inflightCount }}</span>
 
-      <template #status>
-        <span class="prog-nums" :class="{ 'is-done': allDone }">
-          <b>{{ done }}</b><span class="prog-sep">/</span>{{ total }}
-          <span class="prog-pct">{{ percent() }}%</span>
-        </span>
-        <n-progress
-          type="line"
-          class="prog-bar"
-          :percentage="percent()"
-          :height="4"
-          :border-radius="2"
-          :show-indicator="false"
-          :color="allDone ? 'var(--state-success)' : 'var(--brand-primary)'"
-          rail-color="var(--border-subtle)"
-        />
-        <StatusTag :status="reviewKind()" :label="reviewLabel()" />
-      </template>
+    <template #meta>
+      <!-- 审核说明只在未通过时出现：通过后审核状态已由标签和主按钮表达。
+           分项进度（角色 2/2 场景 5/5 道具 4/4）与「已全部生成完成」状态句已删除：
+           总分 X/Y 与进度条已经回答「做到哪了」，分项拆解属于资产卡片自己的信息。 -->
+      <span v-if="needsReview()" class="review-text">{{ reviewText }}</span>
+    </template>
 
-      <template #actions>
-        <n-button
-          size="small"
-          quaternary
-          :loading="loading"
-          @click="emit('refresh')"
-        >
-          刷新进度
-        </n-button>
+    <template #actions>
+      <n-button size="small" quaternary :loading="loading" @click="emit('refresh')">
+        刷新进度
+      </n-button>
+      <template v-if="needsReview()">
         <n-button
           size="small"
           quaternary
           :disabled="reviewStatus !== 'approved'"
           :loading="reviewing"
           :title="reviewStatus !== 'approved' ? '仅当资产审核通过后，才能驳回返工' : undefined"
-          :aria-label="reviewStatus !== 'approved' ? '驳回返工（不可用：仅当资产审核通过后可用）' : '驳回返工'"
           @click="emit('reject')"
         >
           驳回返工
         </n-button>
         <n-button
           size="small"
-          secondary
           type="primary"
+          secondary
           :disabled="!allDone"
           :loading="reviewing"
           :title="!allDone ? (total === 0 ? '当前项目还没有资产，请先在解析页完成解析并生成资产' : `还有 ${total - done} 项资产未生成完成，全部完成后才能审核`) : undefined"
-          :aria-label="!allDone ? (total === 0 ? '审核通过（不可用：当前项目还没有资产）' : '审核通过（不可用：资产尚未全部生成完成）') : '审核通过'"
           @click="emit('approve')"
         >
           审核通过
         </n-button>
-        <n-button
-          size="small"
-          type="primary"
-          :disabled="reviewStatus !== 'approved'"
-          :title="reviewStatus !== 'approved' ? '资产审核通过后才能进入分镜图生成' : undefined"
-          :aria-label="reviewStatus !== 'approved' ? '去分镜图（不可用：资产尚未审核通过）' : '去分镜图'"
-          @click="emit('next')"
-        >
-          去分镜图 <n-icon :component="ArrowForwardOutline" :size="14" />
-        </n-button>
       </template>
-    </PageHeader>
-
-    <div class="status-meta">
-      <span
-        v-for="g in groups"
-        :key="g.label"
-        class="meta-chip"
-        :class="{ 'is-done': g.total > 0 && g.done === g.total }"
-      >{{ g.label }} {{ g.done }}/{{ g.total }}</span>
-      <span v-if="inflightCount" class="meta-inflight">生成中 {{ inflightCount }} 个</span>
-      <span class="meta-text">{{ reviewText }}</span>
-    </div>
-  </section>
+      <n-button
+        size="small"
+        type="primary"
+        :disabled="reviewStatus !== 'approved'"
+        :title="reviewStatus !== 'approved' ? '资产审核通过后才能进入分镜图生成' : undefined"
+        @click="emit('next')"
+      >
+        去分镜图 <n-icon :component="ArrowForwardOutline" :size="14" />
+      </n-button>
+    </template>
+  </StageCard>
 </template>
 
 <style scoped>
-.status-bar {
-  margin-bottom: var(--sp-4);
-}
-.prog-nums {
+.nums {
   display: inline-flex;
   align-items: baseline;
   gap: 2px;
@@ -152,57 +137,31 @@ const reviewLabel = () => {
   color: var(--text-secondary);
   white-space: nowrap;
 }
-.prog-nums b {
+.nums b {
   font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
 }
-.prog-nums.is-done b {
+.nums.is-done b {
   color: var(--state-success);
 }
-.prog-sep {
+.sep {
   color: var(--text-tertiary);
 }
-.prog-pct {
+.pct {
   margin-left: var(--sp-2);
   font-size: 12px;
   color: var(--text-tertiary);
 }
-.prog-bar {
+.bar {
   width: 84px;
   flex: none;
 }
-.status-bar :deep(.page-header) {
-  margin-bottom: var(--sp-3);
-}
-.status-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
-.meta-chip {
-  padding: 0 var(--sp-2);
-  font-size: 12px;
-  line-height: 19px;
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-}
-.meta-chip.is-done {
-  color: var(--state-success);
-  background: var(--success-soft);
-  border-color: var(--success-line);
-}
-.meta-inflight {
+.inflight {
   font-size: 12px;
   color: var(--state-generating);
 }
-.meta-text {
-  font-size: 13px;
-  line-height: 1.5;
+.review-text {
   color: var(--text-secondary);
 }
 </style>

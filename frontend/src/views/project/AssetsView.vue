@@ -49,7 +49,7 @@ const assetsReviewStatus = computed(() => projectQuery.data.value?.assets_review
 const reviewStatusText = computed(() => {
   if (assetsReviewStatus.value === 'approved') return '公共资产已通过人工审核，可进入分镜图生成'
   if (assetsReviewStatus.value === 'rejected') return '审核被驳回：请修改或替换不满意的资产后重新提交审核'
-  return '公共资产待人工审核：确认资产无误并通过审核后，方可生成分镜图'
+  return '确认资产无误后审核通过，方可生成分镜图'
 })
 const reviewMutation = useMutation({
   mutationFn: (action: 'approve' | 'reject') => reviewProjectAssets(projectId.value, action),
@@ -403,32 +403,6 @@ const assetProgress = useGenerationProgress<AssetGenerationProgress>({
   },
 })
 
-/** 资产图分组统计（角色/场景/道具）：模板里安全遍历，避免 Partial 记录取值可能为空 */
-const progressGroups = computed(() => {
-  const groups = assetProgress.data.value?.groups ?? {}
-  const defs: Array<{ kind: AssetKind; label: string }> = [
-    { kind: 'character', label: '角色定妆图' },
-    { kind: 'scene', label: '场景基准图' },
-    { kind: 'prop', label: '道具锚定图' },
-  ]
-  return defs
-    .map((d) => ({ ...d, ...(groups[d.kind] ?? { total: 0, done: 0 }) }))
-    .filter((g) => g.total > 0)
-})
-
-/** 在途任务按角色/场景/道具分组：直接回答「正在生成的是什么类型的图」 */
-const inflightGroups = computed(() => {
-  const defs = [
-    { kind: 'character', label: '角色', unit: '定妆图' },
-    { kind: 'scene', label: '场景', unit: '基准图' },
-    { kind: 'prop', label: '道具', unit: '锚定图' },
-  ]
-  const list = assetProgress.data.value?.inflight ?? []
-  return defs
-    .map((d) => ({ ...d, items: list.filter((j) => j.kind === d.kind) }))
-    .filter((g) => g.items.length > 0)
-})
-
 /** 在途任务 → 卡片可直接查询的状态 */
 const inflightById = computed(() => {
   const map = new Map<string, AssetGenerationJob>()
@@ -483,29 +457,6 @@ function inflightText(job?: AssetGenerationJob): string {
   if (job.status === 'queued') return '排队中'
   return '提交确认中'
 }
-function formatTime(iso?: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleTimeString('zh-CN', { hour12: false })
-}
-/** 顶部状态条的一句话：优先展示「正在生成什么」，其次展示「上次全部完成」 */
-const assetGenHeadline = computed(() => {
-  const p = assetProgress.data.value
-  const inflightCount = p?.inflight_count ?? 0
-  if (inflightCount > 0) {
-    const parts = inflightGroups.value.map(
-      (g) => `${g.label}${g.items.length}个（${g.unit}）`,
-    )
-    return `正在生成：${parts.join('、')}`
-  }
-  if (projectReadiness.value.all) {
-    const at = formatTime(p?.last_completed_at)
-    return `公共资产图已全部生成完成${at ? `（最近完成于 ${at}）` : ''}`
-  }
-  if (!projectReadiness.value.total) return '解析完成后此处展示待生成的资产'
-  return `待生成：还有 ${projectReadiness.value.total - projectReadiness.value.done} 个资产图未生成`
-})
 /** 项目级齐全度（后端权威口径，不受标签页切换影响）：状态条与审核闸口都用它 */
 const projectReadiness = computed(() => {
   const p = assetProgress.data.value
@@ -529,6 +480,13 @@ const failedEntityIds = computed(() => new Set(failedEntities.value.map((f) => f
 // --- 制作资产（公共资产生成：角色定妆图/场景基准图/道具锚定图） ---
 const craftingId = ref<string | null>(null)
 const batchCrafting = ref(false)
+/**
+ * 资产出图工作流（asset_image 槽位）。
+ * 角色定妆图 / 场景基准图 / 道具锚定图共用这一份选择：只允许纯文生图工作流，
+ * 候选由后端 /workflows/candidates 按真实能力过滤，前端不硬编码描述与 ID。
+ * 未选择时后端按项目默认 → 系统默认自行解析，行为与改造前一致。
+ */
+const assetImageWorkflowId = ref<string | undefined>(undefined)
 // --- 制作资产勾选批量生成：勾选多个/全选后批量触发 ---
 const selectedCraftIds = ref<string[]>([])
 function toggleCraft(id: string, checked: boolean) {
@@ -538,7 +496,8 @@ function toggleCraft(id: string, checked: boolean) {
   selectedCraftIds.value = [...set]
 }
 const genPortrait = useMutation({
-  mutationFn: (id: string) => generateCharacterPortrait(id),
+  mutationFn: (id: string) =>
+    generateCharacterPortrait(id, { workflow_id: assetImageWorkflowId.value }),
   onSuccess: () => {
     message.success('角色定妆图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['characters', projectId] })
@@ -548,7 +507,8 @@ const genPortrait = useMutation({
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
 })
 const genBaseline = useMutation({
-  mutationFn: (id: string) => generateSceneBaseline(id),
+  mutationFn: (id: string) =>
+    generateSceneBaseline(id, { workflow_id: assetImageWorkflowId.value }),
   onSuccess: () => {
     message.success('场景基准图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
@@ -557,7 +517,8 @@ const genBaseline = useMutation({
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
 })
 const genAnchor = useMutation({
-  mutationFn: (id: string) => generatePropAnchor(id),
+  mutationFn: (id: string) =>
+    generatePropAnchor(id, { workflow_id: assetImageWorkflowId.value }),
   onSuccess: () => {
     message.success('道具锚定图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['props', projectId] })
@@ -855,17 +816,17 @@ onMounted(() => {
 
 <template>
   <div class="page assets-page">
-    <!-- 一条状态条：进度 + 审核状态 + 下一步主按钮 -->
+    <!-- 左侧「制作流程」栏已高亮 02 资产库，页内不再重复同名大标题。
+         H1 必须保留（.visually-hidden）：删掉 PageHeader 时曾把 H1 一并丢掉，
+         导致本页在无障碍树里没有任何标题层级。 -->
+    <h1 class="visually-hidden">资产库</h1>
+    <!-- 顶部两卡：执行进度（只读）+ 批量生成（可写） -->
     <AssetStatusBar
-      eyebrow="资产库 · 项目级公共资产"
-      title="资产库"
-      :headline="assetGenHeadline"
       :done="projectReadiness.done"
       :total="projectReadiness.total"
       :all-done="projectReadiness.all"
       :review-status="assetsReviewStatus"
       :review-text="reviewStatusText"
-      :groups="progressGroups"
       :inflight-count="assetProgress.inflightCount.value"
       :reviewing="reviewMutation.isPending.value"
       :loading="assetProgress.loading.value"
@@ -886,6 +847,8 @@ onMounted(() => {
       :batch="batchView"
       :retrying="retryingFailed"
       :failed-count="failedInTab"
+      :workflow-id="assetImageWorkflowId"
+      @update:workflow-id="(v: string | undefined) => (assetImageWorkflowId = v)"
       @toggle-all="toggleAll"
       @batch-generate="handleBatchCraft"
       @retry-failed="retryFailedCraft"
@@ -974,6 +937,7 @@ onMounted(() => {
     <!-- 重新生成：提示词 + 候选版本 -->
     <AssetRegenDrawer
       v-model:show="regenVisible"
+      :workflow-id="assetImageWorkflowId"
       :asset="regenAsset"
       @refresh="refreshAll"
       @submitted="assetProgress.start({ notifyOnComplete: true })"

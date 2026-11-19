@@ -14,11 +14,17 @@ import {
   listComfyuiInstances, updateComfyuiInstances, testComfyui,
 } from '@/api/settings'
 import {
-  listWorkflows, uploadWorkflow, validateWorkflow,
+  getWorkflow, getWorkflowClassification, updateWorkflow,
+  uploadWorkflow, validateWorkflow,
 } from '@/api/workflows'
 import { listProjects } from '@/api/projects'
 import type { LlmInstance, ComfyUIInstance, ComfyUIInstanceTestResult } from '@/types/compose'
 import type { Workflow, WorkflowType } from '@/types/asset'
+import {
+  MODE_LABELS,
+  type WorkflowClassifiedItem,
+  type WorkflowClassificationGroup,
+} from '@/types/workflow'
 
 const message = useMessage()
 const queryClient = useQueryClient()
@@ -249,14 +255,50 @@ const workflowTypeOptions: Array<{ label: string; value: WorkflowType | '' }> = 
   { label: 'BGM', value: 'bgm' },
   { label: '音效', value: 'sfx' },
 ]
-const workflowsQuery = useQuery({
-  queryKey: ['workflows', workflowTypeFilter],
-  queryFn: () => listWorkflows(workflowTypeFilter.value ? { workflow_type: workflowTypeFilter.value } : undefined),
+/**
+ * 工作流细分分类：分组由后端按 capabilities.normalize() 的真实能力算好
+ * （文生图 / 图生图 / 首尾帧 / 文生视频 / 参考图生视频 / TTS / BGM / SFX）。
+ * 前端只按 workflow_type 做一级筛选，不按名称或描述二次归类。
+ */
+const classificationQuery = useQuery({
+  queryKey: ['workflows', 'classification'],
+  queryFn: () => getWorkflowClassification(),
 })
-const workflowList = computed<Workflow[]>(() => {
-  const data: any = workflowsQuery.data.value
-  if (Array.isArray(data)) return data
-  return data?.items ?? []
+const classificationGroups = computed<WorkflowClassificationGroup[]>(() => {
+  const groups = classificationQuery.data.value?.groups ?? []
+  if (!workflowTypeFilter.value) return groups
+  return groups.filter((g) => g.workflow_type === workflowTypeFilter.value)
+})
+/** 能力判不出细分类型的工作流：单独成组展示，不硬塞进任何分类 */
+const uncategorizedItems = computed<WorkflowClassifiedItem[]>(() => {
+  const items = classificationQuery.data.value?.uncategorized ?? []
+  if (!workflowTypeFilter.value) return items
+  return items.filter((i) => i.workflow_type === workflowTypeFilter.value)
+})
+const classifiedCount = computed(
+  () =>
+    classificationGroups.value.reduce((n, g) => n + g.items.length, 0)
+    + uncategorizedItems.value.length,
+)
+/** 分组里的能力标签：用统一中文文案，未知模式直接显示原始键名 */
+function modeLabel(mode: string): string {
+  return MODE_LABELS[mode] ?? mode
+}
+
+/** 渲染用分组：正常分类 +（有内容时）待检查组，模板只需一套行结构 */
+interface RenderGroup {
+  key: string
+  label: string
+  items: WorkflowClassifiedItem[]
+}
+const renderGroups = computed<RenderGroup[]>(() => {
+  const list: RenderGroup[] = classificationGroups.value
+    .filter((g) => g.items.length)
+    .map((g) => ({ key: g.key, label: g.label, items: g.items }))
+  if (uncategorizedItems.value.length) {
+    list.push({ key: '__uncategorized__', label: '待检查', items: uncategorizedItems.value })
+  }
+  return list
 })
 
 // 上传表单
@@ -312,20 +354,59 @@ const validateWorkflowMutation = useMutation({
   onError: (e: any) => message.error(`校验失败: ${e?.message ?? e}`),
 })
 
-// 下载工作流 JSON 文件
-const downloadWorkflow = (wf: Workflow) => {
-  if (!wf.definition) {
-    message.error('该工作流无定义内容')
-    return
+// 下载工作流 JSON 文件：分类接口只返回摘要，下载前按 id 取回完整定义
+const downloadWorkflow = async (wf: { id: string; name: string }) => {
+  try {
+    const full: Workflow = await getWorkflow(wf.id)
+    if (!full.definition) {
+      message.error('该工作流无定义内容')
+      return
+    }
+    const blob = new Blob([JSON.stringify(full.definition, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${full.name}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e: any) {
+    message.error(`下载失败: ${e?.message ?? e}`)
   }
-  const blob = new Blob([JSON.stringify(wf.definition, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${wf.name}.json`
-  a.click()
-  URL.revokeObjectURL(url)
 }
+
+// --- 描述编辑：描述是资产库 / 分镜图 / 分镜看板选择器的主展示文本，必须可维护 ---
+const showDescModal = ref(false)
+const descWorkflow = ref<WorkflowClassifiedItem | null>(null)
+const descValue = ref('')
+function openDescEdit(wf: WorkflowClassifiedItem) {
+  descWorkflow.value = wf
+  descValue.value = wf.description
+  showDescModal.value = true
+}
+/** 与后端同口径：不超过 20 个汉字或 40 个英文（ASCII）字符 */
+const descCharCount = computed(() => {
+  const chars = [...descValue.value.trim()]
+  const ascii = chars.filter((c) => c.charCodeAt(0) < 128).length
+  return { total: chars.length, ascii, nonAscii: chars.length - ascii }
+})
+const descTooLong = computed(
+  () => descCharCount.value.nonAscii > 20 || descCharCount.value.ascii > 40,
+)
+const saveDescMutation = useMutation({
+  mutationFn: () => {
+    const wf = descWorkflow.value
+    if (!wf) throw new Error('未选择工作流')
+    return updateWorkflow(wf.id, { description: descValue.value.trim() })
+  },
+  onSuccess: () => {
+    message.success('描述已更新，各页面选择器的显示文本同步变更')
+    showDescModal.value = false
+    queryClient.invalidateQueries({ queryKey: ['workflows'] })
+    queryClient.invalidateQueries({ queryKey: ['workflow-candidates'] })
+    queryClient.invalidateQueries({ queryKey: ['project-workflow-config'] })
+  },
+  onError: (e: any) => message.error(`保存失败: ${e?.message ?? e}`),
+})
 </script>
 
 <template>
@@ -531,7 +612,10 @@ const downloadWorkflow = (wf: Workflow) => {
         <template v-else-if="activeTab === 'workflows'">
           <div class="page-header">
             <h2 class="page-title">工作流管理</h2>
-            <p class="page-subtitle">悬停名称查看说明；内置工作流默认优先执行且不可删除</p>
+            <p class="page-subtitle">
+              按真实能力自动细分（文生图 / 图生图 / 首尾帧 / 文生视频 / 参考图生视频 / TTS / BGM / SFX），
+              共 {{ classifiedCount }} 个；描述可在行内编辑，内置工作流默认优先执行且不可删除
+            </p>
           </div>
 
           <!-- 列表 -->
@@ -548,39 +632,94 @@ const downloadWorkflow = (wf: Workflow) => {
               </div>
               <n-button size="small" type="primary" @click="openUploadModal">+ 新增工作流</n-button>
             </div>
-            <n-spin v-if="workflowsQuery.isLoading.value" style="padding: 24px 0; width: 100%" />
-            <n-empty v-else-if="!workflowList.length" description="暂无工作流" style="padding: 24px 0" />
-            <div v-else class="wf-table">
-              <div class="wf-thead">
-                <span class="col-name">名称</span>
-                <span class="col-type">类型</span>
-                <span class="col-time">更新时间</span>
-                <span class="col-actions">操作</span>
-              </div>
-              <div v-for="wf in workflowList" :key="wf.id" class="wf-tr">
-                <span class="col-name" data-label="名称">
-                  <n-tooltip trigger="hover" placement="top-start" :disabled="!wf.name">
-                    <template #trigger>
-                      <span class="wf-name wf-name-hover">{{ wf.description || wf.name }}</span>
-                    </template>
-                    <div class="wf-tooltip">{{ wf.name || '暂无名称' }}</div>
-                  </n-tooltip>
-                </span>
-                <span class="col-type" data-label="类型">
-                  <n-tag size="small" :bordered="false">{{ wf.workflow_type }}</n-tag>
-                  <n-tag v-if="wf.is_builtin" type="warning" size="small" :bordered="false">内置</n-tag>
-                  <n-tag v-if="wf.is_default" type="success" size="small" :bordered="false">默认</n-tag>
-                </span>
-                <span class="col-time hint-text" data-label="更新时间">{{ new Date(wf.updated_at).toLocaleString() }}</span>
-                <span class="col-actions" data-label="操作">
-                  <n-button size="tiny" quaternary @click="downloadWorkflow(wf)">下载</n-button>
-                  <n-button size="tiny" quaternary @click="validateWorkflowMutation.mutate(wf.id)" :loading="validateWorkflowMutation.isPending.value">校验</n-button>
-                </span>
-              </div>
+            <n-spin v-if="classificationQuery.isLoading.value" style="padding: 24px 0; width: 100%" />
+            <n-empty
+              v-else-if="!renderGroups.length"
+              :description="classificationQuery.isError.value ? '工作流分类加载失败，请检查后端服务' : '暂无工作流'"
+              style="padding: 24px 0"
+            />
+            <div v-else class="wf-groups">
+              <section v-for="group in renderGroups" :key="group.key" class="wf-group">
+                <div class="wf-group-head">
+                  <span class="wf-group-title">{{ group.label }}</span>
+                  <span class="wf-group-count">{{ group.items.length }}</span>
+                  <span v-if="group.key === '__uncategorized__'" class="wf-group-hint">
+                    能力声明不足以判定细分类型，未归入任何分类；请检查该工作流的能力标记
+                  </span>
+                </div>
+                <div class="wf-table">
+                  <div v-for="wf in group.items" :key="wf.id" class="wf-tr">
+                    <span class="col-name" data-label="描述">
+                      <n-tooltip trigger="hover" placement="top-start" :disabled="!wf.name">
+                        <template #trigger>
+                          <span class="wf-name wf-name-hover">{{ wf.description }}</span>
+                        </template>
+                        <div class="wf-tooltip">技术名：{{ wf.name }}</div>
+                      </n-tooltip>
+                      <span class="wf-sub">v{{ wf.version }} · {{ wf.name }}</span>
+                    </span>
+                    <span class="col-type" data-label="能力">
+                      <n-tag
+                        v-for="mode in wf.generation_modes.slice(0, 3)"
+                        :key="mode"
+                        size="small"
+                        :bordered="false"
+                      >{{ modeLabel(mode) }}</n-tag>
+                      <span v-if="!wf.generation_modes.length" class="hint-text">未声明能力</span>
+                    </span>
+                    <span class="col-time col-state" data-label="状态">
+                      <n-tag v-if="wf.is_default" type="success" size="small" :bordered="false">默认</n-tag>
+                      <n-tag v-if="wf.is_builtin" type="warning" size="small" :bordered="false">内置</n-tag>
+                      <span v-if="!wf.is_default && !wf.is_builtin" class="hint-text">自定义</span>
+                    </span>
+                    <span class="col-actions" data-label="操作">
+                      <n-button size="tiny" quaternary @click="openDescEdit(wf)">编辑描述</n-button>
+                      <n-button size="tiny" quaternary @click="downloadWorkflow(wf)">下载</n-button>
+                      <n-button size="tiny" quaternary @click="validateWorkflowMutation.mutate(wf.id)" :loading="validateWorkflowMutation.isPending.value">校验</n-button>
+                    </span>
+                  </div>
+                </div>
+              </section>
             </div>
           </n-card>
 
           <WorkflowTestPanel class="wf-test-panel" />
+          <!-- 描述编辑弹窗：描述是各页面选择器的主展示文本，改这里全站同步 -->
+          <n-modal
+            v-model:show="showDescModal"
+            preset="card"
+            title="编辑工作流描述"
+            style="width: 460px; max-width: 92vw"
+            :bordered="false"
+          >
+            <p class="hint-text" style="margin: 0 0 12px">
+              描述显示在资产库、分镜图、分镜看板的工作流选择器中，技术名只在悬停时提示。
+            </p>
+            <div class="form-item">
+              <label class="field-label">描述</label>
+              <n-input
+                v-model:value="descValue"
+                placeholder="如：千问文生图"
+                maxlength="60"
+                show-count
+              />
+              <span class="hint-text" :style="descTooLong ? 'color: var(--state-danger)' : ''">
+                当前 {{ descCharCount.nonAscii }} 个汉字 / {{ descCharCount.ascii }} 个英文字符，上限 20 个汉字或 40 个英文字符
+              </span>
+            </div>
+            <p v-if="descWorkflow" class="hint-text" style="margin: 4px 0 0">
+              技术名：{{ descWorkflow.name }}（v{{ descWorkflow.version }}）
+            </p>
+            <div class="card-actions" style="margin-top: 16px">
+              <n-button
+                type="primary"
+                :disabled="!descValue.trim() || descTooLong"
+                :loading="saveDescMutation.isPending.value"
+                @click="saveDescMutation.mutate()"
+              >保存</n-button>
+              <n-button quaternary @click="showDescModal = false">取消</n-button>
+            </div>
+          </n-modal>
 
           <!-- 新增工作流弹窗 -->
           <n-modal
@@ -797,6 +936,53 @@ const downloadWorkflow = (wf: Workflow) => {
 }
 
 /* --- Workflow list --- */
+.wf-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 12px;
+}
+.wf-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 2px 6px;
+}
+.wf-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.wf-group-count {
+  min-width: 18px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 17px;
+  text-align: center;
+  color: var(--text-secondary);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+}
+.wf-group-hint {
+  font-size: 12px;
+  color: var(--state-warning);
+}
+.wf-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.col-state {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
 .wf-toolbar {
   display: flex;
   align-items: center;

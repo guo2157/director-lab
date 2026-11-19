@@ -38,7 +38,8 @@ NAV_PAGE_WHITELIST: set[str] = {
     "storyboard",
     "assets",
     "compose",
-    "jobs",
+    # "jobs" 已下线（2026-11-19）：任务中心页面移除，任务进度改在产出页面内联展示。
+    # 保留在 Agent 白名单里会让 Agent 声称「已切到任务页」而前端只能落到作品列表。
     "settings",
     "series-list",
 }
@@ -69,7 +70,8 @@ NAVIGATE_KEYWORD_TO_ROUTE: dict[str, str] = {
     "项目列表": "projects",
     "设置": "settings",
     "工作台": "director",
-    "任务": "jobs",
+    # 「任务」不再映射到已下线的任务中心：任务进度在各产出页面内联可见，
+    # 让 Agent 把用户送去一个不存在的页面比不做任何导航更糟。
     "系列": "series-list",
     "系列列表": "series-list",
 }

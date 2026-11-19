@@ -1,24 +1,29 @@
 <script setup lang="ts">
 /**
- * 分镜图批量工具栏：全选 / 状态筛选 / 批量生成 / 批量审核通过。
- * 吸附在页面顶部——滚动 26 个镜头时，批量操作始终在手边。
+ * 分镜图批量操作卡：工作流选择 / 全选 / 批量生成 / 批量审核通过。
+ *
+ * 改造点（2026-11-19 v8）：删掉状态筛选 chips（全部 / 已完成 / 待确认 / 失败）。
+ * 那四个数字回答的是「各状态各有多少张」——而进度卡上的 X/Y 与进度条已经回答了
+ * 「做到哪了」，镜头卡片右上角也各自带着状态标签。筛选条把同一批计数在第三个位置
+ * 又列一遍，还额外占了一整行。需要找特定状态的镜头时用卡片标签扫读即可。
  */
 import { computed, ref, watch } from 'vue'
 import { NButton, NCheckbox } from 'naive-ui'
-import { SHOT_FILTERS, type ShotFilter } from './types'
+import StageCard from '@/components/ui/StageCard.vue'
+import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 
 const props = withDefaults(
   defineProps<{
     total: number
     selected: number
     allSelected?: boolean
-    filter: ShotFilter
-    counts: Record<ShotFilter, number>
     /** 公共资产审核通过才可生成 */
     canGenerate?: boolean
     batchLoading?: boolean
     confirmLoading?: boolean
     inflightCount?: number
+    /** 当前选中的分镜出图工作流（storyboard_image 槽位） */
+    workflowId?: string
   }>(),
   {
     allSelected: false,
@@ -30,7 +35,7 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  'update:filter': [ShotFilter]
+  'update:workflowId': [string | undefined]
   'toggle-all': [boolean]
   generate: []
   confirm: []
@@ -49,7 +54,16 @@ watch(
 </script>
 
 <template>
-  <section class="batch-bar">
+  <StageCard label="批量出图">
+    <span class="wf-pick">
+      <WorkflowSelector
+        :model-value="workflowId"
+        slot="storyboard_image"
+        size="small"
+        placeholder="选择分镜出图工作流"
+        @update:model-value="(v: string | undefined) => emit('update:workflowId', v)"
+      />
+    </span>
     <n-checkbox
       :checked="allSelected"
       :indeterminate="indeterminate"
@@ -59,132 +73,53 @@ watch(
       全选
     </n-checkbox>
     <span class="sel-count">已选 <b>{{ selected }}</b> / {{ total }}</span>
-    <span v-if="inflightCount" class="inflight">排队 / 生成中 {{ inflightCount }}</span>
 
-    <span class="divider" />
-
-    <div class="filters" role="tablist" aria-label="按状态筛选镜头">
-      <button
-        v-for="f in SHOT_FILTERS"
-        :key="f.value"
-        type="button"
-        role="tab"
-        class="f-btn"
-        :class="{ active: filter === f.value }"
-        :aria-selected="filter === f.value"
-        @click="emit('update:filter', f.value)"
+    <template #actions>
+      <!-- 批量审核只在有已选镜头时出现：没有选中项时它只是一个恒为 0 的禁用按钮 -->
+      <n-button
+        v-if="selected > 0"
+        size="small"
+        type="primary"
+        secondary
+        :loading="confirmLoading"
+        @click="emit('confirm')"
       >
-        {{ f.label }}
-        <span class="f-count">{{ counts[f.value] ?? 0 }}</span>
-      </button>
-    </div>
-
-    <span class="spacer" />
-
-    <n-button
-      size="small"
-      type="primary"
-      secondary
-      :disabled="!selected"
-      :loading="confirmLoading"
-      @click="emit('confirm')"
-    >
-      批量审核通过（{{ selected }}）
-    </n-button>
-    <n-button
-      size="small"
-      type="primary"
-      :disabled="!canGenerate || !selected"
-      :loading="batchLoading"
-      @click="emit('generate')"
-    >
-      批量生成（{{ selected }}）
-    </n-button>
-  </section>
+        批量审核通过（{{ selected }}）
+      </n-button>
+      <n-button
+        size="small"
+        type="primary"
+        :disabled="!canGenerate || !selected"
+        :loading="batchLoading"
+        @click="emit('generate')"
+      >
+        批量生成（{{ selected }}）
+      </n-button>
+    </template>
+  </StageCard>
 </template>
 
 <style scoped>
-.batch-bar {
-  position: sticky;
-  top: 0;
-  z-index: 4;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2) var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  margin-bottom: var(--sp-4);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+.wf-pick {
+  min-width: 170px;
+  max-width: 260px;
+  flex: 0 1 210px;
 }
 .sel-count {
   font-size: 12px;
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 .sel-count b {
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-primary);
 }
-.inflight {
-  font-size: 12px;
-  color: var(--state-generating);
-}
-.divider {
-  width: 1px;
-  height: 16px;
-  background: var(--border-subtle);
-}
-.filters {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-}
-.f-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px var(--sp-2);
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 20px;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
-}
-.f-btn:hover {
-  color: var(--text-primary);
-  background: var(--overlay-hover);
-}
-.f-btn.active {
-  color: var(--brand-hover);
-  background: var(--brand-soft);
-  border-color: var(--brand-line);
-}
-.f-count {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-tertiary);
-}
-.f-btn.active .f-count {
-  color: var(--brand-hover);
-}
-.spacer {
-  flex: 1;
-  min-width: var(--sp-2);
-}
+
 @media (max-width: 768px) {
-  .spacer {
-    display: none;
-  }
-  .filters {
-    order: 3;
-    width: 100%;
-    overflow-x: auto;
+  .wf-pick {
+    flex: 1 1 100%;
+    max-width: none;
   }
 }
 </style>

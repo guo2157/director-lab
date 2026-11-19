@@ -48,6 +48,7 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
     pid = client.post("/api/projects", json={"name": "多角色项目", "aspect_ratio": "9:16"}).json()["id"]
     db = SessionLocal()
     char_names = []
+    char_ids = []
     for i in range(n_chars):
         # D-23 资产门禁：定妆图文件必须真实存在
         Path(_TMP_DIR / f"p{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
@@ -56,8 +57,10 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
         db.add(a)
         db.flush()
         name = f"角色{i}"
-        db.add(Character(id=ids.character_id(), project_id=pid, name=name,
-                         appearance="x", portrait_asset_id=a.id))
+        c = Character(id=ids.character_id(), project_id=pid, name=name,
+                      appearance="x", portrait_asset_id=a.id)
+        db.add(c)
+        char_ids.append(c.id)
         char_names.append(name)
     scene_name = None
     if with_scene:
@@ -77,7 +80,7 @@ def _mk_char_scene_assets(client, n_chars=1, with_scene=True):
     _proj.assets_review_status = "approved"
     db.commit()
     db.close()
-    return pid, char_names, scene_name
+    return pid, char_names, scene_name, char_ids
 
 
 # ---------- 多角色槽位注入 ----------
@@ -86,7 +89,7 @@ def test_multi_character_slot_priority(client: TestClient):
     """多角色按出现顺序填入 ref_identity → ref_character_2（ref_image 为分镜图保留槽位）。"""
     from app.core.database import SessionLocal
     from app.services import ref_inject
-    pid, names, _ = _mk_char_scene_assets(client, n_chars=2)
+    pid, names, _, _ = _mk_char_scene_assets(client, n_chars=2)
     db = SessionLocal()
     prompt = f"@{names[0]} 和 @{names[1]} 在对话"
     media = ref_inject.build_media_params(db, pid, prompt, None)
@@ -101,7 +104,7 @@ def test_character_never_occupies_ref_image(client: TestClient):
     """P0 回归：角色引用不得占用 ref_image（当前分镜图槽位），避免分镜图被覆盖。"""
     from app.core.database import SessionLocal
     from app.services import ref_inject
-    pid, names, _ = _mk_char_scene_assets(client, n_chars=1)
+    pid, names, _, _ = _mk_char_scene_assets(client, n_chars=1)
     db = SessionLocal()
     # 工作流声明 ref_identity 与 ref_image 均可用
     media = ref_inject.build_media_params(db, pid, f"@{names[0]} 独白", ["ref_identity", "ref_image"])
@@ -114,7 +117,7 @@ def test_character_slot_overflow_with_ref_image_declared(client: TestClient):
     """3 个角色仅 2 个角色槽位（ref_image 不计数）时返回 422，不静默丢弃参考。"""
     from app.core.database import SessionLocal
     from app.services import ref_inject
-    pid, names, _ = _mk_char_scene_assets(client, n_chars=3)
+    pid, names, _, _ = _mk_char_scene_assets(client, n_chars=3)
     db = SessionLocal()
     prompt = f"@{names[0]} 和 @{names[1]} 与 @{names[2]}"
     with pytest.raises(HTTPException) as ei:
@@ -127,7 +130,7 @@ def test_multi_character_slot_overflow_422(client: TestClient):
     """角色引用数超过工作流声明槽位时返回 422，不静默丢参考。"""
     from app.core.database import SessionLocal
     from app.services import ref_inject
-    pid, names, _ = _mk_char_scene_assets(client, n_chars=2)
+    pid, names, _, _ = _mk_char_scene_assets(client, n_chars=2)
     db = SessionLocal()
     prompt = f"@{names[0]} 和 @{names[1]}"
     # 工作流仅声明 ref_identity 一个角色槽位
@@ -223,7 +226,7 @@ def _mk_shots_with_prompt(client, n=3):
     from app.core.database import SessionLocal
     from app.models import Asset, Scene, ids
 
-    pid, names, _ = _mk_char_scene_assets(client, n_chars=1)
+    pid, names, _, char_ids = _mk_char_scene_assets(client, n_chars=1)
     # 场景标题刻意不与提示词中的地点同名，避免 @引用解析注入 ref_scene，
     # 保证本用例的断言只针对角色参考图 ref_identity
     scn = client.post("/api/scenes", json={"project_id": pid, "title": "外景地", "episode": 1}).json()
@@ -250,6 +253,7 @@ def _mk_shots_with_prompt(client, n=3):
         shot = client.post("/api/shots", json={
             "scene_id": scn["id"], "episode": 1, "shot_kind": "visual", "duration": 5,
             "image_prompt": f"@{names[0]} 站在操场上",
+            "character_id": char_ids[0],
         }).json()
         shot_ids.append(shot["id"])
     return pid, names, shot_ids

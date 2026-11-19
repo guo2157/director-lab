@@ -1056,7 +1056,10 @@ async function copyRawReport() {
     <header class="parse-header">
       <div class="parse-header-left">
         <div class="title-block">
-          <h1 class="detail-title">解析</h1>
+          <!-- 左侧「制作流程」栏已高亮 01 剧本（解析是剧本阶段的子步骤），
+               FlowNav 里也已选中「解析」；页内不再画第三个同名标题。
+               H1 降为 visually-hidden 保留文档大纲与读屏语义。 -->
+          <h1 class="visually-hidden">解析</h1>
           <FlowNav :project-id="projectId" />
         </div>
       </div>
@@ -1417,20 +1420,9 @@ async function copyRawReport() {
 }
 .parse-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
-/* 页面标题：与作品列表页同档（无衬线特粗 + 负字距）。
-   原实现把 H1 写成 .visually-hidden，详情页在视觉上没有标题层级，
-   用户只能靠顶栏小字面包屑判断「我在哪一页」。
-   gap 用 8px：FlowNav 是有填充和描边的控件，2px 会让它贴死标题像副标题。 */
+/* FlowNav 是页头唯一的可视元素（标题已 hidden），它是带描边填充的胶囊控件。
+   gap 保持 8px 以维持 title-block 的纵向节奏，与 ScriptView 一致。 */
 .title-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.detail-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.022em;
-  line-height: 1.2;
-  color: var(--text-primary);
-}
 
 .parse-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .parse-body { display: flex; flex: 1; min-height: 0; min-width: 0; }

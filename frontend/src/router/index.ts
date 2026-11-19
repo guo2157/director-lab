@@ -82,10 +82,10 @@ const router = createRouter({
       meta: { title: '剧集审核' },
     },
     {
+      // 任务中心已下线（2026-11-19）：任务进度改在产出页面内联展示。
+      // 保留旧路径重定向，避免历史书签/外部链接直接白屏。
       path: '/jobs',
-      name: 'jobs',
-      component: () => import('../views/JobsView.vue'),
-      meta: { title: '任务中心' },
+      redirect: { name: 'projects' },
     },
     {
       path: '/settings',

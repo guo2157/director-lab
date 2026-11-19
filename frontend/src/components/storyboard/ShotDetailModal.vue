@@ -9,7 +9,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NModal, NTabPane, NTabs } from 'naive-ui'
 import type { Character, Prop, Scene, Shot } from '@/types/script'
-import { useShotDetail, type ClipTier } from './useShotDetail'
+import { useShotDetail } from './useShotDetail'
 import ShotPreviewPane from './ShotPreviewPane.vue'
 import ShotPromptTab from './ShotPromptTab.vue'
 import ShotReferencesTab from './ShotReferencesTab.vue'
@@ -30,8 +30,6 @@ const props = defineProps<{
   kindLabel: string
   clipJobActive: boolean
   clipWorkflowId?: string
-  clipTier: ClipTier
-  clipTierOptions: Array<{ label: string; value: string }>
   scenes: Scene[]
   characters: Character[]
   propItems: Prop[]
@@ -40,7 +38,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:show': [value: boolean]
   'update:shotId': [value: string]
-  'update:clipTier': [value: ClipTier]
   /** 生成任务提交成功：页面刷新场景/任务列表并启动进度轮询 */
   submitted: []
   /** 提示词已保存：页面需要重新拉取该镜头（后端做失效传播） */
@@ -91,8 +88,6 @@ const {
   props: () => props.propItems,
   readinessAll: () => props.readinessAll,
   clipWorkflowId: () => props.clipWorkflowId,
-  clipTier: () => props.clipTier,
-  setClipTier: (tier: ClipTier) => emit('update:clipTier', tier),
   clipJobActive: () => props.clipJobActive,
   onSubmitted: () => emit('submitted'),
   onPromptsSaved: (shot: Shot) => emit('prompts-saved', shot),
@@ -119,9 +114,6 @@ function close() {
   emit('update:show', false)
 }
 
-function handleTierChange(value: string) {
-  emit('update:clipTier', value as ClipTier)
-}
 
 /** Enter：执行当前标签页的主操作（与页面上的主按钮一致） */
 function confirmPrimary() {
@@ -254,7 +246,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
           <n-tab-pane name="generate" tab="生成">
             <ShotGenerateTab
-              :tier="clipTier"
               :project-id="projectId"
               :shot-id="activeShot.id"
               :episode="activeShot.episode"
@@ -264,8 +255,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               :clip-action-is-regenerate="clipActionIsRegenerate"
               :generating="generating"
               :direct-regen-loading="directRegenLoading"
-              :tier-options="clipTierOptions"
-              @update:tier="handleTierChange"
               @generate-keyframe="handleGenerateKeyframe"
               @clip-action="handleClipActionClick"
             />

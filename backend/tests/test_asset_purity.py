@@ -196,7 +196,8 @@ def test_scene_batch_generate_injects_media(client: TestClient):
         seed_scene_baseline_asset(db, scene, "/tmp/dlab_test_media")
         for i in range(3):
             db.add(Shot(id=ids.shot_id(), scene_id=scene.id, episode=1, seq=i + 1,
-                        shot_kind="visual", duration=5, image_prompt=f"@小马 在马棚，镜头{i+1}"))
+                        shot_kind="visual", duration=5, character_id=pony.id,
+                        image_prompt=f"@小马 在马棚，镜头{i+1}"))
         wf = Workflow(id=ids.workflow_id(), name="img", workflow_type="image",
                       capabilities={"reference_slots": ["ref_identity", "ref_scene"]},
                       definition={"nodes": []}, is_default=True)

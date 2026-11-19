@@ -8,7 +8,6 @@ import { chromium } from 'playwright-core'
 const BASE = 'http://127.0.0.1'
 const PAGES = [
   { key: 'script', path: '/project/prj_257406918e63/script' },
-  { key: 'jobs', path: '/jobs' },
   { key: 'settings', path: '/settings' },
 ]
 

@@ -63,10 +63,11 @@ const SERIES_ROUTE_NAMES = ['series-list', 'series-create', 'series-detail', 'se
 /** 导演台为固定视口布局：页面级滚动条不滚动，改由页面内部面板各自滚动 */
 const isFixedViewport = computed(() => route.name === 'director')
 
-/** 全局导航入口：作品（含单集项目与系列）| 任务中心 | 设置；导演台入口有意移除，经右侧 AI 助手面板进入 */
+/** 全局导航入口：作品（含单集项目与系列）| 设置；导演台入口有意移除，经右侧 AI 助手面板进入。
+ *  任务中心已下线（2026-11-19）：任务进度改为在产出它的页面内联展示（分镜图/资产/剧本页自带进度），
+ *  不再需要一个独立的全局任务列表页。 */
 const topMenuOptions = [
   { label: '作品', key: 'projects' },
-  { label: '任务中心', key: 'jobs' },
   { label: '设置', key: 'settings' },
 ]
 
@@ -181,8 +182,13 @@ function goProjects() {
 }
 
 .header-pill {
+  position: relative;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  /* 必须是 minmax(0, 1fr) 而不是 1fr：1fr 的隐含最小值是 auto（= 内容的
+     min-content 宽度），窄屏下品牌名的固有宽度会把左列撑宽、右列被压窄，
+     中列导航随之整体右移。实测 768 偏 2px、390 偏 27px。
+     用 minmax(0, 1fr) 后两列严格等宽，导航恒在几何中心。 */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: var(--sp-4);
   width: 100%;
@@ -204,6 +210,7 @@ function goProjects() {
   gap: 9px;
   flex-shrink: 0;
   justify-self: start;
+  min-width: 0;
   cursor: pointer;
   user-select: none;
   appearance: none;
@@ -227,8 +234,16 @@ function goProjects() {
   letter-spacing: -0.01em;
   color: var(--text-primary);
   white-space: nowrap;
+  /* 窄屏下品牌名不得顶破左列（左列已锁 minmax(0,1fr)），超长时省略 */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
+/* 导航容器：只有两个入口时，两个裸胶囊会读成「一个按钮 + 一个标签」，
+   未激活项几乎没有视觉重量。改为分段控件（轨道底 + 内嵌项），
+   两项获得相同的面积，字号也才敢往上加。
+   轨道走 --bg-sunken（比顶栏 --bg-panel 更深）而不是 --bg-elevated：
+   分段控件的语义是「凹陷的槽」，比容器更亮的轨道会读成浮起的按钮块。 */
 .top-nav {
   display: flex;
   align-items: center;
@@ -236,6 +251,10 @@ function goProjects() {
   gap: 2px;
   justify-self: center;
   min-width: 0;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-sunken);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -243,19 +262,23 @@ function goProjects() {
   display: none;
 }
 
-/* 导航项：胶囊形，激活态 = 品牌 soft 底 + 品牌字 + 内描边（三重编码） */
+/* 导航项：激活态 = 品牌 soft 底 + 品牌字 + 内描边（三重编码）。
+   字号走 15.5px 档（DESIGN.md 3 节卡片标题档），不再用 13.5px 的界面微调档：
+   顶栏是全局唯一常驻导航，13.5px 在 52px 胶囊里读起来像辅助文字。
+   未激活字色用 --text-secondary：实测在 --bg-sunken 上 8.99:1（远超 AA 4.5），
+   且比 --text-primary（18.59:1）低一档，不会和激活态的青字抢焦点。 */
 .nav-item {
   position: relative;
   flex-shrink: 0;
   appearance: none;
   background: none;
   border: 0;
-  padding: 0 14px;
-  height: 34px;
-  font-family: inherit;
-  font-size: 13.5px;
+  padding: 0 22px;
+  height: 36px;
+  font-family: var(--font-display);
+  font-size: 15.5px;
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: -0.005em;
   color: var(--text-secondary);
   border-radius: var(--radius-pill);
   cursor: pointer;
@@ -399,14 +422,29 @@ function goProjects() {
   .header-pill {
     gap: var(--sp-3);
     height: 48px;
-    padding: 0 var(--sp-2) 0 var(--sp-3);
+    /* 窄屏必须左右对称：原 0 var(--sp-2) 0 var(--sp-3) 会让中列再偏 2px */
+    padding: 0 var(--sp-3);
   }
+  /* 窄屏：品牌只留图标。
+     左列被 minmax(0,1fr) 锁成 96px（390 视口），而「图标 + Director Lab」
+     需要 124px —— 保留文字必然溢出 28px，只能截成「Director La...」，
+     比不显示更糟。图标本身已足够识别，且品牌区在手机上不是导航路径。 */
   .brand-name {
-    font-size: 13.5px;
+    display: none;
   }
+  .brand-mark {
+    width: 20px;
+    height: 20px;
+  }
+  /* 窄屏导航：字号只降一档（15.5 → 14.5），不再掉到 13px。
+     顶栏在手机上仍是唯一导航，13px 加窄 padding 会读成次要文字。 */
   .nav-item {
-    padding: 0 10px;
-    font-size: 13px;
+    padding: 0 14px;
+    height: 32px;
+    font-size: 14.5px;
+  }
+  .top-nav {
+    padding: 3px;
   }
   .crumb-bar {
     display: none;

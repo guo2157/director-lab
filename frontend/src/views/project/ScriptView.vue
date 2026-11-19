@@ -306,9 +306,11 @@ watch(
     <header class="script-header">
       <div class="header-left">
         <div class="title-block">
-          <h1 class="detail-title">剧本</h1>
-          <!-- FlowNav 是页内子流程（剧本 → 解析），与页面标题同处一列，
-               表达「本页在项目内处于哪一步」，不是重复导航 -->
+          <!-- 左侧「制作流程」栏已高亮 01 剧本，页内不再画同名可视大标题；
+               H1 降为 visually-hidden 保留文档大纲与读屏语义 -->
+          <h1 class="visually-hidden">剧本</h1>
+          <!-- FlowNav 是页内子流程（剧本 → 解析），与左侧 01 剧本不是同一层级，
+               它表达「本阶段内进行到哪一步」，必须保留 -->
           <FlowNav :project-id="projectId" />
         </div>
       </div>
@@ -409,19 +411,9 @@ watch(
 }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
-/* 页面标题：与作品列表页同档（无衬线特粗 + 负字距），详情页不能没有 H1。
-   下方紧跟 FlowNav 子流程，两行合起来表达「哪一页 · 第几步」。
-   gap 用 8px：FlowNav 是有填充和描边的控件，2px 会让它贴死标题像副标题。 */
+/* FlowNav 是页头唯一的可视元素（标题已 hidden），它是带描边填充的胶囊控件，
+   自身有 2px 内 padding，页头不再额外叠加 gap */
 .title-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.detail-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.022em;
-  line-height: 1.2;
-  color: var(--text-primary);
-}
 
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 

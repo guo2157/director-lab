@@ -40,6 +40,45 @@ def _definition_hash(definition: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def normalize_description(
+    db: Session,
+    raw: str | None,
+    *,
+    fallback: str,
+    exclude_id: str | None = None,
+) -> str:
+    """工作流展示描述统一收敛：非空 → 长度 → 全局唯一。
+
+    上传与 PATCH 共用同一套规则，避免两处校验漂移：
+    - 未填写（None / 空白）时回落到 `fallback`（工作流名称），保证落库描述非空；
+    - 用户填写时限制 20 个汉字或 40 个 ASCII 字符；
+    - 唯一性校验排除自身，重复时给出可操作提示而不是 500。
+    """
+    user_provided = bool((raw or "").strip())
+    desc = (raw or "").strip() or (fallback or "").strip()
+    if not desc:
+        raise errors.AppError("invalid_request", "description 不能为空", 422)
+    if user_provided:
+        ascii_count = sum(1 for c in desc if ord(c) < 128)
+        if len(desc) - ascii_count > 20 or ascii_count > 40:
+            raise errors.AppError(
+                "invalid_request",
+                "description 不超过 20 个汉字或 40 个英文字符",
+                422,
+            )
+    query = db.query(Workflow).filter(Workflow.description == desc)
+    if exclude_id:
+        query = query.filter(Workflow.id != exclude_id)
+    existing = query.first()
+    if existing is not None:
+        raise errors.AppError(
+            "invalid_request",
+            f"description 已被工作流「{existing.name}」使用，请使用不同的描述",
+            422,
+        )
+    return desc
+
+
 def _to_dict(wf: Workflow, db: Session) -> dict:
     used_by_jobs = db.query(Job).filter(Job.workflow_id == wf.id).count()
     schema = wf.parsed_schema or {}
@@ -98,6 +137,194 @@ def list_workflows(
         )
     wfs = query.order_by(Workflow.workflow_type, Workflow.name).all()
     return [_to_dict(w, db) for w in wfs]
+
+
+# 业务槽位 → 候选工作流的真实能力规则（选择器 / 项目默认 / 设置页共用）。
+# 规则只读 capabilities.normalize() 的解析结果，不看名称、描述或文件名。
+_SLOT_SELECTION_RULES: dict[str, dict] = {
+    # 资产库：只允许无图片输入的纯文生图（带参考槽位会让模型自行补全主体）
+    'asset_image': {'workflow_type': 'image', 'no_image_input': True},
+    # 分镜图：必须能接多张参考图（角色 / 场景 / 道具）
+    'storyboard_image': {
+        'workflow_type': 'image',
+        'required': {
+            'modalities.image_input': True,
+            'reference.supports_multi_reference': True,
+        },
+    },
+    # 分镜看板：必须是 H3 多参考图视频协议（计算图含 MiniMaxH3ReferenceToVideo）
+    'video': {
+        'workflow_type': 'video',
+        'required': {'modalities.image_input': True, 'modalities.video_output': True},
+        'modes': ['multi_reference_to_video'],
+    },
+}
+
+
+def _slot_selection_caps(wf: Workflow) -> dict:
+    """归一化能力；definition 缺失时退回原始 capabilities（不虚构能力）。"""
+    if wf.definition:
+        return normalize_capabilities(
+            wf.workflow_type, wf.definition,
+            capabilities=wf.capabilities or {}, trigger=wf.trigger or {},
+        )
+    return dict(wf.capabilities or {})
+
+
+def _slot_selection_check(caps: dict, rule: dict) -> tuple[bool, list[str]]:
+    """按槽位规则判定可用性，返回 (可用, 缺失说明)。"""
+    from app.services.workflow.capabilities import capability_matches
+
+    ok, missing = capability_matches(caps, rule.get('required') or {})
+    reasons: list[str] = list(missing)
+    if rule.get('no_image_input') and (caps.get('modalities') or {}).get('image_input'):
+        ok = False
+        reasons.append('该工作流声明了图片输入，不是纯文生图')
+    for mode in rule.get('modes') or []:
+        if mode not in (caps.get('generation_modes') or []):
+            ok = False
+            reasons.append(f'缺少能力：{mode}')
+    return ok, reasons
+
+
+@router.get('/candidates')
+def list_workflow_candidates(
+    slot: str = Query(..., description='业务槽位：asset_image / storyboard_image / video'),
+    db: Session = Depends(get_db),
+) -> dict:
+    """按业务槽位返回候选工作流（含展示描述与可用性）。
+
+    前端选择器只用 description 作主展示文本，能否入选完全取决于后端解析出的
+    真实能力，避免各页面各写一套规则、也避免按名称猜类型。
+    """
+    rule = _SLOT_SELECTION_RULES.get(slot)
+    if rule is None:
+        raise errors.AppError(
+            'invalid_request',
+            f'未知的业务槽位：{slot}',
+            422,
+            allowed_slots=sorted(_SLOT_SELECTION_RULES),
+        )
+    rows = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == rule['workflow_type'])
+        .order_by(Workflow.is_default.desc(), Workflow.is_builtin.desc(), Workflow.name)
+        .all()
+    )
+    items: list[dict] = []
+    for wf in rows:
+        caps = _slot_selection_caps(wf)
+        usable, reasons = _slot_selection_check(caps, rule)
+        items.append({
+            'id': wf.id,
+            'name': wf.name,
+            'description': wf.description or wf.name,
+            'workflow_type': wf.workflow_type,
+            'version': wf.version,
+            'is_default': wf.is_default,
+            'is_builtin': wf.is_builtin,
+            'runtime_status': wf.runtime_status,
+            'generation_modes': caps.get('generation_modes') or [],
+            'usable': usable,
+            'missing': reasons,
+        })
+    return {
+        'slot': slot,
+        'workflow_type': rule['workflow_type'],
+        'items': items,
+        'usable_count': sum(1 for i in items if i['usable']),
+    }
+
+
+# 设置页工作流分类：细分类型只从 capabilities.normalize() 的解析结果推导，
+# 不按工作流名称、描述或文件名判断（AGENTS.md #6 / 审计 D5）。
+_CLASSIFICATION_GROUPS: list[tuple[str, str, str]] = [
+    ("image_text_to_image", "文生图模型", "image"),
+    ("image_image_to_image", "图生图模型", "image"),
+    ("video_first_last_frame", "首尾帧生视频", "video"),
+    ("video_text_to_video", "文生视频", "video"),
+    ("video_reference_to_video", "参考图生视频", "video"),
+    ("tts", "TTS", "tts"),
+    ("bgm", "BGM", "bgm"),
+    ("sfx", "SFX", "sfx"),
+]
+
+
+def _classify_by_capabilities(workflow_type: str, caps: dict) -> str | None:
+    """按归一化能力给出细分分类键；无法判定时返回 None（进「待检查」区）。"""
+    modes = set(caps.get("generation_modes") or [])
+    modalities = caps.get("modalities") or {}
+    video = caps.get("video") or {}
+    if workflow_type == "image":
+        if "image_to_image" in modes or modalities.get("image_input"):
+            return "image_image_to_image"
+        if "text_to_image" in modes:
+            return "image_text_to_image"
+        return None
+    if workflow_type == "video":
+        # 顺序有意义：H3 多参考图协议最具体，必须先判，否则会被下面的
+        # 「有图片输入 → 参考图生视频」吞掉；首尾帧再判，避免误归单参考图。
+        if "multi_reference_to_video" in modes:
+            return "video_reference_to_video"
+        if video.get("supports_first_frame") and video.get("supports_last_frame"):
+            return "video_first_last_frame"
+        if modalities.get("image_input"):
+            return "video_reference_to_video"
+        if "text_to_video" in modes:
+            return "video_text_to_video"
+        return None
+    if workflow_type in ("tts", "bgm", "sfx"):
+        return workflow_type
+    return None
+
+
+@router.get("/classification")
+def classify_workflows(db: Session = Depends(get_db)) -> dict:
+    """按真实能力给工作流分组（设置页工作流 Tab 使用）。
+
+    每组只列 workflow_type 匹配且能力落在该细分类型的记录；能力判不出来的
+    记录进 uncategorized，绝不为了「看起来完整」硬塞进某类。
+    """
+    rows = (
+        db.query(Workflow)
+        .order_by(Workflow.workflow_type, Workflow.is_default.desc(), Workflow.name)
+        .all()
+    )
+    buckets: dict[str, list[dict]] = {key: [] for key, _, _ in _CLASSIFICATION_GROUPS}
+    uncategorized: list[dict] = []
+    for wf in rows:
+        caps = _slot_selection_caps(wf)
+        key = _classify_by_capabilities(wf.workflow_type, caps)
+        item = {
+            "id": wf.id,
+            "name": wf.name,
+            "description": wf.description or wf.name,
+            "workflow_type": wf.workflow_type,
+            "version": wf.version,
+            "is_default": wf.is_default,
+            "is_builtin": wf.is_builtin,
+            "runtime_status": wf.runtime_status,
+            "validation_status": wf.validation_status,
+            "generation_modes": caps.get("generation_modes") or [],
+            "supports_multi_reference": bool((caps.get("reference") or {}).get("supports_multi_reference")),
+        }
+        if key is None:
+            uncategorized.append(item)
+        else:
+            buckets[key].append(item)
+    return {
+        "groups": [
+            {
+                "key": key,
+                "label": label,
+                "workflow_type": wf_type,
+                "items": buckets[key],
+            }
+            for key, label, wf_type in _CLASSIFICATION_GROUPS
+        ],
+        "uncategorized": uncategorized,
+        "total": len(rows),
+    }
 
 
 @router.post("/resolve")
@@ -306,6 +533,7 @@ async def upload_workflow(
     schema = build_schema(definition, capabilities=caps_dict, trigger=trigger_dict)
 
     from app.models.ids import workflow_id as new_workflow_id
+    resolved_description = normalize_description(db, description, fallback=name)
     wf = Workflow(
         id=new_workflow_id(),
         name=name,
@@ -313,7 +541,7 @@ async def upload_workflow(
         original_filename=file.filename,
         file_hash=_definition_hash(definition),
         workflow_type=workflow_type,
-        description=description,
+        description=resolved_description,
         trigger=trigger_dict,
         capabilities=caps_dict,
         definition=definition,
@@ -322,7 +550,7 @@ async def upload_workflow(
         status="draft",
         validation_status="static_validated",
         is_default=False,
-        description_source="user",
+        description_source="user" if description else "seed",
     )
     if is_default:
         db.query(Workflow).filter(
@@ -446,37 +674,12 @@ def update_workflow(
         desc = payload["description"]
         if desc is not None and not isinstance(desc, str):
             raise errors.AppError("invalid_request", "description 必须是字符串", 422)
+        # 描述不允许为空：未填写时回落到工作流名称（§4.2 第 4 条）
+        wf.description = normalize_description(
+            db, desc, fallback=wf.name, exclude_id=wf.id,
+        )
         if desc is not None:
-            desc_stripped = desc.strip()
-            if not desc_stripped:
-                raise errors.AppError("invalid_request", "description 不能为空", 422)
-            # 长度校验：≤20 汉字 或 ≤40 ASCII 字符
-            char_count = len(desc_stripped)
-            ascii_count = sum(1 for c in desc_stripped if ord(c) < 128)
-            non_ascii_count = char_count - ascii_count
-            if non_ascii_count > 20 or ascii_count > 40:
-                raise errors.AppError(
-                    "invalid_request",
-                    "description 不超过 20 个汉字或 40 个英文字符",
-                    422,
-                )
-            # 唯一性校验：排除自身
-            existing = (
-                db.query(Workflow)
-                .filter(Workflow.description == desc_stripped, Workflow.id != wf.id)
-                .first()
-            )
-            if existing:
-                raise errors.AppError(
-                    "invalid_request",
-                    f"description 已被工作流「{existing.name}」使用，请使用不同的描述",
-                    422,
-                )
-            wf.description = desc_stripped
             wf.description_source = "user"
-        else:
-            wf.description = None
-            wf.description_source = None
     if "is_default" in payload:
         if payload["is_default"]:
             db.query(Workflow).filter(

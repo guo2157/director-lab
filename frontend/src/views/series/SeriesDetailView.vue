@@ -196,9 +196,10 @@ const nextAction = computed<{ label: string; hint: string; cta: string; run: () 
   if (step === 'analyzing') {
     return {
       label: `${no}剧本生成中`,
-      hint: '后台任务正在生成剧本，可在任务中心查看进度，完成后回来审核。',
-      cta: '查看任务进度',
-      run: () => void router.push({ name: 'jobs' }),
+      // 任务中心已下线：进度改为就地刷新本页数据，不再把用户甩到一个独立列表页
+      hint: '后台任务正在生成剧本，点「刷新进度」查看最新状态，完成后回来审核。',
+      cta: '刷新进度',
+      run: () => void episodesQuery.refetch(),
     }
   }
   if (step === 'review') {
@@ -410,8 +411,9 @@ async function goWorkspace(ep: SeriesEpisode) {
                   <n-button
                     v-if="episodeStep(ep) === 'analyzing'"
                     size="small"
-                    @click="router.push({ name: 'jobs' })"
-                  >生成中 · 查看进度</n-button>
+                    :loading="episodesQuery.isFetching.value"
+                    @click="() => episodesQuery.refetch()"
+                  >生成中 · 刷新进度</n-button>
                   <n-button
                     v-else-if="episodeStep(ep) === 'write'"
                     size="small"
