@@ -27,6 +27,7 @@ from app.integrations.llm_response import (
     validate_parse_payload,
 )
 from app.integrations.llm_retry import call_with_retry
+from app.integrations.token_estimate import precheck_input_budget
 from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion
 from app.models import ids
 from app.services.script_parse import (
@@ -209,6 +210,25 @@ def execute_script_agent_job(job_id: str) -> dict:
         settings_map = (project.settings or {}) if project else {}
         episode_duration_target = int(settings_map.get("episode_duration_target", 90))
         max_per_batch = int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch)
+
+        # ---- 0.9 输入预算预检 ----
+        # 超长输入必须在发起 LLM 之前明确失败：否则供应商返回「上下文超限」
+        # 会被当成可退避重试的供应商错误，白白重试 N 次后仍然失败。
+        # 阶段 3 做完分段大纲后，这里的 allow_segmented 才会改为 True。
+        precheck = precheck_input_budget(text, settings=settings, allow_segmented=False)
+        _write_event(db, job, "agent.input_precheck", {
+            "ok": precheck["ok"],
+            "code": precheck["code"],
+            "estimated_tokens": precheck["estimated_tokens"],
+            "budget": precheck["budget"],
+            "chars": precheck["chars"],
+            "episode": precheck["episode"],
+            "outline_mode": precheck["outline_mode"],
+        })
+        if not precheck["ok"]:
+            _fail_job(db, job, precheck["code"], precheck["message"])
+            return {"ok": False, "reason": precheck["code"]}
+        db.commit()
         try:
             outline_data = analyze_script_outline(
                 text,

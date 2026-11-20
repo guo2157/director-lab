@@ -26,6 +26,41 @@ ERR_PROVIDER_ERROR = "llm_provider_error"
 ERR_NON_JSON_OUTPUT = "llm_non_json_output"
 ERR_INVALID_OUTPUT = "llm_invalid_output"
 ERR_SCHEMA_MISMATCH = "llm_schema_mismatch"
+#: 输入超过模型上下文窗口（配置类错误，不可重试：原样重试必然再次失败）
+ERR_INPUT_TOO_LONG = "llm_input_too_long"
+
+#: 供应商报错体里指示「输入超上下文」的特征词（小写匹配）
+#: 不同供应商措辞不一致，这里只收窄到明确指向输入长度/上下文窗口的说法。
+_INPUT_TOO_LONG_HINTS = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "max context",
+    "context window",
+    "token limit",
+    "too many tokens",
+    "reduce the length",
+    "prompt is too long",
+    "input is too long",
+    "input too long",
+    "request too large",
+    "字符串过长",
+    "上下文长度",
+    "超过最大",
+    "内容过长",
+)
+
+
+def is_input_too_long_error(message: str | None) -> bool:
+    """判断错误信息是否指向「输入超上下文窗口」。
+
+    只做保守特征词匹配：宁可漏判成普通供应商错误，也不要把「输出被截断」
+    （finish_reason=length）误判成输入超限——两者的处置方式完全相反。
+    """
+    low = (message or "").lower()
+    if not low:
+        return False
+    return any(h in low for h in _INPUT_TOO_LONG_HINTS)
 
 #: 可重试的错误码 → 重试时的调整方向
 #:   widen: 放大 max_tokens（仅当供应商真的遵守该参数时有效）
@@ -150,8 +185,17 @@ def validate_llm_response(meta: LLMResponseMeta) -> ValidationResult:
     """
     # 1. 供应商错误优先：错误体里即使混入文本也不能当 JSON
     if meta.provider_error:
+        detail = str(meta.provider_error)[:300]
+        # 1.1 输入超上下文：必须在供应商错误之前分流，否则会被当成
+        # 可退避重试的 llm_provider_error，退避 3 次仍必然失败。
+        if is_input_too_long_error(detail):
+            return _fail(
+                meta, ERR_INPUT_TOO_LONG,
+                f"输入超过模型上下文窗口: {detail}",
+                retryable=False,
+            )
         return _fail(meta, ERR_PROVIDER_ERROR,
-                     f"语言模型供应商返回错误: {str(meta.provider_error)[:300]}")
+                     f"语言模型供应商返回错误: {detail}")
 
     # 2. 流中断：已收到部分内容也必须失败，不能把残缺结果当成功落库
     if not meta.stream_completed:
