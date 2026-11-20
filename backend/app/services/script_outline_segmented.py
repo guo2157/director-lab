@@ -65,17 +65,37 @@ def build_outline_payload(
     }
 
 
-def pack_windows(chunks: list, *, settings: Any) -> list[list]:
-    """按输入预算把相邻集打包成窗口；窗口之间不切断单集。"""
+def pack_windows(chunks: list, *, settings: Any,
+                 reserve_tokens: int = 0) -> list[list]:
+    """按输入预算把相邻集打包成窗口；窗口之间不切断单集。
+
+    ``reserve_tokens`` 是每个窗口必须留给 prompt 固定开销的额度（方向说明、
+    目标时长、集号说明等）。**必须扣减**：预算只按正文累加会让单窗口的完整
+    提示词顶到预算之外，超长剧本照样被供应商以「上下文超限」拒绝。
+
+    单集正文本身就超过有效额度时，该集单独成窗口（无法再切分，交由上层
+    预检在更早阶段拦截单集超预算）。
+    """
     from app.integrations.token_estimate import estimate_input_tokens, input_budget
 
     budget = input_budget(settings)
+    if budget <= 0:
+        # 未配置窗口：无法判断，保持单窗口（等同分段前行为）
+        return [list(chunks)] or []
+
+    effective = budget - max(0, reserve_tokens)
+    if effective <= 0:
+        # 预算被 prompt 固定开销吃掉：最小化窗口粒度——每集单独成窗口。
+        # 不能退化成单个窗口，那等于放弃分段并生成一个必然超预算的提示词；
+        # 单集自己仍然放不下时，由上游 precheck 在更早阶段拦截并提示拆集。
+        return [[chunk] for chunk in chunks] or []
+
     windows: list[list] = []
     cur: list = []
     cur_tokens = 0
     for chunk in chunks:
         tokens = estimate_input_tokens(chunk.text, settings=settings)
-        if cur and budget > 0 and cur_tokens + tokens > budget:
+        if cur and cur_tokens + tokens > effective:
             windows.append(cur)
             cur = []
             cur_tokens = 0
@@ -84,6 +104,19 @@ def pack_windows(chunks: list, *, settings: Any) -> list[list]:
     if cur:
         windows.append(cur)
     return windows or [list(chunks)]
+
+
+def _prompt_reserve_tokens(episode_duration_target: int, settings: Any) -> int:
+    """估算一个窗口 prompt 的固定开销（方向说明 + 集号说明 + 目标时长）。"""
+    from app.integrations.token_estimate import estimate_input_tokens
+
+    skeleton = outline_user_prompt(
+        "", episode_duration_target,
+        window_note="本段从第 9999 集开始，共 9999 集。"
+                    "请只输出本段的 episodes，集号按本段顺序从 1 开始编号。",
+    )
+    # 留 20% 余量：模型侧 token 计算与本地估算存在偏差
+    return int(estimate_input_tokens(skeleton, settings=settings) * 1.2) + 8
 
 
 def analyze_outline_segmented(
@@ -110,7 +143,8 @@ def analyze_outline_segmented(
             "或调大 llm_context_window_tokens",
         )
 
-    windows = pack_windows(split.chunks, settings=settings)
+    reserve = _prompt_reserve_tokens(episode_duration_target, settings)
+    windows = pack_windows(split.chunks, settings=settings, reserve_tokens=reserve)
     system = get_prompt("script_outline_system")
     concurrency = max(1, int(getattr(settings, "llm_parse_concurrency", 3) or 3))
 

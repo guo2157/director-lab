@@ -178,6 +178,7 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
     由调用方转为 HTTP 错误，不落库半成品。
     """
     from app.integrations.llm import LLMClient
+    from app.integrations.llm_response import parse_json_safely
     from app.integrations.llm_retry import call_with_retry
     from app.services.prompt_store import get_prompt
 
@@ -210,6 +211,18 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
         on_delta=on_delta,
         use_chat_json=on_delta is None,
     )
+
+    # 流式路径（on_delta 非 None）下 call_with_retry 的 use_chat_json=False，
+    # 返回的是**原始文本**而不是 dict。旧实现直接对返回值做 .keys() 校验，
+    # 必然抛 "'str' object has no attribute 'keys'"，被 agent 的软闸口静默跳过，
+    # 导致 Agent 主路径的评估事实上从未产出过。这里显式解析。
+    if isinstance(result, str):
+        # 注意：parse_json_safely 返回 (对象, ValidationResult) 元组
+        parsed, check = parse_json_safely(result, expect=dict)
+        if not isinstance(parsed, dict):
+            reason = getattr(check, "message", None) or getattr(check, "error_code", "unknown")
+            raise ValueError(f"评估返回无法解析为 JSON 对象: {reason}")
+        result = parsed
 
     # 校验返回结构基本字段
     required_keys = {"strengths", "issues", "suggestions", "production_risks",
