@@ -730,9 +730,11 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
     <!-- 卡二：批量出视频（工作流 / 全选 / 批量出视频） -->
     <StageCard label="批量出视频">
       <span class="clip-wf-pick">
+        <!-- 分镜看板只支持多参考图生视频：模型类型固定，不展示下拉，仅标签提示 -->
         <WorkflowSelector
           v-model="clipWorkflowId"
           slot="video"
+          fixed-model-type="video_reference_to_video"
           size="small"
           placeholder="选择分镜视频工作流"
         />
@@ -889,6 +891,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           <WorkflowSelector
             v-model="clipWorkflowId"
             slot="video"
+            fixed-model-type="video_reference_to_video"
             size="small"
             style="width: 240px"
           />

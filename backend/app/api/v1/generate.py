@@ -18,6 +18,7 @@ from app.models import (Asset, AssetRef, Character, Job, JobEvent, Project, Prop
                        Shot, Workflow, ids)
 from app.services import errors
 from app.services.execution_verifier import find_active_job_by_request_key
+from app.services.workflow.capabilities import declared_reference_slots
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -114,7 +115,7 @@ def _find_ref_capable_image_workflow(db: Session) -> Workflow | None:
         .all()
     )
     for wf in rows:
-        slots = (wf.capabilities or {}).get("reference_slots") or []
+        slots = declared_reference_slots(wf.capabilities)
         names = [item.get("param") if isinstance(item, dict) else item for item in slots]
         if any(name in _REF_CHAR_SLOTS for name in names):
             return wf
@@ -140,7 +141,7 @@ def _find_ref_capable_video_workflow(db: Session) -> Workflow | None:
     )
     candidates: list[tuple[int, Workflow]] = []
     for wf in rows:
-        slots = (wf.capabilities or {}).get("reference_slots") or []
+        slots = declared_reference_slots(wf.capabilities)
         names = [item.get("param") if isinstance(item, dict) else item for item in slots]
         if "ref_image" in names:
             tier = (wf.capabilities or {}).get("tier")
@@ -167,12 +168,12 @@ def _match_workflow(db: Session, target: str, workflow_id: str | None,
         and _is_project_default(db, project_id, target, wf.id)
     )
     if not _project_default_hit and workflow_id is None and target == "keyframe":
-        if not (wf.capabilities or {}).get("reference_slots"):
+        if not declared_reference_slots(wf.capabilities):
             alt = _find_ref_capable_image_workflow(db)
             if alt is not None:
                 return alt
     if not _project_default_hit and workflow_id is None and target == "clip" and not wf.is_default:
-        slots = (wf.capabilities or {}).get("reference_slots") or []
+        slots = declared_reference_slots(wf.capabilities)
         names = [item.get("param") if isinstance(item, dict) else item for item in slots]
         if "ref_image" not in names:
             alt = _find_ref_capable_video_workflow(db)
@@ -295,7 +296,7 @@ def _match_pure_asset_workflow(db: Session, workflow_id: str | None,
         wf = db.get(Workflow, workflow_id)
         if wf is None:
             raise errors.AppError("workflow_not_found", "工作流不存在", 404)
-        if (wf.capabilities or {}).get("reference_slots"):
+        if declared_reference_slots(wf.capabilities):
             raise errors.AppError(
                 "invalid_request",
                 "资产图只允许无参考图的纯文生图工作流，当前工作流声明了 reference_slots",
@@ -317,7 +318,7 @@ def _match_pure_asset_workflow(db: Session, workflow_id: str | None,
                     "workflow_capability_mismatch",
                     f"项目默认资产图工作流 {_wf.name} 类型为 {_wf.workflow_type}，应为 image", 422,
                 )
-            if (_wf.capabilities or {}).get("reference_slots"):
+            if declared_reference_slots(_wf.capabilities):
                 raise errors.AppError(
                     "workflow_capability_mismatch",
                     f"项目默认资产图工作流 {_wf.name} 声明了参考图槽位；"
@@ -331,7 +332,7 @@ def _match_pure_asset_workflow(db: Session, workflow_id: str | None,
         .all()
     )
     for wf in candidates:
-        if not (wf.capabilities or {}).get("reference_slots"):
+        if not declared_reference_slots(wf.capabilities):
             return wf
     raise errors.AppError(
         "workflow_not_found", "未找到可用的纯文生图工作流，资产图生成已阻断", 404
@@ -1086,7 +1087,7 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
         from app.services.ref_inject import build_media_params
         prompt_text = params.get("prompt") or ""
         if prompt_text:
-            slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+            slots = declared_reference_slots(wf.capabilities)
             media = build_media_params(db, scene.project_id, prompt_text, slots)
             if media:
                 _existing = params.get("__media__", {})
@@ -1195,7 +1196,7 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
         from app.services.ref_inject import build_media_params
         prompt_text = params.get("prompt") or ""
         if prompt_text:
-            slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+            slots = declared_reference_slots(wf.capabilities)
             media = build_media_params(db, scene.project_id, prompt_text, slots)
             if media:
                 _existing = params.get("__media__", {})
@@ -1277,7 +1278,7 @@ def regenerate_shot_clip(shot_id: str, payload: dict | None = None,
     from app.services.ref_inject import build_media_params
     prompt_text = params.get("prompt") or ""
     if prompt_text:
-        slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+        slots = declared_reference_slots(wf.capabilities)
         media = build_media_params(db, scene.project_id, prompt_text, slots)
         if media:
             _existing = params.get("__media__", {})
@@ -1369,7 +1370,7 @@ def generate_scene_baseline(scene_id: str, payload: dict | None = None, db: Sess
         wf = db.get(Workflow, wf_id)
         if wf is None:
             raise errors.AppError("workflow_not_found", "工作流不存在", 404)
-        if (wf.capabilities or {}).get("reference_slots"):
+        if declared_reference_slots(wf.capabilities):
             raise errors.AppError(
                 "invalid_request",
                 "场景基准图只允许无参考图的纯文生图工作流，当前工作流声明了 reference_slots",
@@ -1439,7 +1440,7 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
     # @引用注入（D-16，P0 修复）：与单镜生成/项目批量生成行为一致，
     # 解析每个镜头提示词中的 @角色/@场景/@道具，自动携带参考图
     from app.services.ref_inject import build_media_params
-    slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+    slots = declared_reference_slots(wf.capabilities)
     jobs = []
     for shot in shots:
         params = dict(payload.get("params") or {})
@@ -1546,7 +1547,7 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
             409,
         )
     jobs = []
-    slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+    slots = declared_reference_slots(wf.capabilities)
     for shot in shots:
         params = dict(payload.get("params") or {})
         if target == "keyframe":

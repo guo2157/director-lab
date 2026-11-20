@@ -28,9 +28,18 @@ QWEN_SLOTS = [
     {"param": "ref_prop", "input_key": "images.image_6"},
 ]
 
+# H3 Ref2VA 实际九槽（`backend/data/workflows/wf_video_h3_ref2va_*.json`）：
+# 没有 ref_scene，ref_prop 位于第 4 槽（ref_image_4）
 H3_SLOTS = [
-    {"param": "ref_identity", "input_key": "ref_images.ref_image_0"},
-    {"param": "ref_scene", "input_key": "ref_images.ref_image_1"},
+    {"param": "ref_prev_frame", "input_key": "ref_images.ref_image_0"},
+    {"param": "ref_image", "input_key": "ref_images.ref_image_1"},
+    {"param": "ref_identity", "input_key": "ref_images.ref_image_2"},
+    {"param": "ref_character_2", "input_key": "ref_images.ref_image_3"},
+    {"param": "ref_prop", "input_key": "ref_images.ref_image_4"},
+    {"param": "ref_character_3", "input_key": "ref_images.ref_image_5"},
+    {"param": "ref_character_4", "input_key": "ref_images.ref_image_6"},
+    {"param": "ref_character_5", "input_key": "ref_images.ref_image_7"},
+    {"param": "ref_character_6", "input_key": "ref_images.ref_image_8"},
 ]
 
 
@@ -43,9 +52,28 @@ def test_slot_image_index_qwen_images():
 
 def test_slot_image_index_h3_ref_images_zero_based():
     # ref_images.ref_image_N 为 0-based，换算为 1-based 图片序号
-    assert slot_image_index("ref_identity", H3_SLOTS) == 1
-    assert slot_image_index("ref_scene", H3_SLOTS) == 2
+    assert slot_image_index("ref_prev_frame", H3_SLOTS) == 1
+    assert slot_image_index("ref_image", H3_SLOTS) == 2
+    assert slot_image_index("ref_identity", H3_SLOTS) == 3
+    assert slot_image_index("ref_prop", H3_SLOTS) == 5
+    # H3 Ref2VA 没有 ref_scene 槽位：不得解析出图片序号，也就不会被注入
+    assert slot_image_index("ref_scene", H3_SLOTS) is None
 
+
+def test_h3_workflow_json_has_no_ref_scene_slot():
+    """H3 Ref2VA 工作流 JSON 不得出现 ref_scene 输入槽位（该参数只属于 Qwen 图片工作流）。"""
+    import json
+    from pathlib import Path
+    wf_dir = Path(__file__).resolve().parents[1] / "data" / "workflows"
+    for p in sorted(wf_dir.glob("wf_video_h3_*.json")):
+        text = p.read_text(encoding="utf-8")
+        assert "$ref_scene" not in text, f"{p.name} 仍声明 ref_scene 槽位"
+        defn = json.loads(text)
+        for node in defn.values():
+            if not isinstance(node, dict):
+                continue
+            for key in (node.get("inputs") or {}):
+                assert "ref_scene" not in str(key), f"{p.name} 节点输入出现 ref_scene：{key}"
 
 def test_workflow_ref_syntax_detection():
     assert workflow_ref_syntax(QWEN_SLOTS) == "image"

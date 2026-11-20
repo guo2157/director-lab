@@ -13,11 +13,12 @@ import {
   listComfyuiInstances, updateComfyuiInstances, testComfyui,
 } from '@/api/settings'
 import {
-  getWorkflow, getWorkflowClassification, updateWorkflow,
+  getWorkflow, getWorkflowClassification, getWorkflowModelTypes, updateWorkflow,
   uploadWorkflow, validateWorkflow,
 } from '@/api/workflows'
 import type { LlmInstance, ComfyUIInstance, ComfyUIInstanceTestResult } from '@/types/compose'
 import type { Workflow, WorkflowType } from '@/types/asset'
+import type { WorkflowModelType } from '@/types/workflow'
 import {
   MODE_LABELS,
   type WorkflowClassifiedItem,
@@ -290,13 +291,59 @@ const renderGroups = computed<RenderGroup[]>(() => {
 })
 
 // 上传表单
-const uploadForm = ref<{ name: string; workflow_type: WorkflowType; is_default: boolean; file: File | null }>({
+const uploadForm = ref<{
+  name: string
+  workflow_type: WorkflowType
+  /** 模型类型：图片的文生图/图生图、视频的参考图生视频、TTS 语音合成 */
+  model_type: WorkflowModelType | null
+  is_default: boolean
+  file: File | null
+}>({
   name: '',
   workflow_type: 'image',
+  model_type: null,
   is_default: false,
   file: null,
 })
 const uploadTypeOptions = workflowTypeOptions.filter((o) => o.value !== '')
+
+/**
+ * 模型类型选项：由后端 /workflows/model-types 给出，按类型联动展示。
+ * 图片：文生图 / 图生图；视频：参考图生视频（可选）+ 首尾帧、文生视频（预留置灰）；
+ * TTS：语音合成。前端不自行猜能力，只按后端 enabled 标记决定能否提交。
+ */
+const modelTypesQuery = useQuery({
+  queryKey: ['workflows', 'model-types'],
+  queryFn: () => getWorkflowModelTypes(),
+  staleTime: 5 * 60_000,
+})
+
+const uploadModelTypeOptions = computed(() => {
+  const group = (modelTypesQuery.data.value?.items ?? [])
+    .find((g) => g.workflow_type === uploadForm.value.workflow_type)
+  return (group?.model_types ?? []).map((o) => ({
+    label: o.enabled ? o.label : `${o.label}（暂未开放）`,
+    value: o.value,
+    disabled: !o.enabled,
+  }))
+})
+
+/** 当前选择是否为一个已开放的模型类型（决定上传按钮能否点击） */
+const uploadModelTypeValid = computed(() => {
+  if (!uploadForm.value.model_type) return false
+  const group = (modelTypesQuery.data.value?.items ?? [])
+    .find((g) => g.workflow_type === uploadForm.value.workflow_type)
+  const hit = (group?.model_types ?? []).find((o) => o.value === uploadForm.value.model_type)
+  return Boolean(hit?.enabled)
+})
+
+/** 切换类型时清空模型类型，等用户在同一类型下重新选择 */
+watch(
+  () => uploadForm.value.workflow_type,
+  () => {
+    uploadForm.value.model_type = null
+  },
+)
 
 const uploadWorkflowMutation = useMutation({
   mutationFn: () => {
@@ -304,13 +351,16 @@ const uploadWorkflowMutation = useMutation({
     return uploadWorkflow(uploadForm.value.file, {
       name: uploadForm.value.name || uploadForm.value.file.name.replace(/\.json$/i, ''),
       workflow_type: uploadForm.value.workflow_type,
+      model_type: uploadForm.value.model_type,
       is_default: uploadForm.value.is_default,
     })
   },
   onSuccess: () => {
     message.success('工作流已上传')
     showUploadModal.value = false
-    uploadForm.value = { name: '', workflow_type: 'image', is_default: false, file: null }
+    uploadForm.value = {
+      name: '', workflow_type: 'image', model_type: null, is_default: false, file: null,
+    }
     queryClient.invalidateQueries({ queryKey: ['workflows'] })
   },
   onError: (e: any) => message.error(`上传失败: ${e?.message ?? e}`),
@@ -319,7 +369,9 @@ const uploadWorkflowMutation = useMutation({
 // 新增工作流弹窗
 const showUploadModal = ref(false)
 const openUploadModal = () => {
-  uploadForm.value = { name: '', workflow_type: 'image', is_default: false, file: null }
+  uploadForm.value = {
+    name: '', workflow_type: 'image', model_type: null, is_default: false, file: null,
+  }
   showUploadModal.value = true
 }
 
@@ -726,6 +778,18 @@ const saveDescMutation = useMutation({
               <n-select v-model:value="uploadForm.workflow_type" :options="uploadTypeOptions" />
             </div>
             <div class="form-item">
+              <label class="field-label">模型类型</label>
+              <n-select
+                v-model:value="uploadForm.model_type"
+                :options="uploadModelTypeOptions"
+                :loading="modelTypesQuery.isLoading.value"
+                placeholder="选择模型类型"
+              />
+              <div v-if="uploadForm.workflow_type === 'video'" class="field-hint">
+                视频目前仅支持参考图生视频，首尾帧与文生视频为预留能力
+              </div>
+            </div>
+            <div class="form-item">
               <label class="field-label">工作流 JSON 文件（≤10MB）</label>
               <n-upload
                 :max="1"
@@ -741,7 +805,12 @@ const saveDescMutation = useMutation({
               <n-switch v-model:value="uploadForm.is_default" size="small" />
             </div>
             <div class="card-actions" style="margin-top: 0">
-              <n-button type="primary" :loading="uploadWorkflowMutation.isPending.value" @click="uploadWorkflowMutation.mutate()">上传</n-button>
+              <n-button
+                type="primary"
+                :loading="uploadWorkflowMutation.isPending.value"
+                :disabled="!uploadModelTypeValid"
+                @click="uploadWorkflowMutation.mutate()"
+              >上传</n-button>
               <n-button quaternary @click="showUploadModal = false">取消</n-button>
             </div>
           </n-modal>
@@ -784,7 +853,7 @@ const saveDescMutation = useMutation({
   padding: 24px;
   align-items: stretch;
   min-height: 100%;
-  max-width: 1440px;
+  max-width: var(--page-max);
   margin: 0 auto;
 }
 
@@ -1066,6 +1135,12 @@ const saveDescMutation = useMutation({
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
+}
+/* 表单字段的补充说明（如视频模型类型的预留能力提示） */
+.field-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 .card-actions {
   display: flex;

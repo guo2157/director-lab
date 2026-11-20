@@ -33,9 +33,19 @@ function imageSlotLabel(param: string, charIndex: number, propIndex: number): st
   return param
 }
 
-/** 归一化工作流 reference_slots（兼容字符串数组与对象数组两种声明形式）。 */
+/**
+ * 归一化工作流参考槽位声明，兼容字符串数组与对象数组。
+ *
+ * 后端数据库实际保存的是 capabilities.normalize() 产出的 `reference.slots`，
+ * 旧形态顶层 `reference_slots` 仅作兼容读取。只读后者会让所有工作流看起来都是 0 槽，
+ * 前端槽位面板与图片编号随之全部失效。
+ */
 function normalizeRefSlots(caps: Record<string, unknown> | null | undefined): RefSlotInfo[] {
-  const raw = Array.isArray(caps?.reference_slots) ? (caps!.reference_slots as unknown[]) : []
+  const reference = caps?.reference as Record<string, unknown> | undefined
+  // 顺序不能反：顶层 reference_slots 若存在但是空数组，先读它会把已声明槽位判成 0 槽。
+  const fromReference = Array.isArray(reference?.slots) ? (reference!.slots as unknown[]) : []
+  const fromLegacy = Array.isArray(caps?.reference_slots) ? (caps!.reference_slots as unknown[]) : []
+  const raw: unknown[] = fromReference.length ? fromReference : fromLegacy
   const slots: RefSlotInfo[] = []
   for (const item of raw) {
     if (typeof item === 'string') {
@@ -52,6 +62,9 @@ function normalizeRefSlots(caps: Record<string, unknown> | null | undefined): Re
       const o = item as Record<string, unknown>
       const param = typeof o.param === 'string' ? o.param : ''
       if (!param) continue
+      // reference.slots 是全量槽位（H3 为 9 图 + 3 音频），参考图面板只取图片槽，
+      // 与后端 declared_reference_slots 只返回图片槽的语义保持一致。
+      if (o.media_type && o.media_type !== 'image') continue
       slots.push({
         param,
         input_key: typeof o.input_key === 'string' ? o.input_key : null,

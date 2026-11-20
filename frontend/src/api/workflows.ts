@@ -7,6 +7,8 @@ import type {
   WorkflowCandidateResponse,
   WorkflowCapability,
   WorkflowClassificationResponse,
+  WorkflowModelType,
+  WorkflowModelTypeResponse,
   WorkflowSchema,
   WorkflowSlotKey,
   WorkflowVersionItem,
@@ -23,11 +25,21 @@ export function getWorkflow(id: string) {
 }
 
 /** 上传工作流（multipart，file ≤10MB，返回 parsed_schema.params/outputs） */
-export function uploadWorkflow(file: File, payload: { name: string; workflow_type: WorkflowType; is_default?: boolean }) {
+export function uploadWorkflow(
+  file: File,
+  payload: {
+    name: string
+    workflow_type: WorkflowType
+    /** 模型类型：新增工作流时按类型联动选择，用于区分文生图 / 图生图 / 参考图生视频 */
+    model_type?: WorkflowModelType | null
+    is_default?: boolean
+  },
+) {
   const form = new FormData()
   form.append('file', file)
   form.append('name', payload.name)
   form.append('workflow_type', payload.workflow_type)
+  if (payload.model_type) form.append('model_type', payload.model_type)
   if (payload.is_default !== undefined) form.append('is_default', String(payload.is_default))
   return apiClient.post<Workflow>('/workflows', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -81,8 +93,19 @@ export function getWorkflowClassification() {
  * 按业务槽位取候选工作流：usable / missing 由后端按真实能力解析得出，
  * 前端只负责展示与禁用，不在页面里各写一套按名称判断的过滤规则。
  */
-export function listWorkflowCandidates(slot: WorkflowSlotKey) {
-  return get<WorkflowCandidateResponse>('/workflows/candidates', { slot })
+export function listWorkflowCandidates(slot: WorkflowSlotKey, modelType?: WorkflowModelType | null) {
+  return get<WorkflowCandidateResponse>(
+    '/workflows/candidates',
+    modelType ? { slot, model_type: modelType } : { slot },
+  )
+}
+
+/**
+ * 模型类型选项（按类型分组，含 enabled 标记）。
+ * 视频当前只开放参考图生视频，首尾帧 / 文生视频作为预留项由后端置 enabled=false。
+ */
+export function getWorkflowModelTypes() {
+  return get<WorkflowModelTypeResponse>('/workflows/model-types')
 }
 
 /** 归一化能力：generation_modes / modalities / audio / video / reference */

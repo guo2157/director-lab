@@ -40,6 +40,19 @@ def _definition_hash(definition: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _workflow_model_type(wf: Workflow, caps: dict | None = None) -> str | None:
+    """返回工作流的模型类型（细分大类）。
+
+    读取顺序：库值 model_type 优先（上传/播种时按 normalize 结果写入）；
+    历史记录该列为空时，用 normalize() 从节点重新推导，
+    绝不对名称、描述或文件名做匹配。
+    """
+    if getattr(wf, "model_type", None):
+        return wf.model_type
+    resolved = caps if caps is not None else _slot_selection_caps(wf)
+    return _classify_by_capabilities(wf.workflow_type, resolved)
+
+
 def normalize_description(
     db: Session,
     raw: str | None,
@@ -92,6 +105,8 @@ def _to_dict(wf: Workflow, db: Session) -> dict:
         "original_filename": wf.original_filename,
         "file_hash": wf.file_hash,
         "workflow_type": wf.workflow_type,
+        # 模型类型：前端按它选择具体工作流（文生图 / 图生图 / 参考图生视频 / …）
+        "model_type": _workflow_model_type(wf),
         "description": wf.description,
         "trigger": wf.trigger,
         "capabilities": wf.capabilities,
@@ -200,6 +215,11 @@ def _slot_selection_check(caps: dict, rule: dict) -> tuple[bool, list[str]]:
 @router.get('/candidates')
 def list_workflow_candidates(
     slot: str = Query(..., description='业务槽位：asset_image / storyboard_image / video'),
+    model_type: str | None = Query(
+        None,
+        description='模型类型（细分键）：image_text_to_image / image_image_to_image / '
+                    'video_reference_to_video；缺省取该槽位的默认模型类型',
+    ),
     db: Session = Depends(get_db),
 ) -> dict:
     """按业务槽位返回候选工作流（含展示描述与可用性）。
@@ -222,9 +242,35 @@ def list_workflow_candidates(
         .all()
     )
     slot_default = _SLOT_DEFAULT_WORKFLOWS.get(slot)
+    # 页面按「模型类型」选具体工作流：只在显式传值时过滤。
+    # 未传时保持原有全量返回（兼容既有调用与能力检查场景），
+    # 默认值由前端从 /model-types 的 slot_defaults 取，不在这里隐式兜底。
+    wanted_model_type = model_type or None
+    if model_type:
+        allowed = _MODEL_TYPES_BY_WORKFLOW_TYPE.get(rule['workflow_type']) or ()
+        if model_type not in allowed:
+            raise errors.AppError(
+                'invalid_request',
+                f'模型类型 {model_type} 不属于 {rule["workflow_type"]}，可选：{", ".join(allowed)}',
+                422,
+            )
+    # 模型类型切换后能力要求随之变化：资产库默认要求纯文生图，
+    # 一旦显式切到「图生图」，就必须能接图片输入，否则永远选不出候选。
+    if wanted_model_type == 'image_image_to_image':
+        rule = {
+            **rule,
+            'no_image_input': False,
+            'required': {**(rule.get('required') or {}), 'modalities.image_input': True},
+        }
+    elif wanted_model_type == 'image_text_to_image':
+        rule = {**rule, 'no_image_input': True, 'required': {}}
     items: list[dict] = []
     for wf in rows:
         caps = _slot_selection_caps(wf)
+        wf_model_type = _workflow_model_type(wf, caps)
+        # 只列该模型类型的候选，避免下拉里混进别的细分类型
+        if wanted_model_type and wf_model_type != wanted_model_type:
+            continue
         usable, reasons = _slot_selection_check(caps, rule)
         items.append({
             # 推荐默认项：只有真实可用的工作流才会被推荐，避免默认值指向不可用模型
@@ -233,6 +279,7 @@ def list_workflow_candidates(
             'name': wf.name,
             'description': wf.description or wf.name,
             'workflow_type': wf.workflow_type,
+            'model_type': wf_model_type,
             'version': wf.version,
             'is_default': wf.is_default,
             'is_builtin': wf.is_builtin,
@@ -244,6 +291,9 @@ def list_workflow_candidates(
     return {
         'slot': slot,
         'workflow_type': rule['workflow_type'],
+        'model_type': wanted_model_type,
+        # 该槽位可切换的模型类型（前端渲染「模型类型」下拉用）
+        'model_type_options': model_type_options(rule['workflow_type']),
         'default_workflow_name': slot_default,
         'items': items,
         'usable_count': sum(1 for i in items if i['usable']),
@@ -292,6 +342,61 @@ def _classify_by_capabilities(workflow_type: str, caps: dict) -> str | None:
     return None
 
 
+# 模型类型（细分大类）定义：前端下拉与后端校验共用同一份。
+# 视频目前只开放「参考图生视频」，首尾帧 / 文生视频作为预留项，前端置灰不可选。
+_MODEL_TYPES_BY_WORKFLOW_TYPE: dict[str, tuple[str, ...]] = {
+    'image': ('image_text_to_image', 'image_image_to_image'),
+    'video': ('video_reference_to_video', 'video_first_last_frame', 'video_text_to_video'),
+    'tts': ('tts',),
+}
+
+MODEL_TYPE_LABELS: dict[str, str] = {
+    'image_text_to_image': '文生图模型',
+    'image_image_to_image': '图生图模型',
+    'video_reference_to_video': '参考图生视频',
+    'video_first_last_frame': '首尾帧生视频',
+    'video_text_to_video': '文生视频',
+    'tts': 'TTS',
+}
+
+# 当前真正开放的模型类型（视频只支持参考图生视频，其余为预留）
+_ENABLED_MODEL_TYPES: dict[str, tuple[str, ...]] = {
+    'image': ('image_text_to_image', 'image_image_to_image'),
+    'video': ('video_reference_to_video',),
+    'tts': ('tts',),
+}
+
+# 业务槽位 -> 页面默认模型类型：资产库文生图 / 分镜图图生图 / 分镜视频参考图生视频
+_SLOT_DEFAULT_MODEL_TYPES: dict[str, str] = {
+    'asset_image': 'image_text_to_image',
+    'storyboard_image': 'image_image_to_image',
+    'video': 'video_reference_to_video',
+}
+
+
+def model_type_options(workflow_type: str) -> list[dict]:
+    keys = _MODEL_TYPES_BY_WORKFLOW_TYPE.get(workflow_type) or ()
+    enabled = _ENABLED_MODEL_TYPES.get(workflow_type) or ()
+    return [
+        {'value': key, 'label': MODEL_TYPE_LABELS[key], 'enabled': key in enabled}
+        for key in keys
+    ]
+
+
+@router.get('/model-types')
+def list_model_types() -> dict:
+    return {
+        'items': [
+            {
+                'workflow_type': wf_type,
+                'model_types': model_type_options(wf_type),
+            }
+            for wf_type in _MODEL_TYPES_BY_WORKFLOW_TYPE
+        ],
+        'slot_defaults': dict(_SLOT_DEFAULT_MODEL_TYPES),
+    }
+
+
 @router.get("/classification")
 def classify_workflows(db: Session = Depends(get_db)) -> dict:
     """按真实能力给工作流分组（设置页工作流 Tab 使用）。
@@ -308,12 +413,14 @@ def classify_workflows(db: Session = Depends(get_db)) -> dict:
     uncategorized: list[dict] = []
     for wf in rows:
         caps = _slot_selection_caps(wf)
-        key = _classify_by_capabilities(wf.workflow_type, caps)
+        # 模型类型：库值优先（上传时按真实能力写入），历史空值再从能力推导
+        key = _workflow_model_type(wf, caps)
         item = {
             "id": wf.id,
             "name": wf.name,
             "description": wf.description or wf.name,
             "workflow_type": wf.workflow_type,
+            "model_type": key,
             "version": wf.version,
             "is_default": wf.is_default,
             "is_builtin": wf.is_builtin,
@@ -507,6 +614,10 @@ def rollback_version(workflow_id: str, version_id: str, db: Session = Depends(ge
 async def upload_workflow(
     name: str = Form(...),
     workflow_type: str = Form(...),
+    # 模型类型：前端「新增工作流」按类型联动下拉选择，例如 image 下的
+    # image_text_to_image / image_image_to_image，video 下的 video_reference_to_video。
+    # 允许省略（由 JSON 推导），一旦传入就必须与 JSON 实际能力一致。
+    model_type: str | None = Form(None),
     alias: str | None = Form(None),
     description: str | None = Form(None),
     trigger: str | None = Form(None),
@@ -544,7 +655,45 @@ async def upload_workflow(
             issues=result["errors"],
         )
 
-    schema = build_schema(definition, capabilities=caps_dict, trigger=trigger_dict)
+    # 能力声明统一由 normalize() 从节点推导后落库，不再依赖调用方是否传 capabilities，
+    # 避免出现「库值为空、读取侧另算」的两套形态。
+    normalized_caps = normalize_capabilities(
+        workflow_type, definition, capabilities=caps_dict or {}, trigger=trigger_dict
+    )
+    stored_caps = {**(caps_dict or {}), **normalized_caps}
+
+    derived_model_type = _classify_by_capabilities(workflow_type, normalized_caps)
+    allowed_model_types = [
+        key for key, _label, wf_type in _CLASSIFICATION_GROUPS if wf_type == workflow_type
+    ]
+    if model_type:
+        if model_type not in allowed_model_types:
+            raise errors.AppError(
+                "invalid_request",
+                f"模型类型 {model_type} 不属于 {workflow_type} 类型，"
+                f"可选：{', '.join(allowed_model_types) or '无'}",
+                422,
+            )
+        # 预留能力（视频的首尾帧 / 文生视频）当前不可提交，避免建出跑不了的工作流
+        enabled_model_types = _ENABLED_MODEL_TYPES.get(workflow_type) or ()
+        if model_type not in enabled_model_types:
+            raise errors.AppError(
+                "invalid_request",
+                f"模型类型「{MODEL_TYPE_LABELS.get(model_type, model_type)}」暂未开放，"
+                f"当前可选：{'、'.join(MODEL_TYPE_LABELS.get(k, k) for k in enabled_model_types)}",
+                422,
+            )
+        if derived_model_type and model_type != derived_model_type:
+            raise errors.AppError(
+                "workflow_format_invalid",
+                f"所选模型类型（{model_type}）与工作流 JSON 实际能力（{derived_model_type}）不一致，"
+                "请按 JSON 的真实节点与输入标记选择",
+                422,
+            )
+    else:
+        model_type = derived_model_type
+
+    schema = build_schema(definition, capabilities=stored_caps, trigger=trigger_dict)
 
     from app.models.ids import workflow_id as new_workflow_id
     resolved_description = normalize_description(db, description, fallback=name)
@@ -555,9 +704,10 @@ async def upload_workflow(
         original_filename=file.filename,
         file_hash=_definition_hash(definition),
         workflow_type=workflow_type,
+        model_type=model_type,
         description=resolved_description,
         trigger=trigger_dict,
-        capabilities=caps_dict,
+        capabilities=stored_caps,
         definition=definition,
         parsed_schema=schema,
         version=0,
@@ -702,6 +852,32 @@ def update_workflow(
                 Workflow.id != wf.id,
             ).update({"is_default": False})
         wf.is_default = bool(payload["is_default"])
+    if "model_type" in payload:
+        caps = _slot_selection_caps(wf)
+        allowed = _MODEL_TYPES_BY_WORKFLOW_TYPE.get(wf.workflow_type) or ()
+        enabled = _ENABLED_MODEL_TYPES.get(wf.workflow_type) or ()
+        value = payload["model_type"] or None
+        if value is not None and value not in allowed:
+            raise errors.AppError(
+                "invalid_request",
+                f"模型类型必须是 {', '.join(allowed)} 之一",
+                422,
+            )
+        if value is not None and value not in enabled:
+            raise errors.AppError(
+                "invalid_request",
+                f"模型类型「{MODEL_TYPE_LABELS.get(value, value)}」暂未开放",
+                422,
+            )
+        derived = _classify_by_capabilities(wf.workflow_type, caps)
+        if value and derived and derived != value:
+            raise errors.AppError(
+                "invalid_request",
+                f"所选模型类型（{MODEL_TYPE_LABELS.get(value, value)}）与工作流 JSON "
+                f"实际能力（{MODEL_TYPE_LABELS.get(derived, derived)}）不一致",
+                422,
+            )
+        wf.model_type = value or derived
     if "definition" in payload:
         definition = payload["definition"]
         if not isinstance(definition, dict):

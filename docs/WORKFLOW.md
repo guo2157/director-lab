@@ -45,17 +45,25 @@
 | height | 高度 | $height（字段同名）；Primitive 节点写 $height.value | 视工作流 |
 | seed | 随机种子 | $seed | 否 |
 | ref_identity | 人物身份参考图，优先保持面部与五官 | $ref_identity.~image | 否 |
-| ref_character_2 | 服装与全身比例参考图 | $ref_character_2.~image | 否 |
-| ref_scene | 场景与光线参考图 | $ref_scene.~image | 否 |
+| ref_character_2 | 服装与全身比例参考图（更多角色为 ref_character_3 … ref_character_6） | $ref_character_2.~image | 否 |
 | ref_prop | 关键道具参考图，约束道具形制、颜色与持握关系 | $ref_prop.~image | 否 |
 | ref_prev_frame | 上一镜头末帧，用于画面连续衔接；首镜或前镜末帧缺失时不注入 | $ref_prev_frame.~image | 否 |
-| ref_image | 通用参考图。出图工作流中与 ref_identity/ref_character_2/ref_scene 互斥；H3 视频工作流中表示『当前镜头分镜图』，与其余五个槽位并存 | $ref_image.~image | 否 |
+| ref_image | 通用参考图。出图工作流中与 ref_identity/ref_character_2 互斥；H3 视频工作流中表示『当前镜头分镜图』 | $ref_image.~image | 否 |
+
+参考槽位必须按工作流类型区分，禁止跨类型套用：
+
+| 工作流类型 | 可用参考槽位 |
+| --- | --- |
+| Qwen 图片工作流（`wf_image_ref_qwen21_multi`） | `ref_scene`（场景与光线，`$ref_scene.~image`）、`ref_identity`、`ref_character_2` ~ `ref_character_6`、`ref_prop`、`ref_prop_2`，共 9 图 |
+| H3 Ref2VA 视频工作流（`wf_video_h3_ref2va_std_5s` / `wf_video_h3_ref2va_quality_10s`） | `ref_prev_frame`、`ref_image`、`ref_identity`、`ref_character_2` ~ `ref_character_6`、`ref_prop`，共 9 图 + 3 音频；**没有 `ref_scene`** |
+
+`ref_scene` 只是 Qwen 图片工作流的合法参数。H3 Ref2VA 计算图不含该输入，后端不得向其注入，场景内容仅由提示词文字描述承担（见第 5.1、12.3、13.1 节）。
 | first_frame | 首帧 | $first_frame.~image | 否 |
 | end_frame | 尾帧 | $end_frame.~image | 否 |
 | frames | 帧数 | $frames | 否 |
 | tts_text | 配音文本 | $tts_text! | 是（TTS） |
 | length | 视频目标帧数（H3 本地节点；124–362，步长 17，offset 5，fps=24） | $length.value | 否 |
-| ref_audio_0 / ref_audio_1 / ref_audio_2 | H3 参考音频：本镜已审核的对白/旁白，按说话人各一条 | $ref_audio_N.~audio | 否 |
+| ref_audio_0 / ref_audio_1 / ref_audio_2 | H3 参考音频：本镜已审核的对白/旁白，按说话人各一条（仅 H3 视频工作流） | $ref_audio_N.~audio | 否 |
 | tts_lang | TTS 语种（如 Chinese） | $tts_lang | 否 |
 
 ## 4. 输出约定（P0）
@@ -82,20 +90,32 @@
 
 ### 5.1 多参考图规则
 
-每个槽位承担一项约束，互不替代。容量以工作流 `.meta.json` 的 `reference_slots` 与 `max_reference_images` 为准，代码不写死数量；提示词中的 `<imageN>` / `<Picture N>` 序号严格对应槽位声明的 `input_key`，不按书写顺序推断。
+每个槽位承担一项约束，互不替代。可用槽位与容量一律以数据库 `workflow.capabilities` 为准（`reference.slots` 的 `param` / `input_key`，上限 `reference.max_image_references`；旧形态顶层 `reference_slots` 仍兼容），代码不写死数量，也不按工作流名称推断；提示词中的 `<imageN>` / `<Picture N>` 序号严格对应槽位声明的 `input_key`，不按书写顺序推断。
 
 图片工作流只保留两个：多参考版 `wf_image_ref_qwen21_multi`（默认工作流，9 槽）与纯文生图 `wf_image_t2i_qwen21_turbo`（0 槽）。原单角色版 `wf_image_ref_qwen21_turbo` 已下线：multi 是它的超集，只注入 3 张参考图时多余槽位会被自动剔除，生成行为与之等价，无需再切换工作流。
 
-- 出图多参考版（`wf_image_ref_qwen21_multi`）：9 槽，`ref_scene`、`ref_identity`、`ref_character_2` 三槽见下表，其后为 `ref_character_3` 至 `ref_character_6`（第 3 至第 6 个角色）与 `ref_prop`、`ref_prop_2`（两个道具）。
-- 视频（H3 ref2va 三档）：9 槽，五个职责槽位（`ref_identity`、`ref_character_2`、`ref_prev_frame`、`ref_prop`、`ref_image`）之外追加 `ref_character_3` 至 `ref_character_6`。
+- 出图多参考版（`wf_image_ref_qwen21_multi`）：9 槽，按连线顺序为 `ref_scene`、`ref_identity`、`ref_character_2`、`ref_character_3`、`ref_character_4`、`ref_prop`、`ref_prop_2`、`ref_character_5`、`ref_character_6`。
+- 视频（H3 ref2va，当前两档 `std_5s` / `quality_10s`）：9 图 + 3 音频，按连线顺序为 `ref_prev_frame`、`ref_image`、`ref_identity`、`ref_character_2`、`ref_prop`、`ref_character_3`、`ref_character_4`、`ref_character_5`、`ref_character_6`，**不含 `ref_scene`**。
 
-三张职责槽位（角色版与视频版通用）：
+各槽位职责、适用范围与缺失处理：
 
-| 槽位 | 负责约束 | 缺失时的处理 |
-| --- | --- | --- |
-| ref_identity | 人物身份、脸型、五官、发型 | 该槽位不注入，仅按其余槽位与提示词生成 |
-| ref_character_2 | 服装颜色、配饰、全身比例 | 同上 |
-| ref_scene | 场景与光线 | 同上 |
+| 槽位 | 负责约束 | 适用工作流 | 缺失时的处理 |
+| --- | --- | --- | --- |
+| ref_identity | 人物身份、脸型、五官、发型 | 图片 / H3 视频 | 该槽位不注入，仅按其余槽位与提示词生成 |
+| ref_character_2 ~ ref_character_6 | 服装颜色、配饰、全身比例；每个角色独立绑定、互不合并 | 图片 / H3 视频 | 同上 |
+| ref_prop（图片工作流另有 ref_prop_2） | 关键道具形制、颜色与持握关系 | 图片 / H3 视频 | 同上 |
+| ref_scene | 场景与光线 | **仅 Qwen 图片工作流** | H3 工作流无此槽位，不注入，场景仅由提示词文字描述承担 |
+| ref_prev_frame | 与上一镜头画面连续 | 仅 H3 视频 | 首镜或上一镜末帧缺失时不注入 |
+| ref_image | 当前镜头分镜图 | 仅 H3 视频 | 缺少当前有效分镜图时阻断生成 |
+
+约定：
+
+- 角色参考图必须独立绑定各自的 `ref_character_N` 槽位，禁止把多个角色塞进同一槽位，也禁止回退到旧版六槽映射。
+- 道具统一走 `ref_prop`；Qwen 图片工作流可用 `ref_prop_2` 承载第二个道具。
+- `ref_prev_frame` 与 `ref_image` 由系统按镜头状态注入（上一镜末帧、当前分镜图），提示词中不写 @引用。
+- 未使用的槽位在提交前自动剔除，剔除后按剩余连线顺序重编图片序号。
+- 提示词中的 `<Picture N>` 序号必须与最终实际注入顺序一致。
+- 参考图数量超出工作流容量时明确返回 422，不静默丢弃。
 
 ### 5.2 分辨率来源
 
@@ -305,24 +325,26 @@ H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 wid
 
 视频提示词对应 `shot.video_prompt`，与分镜图模板并列存放，互不覆盖。完整模板结构（开场状态六项 / 剧情与动作 / 目标状态六项 / 必须保持 / 禁止 / 对白与声音）见 PROMPTS.md 第 5 节。
 
-#### 视频六槽位与取值来源
+#### 视频九槽位与取值来源
+
+H3 Ref2VA 当前为 9 图 + 3 音频，槽位与 `ref_images.ref_image_N` 的对应关系见第 13.1 节。**H3 没有 `ref_scene` 槽位**，场景、光线与空间陈设只由提示词文字描述承担（`ref_scene` 仅 Qwen 图片工作流可用）。
 
 | 槽位 | 负责约束 | 自动取值来源 |
 | --- | --- | --- |
 | ref_identity | 人物身份、脸型、五官、发型 | 主说话角色的 `portrait_asset_id` |
-| ref_character_2 | 服装颜色、配饰、全身比例 | 暂由角色定妆图兼任 |
-| ref_scene | 场景、光线与空间陈设 | 场景 `baseline_asset_id` |
-| ref_prop | 关键道具的形制、颜色与持握关系 | 提示词中 `@道具名` 引用道具的 `anchor_asset_id`，多道具时按出现顺序取用 |
+| ref_character_2 ~ ref_character_6 | 服装颜色、配饰、全身比例，每个角色独立占一槽 | 第 2 ~ 第 6 个出场角色的 `portrait_asset_id` |
+| ref_prop | 关键道具的形制、颜色与持握关系 | 提示词中 `@道具名` 引用道具的 `anchor_asset_id` |
 | ref_prev_frame | 与上一镜头的画面连续性 | 同场景同集内 `seq - 1` 镜头的末帧资产 |
 | ref_image | 当前镜头分镜图（目标构图与终态） | 该镜头的 keyframe 资产 |
 
+
 补充约定：
-- 视频工作流中 `ref_image` 固定表示当前镜头分镜图，与其余五个槽位并存；出图工作流中 `ref_image` 为通用单图参考，与身份/服装/场景三槽位互斥
-- 同一镜头绑定的参考素材总数不超过 6 个，含分镜图在内
+- 视频工作流中 `ref_image` 固定表示当前镜头分镜图，与其余八个图片槽位（`ref_prev_frame`、`ref_identity`、`ref_character_2` ~ `ref_character_6`、`ref_prop`）并存，合计 9 个图片槽位；出图工作流中 `ref_image` 为通用单图参考，与身份/服装/场景三槽位互斥
+- 同一镜头绑定的参考素材（图片）总数不超过 9 个，含分镜图与上一镜末帧在内；音频另有 3 条（`ref_audio_0` ~ `ref_audio_2`）。手动绑定表另有 6 条上限，二者是不同概念，不要混用（见第 9.2 节）
 - 任一来源资产未锁定时不填充该槽位，记 warning，不阻断生成
 - `ref_prev_frame` 在首镜（seq=1）或上一镜头末帧缺失时不注入，此时仅靠 `start_state` 枚举值衔接
-- 分组注入：`ref_prev_frame` 单独作为参考图1；`ref_image` 作为参考图2；`ref_identity`、`ref_character_2`、`ref_scene`、`ref_prop` 作为参考图2 的细化来源追加注入，不单独成段；提交 H3 时提示词编译器按实际连线顺序把『参考图1/2』与 `@名称` 统一编译为 `<Picture N>`（槽位映射键 `ref_images.ref_image_N`，见第 13.1 节）
-- 六个槽位全部无法填充时需降级为 T2VA；H3 参考生视频要求至少一张参考图或参考视频，降级须改用 T2V 工作流（`wf_video_h3_t2v`），否则返回 422 `h3_reference_required`
+- 注入顺序：`ref_prev_frame`（`ref_image_0`）、`ref_image`（`ref_image_1`）、`ref_identity`（`ref_image_2`）、`ref_character_2`（`ref_image_3`）、`ref_prop`（`ref_image_4`）、`ref_character_3` ~ `ref_character_6`（`ref_image_5` ~ `ref_image_8`）；提交 H3 时提示词编译器按实际注入槽位把 `@名称` 统一编译为 `<Picture N>`，未注入槽位剔除后重编号（见第 13.1 节）
+- 全部图片槽位都无法填充时需降级为 T2VA；H3 参考生视频要求至少一张参考图，否则返回 422 `h3_reference_required`（当前 T2V 工作流已移入 `_retired`，无可用降级工作流）
 
 #### 约束冲突处理
 
@@ -467,7 +489,21 @@ shot.duration    → $duration_hint（目标时长）
 
 ### 12.1 能力声明提交方式
 
-`capabilities` / `trigger` 必须经独立字段或 sidecar `*.meta.json` 提交，写入工作流 JSON 顶层会破坏「节点 ID→节点对象」格式校验。capabilities 还须含 `reference_slots`、`frame_count_param/frame_count_step/frame_count_offset/frame_count_range`（或等价 `duration_param/duration_range/duration_step`）、`resolution_constraints`、`requires`；未知的 `fps`、`frame_count_step` 置 `null` 待首次联调回填，禁止推测；不得按工作流名称推测能力。
+能力声明由三方分工，不得混用：
+
+| 角色 | 载体 | 职责 |
+| --- | --- | --- |
+| 业务来源 | 数据库 `workflow` 表的 `capabilities` / `trigger` 列 | 保存能力声明与匹配条件，读写以此为唯一业务真相 |
+| 结构来源 | `backend/data/workflows/*.json` | 只描述真实节点与输入字段，是槽位 `input_key`、媒体类型、输出标记的事实依据 |
+| 一致性校验 | `backend/scripts/validate_workflows.py` + `capabilities.normalize()` | 从节点重新推导能力，核对声明的槽位是否真的存在于节点输入 |
+
+规则：
+
+- `.meta.json` sidecar 已删除，不再是能力声明来源，也不再作为前置条件；仍直接依赖它的逻辑属于遗留缺陷，必须修复而不是在文档中保留。
+- 数据库 `capabilities` 由 `capabilities.normalize()` 从工作流定义推导后写入，形态为 `reference.slots`（`param` / `input_key` / `semantic` / `media_type`）、`reference.max_image_references`、`audio`、`video`（`fps`、`frame_count_range`、`resolution_constraints`）、`generation_modes`、`source` 等；旧形态顶层 `reference_slots` 仅作兼容读取。
+- 读取参考槽位必须走统一入口 `capabilities.declared_reference_slots()`，同时兼容 `reference.slots` 与顶层 `reference_slots`，禁止各处自写 `caps.get` 直读。
+- 槽位数量与 `input_key` 一律来自声明，不得按工作流名称、文件名推断，也不得回退到代码内置的默认槽位表。
+- 推导不出的字段（如 `fps`）保留 `null` 并给出显式告警，禁止填猜测值。
 
 ### 12.2 媒体与工作流安全
 
@@ -483,34 +519,35 @@ shot.duration    → $duration_hint（目标时长）
 
 按定义批量生成（`POST /projects/{id}/asset-plans/generate`）的参考图注入规则：
 
-1. **槽位由定义绑定决定**：`asset_plan_dependency` 按 (plan_id, slot) 记录依赖（ref_identity/ref_character_2/ref_scene/ref_prop/ref_image），注入不依赖提示词文本书写顺序，从根本上避免槽位错位。
-2. **仅注入工作流声明的槽位**：以 `capabilities.reference_slots` 为准（字符串数组或 `{param, input_key, optional}` 对象数组），未声明的槽位不注入，避免无效上传与工作流不支持的输入。
+1. **槽位由定义绑定决定**：`asset_plan_dependency` 按 (plan_id, slot) 记录依赖，注入不依赖提示词文本书写顺序，从根本上避免槽位错位。可绑定槽位集合本身按工作流类型区分——分镜图为 `ref_identity`、`ref_character_2` ~ `ref_character_6`、`ref_scene`、`ref_prop`；分镜视频为 `ref_image`、`ref_prev_frame`、`ref_identity`、`ref_character_2` ~ `ref_character_6`、`ref_prop`。
+2. **仅注入工作流声明的槽位**：以统一入口 `capabilities.declared_reference_slots()` 读取声明（数据库里是 `reference.slots`，旧形态顶层 `reference_slots` 兼容读取），未声明的槽位一律不注入，避免无效上传与工作流不支持的输入。H3 Ref2VA 未声明 `ref_scene`，因此**不得**向其注入该参数：场景 @引用降级为提示词文字描述，`ref_scene` 仍可正常注入 Qwen 图片工作流。
+2.1 **声明缺失时的降级**：工作流完全没有某类槽位（如 H3 没有场景槽位）时，该类 @引用不注入、不报错，并在提示词编译告警中留痕；只有「声明了槽位但装不下」才算错误。
+2.2 **容量上限**：角色 / 场景 / 道具引用数量超过工作流声明的槽位数时返回 422 `invalid_reference` 并列出引用名单与可用槽位，禁止静默丢弃超额参考图。
 3. **版本锁定**：解析优先取定义绑定的当前有效资产（`validity == 'current'`）；绑定资产被替换时回退到归属实体/镜头的当前有效资产，不引用过期版本。
 4. **绑定快照**：每个槽位固化 `slot/ref_key/asset_id/version/file_path/status` 随任务参数 `__binding_snapshot__` 持久化；重试复用快照，不重新解析（版本漂移防护）。
 5. **系统保留槽位**：`ref_prev_frame`/`first_frame`/`end_frame` 由执行器按镜头实际产物回填（上一镜尾帧、跨集首帧），提示词中不写 @ 引用，@引用解析也不得占用。
 6. **文件缺失处理**：参考图文件不存在时跳过该槽位并记录 `file_missing`，不阻断生成。
-7. **提示词 @名称 语法**：分镜图/视频定义提示词用 `@角色名`/`@场景名` 引用（@引用解析可携带参考图）；`ref_image`（本镜分镜图）与 `ref_prev_frame`（上一镜末帧）为系统保留槽，提示词中不写 @ 引用。
+7. **提示词 @名称 语法**：分镜图/视频定义提示词用 `@角色名`/`@道具名` 引用（@引用解析可携带参考图）；`@场景名` 仅在声明了 `ref_scene` 的工作流（Qwen 图片工作流）生效。`ref_image`（本镜分镜图）与 `ref_prev_frame`（上一镜末帧）为系统保留槽，提示词中不写 @ 引用。
+8. **注入后的序号重写**：按实际注入槽位的 `input_key` 重写提示词图片序号（Qwen 为 `<imageN>`、H3 为 `<Picture N>`），剔除槽位后按剩余连线顺序重编号，保证描述与模型实际收到的图片严格一致。
 
 ## 13. 标准工作流清单（随文交付）
 
-### 13.0 当前实际清单（2026-11-18 核对，以本节为准）
+### 13.0 当前实际清单（2026-11-20 核对，以本节为准）
 
-`backend/data/workflows/` 实存 **10 份**工作流 + 10 份 `.meta.json`，均已在 `workflow` 表注册（`is_builtin=1`）：
+`backend/data/workflows/` 顶部实存 **6 份在用**工作流，全部已在 `workflow` 表注册；`.meta.json` sidecar 已全部删除，能力声明改由数据库 `workflow.capabilities` / `trigger` 承载。
 
 | 文件 | workflow_type | 槽位 | 输出标记 | 说明 |
 | --- | --- | --- | --- | --- |
 | `wf_image_t2i_qwen21_turbo.json` | image | 0 | `$output.cover` | 纯文生图（定妆图/基准图/锚定图） |
-| `wf_image_ref_qwen21_multi.json` | image | 9 图 | `$output.cover` | 多参考图出图（默认，`trigger.priority=20`） |
-| `wf_video_h3_ref2va_fast_5s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 极速档，`capabilities.tier=fast_5s`，480×864 |
-| `wf_video_h3_ref2va_std_5s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 标准档，`tier=std_5s`，640×1120（日常出片） |
-| `wf_video_h3_ref2va_quality_10s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 质量档，`tier=quality_10s`，768×1344 |
-| `wf_video_h3_flf2v.json` | video | 首帧 + 尾帧 | `$output.clip` | 首尾帧生视频（跨集连续性） |
-| `wf_video_h3_t2v.json` | video | 0 | `$output.clip` | 纯文生视频（参考图全空时的降级路径） |
+| `wf_image_ref_qwen21_multi.json` | image | 9 图（含 `ref_scene`） | `$output.cover` | 多参考图出图（默认，`trigger.priority=20`） |
+| `wf_video_h3_ref2va_std_5s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 标准档，`tier=std_5s`（日常出片） |
+| `wf_video_h3_ref2va_quality_10s.json` | video | 9 图 + 3 音频 | `$output.clip` | H3 质量档，`tier=quality_10s` |
 | `wf_tts_qwen3_custom_voice.json` | tts | — | `$output.voice` | Qwen3 预设音色（`voice_mode=preset`） |
 | `wf_tts_qwen3_voice_clone.json` | tts | 1 音频 | `$output.voice` | Qwen3 音色克隆（`voice_mode=clone_reference_audio`） |
-| `wf_bgm_stable_audio.json` | bgm | — | `$output.bgm` | Stable Audio Open |
 
-> 第 13.1 节起的分档说明与 §13 旧表为 2026-10 交付快照，仅作历史参考；文件名/份数/槽位以本节为准。SFX 工作流仍未交付。
+已移入 `backend/data/workflows/_retired/` 且当前不参与出片：`wf_video_h3_ref2va_fast_5s.json`（极速档）、`wf_video_h3_flf2v.json`（首尾帧）、`wf_video_h3_t2v.json`（纯文生视频降级）、`wf_bgm_stable_audio.json`（BGM）。上述文件的 `capabilities` / `trigger` 在数据库中同样不存在，因此 BGM、FLF2V、T2V 三条链路当前无可用工作流，生成请求会返回 `no_matching_workflow`，属已知缺口而非静默降级。SFX 工作流仍未交付。
+
+> 第 13.0.1 节为 2026-10 历史快照，仅作溯源参考；文件名、份数、槽位一律以本节与第 13.1 节为准。
 
 ### 13.0.1 历史快照（2026-10，逐步淘汰）
 
@@ -527,9 +564,32 @@ shot.duration    → $duration_hint（目标时长）
 | `wf_bgm_stable_audio.json` | bgm / bgm | Stable Audio Open 1.0，`$output.bgm`；时长由单个 PrimitiveFloat 同时驱动 EmptyLatentAudio.seconds 与 ConditioningStableAudio.seconds_total | [bgm_style] | 0 |
 | ~~`wf_sfx_stable_audio.json`~~ | sfx / sfx | **本期不交付**：文件未随文档提供。文档层保留 sfx 枚举与链路定义；SFX 为可选轨道，缺失不阻塞合成，可从素材库选取 | [soundscape] | 0 |
 
-### 13.1 H3 六参考槽位映射（`ref_images.ref_image_N`）
+### 13.1 H3 参考槽位映射（`ref_images.ref_image_N`）
 
-0=ref_prev_frame（上镜末帧）、1=ref_image（当前分镜图）、2=ref_identity、3=ref_character_2、4=ref_scene、5=ref_prop（官方 autogrow 命名从 0 起）；`prompt`/`length`/`seed` 由 Primitive 节点连线驱动；`width`/`height` 由执行器按第 5.2 节分辨率约束注入；提示词以 `<Picture N>` 按连线顺序引用，剔除槽位后重新编号。
+当前 H3 Ref2VA（`wf_video_h3_ref2va_std_5s` / `wf_video_h3_ref2va_quality_10s`）为 **9 图 + 3 音频**，官方 autogrow 命名从 0 起：
+
+| 输入 | 参数 | 职责 |
+| --- | --- | --- |
+| ref_image_0 | ref_prev_frame | 上一镜末帧（系统注入） |
+| ref_image_1 | ref_image | 当前镜头分镜图（系统注入） |
+| ref_image_2 | ref_identity | 主角色身份 |
+| ref_image_3 | ref_character_2 | 第 2 个角色 |
+| ref_image_4 | ref_prop | 关键道具 |
+| ref_image_5 | ref_character_3 | 第 3 个角色 |
+| ref_image_6 | ref_character_4 | 第 4 个角色 |
+| ref_image_7 | ref_character_5 | 第 5 个角色 |
+| ref_image_8 | ref_character_6 | 第 6 个角色 |
+| ref_audio_0 / 1 / 2 | ref_audio_0 / 1 / 2 | 本镜已审核的对白/旁白，按说话人各一条 |
+
+约定：
+
+- 总容量 9 张图片 + 3 条音频；角色参考图必须独立绑定，不得合并到同一槽位。
+- **不存在 `ref_scene`**：`ref_scene` 只属于 Qwen 图片工作流，H3 的场景内容由提示词文字描述承担。
+- 道具统一使用 `ref_prop`（第 4 槽，`ref_image_4`）。
+- `ref_prev_frame` 与 `ref_image` 由系统按镜头状态注入（上一镜末帧、当前分镜图），提示词中不写 @引用。
+- 未使用的槽位在提交前剔除，`ref_images.ref_image_N` 压缩为连续编号，提示词 `<Picture N>` 按压缩结果重写。
+- 超出容量的参考图明确报错，不静默丢弃。
+- `prompt` / `length` / `seed` 由节点连线驱动；`width` / `height` 由执行器按第 5.2 节分辨率约束注入。
 
 ### 13.2 H3 约束
 
@@ -538,15 +598,15 @@ shot.duration    → $duration_hint（目标时长）
 - 参考图 ≤9 张、短边 ≥256px、宽高比 0.4–2.5；R2V 至少 1 张参考图，否则 422 `h3_reference_required`
 - R2V 不支持首尾帧；FLF2V 首尾帧经 ImageScale(crop=center) 裁切到画布
 - 同生成立体声音轨内嵌 mp4（`audio=true`、`audio_output_mode=embedded`）
-- 本地权重 5 项（见 13.3）；需 ≥24GB 显存（验证目标 A10，V100 未验证，NVFP4 不支持已排除）；ComfyUI 须含官方 MiniMax H3 原生节点（2026-08 合入），勿装 ComfyUI-MiniMaxH3-Cache；权重受 MiniMax H3 Community License 约束（美/欧/英/韩为排除地区）
+- 本地权重 4 项 + Turbo LoRA 1 项（见 13.3）；需 ≥24GB 显存（验证目标 A10，V100 未验证，NVFP4 不支持已排除）；ComfyUI 须含官方 MiniMax H3 原生节点（2026-08 合入），勿装 ComfyUI-MiniMaxH3-Cache；权重受 MiniMax H3 Community License 约束（美/欧/英/韩为排除地区）
 
 ### 13.3 模型默认文件名
 
-按链路分组，与各工作流 JSON 实际引用一致（2026-10-24 核对）：
+按链路分组，与 `backend/data/workflows/` 在用的工作流 JSON 实际引用一致（2026-11-20 逐项核对）：
 
-- 图像链路 6 项：`qwen_image_fp8_e4m3fn.safetensors`、`qwen_image_edit_2511_bf16.safetensors`、`qwen_2.5_vl_7b_fp8_scaled.safetensors`、`qwen_image_vae.safetensors`、Lightning LoRA `Qwen-Image-Lightning-4steps-V1.0.safetensors` 与 `Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`
-- H3 视频链路 6 项：本地权重 5 项 `minimax_h3_ref2va_pruned_int8_convrot.safetensors`、`minimax_h3_fl2va_pruned_int8_convrot.safetensors`、`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`、`minimax_h3_video_vae_fp16.safetensors`、`minimax_h3_audio_vae_fp32.safetensors`；turbo 加速 LoRA `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`（仅 ref2va_turbo 工作流使用）
-- 音频链路 4 项：BGM `stable-audio-open-1.0.safetensors` + `t5-base.safetensors`；TTS 经 Qwen3Loader 按 HuggingFace 仓库加载，无本地 safetensors 文件：`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`（预设音色）、`Qwen/Qwen3-TTS-12Hz-1.7B-Base`（声音克隆）
+- 图像链路（`wf_image_ref_qwen21_multi` / `wf_image_t2i_qwen21_turbo`）3 项：`qwen_image_2.1_turbo_int8_convrot.safetensors`（UNETLoader）、`qwen3vl_8b_int8_convrot.safetensors`（CLIPLoader）、`qwen_image_2.1_vae_bf16.safetensors`（VAELoader）。**两个工作流均无 LoRA 节点**，旧版 Lightning 4 步 LoRA 与 `qwen_image_edit_2511` 权重已不再被引用，`wf_image_ref_qwen_edit`、`wf_image_t2i_qwen` 均已退役。
+- H3 视频链路（`wf_video_h3_ref2va_std_5s` / `wf_video_h3_ref2va_quality_10s`）：`minimax_h3_ref2va_pruned_int8_convrot.safetensors`（UNET）、`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`（CLIP）、`minimax_h3_video_vae_int8_convrot.safetensors`（视频 VAE）、`minimax_h3_audio_vae_fp32.safetensors`（音频 VAE）；外加 LoRA `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`（LoraLoaderModelOnly，strength 1.0），**两档均引用该 LoRA**，不是只给已退役的 turbo 工作流使用。`minimax_h3_fl2va_pruned_int8_convrot.safetensors` 仅 `wf_video_h3_flf2v` / `wf_video_h3_t2v` 引用，二者已移入 `_retired`，当前不参与出片。
+- 音频链路：TTS 经 Qwen3Loader 按 HuggingFace 仓库加载，无本地 safetensors：`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`（预设音色）、`Qwen/Qwen3-TTS-12Hz-1.7B-Base`（声音克隆）；BGM `stable-audio-open-1.0.safetensors` + `t5-base.safetensors`，对应 `wf_bgm_stable_audio` 已移入 `_retired`，当前无在用 BGM 工作流。
 
 ### 13.4 依赖与限制
 
@@ -555,7 +615,13 @@ shot.duration    → $duration_hint（目标时长）
 
 ### 13.5 校验脚本
 
-`backend/scripts/validate_workflows.py` 供 M5-02/03/04 校验：API 格式、连线完整、标记非连线、同名参数不重复、宽高同时绑定、`$output.*` 存在。
+`backend/scripts/validate_workflows.py` 供 M5-02/03/04 校验：
+
+- 结构类：API 格式、连线完整、标记非连线、同名参数不重复、宽高同时绑定、`$output.*` 存在、画布专用残留键。
+- 能力一致性类：按 `$output.*` 判定 workflow_type，调用 `capabilities.normalize()` 从节点重新推导能力，核对每个槽位声明的 `input_key` 是否真的出现在节点输入中；视频工作流另检查 fps 可读性与 `length`/`frames`/`duration` 时长参数标记。
+- 脚本不再读取 `.meta.json`（文件已删除），必需输出也改由工作流自身输出标记判定，不按文件名猜能力。
+
+近期运行结果（2026-11-20）：`data/workflows/wf_*.json` 全部 PASS，退出码 0。
 
 ## 14. 本期未交付与待实测项（TBD，详见 DECISIONS.md）
 

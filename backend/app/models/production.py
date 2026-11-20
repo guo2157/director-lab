@@ -70,6 +70,12 @@ class Workflow(TimestampMixin, Base):
     original_filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
     file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     workflow_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 模型类型（细分大类）：前端按它选择具体工作流，取值与
+    # app/api/v1/workflows.py 的 _CLASSIFICATION_GROUPS 细分键保持一致，
+    # 例如 image_text_to_image / image_image_to_image /
+    # video_reference_to_video / video_first_last_frame / video_text_to_video / tts。
+    # 写入时以 capabilities.normalize() 的推导结果为准，不允许与 JSON 实际能力冲突。
+    model_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     trigger: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     capabilities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -91,6 +97,8 @@ class Workflow(TimestampMixin, Base):
 # 原为全表扫描（workflow 表此前只有主键索引）。
 Index("ix_workflow_type_default", Workflow.__table__.c.workflow_type, Workflow.__table__.c.is_default)
 Index("ix_workflow_type_created", Workflow.__table__.c.workflow_type, Workflow.__table__.c.created_at)
+# 按「类型 + 模型类型」筛选工作流（前端选择器按 model_type 取候选）。
+Index("ix_workflow_type_model", Workflow.__table__.c.workflow_type, Workflow.__table__.c.model_type)
 
 
 class WorkflowVersion(Base):

@@ -505,9 +505,15 @@ def _style_for(db: Session, project: Project | None, task_type: str) -> str:
 
 
 def _declared_slots(capabilities: dict) -> list[dict]:
-    """归一化工作流 reference_slots：兼容字符串数组与对象数组两种声明。"""
+    """归一化工作流参考槽位声明，统一走 capabilities.declared_reference_slots。
+
+    数据库中 workflow.capabilities 实际保存的是 normalize() 产出的
+    reference.slots，直接读顶层 reference_slots 只会得到 None，
+    会把「已声明槽位」误判成「未声明」，场景/角色参考被整体降级为文字描述。
+    """
+    from app.services.workflow.capabilities import declared_reference_slots
     slots: list[dict] = []
-    for item in capabilities.get("reference_slots") or []:
+    for item in declared_reference_slots(capabilities):
         if isinstance(item, dict):
             param = item.get("param")
             input_key = item.get("input_key")
@@ -521,6 +527,11 @@ def _declared_slots(capabilities: dict) -> list[dict]:
 
 def _slot_limit(capabilities: dict, declared: list[dict]) -> int:
     limit = capabilities.get("max_reference_images")
+    if not (isinstance(limit, int) and limit > 0):
+        # 归一化能力把参考图上限放在 reference.max_image_references
+        ref = capabilities.get("reference")
+        if isinstance(ref, dict):
+            limit = ref.get("max_image_references")
     if isinstance(limit, int) and limit > 0:
         return limit
     return len(declared)

@@ -217,6 +217,46 @@ def _slot_entries(capabilities: dict, schema: dict,
     return entries
 
 
+def declared_reference_slots(capabilities: dict | None) -> list:
+    """返回工作流声明的参考槽位（全仓唯一读取入口）。
+
+    为什么需要：`.meta.json` 删除后，能力声明有两处同义存放——
+    1. `reference.slots`：`normalize()` 产出的结构，数据库中
+       `workflow.capabilities` 实际保存的就是它，字段最全
+       （含 input_key / semantic / media_type）；
+    2. 顶层 `reference_slots`：旧 seed / 上传端点声明的兼容键。
+    调用方若只读其中一处，另一处就会退化成「未声明」，进而回退到内置默认
+    槽位表，把工作流并不支持的槽位（典型如 H3 的 ref_scene）注入进去。
+
+    只返回图片类槽位，保持 `reference_slots` 的历史语义；返回值恒为列表，
+    空列表表示该工作流确实没有声明任何参考图槽位，调用方必须据此判定
+    「不支持」，不得回退到默认槽位表，也不得按工作流名称推断。
+    """
+    caps = capabilities if isinstance(capabilities, dict) else {}
+    slots = caps.get("reference_slots")
+    if not slots:
+        ref = caps.get("reference")
+        if isinstance(ref, dict):
+            slots = ref.get("slots")
+    if not isinstance(slots, list):
+        return []
+    out: list = []
+    for item in slots:
+        if isinstance(item, str):
+            out.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        if not (item.get("param") or item.get("key")):
+            continue
+        media_type = item.get("media_type")
+        if media_type and media_type != "image":
+            # H3 的 ref_audio_N 等音视频槽位不属于参考图槽位
+            continue
+        out.append(item)
+    return out
+
+
 def normalize(workflow_type: str, definition: dict,
               capabilities: dict | None = None, trigger: dict | None = None) -> dict:
     """返回归一化能力。definition 必须真实存在——能力从标记与节点读，不从名字读。"""

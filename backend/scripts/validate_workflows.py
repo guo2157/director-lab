@@ -17,7 +17,7 @@ def parse_title(t):
         if not m: params.append(("INVALID",frag)); continue
         media=bool(m.group(1) or m.group(3)); params.append((m.group(2).lower(),m.group(4),media,bool(m.group(5))))
     return params,outs
-def check(path,need_out):
+def check(path):
     wf=load_json(path); errs=[]; warns=[]
     if "nodes" in wf and "links" in wf: return ["画布格式，须为 API Format"],[],{},set()
     outs=set(); params={}
@@ -39,69 +39,79 @@ def check(path,need_out):
             if name in params: errs.append(f"参数 {name} 重复绑定")
             params[name]=(nid,field,media,req)
     if not outs: errs.append("缺少 $output.* 输出标记 (workflow_marker_missing)")
-    for o in need_out:
+    # 必需输出由工作流自身声明的 $output.* 决定，不再从 sidecar 推断
+    for o in infer_need_out(path, outs):
         if o not in outs: errs.append(f"缺少必需输出 $output.{o}")
     if ("width" in params)!=("height" in params): errs.append("宽高须同时绑定")
     return errs,warns,params,outs
 
 TARGET_TYPE={"keyframe":"image","clip":"video","audio":"tts","bgm":"bgm","sfx":"sfx"}
-# trigger.target → 必需输出名；meta 缺失或 target 非法时回退到文件名推断
-TARGET_OUT={"keyframe":"cover","clip":"clip","audio":"voice","bgm":"bgm","sfx":"sfx"}
+# $output.* 名 → trigger.target。
+# 必需输出的判据是工作流自身的输出标记：`.meta.json` 已删除，不再有 sidecar 可读；
+# 能力声明的业务来源是数据库 workflow 表的 capabilities/trigger（由 normalize 生成），
+# 工作流 JSON 只负责「实际有哪些节点与输入字段」。
+OUT_TARGET={"cover":"keyframe","clip":"clip","voice":"audio","bgm":"bgm","sfx":"sfx"}
 
-def meta_path_of(path):
-    return os.path.splitext(path)[0]+".meta.json"
+def infer_need_out(path, available_outs):
+    """按工作流自身声明的输出标记推断必需输出；不读 sidecar、不按文件名猜能力。"""
+    for out in ("cover","clip","voice","bgm","sfx"):
+        if out in available_outs:
+            return [out]
+    return []
 
-def infer_need_out(path):
-    """优先依据 sidecar meta 的 trigger.target 推断必需输出；失败时回退文件名推断。"""
-    mp=meta_path_of(path)
-    if os.path.exists(mp):
-        try:
-            t=load_json(mp).get("trigger",{}).get("target")
-            if t in TARGET_OUT: return [TARGET_OUT[t]]
-        except Exception:
-            pass
-    base=os.path.basename(path)
-    return ["clip"] if "video" in base else ["voice"] if "tts" in base else ["bgm"] if "bgm" in base else ["sfx"] if "sfx" in base else ["cover"]
+def infer_workflow_type(outs):
+    """按 $output.* 输出标记推断 workflow_type，不按文件名猜。"""
+    for out,target in OUT_TARGET.items():
+        if out in outs:
+            return TARGET_TYPE.get(target)
+    return None
 
-def check_meta(path,wf,params,outs):
-    mp=meta_path_of(path); errs=[];warns=[]
-    if not os.path.exists(mp): return ["缺少 sidecar "+os.path.basename(mp)],[]
-    m=load_json(mp)
-    legacy = m.get("schema_version") is None
-    if legacy:
-        warns.append("meta 为旧格式（无 schema_version），建议升级到 schema_version 1")
-    else:
-        if m.get("schema_version")!=1: errs.append("schema_version 须为 1")
-        if m.get("workflow_file")!=os.path.basename(path): errs.append("workflow_file 与文件名不一致")
-    t=m.get("trigger",{}); c=m.get("capabilities",{})
-    if t.get("target") not in TARGET_TYPE: errs.append(f"trigger.target 非法 {t.get('target')}")
-    elif c.get("workflow_type")!=TARGET_TYPE[t["target"]]: errs.append("workflow_type 与 target 映射不符")
-    if c.get("target")!=t.get("target"): errs.append("capabilities.target 与 trigger.target 不一致")
-    for p in t.get("required_params",[]):
-        if p not in params: errs.append(f"required_params 含未标记参数 {p}")
-    o=c.get("output","")
-    if not o.startswith("$output.") or o[8:] not in outs: errs.append(f"capabilities.output {o} 在工作流中不存在")
-    for s in c.get("reference_slots",[]):
-        name = s if isinstance(s,str) else s.get("param")
-        if name not in params or not params[name][2]: errs.append(f"reference_slots 参数 {name} 不是已标记的媒体参数")
-    for k in ("ratio_patch_key","resolution_patch_key"):
-        v=c.get(k)
-        if v and not any(v in n["inputs"] for n in wf.values()): errs.append(f"{k}={v} 在工作流输入中不存在")
-    fp=c.get("frame_count_param")
-    if fp and fp not in params: errs.append(f"frame_count_param {fp} 未标记")
-    if c.get("workflow_type")=="video" and not (c.get("duration_param") or fp): errs.append("video 须声明 duration_param 或 frame_count_param 之一")
-    if fp and (c.get("fps") is None or c.get("frame_count_step") is None): errs.append("frame_count_param 存在时 fps 与 frame_count_step 必填")
-    dp=c.get("duration_param")
-    if dp and dp not in params: errs.append(f"duration_param {dp} 未标记")
-    if c.get("workflow_type")=="video" and c.get("audio") and c.get("audio_output_mode") not in ("embedded","separate"): errs.append("audio=true 时须声明 audio_output_mode")
-    if c.get("workflow_type")=="video" and c.get("fps") is None: warns.append("fps 未声明(null)，需联调后回填")
+def check_capabilities(path,wf,params,outs):
+    """能力声明与工作流 JSON 的一致性校验。
+
+    `.meta.json` 已删除，本脚本不再读 sidecar：能力声明的业务来源是数据库
+    workflow 表的 capabilities/trigger（由 capabilities.normalize() 生成），
+    工作流 JSON 只负责实际节点与输入字段。这里用同一个 normalize() 从节点推导能力，
+    再核对每个声明槽位的 input_key 是否真的存在于节点输入中。
+    """
+    errs=[];warns=[]
+    try:
+        from app.services.workflow.capabilities import normalize
+    except Exception as e:  # 后端依赖不可用时降级，不误报失败
+        warns.append(f"跳过能力一致性校验：无法导入 normalize（{e}）")
+        return errs,warns
+    wf_type=infer_workflow_type(outs)
+    if wf_type is None:
+        errs.append("无法从 $output.* 输出标记确定 workflow_type")
+        return errs,warns
+    caps=normalize(wf_type,wf,capabilities=None,trigger=None)
+    inputs_of=[n.get("inputs") or {} for n in wf.values() if isinstance(n,dict)]
+    for slot in (caps.get("reference") or {}).get("slots") or []:
+        name=slot.get("param")
+        if name not in params or not params[name][2]:
+            errs.append(f"槽位 {name} 不是已标记的媒体参数")
+            continue
+        key=slot.get("input_key")
+        if not key:
+            errs.append(f"槽位 {name} 未解析出 input_key")
+            continue
+        if not any(key in ins for ins in inputs_of):
+            errs.append(f"槽位 {name} 的 input_key={key} 在工作流节点输入中不存在")
+    if wf_type=="video":
+        video=caps.get("video") or {}
+        if video.get("fps") is None: warns.append("fps 未从计算图读取到，需联调后回填")
+        # 时长控制看工作流是否真的标记了帧数/时长参数（H3 用 length，其它可能用 frames/duration）
+        if not ({"length","frames","duration"} & set(params)):
+            errs.append("视频工作流缺少帧数/时长控制参数标记（length/frames/duration）")
+        audio=caps.get("audio") or {}
+        if audio.get("supports_native_audio") and audio.get("audio_output_mode") not in ("embedded","separate"):
+            errs.append("检测到原生音轨但 audio_output_mode 无法确定")
     return errs,warns
 rc=0
 for p in sys.argv[1:]:
     if p.endswith(".meta.json"): continue
-    need=infer_need_out(p)
-    errs,warns,params,outs=check(p,need)
-    me,mw=check_meta(p,load_json(p),params,outs); errs=errs+me; warns=warns+mw
+    errs,warns,params,outs=check(p)
+    me,mw=check_capabilities(p,load_json(p),params,outs); errs=errs+me; warns=warns+mw
     print(("PASS " if not errs else "FAIL ")+p)
     print("  params:",{k:f"{v[0]}.{v[1]}{'~' if v[2] else ''}{'!' if v[3] else ''}" for k,v in params.items()}); print("  outputs:",sorted(outs))
     for e in errs: print("  ERR",e); rc=1

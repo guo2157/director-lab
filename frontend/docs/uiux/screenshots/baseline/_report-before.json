@@ -1,0 +1,669 @@
+[
+  {
+    "page": "home",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__home__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 62,
+    "blocks": [
+      {
+        "cls": "list-toolbar",
+        "tag": "div",
+        "top": 86,
+        "h": 36,
+        "text": "全部 4 草稿 0 进行中 4 已归档 0 搜索作品 新建作品"
+      }
+    ],
+    "blockCount": 1,
+    "blocksTotalH": 36,
+    "contentTop": 142,
+    "contentSel": ".project-grid",
+    "docH": 900,
+    "textLen": 219,
+    "errHits": []
+  },
+  {
+    "page": "script",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__script__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": null,
+    "contentSel": null,
+    "docH": 900,
+    "textLen": 1206,
+    "errHits": []
+  },
+  {
+    "page": "parse",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__parse__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 323,
+    "contentSel": ".result-panel",
+    "docH": 900,
+    "textLen": 220,
+    "errHits": []
+  },
+  {
+    "page": "assets",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__assets__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 62,
+    "blocks": [
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 86,
+        "h": 54,
+        "text": "执行进度 11 / 11 100% 刷新进度 去分镜图"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 99,
+        "h": 28,
+        "text": "执行进度 11 / 11 100% 刷新进度 去分镜图"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 101,
+        "h": 24,
+        "text": "11 / 11 100%"
+      },
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 152,
+        "h": 54,
+        "text": "批量生成 千问文生图 全选 已选 0 / 2 批量生成角色定妆图（0）"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 165,
+        "h": 28,
+        "text": "批量生成 千问文生图 全选 已选 0 / 2 批量生成角色定妆图（0）"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 165,
+        "h": 28,
+        "text": "千问文生图 全选 已选 0 / 2"
+      },
+      {
+        "cls": "n-tabs n-tabs--line-type n-tabs--medium-size n-tabs--top ass",
+        "tag": "div",
+        "top": 218,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      },
+      {
+        "cls": "n-tabs-nav--line-type n-tabs-nav--top n-tabs-nav",
+        "tag": "div",
+        "top": 218,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      },
+      {
+        "cls": "n-tabs-nav-scroll-wrapper",
+        "tag": "div",
+        "top": 218,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      },
+      {
+        "cls": "v-x-scroll",
+        "tag": "div",
+        "top": 218,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      }
+    ],
+    "blockCount": 10,
+    "blocksTotalH": 384,
+    "contentTop": 86,
+    "contentSel": ".stage-card",
+    "docH": 900,
+    "textLen": 272,
+    "errHits": []
+  },
+  {
+    "page": "storyboard",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__storyboard__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 78,
+    "contentSel": ".stage-card",
+    "docH": 900,
+    "textLen": 651,
+    "errHits": []
+  },
+  {
+    "page": "sb-images",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__sb-images__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 62,
+    "blocks": [
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 86,
+        "h": 62,
+        "text": "执行进度 26/26（100%） 刷新进度 刷新镜头 去分镜看板"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 99,
+        "h": 28,
+        "text": "执行进度 26/26（100%） 刷新进度 刷新镜头 去分镜看板"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 103,
+        "h": 19,
+        "text": "26/26（100%）"
+      },
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 160,
+        "h": 54,
+        "text": "批量出图 千问多参考图生图 全选 已选 0 / 26 批量生成（0）"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 173,
+        "h": 28,
+        "text": "批量出图 千问多参考图生图 全选 已选 0 / 26 批量生成（0）"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 173,
+        "h": 28,
+        "text": "千问多参考图生图 全选 已选 0 / 26"
+      },
+      {
+        "cls": "scene-header",
+        "tag": "header",
+        "top": 226,
+        "h": 24,
+        "text": "#1 游乐场正门入口 7 镜"
+      }
+    ],
+    "blockCount": 7,
+    "blocksTotalH": 243,
+    "contentTop": 86,
+    "contentSel": ".stage-card",
+    "docH": 900,
+    "textLen": 3668,
+    "errHits": []
+  },
+  {
+    "page": "compose",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__compose__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 62,
+    "contentSel": ".compose-page",
+    "docH": 900,
+    "textLen": 317,
+    "errHits": []
+  },
+  {
+    "page": "settings",
+    "viewport": "1440x900",
+    "file": "docs/uiux/screenshots/baseline/before__settings__1440x900.png",
+    "vw": 1440,
+    "vh": 900,
+    "overflowX": false,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 62,
+    "contentSel": ".settings-page",
+    "docH": 900,
+    "textLen": 195,
+    "errHits": []
+  },
+  {
+    "page": "home",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__home__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 56,
+    "blocks": [
+      {
+        "cls": "list-toolbar",
+        "tag": "div",
+        "top": 72,
+        "h": 78,
+        "text": "全部 4 草稿 0 进行中 4 已归档 0 搜索作品 新建作品"
+      },
+      {
+        "cls": "filter-chips",
+        "tag": "div",
+        "top": 72,
+        "h": 34,
+        "text": "全部 4 草稿 0 进行中 4 已归档 0"
+      },
+      {
+        "cls": "n-input n-input--medium-size n-input--resizable n-input--sta",
+        "tag": "div",
+        "top": 115,
+        "h": 34,
+        "text": "搜索作品"
+      },
+      {
+        "cls": "n-input-wrapper",
+        "tag": "div",
+        "top": 115,
+        "h": 34,
+        "text": "搜索作品"
+      },
+      {
+        "cls": "n-input__border",
+        "tag": "div",
+        "top": 115,
+        "h": 34,
+        "text": ""
+      },
+      {
+        "cls": "n-input__state-border",
+        "tag": "div",
+        "top": 115,
+        "h": 34,
+        "text": ""
+      },
+      {
+        "cls": "card-body",
+        "tag": "div",
+        "top": 438,
+        "h": 128,
+        "text": "E2E校验-不完整不落库 ⋯ 小说改编 · 更新于 16 小时前 角色定妆 0/6 镜"
+      },
+      {
+        "cls": "card-title-row",
+        "tag": "div",
+        "top": 454,
+        "h": 25,
+        "text": "E2E校验-不完整不落库 ⋯"
+      },
+      {
+        "cls": "card-meta",
+        "tag": "div",
+        "top": 482,
+        "h": 18,
+        "text": "小说改编 · 更新于 16 小时前"
+      },
+      {
+        "cls": "progress-block is-zero",
+        "tag": "div",
+        "top": 500,
+        "h": 50,
+        "text": "角色定妆 0/6 镜"
+      }
+    ],
+    "blockCount": 10,
+    "blocksTotalH": 469,
+    "contentTop": 170,
+    "contentSel": ".project-grid",
+    "docH": 844,
+    "textLen": 192,
+    "errHits": []
+  },
+  {
+    "page": "script",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__script__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": null,
+    "contentSel": null,
+    "docH": 844,
+    "textLen": 1154,
+    "errHits": []
+  },
+  {
+    "page": "parse",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__parse__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 434,
+    "contentSel": ".result-panel",
+    "docH": 844,
+    "textLen": 180,
+    "errHits": []
+  },
+  {
+    "page": "assets",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__assets__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 135,
+    "blocks": [
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 151,
+        "h": 112,
+        "text": "执行进度 11 / 11 100% 刷新进度 去分镜图"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 164,
+        "h": 86,
+        "text": "执行进度 11 / 11 100% 刷新进度 去分镜图"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 190,
+        "h": 24,
+        "text": "11 / 11 100%"
+      },
+      {
+        "cls": "stage-actions",
+        "tag": "div",
+        "top": 222,
+        "h": 28,
+        "text": "刷新进度 去分镜图"
+      },
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 275,
+        "h": 146,
+        "text": "批量生成 千问文生图 全选 已选 0 / 2 批量生成角色定妆图（0）"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 288,
+        "h": 120,
+        "text": "批量生成 千问文生图 全选 已选 0 / 2 批量生成角色定妆图（0）"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 314,
+        "h": 58,
+        "text": "千问文生图 全选 已选 0 / 2"
+      },
+      {
+        "cls": "wf-pick",
+        "tag": "span",
+        "top": 314,
+        "h": 28,
+        "text": "千问文生图"
+      },
+      {
+        "cls": "stage-actions",
+        "tag": "div",
+        "top": 380,
+        "h": 28,
+        "text": "批量生成角色定妆图（0）"
+      },
+      {
+        "cls": "n-tabs n-tabs--line-type n-tabs--medium-size n-tabs--top ass",
+        "tag": "div",
+        "top": 433,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      },
+      {
+        "cls": "n-tabs-nav--line-type n-tabs-nav--top n-tabs-nav",
+        "tag": "div",
+        "top": 433,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      },
+      {
+        "cls": "n-tabs-nav-scroll-wrapper",
+        "tag": "div",
+        "top": 433,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      },
+      {
+        "cls": "v-x-scroll",
+        "tag": "div",
+        "top": 433,
+        "h": 42,
+        "text": "角色 2 场景 5 道具 4 音色"
+      }
+    ],
+    "blockCount": 13,
+    "blocksTotalH": 798,
+    "contentTop": 151,
+    "contentSel": ".stage-card",
+    "docH": 844,
+    "textLen": 232,
+    "errHits": []
+  },
+  {
+    "page": "storyboard",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__storyboard__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 147,
+    "contentSel": ".stage-card",
+    "docH": 844,
+    "textLen": 606,
+    "errHits": []
+  },
+  {
+    "page": "sb-images",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__sb-images__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 135,
+    "blocks": [
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 151,
+        "h": 115,
+        "text": "执行进度 26/26（100%） 刷新进度 刷新镜头 去分镜看板"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 164,
+        "h": 81,
+        "text": "执行进度 26/26（100%） 刷新进度 刷新镜头 去分镜看板"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 190,
+        "h": 19,
+        "text": "26/26（100%）"
+      },
+      {
+        "cls": "stage-actions",
+        "tag": "div",
+        "top": 217,
+        "h": 28,
+        "text": "刷新进度 刷新镜头 去分镜看板"
+      },
+      {
+        "cls": "stage-card",
+        "tag": "section",
+        "top": 278,
+        "h": 146,
+        "text": "批量出图 千问多参考图生图 全选 已选 0 / 26 批量生成（0）"
+      },
+      {
+        "cls": "stage-row",
+        "tag": "div",
+        "top": 291,
+        "h": 120,
+        "text": "批量出图 千问多参考图生图 全选 已选 0 / 26 批量生成（0）"
+      },
+      {
+        "cls": "stage-body",
+        "tag": "div",
+        "top": 317,
+        "h": 58,
+        "text": "千问多参考图生图 全选 已选 0 / 26"
+      },
+      {
+        "cls": "wf-pick",
+        "tag": "span",
+        "top": 317,
+        "h": 28,
+        "text": "千问多参考图生图"
+      },
+      {
+        "cls": "stage-actions",
+        "tag": "div",
+        "top": 384,
+        "h": 28,
+        "text": "批量生成（0）"
+      },
+      {
+        "cls": "scene-header",
+        "tag": "header",
+        "top": 437,
+        "h": 24,
+        "text": "#1 游乐场正门入口 7 镜"
+      }
+    ],
+    "blockCount": 10,
+    "blocksTotalH": 647,
+    "contentTop": 151,
+    "contentSel": ".stage-card",
+    "docH": 844,
+    "textLen": 3628,
+    "errHits": []
+  },
+  {
+    "page": "compose",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__compose__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 135,
+    "contentSel": ".compose-page",
+    "docH": 844,
+    "textLen": 244,
+    "errHits": []
+  },
+  {
+    "page": "settings",
+    "viewport": "390x844",
+    "file": "docs/uiux/screenshots/baseline/before__settings__390x844.png",
+    "vw": 390,
+    "vh": 844,
+    "overflowX": false,
+    "scrollW": 390,
+    "clientW": 390,
+    "rootTop": 0,
+    "blocks": [],
+    "blockCount": 0,
+    "blocksTotalH": 0,
+    "contentTop": 56,
+    "contentSel": ".settings-page",
+    "docH": 844,
+    "textLen": 168,
+    "errHits": []
+  }
+]

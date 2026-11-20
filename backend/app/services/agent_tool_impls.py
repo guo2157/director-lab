@@ -1229,7 +1229,10 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
                 prompt_text = params.get("prompt") or ""
                 if prompt_text:
                     scene = db.get(Scene, shot.scene_id)
-                    slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+                    # 统一入口：数据库里真实保存的是 reference.slots，
+                    # 直读顶层 reference_slots 会把已声明槽位误判成未声明
+                    from app.services.workflow.capabilities import declared_reference_slots
+                    slots = declared_reference_slots(wf.capabilities)
                     media = build_media_params(db, scene.project_id, prompt_text, slots)
                     if media:
                         _existing = params.get("__media__", {})

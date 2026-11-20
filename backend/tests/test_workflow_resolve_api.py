@@ -32,10 +32,14 @@ def wf_path(name: str) -> Path:
 
 
 def _load(name: str) -> tuple[dict, dict]:
+    """读取工作流 JSON。
+
+    `.meta.json` 已全部删除：能力声明与触发条件的真实来源是数据库 workflow 表的
+    capabilities/trigger（由 capabilities.normalize() 从节点推导）。
+    这里不再读 sidecar，第二个返回值恒为空字典，仅为兼容既有调用写法。
+    """
     definition = json.loads(wf_path(name).read_text(encoding="utf-8"))
-    meta_path = WF_DIR / f"{name}.meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-    return definition, meta
+    return definition, {}
 
 
 @pytest.fixture()

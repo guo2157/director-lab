@@ -4,8 +4,11 @@
 - 引用语法：@名称（与剧本解析的 @名称 引用规则一致，角色改名时同步改写）
 - 映射规则：@角色名 → 角色 portrait_asset_id 对应文件；@场景名 → 场景 baseline_asset_id 对应文件；
   @道具名 → 道具 anchor_asset_id 对应文件
-- 多角色支持：多个 @角色 按出现顺序依次填入角色槽位（优先级 ref_identity → ref_image → ref_character_2），
-  槽位不足时返回 422 提示引用过多，不静默丢参考
+- 多角色支持：多个 @角色 按出现顺序依次填入工作流声明的角色槽位
+  （ref_identity → ref_character_2 → ref_character_3…），槽位不足时返回 422 提示引用过多，
+  不静默丢参考
+- 工作流未声明某类槽位时（典型：H3 Ref2VA 没有 ref_scene），该类 @引用降级为文字描述，
+  不注入、不报错；是否降级由 capabilities 声明决定，绝不按工作流名称推断
 - 同名兜底：角色与场景同名时（仅可能来自历史数据，创建/改名入口已拦截）返回 422
 - 未匹配的引用明确报错（invalid_reference），不静默忽略
 - 角色无定妆图 / 场景无基准图时报错（reference_asset_missing），提示先生成
@@ -150,9 +153,12 @@ def build_media_params(db: Session, project_id: str, prompt: str,
     # 兼容两种声明格式：字符串数组 ['ref_identity', ...] 或对象数组
     # [{param: 'ref_identity', input_key: 'ref_images.ref_image_2', optional: true}, ...]（seed meta 格式）
     if reference_slots is None:
-        avail_char = list(_CHARACTER_SLOTS)
-        avail_scene = list(_SCENE_SLOTS)
-        avail_prop = list(_PROP_SLOTS)
+        # 未提供能力声明时一律视为「不声明任何槽位」，不回退到内置默认槽位表：
+        # 默认表把 ref_scene 当成所有工作流通用槽位，会给 H3 Ref2VA 注入它并不存在的
+        # 输入参数（ref_scene 只是 Qwen 图片工作流的合法参数）。
+        avail_char = []
+        avail_scene = []
+        avail_prop = []
     else:
         slot_names = [
             item.get("param") if isinstance(item, dict) else item
@@ -163,8 +169,10 @@ def build_media_params(db: Session, project_id: str, prompt: str,
         avail_scene = [s for s in slot_names if is_scene_slot(s)]
         avail_prop = [s for s in slot_names if is_prop_slot(s)]
     media: dict[str, str] = {}
-    # 角色引用：按顺序填入可用角色槽位
-    if len(char_names) > len(avail_char):
+    # 角色引用：按顺序填入可用角色槽位。
+    # 工作流完全没有角色槽位时降级为纯文字描述（与提示词编译器的
+    # character_reference_unsupported 告警一致）；只有『声明了槽位却装不下』才 422。
+    if char_names and avail_char and len(char_names) > len(avail_char):
         raise errors.AppError(
             "invalid_reference",
             f"提示词引用了 {len(char_names)} 个角色（{'、'.join(char_names)}），"
@@ -176,8 +184,10 @@ def build_media_params(db: Session, project_id: str, prompt: str,
             # 防御：即便工作流声明把系统槽位当角色槽位，也不覆盖分镜图/首尾帧
             continue
         media[slot] = refs[name]["file_path"]
-    # 场景引用：按顺序填入可用场景槽位
-    if len(scene_names) > len(avail_scene):
+    # 场景引用：按顺序填入可用场景槽位。
+    # H3 Ref2VA 没有 ref_scene 槽位：此时不注入场景图，场景仅由提示词文字描述承担，
+    # 绝不把 ref_scene 写进它不支持的输入参数里。
+    if scene_names and avail_scene and len(scene_names) > len(avail_scene):
         raise errors.AppError(
             "invalid_reference",
             f"提示词引用了 {len(scene_names)} 个场景（{'、'.join(scene_names)}），"
@@ -186,8 +196,8 @@ def build_media_params(db: Session, project_id: str, prompt: str,
         )
     for name, slot in zip(scene_names, avail_scene):
         media[slot] = refs[name]["file_path"]
-    # 道具引用：按顺序填入可用道具槽位
-    if len(prop_names) > len(avail_prop):
+    # 道具引用：按顺序填入可用道具槽位（工作流未声明道具槽位时同样降级为文字描述）
+    if prop_names and avail_prop and len(prop_names) > len(avail_prop):
         raise errors.AppError(
             "invalid_reference",
             f"提示词引用了 {len(prop_names)} 个道具（{'、'.join(prop_names)}），"

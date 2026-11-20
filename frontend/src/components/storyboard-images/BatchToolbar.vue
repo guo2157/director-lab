@@ -2,6 +2,9 @@
 /**
  * 分镜图批量操作卡：工作流选择 / 全选 / 批量生成。
  *
+ * 模型类型固定为图生图（参考图生图）：分镜图必须接角色 / 场景 / 道具参考图，
+ * 因此不展示模型类型下拉，只在选择器上方以标签提示「图生图模型」。
+ *
  * 批量审核通过已删除（2026-11 流程简化）：逐镜人工确认闸口取消，
  * 阶段推进改为产物就绪判定，不再需要批量写确认标记。
  *
@@ -56,6 +59,7 @@ watch(
       <WorkflowSelector
         :model-value="workflowId"
         slot="storyboard_image"
+        fixed-model-type="image_image_to_image"
         size="small"
         placeholder="选择分镜出图工作流"
         @update:model-value="(v: string | undefined) => emit('update:workflowId', v)"

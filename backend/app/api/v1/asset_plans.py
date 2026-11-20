@@ -44,8 +44,9 @@ def _find_plain_image_workflow(db: Session):
         .order_by(Workflow.is_default.desc())
         .all()
     )
+    from app.services.workflow.capabilities import declared_reference_slots
     for wf in rows:
-        if not ((wf.capabilities or {}).get("reference_slots") or []):
+        if not declared_reference_slots(wf.capabilities):
             return wf
     return None
 
@@ -324,7 +325,7 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
                 params["negative"] = negative_for(target)
             # 参考图按定义绑定注入（与提示词书写顺序无关，不会错槽）；
             # 仅注入当前工作流声明的槽位，绑定快照随任务持久化供追溯与重试复用
-            _wf_slots = (wf.capabilities or {}).get("reference_slots") if wf.capabilities else None
+            _wf_slots = declared_reference_slots(wf.capabilities)
             _injected = _inject_dependency_slots(db, plan, params, _wf_slots)
             # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
             # （提示词中的 <Picture N> 由 LLM 按文本顺序书写，与槽位注入顺序无关）
@@ -344,9 +345,7 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
         # 不能走 _match_workflow：它在默认 image 工作流无参考槽位时会自动改用带参考
         # 槽位的工作流，而实体资产没有参考依赖可注入，执行期必然报 missing_reference_image。
         wf = _match_workflow_exact(db, target, workflow_id)
-        if workflow_id is None and (
-            (wf.capabilities or {}).get("reference_slots") or []
-        ):
+        if workflow_id is None and declared_reference_slots(wf.capabilities):
             # 兜底匹配可能落到带参考槽位的工作流，实体资产必须换成 0 槽位纯文生图
             _plain_wf = _find_plain_image_workflow(db)
             if _plain_wf is not None:

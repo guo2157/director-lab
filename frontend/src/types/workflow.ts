@@ -102,12 +102,42 @@ export interface WorkflowCapability {
 /** 业务槽位：资产库出图 / 分镜图 / 分镜视频 */
 export type WorkflowSlotKey = 'asset_image' | 'storyboard_image' | 'video'
 
+/**
+ * 模型类型（细分大类）：前端按它选择具体工作流。
+ * 取值与后端 _CLASSIFICATION_GROUPS 的细分键一致。
+ */
+export type WorkflowModelType =
+  | 'image_text_to_image'
+  | 'image_image_to_image'
+  | 'video_reference_to_video'
+  | 'video_first_last_frame'
+  | 'video_text_to_video'
+  | 'tts'
+
+export interface WorkflowModelTypeOption {
+  value: WorkflowModelType
+  label: string
+  /** false 表示该项为预留能力，当前不可选（如视频的首尾帧 / 文生视频） */
+  enabled: boolean
+}
+
+/** GET /api/workflows/model-types */
+export interface WorkflowModelTypeResponse {
+  items: Array<{
+    workflow_type: WorkflowType
+    model_types: WorkflowModelTypeOption[]
+  }>
+  slot_defaults: Record<string, WorkflowModelType>
+}
+
 /** GET /api/workflows/candidates 的候选项（usable 由后端按真实能力算好） */
 export interface WorkflowCandidateItem {
   id: string
   name: string
   description: string
   workflow_type: WorkflowType
+  /** 模型类型（细分大类），后端按工作流真实能力写入 */
+  model_type?: WorkflowModelType | null
   version: number
   is_default: boolean
   is_builtin?: boolean
@@ -122,6 +152,10 @@ export interface WorkflowCandidateItem {
 export interface WorkflowCandidateResponse {
   slot: string
   workflow_type: WorkflowType
+  /** 本次候选实际使用的模型类型（未显式传时取槽位默认值） */
+  model_type?: WorkflowModelType | null
+  /** 该槽位可切换的模型类型（未开放的项 enabled=false，前端置灰） */
+  model_type_options?: WorkflowModelTypeOption[]
   /** 该槽位声明的推荐默认工作流名称；对应项会带 is_recommended=true */
   default_workflow_name?: string | null
   items: WorkflowCandidateItem[]
@@ -134,6 +168,7 @@ export interface WorkflowClassifiedItem {
   name: string
   description: string
   workflow_type: WorkflowType
+  model_type?: WorkflowModelType | null
   version: number
   is_default: boolean
   is_builtin?: boolean

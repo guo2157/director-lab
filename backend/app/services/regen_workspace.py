@@ -102,7 +102,10 @@ def slot_node_map(wf: Workflow | None) -> dict[str, dict]:
     parsed = parse_workflow(wf.definition)
     declared: dict[str, dict] = {}
     caps = wf.capabilities if isinstance(wf.capabilities, dict) else {}
-    for item in caps.get("reference_slots") or []:
+    # 统一入口：数据库保存的是 reference.slots，仅读顶层 reference_slots 会得到空声明，
+    # 导致图片序号与 input_key 全部回退到节点标记，H3 槽位序号错位
+    from app.services.workflow.capabilities import declared_reference_slots
+    for item in declared_reference_slots(caps):
         if isinstance(item, dict) and item.get("param"):
             declared[item["param"]] = item
     mapping: dict[str, dict] = {}

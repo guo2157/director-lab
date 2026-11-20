@@ -326,7 +326,7 @@ def get_workflow_config(project_id: str, db: Session = Depends(get_db)) -> dict:
             # 带参考图槽位的工作流在无参考图时会由模型自行补全主体，导致角色图混入
             # 无关人物、场景图混入人物道具。这类工作流对资产图永远不可用，前端不该
             # 让用户选中后到生成时才 422，因此在这里就标为不可用并说明原因。
-            if slot == "image" and caps.get("reference_slots"):
+            if slot == "image" and caps_svc.declared_reference_slots(caps):
                 entry_slot["usable"] = False
                 entry_slot["missing"] = [
                     *entry_slot["missing"],
