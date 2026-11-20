@@ -677,8 +677,16 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   }
 }
 @media (max-width: 768px) {
-  .shots-grid {
-    grid-template-columns: minmax(0, 1fr);
+  /* 窄屏双列，不是单列：分镜图是 9:16 竖图，390 视口单列时卡宽 358、
+     图片高 633、单卡 743px，26 个镜头页面总高 19942px —— 要滑 24 屏才能看完。
+     双列后卡宽 171、图高 302、单卡约 410px，一屏可见 2 个镜头，
+     且保留「同场景内横向比对」这个分镜评审的核心动作。
+     卡底两个按钮在 171px 内放得下：「重新生成」是 flex:1 + ellipsis，
+     「替换上传」固定约 76px，合计 171 − 16(padding) − 4(gap) = 151 ≥ 76 + 可压缩主按钮。 */
+  .shots-grid,
+  .shots-grid.portrait {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--sp-3);
   }
 }
 
