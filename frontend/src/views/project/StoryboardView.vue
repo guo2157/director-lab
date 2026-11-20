@@ -18,6 +18,8 @@ import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generati
 import ShotDetailModal from '@/components/storyboard/ShotDetailModal.vue'
 import StageCard from '@/components/ui/StageCard.vue'
 import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
+import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
+import { useStageTransition } from '@/composables/useStageTransition'
 
 const route = useRoute()
 const router = useRouter()
@@ -247,7 +249,10 @@ async function trackClipProgress() {
 void clipProgress.bootstrap()
 
 // --- Status badge ---
-type StatusKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'locked' | 'stale'
+// 注意：不含 'locked'——分镜看板的锁定功能已整体移除（2026-11 流程简化）。
+// 共享组件 StatusTag 仍保留 'locked'（DirectorConsoleView 用它表示「未选择会话」），
+// 但本页不产生该状态，故不纳入本页类型。
+type StatusKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'stale'
 interface StatusInfo { label: string; color: string; kind: StatusKind; icon?: string }
 function getShotStatus(shot: Shot): StatusInfo {
   const ca = shot.current_assets
@@ -272,7 +277,10 @@ function getShotStatus(shot: Shot): StatusInfo {
     const con = shot.consistency
     if (con) {
       if (con.verdict === 'passed') return { label: '已完成', color: 'var(--state-success)', kind: 'succeeded' }
-      if (con.verdict === 'review') return { label: '待审核', color: 'var(--state-warning)', kind: 'pending' }
+      // 注意：这是**视频一致性检测**结果（consistency.verdict），不是已取消的
+      // 阶段人工审核。文案用「待复核」而非「待审核」，避免与流程简化前的
+      // 审核闸口混淆——该状态不阻断任何阶段跳转，只是提示画面可能有瑕疵。
+      if (con.verdict === 'review') return { label: '待复核', color: 'var(--state-warning)', kind: 'pending' }
       if (con.verdict === 'failed') return { label: '待重做', color: 'var(--state-warning)', kind: 'pending' }
     }
     return { label: '已完成', color: 'var(--state-success)', kind: 'succeeded' }
@@ -483,9 +491,33 @@ function handleDetailSubmitted() {
 
 // --- 出口：全部镜头视频生成完成后可去合成导出 ---
 const allShots = computed(() => Object.values(shotsMap.value).flat())
-const clipsDone = computed(() => {
+/**
+ * 全部镜头是否都已有视频（前端即时展示口径）。
+ *
+ * 注意：`!!s.current_assets?.clip` 只说明「列表里挂了个视频对象」，
+ * 不说明文件真实存在、版本仍有效、生成任务成功结束。因此这里只用于
+ * 按钮提示文案，**跳转判定一律走后端 stage-readiness**（会逐镜校验
+ * current 版本 + 来源任务 succeeded + 文件存在，且覆盖全部集）。
+ */
+const allClipsReady = computed(() => {
   const shots = allShots.value
   return shots.length > 0 && shots.every((s) => !!s.current_assets?.clip)
+})
+
+const stageTransition = useStageTransition({
+  projectId: () => projectId.value,
+  stage: 'compose',
+  to: (pid) => `/project/${pid}/compose`,
+  notReadyTitle: '分镜视频尚未全部生成完成',
+  confirmTitle: '确认进入合成与导出？',
+  confirmDescription: [
+    '所有分镜视频已经生成完成。',
+    '请确认各镜头视频播放正常，人物动作、台词、音频、画面连续性均没有问题。',
+    '确认后将进入合成与导出页面。',
+  ].join('\n'),
+  confirmText: '确认，进入合成与导出',
+  notify: { warning: (m) => message.warning(m), error: (m) => message.error(m) },
+  push: (path) => router.push(path),
 })
 
 // --- 批量出视频：仅提交已确认分镜图的镜头（D-13 闸口），未确认的跳过并提示 ---
@@ -539,17 +571,19 @@ function handleBatchClip() {
     message.warning('请先勾选要出视频的镜头')
     return
   }
-  const confirmed = picked.filter((s) => s.keyframe_confirmed && !!s.current_assets?.keyframe)
-  const pending = picked.length - confirmed.length
-  if (!confirmed.length) {
-    message.warning(`勾选的 ${picked.length} 个镜头的分镜图均未确认，请先到分镜图环节逐镜确认`)
+  // 逐镜人工确认（keyframe_confirmed）已取消：只要该镜已有分镜图即可提交视频生成，
+  // 更严格的「有效分镜图 + 文件存在」校验由后端 _check_keyframe_ready 统一负责。
+  const ready = picked.filter((s) => !!s.current_assets?.keyframe)
+  const pending = picked.length - ready.length
+  if (!ready.length) {
+    message.warning(`勾选的 ${picked.length} 个镜头都还没有分镜图，请先在分镜图环节生成`)
     return
   }
   if (pending > 0) {
-    message.info(`本次提交 ${confirmed.length} 个已确认镜头，${pending} 个未确认分镜图的镜头已跳过`)
+    message.info(`本次提交 ${ready.length} 个已有分镜图的镜头，${pending} 个缺分镜图的镜头已跳过`)
   }
   // 弹窗选择批量生成方式：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接）
-  pendingClipShots.value = confirmed
+  pendingClipShots.value = ready
   showChainModeModal.value = true
 }
 
@@ -665,16 +699,33 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         <n-button size="small" quaternary :loading="clipProgress.loading.value" @click="clipProgress.refresh()">
           刷新进度
         </n-button>
+        <!-- 跳转按钮不禁用：未完成时点击会展示缺哪些镜头 -->
         <n-button
           size="small"
           type="primary"
-          :disabled="!clipsDone"
-          @click="router.push(`/project/${projectId}/compose`)"
+          :loading="stageTransition.loading.value"
+          :title="allClipsReady ? '进入合成与导出' : '点击查看还差哪些镜头'"
+          @click="stageTransition.request()"
         >
           去合成导出
         </n-button>
       </template>
     </StageCard>
+
+    <!-- 阶段跳转确认弹窗 -->
+    <StageTransitionDialog
+      v-model:visible="stageTransition.visible.value"
+      :title="stageTransition.confirmTitle"
+      :description="stageTransition.confirmDescription"
+      :confirm-text="stageTransition.confirmText"
+      :total="stageTransition.readiness.value.total"
+      :done="stageTransition.readiness.value.done"
+      :blockers="stageTransition.blockers.value"
+      :ready="stageTransition.readiness.value.ready"
+      :loading="stageTransition.loading.value"
+      @confirm="stageTransition.confirm()"
+      @cancel="stageTransition.cancel()"
+    />
 
     <!-- 卡二：批量出视频（工作流 / 全选 / 批量出视频） -->
     <StageCard label="批量出视频">

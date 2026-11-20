@@ -54,7 +54,8 @@ OUTLINE_SYSTEM_PROMPT = _register_default("script_outline_system", """你是专�
 
 
 def analyze_script_outline(text: str, *, episode_duration_target: int = DEFAULT_EPISODE_DURATION,
-                           max_episodes_per_batch: int = 1, client=None) -> dict:
+                           max_episodes_per_batch: int = 1, client=None,
+                           segmented: bool = False, settings=None) -> dict:
     """LLM 大纲分析：集数、每集时长与镜头数一律以 LLM 分析为准（代码规则估算已移除）。
 
     返回结构与原估算对象兼容（algorithm_version/char_count/dialogue_char_estimate/
@@ -63,13 +64,50 @@ def analyze_script_outline(text: str, *, episode_duration_target: int = DEFAULT_
     LLM 失败向上抛 LLMError，由调用方决定失败处理。
     """
     from app.integrations.llm import LLMClient, LLMError
+    from app.integrations.llm_retry import call_with_retry
+    from app.services.script_outline_segmented import (
+        analyze_outline_segmented,
+        outline_user_prompt,
+    )
+
     if client is None:
         client = LLMClient()
-    user = (
-        f"目标单集时长：{episode_duration_target} 秒。\n"
-        f"请分析以下剧本的分集结构：\n\n{text}"
+    if settings is None:
+        from app.core.config import get_settings
+        settings = get_settings()
+
+    # 未显式指定时按预算自动判断：estimate 端点与 Agent 工具都不做预检，
+    # 若这里不兜底，超长剧本会整本硬发、被供应商以上下文超限拒绝。
+    # 调用方显式传 True（Agent 预检已判定 segmented）时不重复估算。
+    if not segmented:
+        from app.integrations.token_estimate import estimate_input_tokens, input_budget
+        _budget = input_budget(settings)
+        if _budget > 0 and estimate_input_tokens(text, settings=settings) > _budget:
+            segmented = True
+
+    # 整本超预算：按集边界分窗口分析再合并（阶段 3）。
+    if segmented:
+        return analyze_outline_segmented(
+            text,
+            episode_duration_target=episode_duration_target,
+            max_episodes_per_batch=max_episodes_per_batch,
+            algorithm_version=OUTLINE_ALGORITHM_VERSION,
+            avg_shot_duration=AVG_SHOT_DURATION,
+            client=client,
+            settings=settings,
+        )
+
+    user = outline_user_prompt(text, episode_duration_target)
+    # 走统一重试：空输出 / 截断 / 非 JSON 按错误码分流。
+    # 旧实现直接 client.chat_json(...)，一次失败就让整个任务失败。
+    result = call_with_retry(
+        client,
+        system_prompt=get_prompt("script_outline_system"),
+        user_prompt=user,
+        json_mode=True,
+        stream=False,
+        use_chat_json=True,
     )
-    result = client.chat_json(get_prompt("script_outline_system"), user)
     try:
         total = int(result.get("total_episodes") or 0)
     except (TypeError, ValueError):

@@ -242,9 +242,14 @@ class LLMClient:
         except httpx.HTTPError as e:
             raise LLMError("llm_unreachable", f"语言模型网络错误: {type(e).__name__}") from e
         if resp.status_code >= 400:
-            # 响应体可能含敏感信息，只截取状态码与有限长度，不记录请求头
+            # 响应体可能含敏感信息，只截取状态码与有限长度，不记录请求头。
+            # 必须把响应体带进 provider_error：供应商的「输入超上下文」提示只
+            # 存在于响应体里，丢掉就映射不出 llm_input_too_long，会被当成可退避
+            # 重试的普通供应商错误，退避 3 次后仍然必然失败。
+            err_body = (resp.text or "")[:300]
             meta = LLMResponseMeta(
-                content=None, provider_error=f"HTTP {resp.status_code}",
+                content=None,
+                provider_error=f"HTTP {resp.status_code}: {err_body}".strip(),
                 model=self.model, max_tokens=limit,
                 request_id=resp.headers.get("x-request-id"),
             )
@@ -337,8 +342,10 @@ class LLMClient:
                     request_id = resp.headers.get("x-request-id")
                     if resp.status_code >= 400:
                         body = resp.read().decode(errors="replace")[:300]
+                        # 同非流式路径：响应体是「输入超上下文」的唯一线索
                         meta = LLMResponseMeta(
-                            content=None, provider_error=f"HTTP {resp.status_code}",
+                            content=None,
+                            provider_error=f"HTTP {resp.status_code}: {body}".strip(),
                             model=self.model, max_tokens=limit,
                             request_id=request_id, stream_completed=False,
                         )

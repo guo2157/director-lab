@@ -234,15 +234,17 @@ def keyframe_generation_progress(
     if db.get(Project, project_id) is None:
         raise errors.project_not_found()
 
+    # 逐镜人工确认（keyframe_confirmed）已取消：进度只反映产物是否生成，
+    # 不再查询确认标记，也不返回 confirmed / all_confirmed 统计。
     rows = (
-        db.query(Shot.id, Shot.seq, Shot.episode, Shot.keyframe_confirmed,
+        db.query(Shot.id, Shot.seq, Shot.episode,
                  Scene.id, Scene.title, Scene.seq)
         .join(Scene, Shot.scene_id == Scene.id)
         .filter(Scene.project_id == project_id)
         .order_by(Shot.episode, Scene.seq, Shot.seq)
         .all()
     )
-    scene_ids = sorted({row[5] for row in rows})
+    scene_ids = sorted({row[3] for row in rows})
 
     # 当前有效分镜图：一次性取回后回填，避免逐镜查询
     current_shots: set[str] = set()
@@ -268,16 +270,15 @@ def keyframe_generation_progress(
 
     total = len(rows)
     with_keyframe = sum(1 for row in rows if row[0] in current_shots)
-    confirmed = sum(1 for row in rows if row[0] in current_shots and row[3])
 
     shot_meta = {
         row[0]: {
             "shot_id": row[0],
             "seq": row[1],
             "episode": row[2],
-            "scene_id": row[4],
-            "scene_title": row[5],
-            "scene_seq": row[6],
+            "scene_id": row[3],
+            "scene_title": row[4],
+            "scene_seq": row[5],
             "has_keyframe": row[0] in current_shots,
         }
         for row in rows
@@ -355,10 +356,8 @@ def keyframe_generation_progress(
         "total": total,
         "with_keyframe": with_keyframe,
         "done": with_keyframe,
-        "confirmed": confirmed,
         "percent": (round(with_keyframe / total * 100) if total else 0),
         "all_done": total > 0 and with_keyframe == total,
-        "all_confirmed": total > 0 and confirmed == total,
         "started": with_keyframe > 0 or bool(inflight_jobs),
         "inflight_count": len(inflight),
         "inflight_queued": sum(1 for j in inflight if j["status"] == "queued"),

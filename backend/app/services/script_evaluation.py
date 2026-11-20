@@ -120,7 +120,46 @@ def build_evaluation_user_prompt(script_text: str, estimate_data: dict, config: 
     return "\n".join(parts)
 
 
-def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delta=None) -> dict:
+def _sample_episodes_for_evaluation(script_text: str) -> tuple[str, list[int]]:
+    """超预算时抽样：人物表 + 第 1–2 集 + 中间等距 2 集 + 最后 1 集。
+
+    返回 ``(抽样正文, 被抽中的集号列表)``。无集标记时原样返回全文（评估本身是
+    软闸口，失败也不阻断任务，这里不做激进裁剪）。
+
+    抽样而非截断的原因：评估要看剧本全貌（开局钩子、中段节奏、收尾），
+    单纯截断前 N 字会把后段结构性问题全部漏掉。
+    """
+    from app.services.script_chunker import split_episodes
+
+    split = split_episodes(script_text)
+    if split is None or not split.chunks:
+        return script_text, []
+
+    chunks = split.chunks
+    total = len(chunks)
+    picked: list = []
+    if total <= 6:
+        picked = list(chunks)
+    else:
+        indexes = {0, 1, total - 1}
+        # 中间等距取 2 集
+        mid = [i for i in range(2, total - 1)]
+        if mid:
+            step = max(1, len(mid) // 2)
+            for i in mid[::step][:2]:
+                indexes.add(i)
+        picked = [chunks[i] for i in sorted(indexes)]
+
+    # 这里必须字符串拼接：对单个字符串用 "\n".join(...) 会把 preamble 逐字符拆开
+    prefix = ""
+    if split.preamble.strip():
+        prefix = "[人物表/序言]\n" + split.preamble.strip() + "\n\n"
+    body = prefix + "\n".join(c.text for c in picked)
+    return body, [c.number for c in picked]
+
+
+def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delta=None,
+                    *, settings=None) -> dict:
     """调用语言模型评估剧本质量，返回结构化评估报告。
     on_delta 不为 None 时使用流式调用，增量文本经回调实时推送（供前端展示评估过程）。
 
@@ -139,11 +178,28 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
     由调用方转为 HTTP 错误，不落库半成品。
     """
     from app.integrations.llm import LLMClient
+    from app.integrations.llm_response import parse_json_safely
     from app.integrations.llm_retry import call_with_retry
     from app.services.prompt_store import get_prompt
 
+    from app.integrations.token_estimate import estimate_input_tokens, input_budget
+
     system = get_prompt("script_evaluation_system")
-    user = build_evaluation_user_prompt(script_text, estimate_data or {}, config or {})
+    if settings is None:
+        from app.core.config import get_settings
+        settings = get_settings()
+
+    # 超预算时改为抽样评估：评估是软闸口，抽样足以发现结构性问题，
+    # 而整本超上下文会让供应商直接报错（等于什么也没评估）。
+    budget = input_budget(settings)
+    eval_text = script_text
+    sampled_episodes: list[int] = []
+    scope = "full"
+    if budget > 0 and estimate_input_tokens(script_text, settings=settings) > budget:
+        eval_text, sampled_episodes = _sample_episodes_for_evaluation(script_text)
+        scope = "sampled"
+
+    user = build_evaluation_user_prompt(eval_text, estimate_data or {}, config or {})
     client = LLMClient()
     # 统一重试：空正文/截断/非 JSON 按错误码分流，JSON 解析在循环内
     result = call_with_retry(
@@ -156,12 +212,28 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
         use_chat_json=on_delta is None,
     )
 
+    # 流式路径（on_delta 非 None）下 call_with_retry 的 use_chat_json=False，
+    # 返回的是**原始文本**而不是 dict。旧实现直接对返回值做 .keys() 校验，
+    # 必然抛 "'str' object has no attribute 'keys'"，被 agent 的软闸口静默跳过，
+    # 导致 Agent 主路径的评估事实上从未产出过。这里显式解析。
+    if isinstance(result, str):
+        # 注意：parse_json_safely 返回 (对象, ValidationResult) 元组
+        parsed, check = parse_json_safely(result, expect=dict)
+        if not isinstance(parsed, dict):
+            reason = getattr(check, "message", None) or getattr(check, "error_code", "unknown")
+            raise ValueError(f"评估返回无法解析为 JSON 对象: {reason}")
+        result = parsed
+
     # 校验返回结构基本字段
     required_keys = {"strengths", "issues", "suggestions", "production_risks",
                      "plot_holes", "overall_score", "summary"}
     missing = required_keys - set(result.keys())
     if missing:
         raise ValueError(f"评估报告缺少必需字段: {missing}")
+
+    # 评估范围标记：sampled 表示因超预算只评估了抽样集（前端可据此提示）
+    result["evaluation_scope"] = scope
+    result["sampled_episodes"] = sampled_episodes
 
     # 可制作性维度：缺失不阻断（软闸口语义），补空结构并留痕，避免下游索引异常
     result["producibility_missing"] = _normalize_producibility(result)

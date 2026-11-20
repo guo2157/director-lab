@@ -27,6 +27,7 @@ from app.integrations.llm_response import (
     validate_parse_payload,
 )
 from app.integrations.llm_retry import call_with_retry
+from app.integrations.token_estimate import precheck_input_budget
 from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, ScriptVersion
 from app.models import ids
 from app.services.script_parse import (
@@ -37,6 +38,12 @@ from app.services.script_parse import (
 )
 from app.services.prompt_store import get_prompt
 from app.services import style_config
+from app.services.script_chunker import (
+    EpisodeChunk,
+    fallback_split,
+    slice_range,
+    split_episodes,
+)
 
 
 def _now() -> datetime:
@@ -114,6 +121,33 @@ def _find_or_create_parse_version(db: Session, project_id: str, script_version_i
     return pv
 
 
+def _build_global_context(preamble: str, char_map: dict, outline_episodes: dict,
+                          b_start: int, b_end: int, *, limit: int = 800) -> str:
+    """拼「全剧上下文」块（≤ limit 字）：已知角色名 + 本批集大纲标题 + 人物表节选。
+
+    并行批次互相看不到对方正文，角色/场景命名容易漂移；这里只喂已入库角色名
+    与大纲标题做缓解，不引入批次间串行依赖（跨批去重仍走 normalize_entity_name）。
+    """
+    parts: list[str] = []
+    names = [n for n in (char_map or {}) if n]
+    if names:
+        parts.append("全剧上下文——已知角色：" + "、".join(names[:40]) + "\n")
+    titles = []
+    for ep in range(b_start, b_end + 1):
+        info = (outline_episodes or {}).get(ep) or {}
+        title = str(info.get("title") or "").strip()
+        if title:
+            titles.append(f"第{ep}集《{title}》")
+    if titles:
+        parts.append("本批集大纲标题：" + "；".join(titles) + "\n")
+    used = sum(len(p) for p in parts)
+    room = max(0, limit - used)
+    head = (preamble or "").strip()
+    if head and room > 0:
+        parts.append("人物表/序言节选：\n" + head[:room] + "\n")
+    return "".join(parts)
+
+
 def execute_script_agent_job(job_id: str) -> dict:
     """执行一个 script-agent 一体化分析任务（批次并行解析）。返回执行结果摘要。"""
     from app.core.config import get_settings
@@ -176,11 +210,32 @@ def execute_script_agent_job(job_id: str) -> dict:
         settings_map = (project.settings or {}) if project else {}
         episode_duration_target = int(settings_map.get("episode_duration_target", 90))
         max_per_batch = int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch)
+
+        # ---- 0.9 输入预算预检 ----
+        # 超长输入必须在发起 LLM 之前明确失败：否则供应商返回「上下文超限」
+        # 会被当成可退避重试的供应商错误，白白重试 N 次后仍然失败。
+        # allow_segmented=True：整本超预算但单集放得下时，走分段大纲而不是失败。
+        precheck = precheck_input_budget(text, settings=settings, allow_segmented=True)
+        _write_event(db, job, "agent.input_precheck", {
+            "ok": precheck["ok"],
+            "code": precheck["code"],
+            "estimated_tokens": precheck["estimated_tokens"],
+            "budget": precheck["budget"],
+            "chars": precheck["chars"],
+            "episode": precheck["episode"],
+            "outline_mode": precheck["outline_mode"],
+        })
+        if not precheck["ok"]:
+            _fail_job(db, job, precheck["code"], precheck["message"])
+            return {"ok": False, "reason": precheck["code"]}
+        db.commit()
         try:
             outline_data = analyze_script_outline(
                 text,
                 episode_duration_target=episode_duration_target,
                 max_episodes_per_batch=max_per_batch,
+                segmented=(precheck["outline_mode"] == "segmented"),
+                settings=settings,
             )
         except LLMError as e:
             _fail_job(db, job, e.code, f"大纲分析失败: {e.message}")
@@ -189,6 +244,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             "estimated_episodes": outline_data.get("estimated_episodes"),
             "estimated_total_duration": outline_data.get("estimated_total_duration"),
             "exceeds_batch_limit": outline_data.get("exceeds_batch_limit"),
+            "outline_mode": precheck["outline_mode"],
         })
         db.commit()
 
@@ -201,7 +257,10 @@ def execute_script_agent_job(job_id: str) -> dict:
                 _write_event(db, job, "agent.llm_delta", {"delta": delta_text, "phase": "evaluation"})
                 db.commit()
 
-            evaluation = evaluate_script(text, outline_data, settings_map, on_delta=_on_eval_delta)
+            evaluation = evaluate_script(
+                text, outline_data, settings_map,
+                on_delta=_on_eval_delta, settings=settings,
+            )
             _write_event(db, job, "agent.eval_info", {
                 "score": evaluation.get("score"),
                 "issues_count": len(evaluation.get("issues") or []),
@@ -242,6 +301,45 @@ def execute_script_agent_job(job_id: str) -> dict:
             c.name: c.id
             for c in db.query(Character).filter(Character.project_id == job.project_id).all()
         }
+
+        # ---- 4.5 按集切片：每批只发送本批集正文 ----
+        # 旧实现 `hasattr(sv, "get_episode_chunk")` 恒为 False（ScriptVersion 上
+        # 并无该方法），于是每一批都发送整本剧本。这里改为显式切分。
+        split = split_episodes(text)
+        preamble = ""
+        chunk_mode = "markers"
+        if split is not None:
+            chunks: list[EpisodeChunk] = list(split.chunks)
+            preamble = split.preamble
+            if len(chunks) != total_episodes:
+                # 标记数与大纲口径不一致：不让任务失败，只留痕
+                _write_event(db, job, "agent.chunk_mismatch", {
+                    "marker_count": len(chunks),
+                    "total_episodes": total_episodes,
+                })
+            if len(chunks) < total_episodes:
+                # 缺失集走近似均分补齐，避免切片后漏集
+                have = {c.number for c in chunks}
+                chunks += [c for c in fallback_split(text, total_episodes) if c.number not in have]
+                chunk_mode = "markers+fallback"
+        else:
+            # 全无集标记：按场次/段落边界近似均分
+            chunks = fallback_split(text, total_episodes)
+            chunk_mode = "fallback"
+        outline_episodes = {
+            int(e.get("episode") or 0): e
+            for e in (outline_data.get("episode_breakdown") or [])
+        }
+        _write_event(db, job, "agent.chunking", {
+            "mode": chunk_mode,
+            "chunk_count": len(chunks),
+            "preamble_chars": len(preamble or ""),
+            "batch_chars": [
+                {"range": f"{bs}-{be}", "chars": len(slice_range(chunks, bs, be))}
+                for bs, be in batches
+            ],
+        })
+        db.commit()
         client = LLMClient()
         style_settings = (project.settings if project is not None else {}) or {}
         style_snap = style_config.style_snapshot(style_settings, project_id=job.project_id)
@@ -294,17 +392,14 @@ def execute_script_agent_job(job_id: str) -> dict:
             """
             b_count = b_end - b_start + 1
 
-            # 只提取当前批次的剧本片段，而非传入全文，减少无关 token 消耗
-            episode_text = text
-            try:
-                if hasattr(sv, "get_episode_chunk"):
-                    episode_text = sv.get_episode_chunk(b_start) or text
-            except Exception:
-                pass
+            # 只发送本批集正文；切片缺失时退回全文，避免发出空正文让模型凭空编造
+            episode_text = slice_range(chunks, b_start, b_end) or text
             user_prompt = (
                 style_config.parse_context_block(style_settings)
+                + _build_global_context(preamble, char_map, outline_episodes, b_start, b_end)
                 + f"请解析以下剧本，仅解析第 {b_start} 集到第 {b_end} 集，"
-                + f"共 {b_count} 集。范围外的集不要输出。\n\n剧本全文：\n{episode_text}"
+                + f"共 {b_count} 集。范围外的集不要输出。\n\n"
+                + f"第 {b_start}–{b_end} 集剧本：\n{episode_text}"
             )
 
             def _on_delta(delta_text: str) -> None:
@@ -349,6 +444,9 @@ def execute_script_agent_job(job_id: str) -> dict:
         writer_thread.start()
         batch_results: list[dict] = []
         batch_errors: list[tuple[tuple[int, int], LLMError]] = []
+        # 失败区间（"start-end"）：写入 job.result，供前端与排障定位哪些集没解析成功。
+        # 必须始终存在（全部成功时为 []），否则前端无法区分「没失败」与「不知道」。
+        failed_ranges: list[str] = []
         max_workers = max(1, min(len(batches), int(getattr(settings, "llm_parse_concurrency", 3) or 3)))
         try:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dlab-parse") as pool:
@@ -368,6 +466,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             for (bs, be), e in batch_errors:
                 _upsert_records(db, job.project_id, bs, be - bs + 1, "failed",
                                 error_msg=e.message[:2000], parse_version_id=pv.id)
+                failed_ranges.append(f"{bs}-{be}")
             failed_desc = "; ".join(
                 f"第 {bs}-{be} 集: {e.message[:200]}" for (bs, be), e in batch_errors[:3]
             )
@@ -446,6 +545,43 @@ def execute_script_agent_job(job_id: str) -> dict:
                 ep = int(sh.get("episode") or episode_start)
                 per_episode_shots[ep] = per_episode_shots.get(ep, 0) + 1
 
+        # ---- 镜头数对账（阶段 4：只警告，不阻断）----
+        # 大纲 estimated_shots 是预估值。实际解析镜头数显著低于预估，通常意味着
+        # 模型漏输出镜头（JSON 合法但镜头被省略/压缩）。只对**本批范围**对账：
+        # 多批次增量解析时 per_episode_shots 只含本批集，越界比较会把未解析的集
+        # 全部误报为 0。
+        low_shot_episodes: list = []
+        ratio_warn = float(getattr(settings, "parse_shot_ratio_warn", 0.5) or 0)
+        if ratio_warn > 0:
+            est_map: dict = {}
+            for item in outline_data.get("episode_breakdown") or []:
+                try:
+                    est_map[int(item.get("episode") or 0)] = max(
+                        1, int(item.get("estimated_shots") or 1))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            for ep in range(episode_start, batch_end + 1):
+                est = est_map.get(ep)
+                if not est:
+                    continue
+                actual = per_episode_shots.get(ep, 0)
+                ratio = actual / est
+                if ratio < ratio_warn:
+                    low_shot_episodes.append({
+                        "episode": ep, "actual": actual,
+                        "estimated": est, "ratio": round(ratio, 3),
+                    })
+                    parse_warnings.append(
+                        f"shot_count_low: 第 {ep} 集实际 {actual} / 预估 {est} 镜"
+                        f"（{ratio:.0%}），可能漏输出镜头"
+                    )
+            _write_event(db, job, "agent.shot_reconcile", {
+                "range": f"{episode_start}-{batch_end}",
+                "threshold": ratio_warn,
+                "low_shot_episodes": low_shot_episodes,
+            })
+            db.commit()
+
         # 落库前最后一道业务门禁：重试循环内的 validate 只校验「单批」结果，
         # 这里校验**合并后**的最终结果。宁可整任务失败，也不能把
         # 「场景 7 个 / 分镜 0 个」这种不可用结果写进 ParseVersion 与 job.result。
@@ -466,8 +602,13 @@ def execute_script_agent_job(job_id: str) -> dict:
             _fail_job(db, job, ERR_SCHEMA_MISMATCH, msg)
             return {"ok": False, "reason": ERR_SCHEMA_MISMATCH, "problems": final_problems}
 
-        _upsert_records(db, job.project_id, episode_start, episode_count, "succeeded",
-                        asset_counts=per_episode_shots, parse_version_id=pv.id)
+        # 只对**实际成功**的批次区间写 succeeded。
+        # 旧实现对整个 episode_start..episode_count 写 succeeded，会把上方刚标记的
+        # failed 集覆盖成 succeeded——多批部分失败时，前端因此完全看不到失败集，
+        # 还会给失败集写上成功批次的镜头数。
+        for _bs, _be in sorted((br["start"], br["end"]) for br in batch_results):
+            _upsert_records(db, job.project_id, _bs, _be - _bs + 1, "succeeded",
+                            asset_counts=per_episode_shots, parse_version_id=pv.id)
 
         # diff_summary 增量合并（多批次共用同一 ParseVersion）
         prev_summary = pv.diff_summary or {}
@@ -492,6 +633,8 @@ def execute_script_agent_job(job_id: str) -> dict:
             "style_config_diffs": style_diffs,
             "parse_warnings": parse_warnings,
             "review_issues": review_issues,
+            "low_shot_episodes": low_shot_episodes,
+            "failed_ranges": failed_ranges,
             "episode_start": episode_start,
             "episode_count": episode_count,
             "total_episodes": total_episodes,

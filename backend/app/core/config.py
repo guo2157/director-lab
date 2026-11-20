@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     llm_parse_concurrency: int = 3
     # 单个解析任务最大自动重试次数
     llm_parse_retry_limit: int = 2
+    # --- 输入预算预检（阶段 2）---
+    # 模型上下文窗口（token）。0 表示未知，跳过预检。默认值仅占位，
+    # 必须按实际使用的模型改；填错会误拦或漏拦。
+    llm_context_window_tokens: int = 128000
+    # 输入最多占窗口的比例，剩余留给输出与思考
+    llm_input_budget_ratio: float = 0.6
+    # token 保守估算系数：CJK 字符 / 其他字符（可校准，见 token_estimate.calibrate_hint）
+    llm_cjk_token_factor: float = 1.2
+    llm_other_token_factor: float = 0.3
+    # --- 镜头数对账（阶段 4）---
+    # 实际解析镜头数 / 大纲预估镜头数 低于该比例时记 shot_count_low 警告（不阻断任务）。
+    # 0 或负数表示关闭对账。
+    parse_shot_ratio_warn: float = 0.5
     # script-agent 首批自动+后续半自动：true 时首次调用仅解析首批（≤max_episodes_per_batch），
     # result.has_more 提示前端『继续分析』；false 时单次调用解析全部批次范围
     agent_first_batch_auto: bool = True
@@ -154,6 +167,9 @@ _PERSISTED_FIELDS = [
     "llm_stream_idle_timeout_seconds",
     "llm_parse_max_tokens", "llm_parse_hard_max_tokens",
     "llm_parse_retry_limit", "llm_parse_concurrency",
+    "llm_context_window_tokens", "llm_input_budget_ratio",
+    "llm_cjk_token_factor", "llm_other_token_factor",
+    "parse_shot_ratio_warn",
     "agent_first_batch_auto", "max_episodes_per_batch",
     "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
 ]

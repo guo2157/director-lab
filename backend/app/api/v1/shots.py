@@ -218,49 +218,10 @@ def list_scene_shots(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-@router.post("/shots/{shot_id}/keyframe/confirm", status_code=200)
-def confirm_keyframe(shot_id: str, db: Session = Depends(get_db)) -> dict:
-    """确认分镜图（D-13 静图先行闸口）：确认前须存在当前有效分镜图产物。"""
-    s = _get_shot(db, shot_id)
-    if not _current_asset_info(db, shot_id, "keyframe"):
-        raise errors.biz_error(code="keyframe_not_ready", http=409, message="分镜图尚未生成，无法确认")
-    s.keyframe_confirmed = True
-    db.commit()
-    return {"id": s.id, "keyframe_confirmed": s.keyframe_confirmed}
 
 
-@router.post("/shots/{shot_id}/keyframe/unconfirm", status_code=200)
-def unconfirm_keyframe(shot_id: str, db: Session = Depends(get_db)) -> dict:
-    """取消分镜图确认（D-13）：取消后 clips 生成闸口重新关闭。"""
-    s = _get_shot(db, shot_id)
-    s.keyframe_confirmed = False
-    db.commit()
-    return {"id": s.id, "keyframe_confirmed": s.keyframe_confirmed}
 
 
-@router.post("/projects/{project_id}/keyframe/confirm", status_code=200)
-def confirm_project_keyframes(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
-    """批量确认项目内分镜图（D-13）：仅确认已具备当前有效分镜图的镜头，返回确认/跳过明细。"""
-    p = db.get(Project, project_id)
-    if p is None:
-        raise errors.AppError("project_not_found", "项目不存在", 404)
-    shot_ids = payload.get("shot_ids")
-    q = (
-        db.query(Shot)
-        .join(Scene, Shot.scene_id == Scene.id)
-        .filter(Scene.project_id == project_id)
-    )
-    if shot_ids:
-        q = q.filter(Shot.id.in_(shot_ids))
-    confirmed, skipped = [], []
-    for s in q.all():
-        if _current_asset_info(db, s.id, "keyframe"):
-            s.keyframe_confirmed = True
-            confirmed.append(s.id)
-        else:
-            skipped.append(s.id)
-    db.commit()
-    return {"confirmed": confirmed, "skipped": skipped, "confirmed_count": len(confirmed), "skipped_count": len(skipped)}
 
 
 @router.patch("/shots/{shot_id}")

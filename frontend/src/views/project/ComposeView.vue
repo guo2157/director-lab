@@ -3,8 +3,8 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import {
-  NCard, NButton, NSpace, NSpin, NEmpty, NPopconfirm, NSelect,
-  NAlert, NInputNumber, NSwitch, NTag, useMessage,
+  NButton, NSpin, NEmpty, NPopconfirm, NSelect,
+  NInputNumber, NSwitch, useMessage,
 } from 'naive-ui'
 import {
   composeProject, listCompositions, exportProject, listExports, downloadExportUrl,
@@ -95,6 +95,17 @@ const ratioValue = computed(() => {
     '16:9': '16 / 9', '9:16': '9 / 16', '1:1': '1 / 1', '4:3': '4 / 3', '3:4': '3 / 4',
   }
   return map[aspectRatio.value] ?? '9 / 16'
+})
+/**
+ * 画幅数值比（宽 / 高）。
+ * 只有 aspect-ratio 一个约束时，容器宽度仍会铺满整列，竖屏视频左右就留出大片黑边；
+ * 用 max-width = 可用高度 × 宽高比，让宽度反过来跟着高度收，画面才不会嵌在宽黑框里。
+ */
+const ratioNumber = computed(() => {
+  const map: Record<string, number> = {
+    '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:3': 4 / 3, '3:4': 3 / 4,
+  }
+  return map[aspectRatio.value] ?? 9 / 16
 })
 
 function episodeLabel(episode?: number | null) {
@@ -348,13 +359,6 @@ const exportMutation = useMutation({
   },
 })
 
-/** 记录里只显示文件名：服务器绝对路径对用户没意义，完整路径放 title */
-function baseName(p?: string | null): string {
-  if (!p) return ''
-  const parts = p.split(/[\\/]/).filter(Boolean)
-  return parts[parts.length - 1] || p
-}
-
 function handleExport() {
   if (!exportCompositionId.value) {
     message.warning('请选择合成版本')
@@ -425,147 +429,172 @@ function goStoryboard() {
   router.push(`/project/${projectId.value}/storyboard`)
 }
 
-function statusTagClass(status: string) {
-  if (status === 'done' || status === 'succeeded') return 'is-succeeded'
-  if (status === 'failed') return 'is-failed'
-  return 'is-running'
+type TagKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'locked' | 'stale'
+
+/** 记录状态 → 统一状态标签语义（合成 composing / 导出 exporting 都映射到 running） */
+function statusKind(status: string, stale = false): TagKind {
+  if (stale) return 'stale'
+  if (status === 'done' || status === 'succeeded') return 'succeeded'
+  if (status === 'failed') return 'failed'
+  return 'running'
 }
+
+/** 当前预览版本是否可播放（决定视频框是否亮起品牌光晕） */
+const previewReady = computed(
+  () => !!previewComposition.value?.file_path && previewComposition.value?.status === 'done',
+)
+
+/** 导出完成后的一行式结果：文件名 + 下载入口，不铺成三行路径块 */
+const exportDone = computed(() => exportJobStatus.value === 'succeeded' && !!exportJobDownloadUrl.value)
 </script>
 
 <template>
   <div class="compose-page">
-    <!-- 左侧「制作流程」栏已高亮 05 合成与导出，页内不再重复同名大标题。
-         页头保留为单行工具条：右侧是画幅/项目标识与回退入口。 -->
+    <!-- 左侧「制作流程」栏已高亮 06 合成与导出，页内不再重复同名大标题。
+         H1 保留为 .visually-hidden：删掉可见标题后无障碍树仍需标题层级。 -->
     <h1 class="visually-hidden">合成与导出</h1>
-    <header class="compose-bar">
-      <n-space :size="8" align="center">
-        <n-tag size="small" round :bordered="false">
-          {{ aspectRatio }} · {{ projectQuery.data.value?.name ?? '当前项目' }}
-        </n-tag>
-        <n-button size="small" quaternary @click="goStoryboard">去分镜看板</n-button>
-      </n-space>
+
+    <header class="cx-bar">
+      <span class="cx-bar-project">
+        <span class="cx-bar-ratio">{{ aspectRatio }}</span>
+        {{ projectQuery.data.value?.name ?? '当前项目' }}
+      </span>
+      <n-button size="small" quaternary @click="goStoryboard">去分镜看板</n-button>
     </header>
 
-    <n-alert
-      v-if="lastError"
-      type="error"
-      closable
-      class="page-alert"
-      @close="lastError = ''"
-    >
-      {{ lastError }}
-    </n-alert>
+    <!-- 错误条：一条就够，不再用整块 NAlert 压住页面 -->
+    <div v-if="lastError" class="cx-error" role="alert">
+      <span class="cx-error-text">{{ lastError }}</span>
+      <button type="button" class="cx-link" @click="lastError = ''">知道了</button>
+    </div>
 
-    <div class="compose-grid">
-      <!-- 左：预览 -->
-      <section class="col-preview">
-        <n-card size="small" title="视频预览" class="panel-card">
-          <template #header-extra>
-            <span v-if="previewComposition" class="preview-meta">
-              {{ episodeLabel(previewComposition.episode) }} ·
-              {{ formatDuration(previewComposition.duration) }}
-            </span>
-            <n-button
-              v-if="previewComposition"
-              size="tiny"
-              quaternary
-              @click="retryVideo"
-            >重新载入</n-button>
-          </template>
+    <div class="cx-main" :style="{ '--cx-ratio-num': ratioNumber }">
+      <!-- 左：成片预览。整页唯一的主角，就绪时给品牌描边，其余一切安静 -->
+      <section class="cx-stage" :class="{ 'is-ready': previewReady }">
+        <div class="cx-stage-head">
+          <span class="cx-stage-title">成片预览</span>
+          <span v-if="previewComposition" class="cx-stage-meta">
+            {{ episodeLabel(previewComposition.episode) }}
+            <template v-if="previewComposition.duration"> · {{ formatDuration(previewComposition.duration) }}</template>
+          </span>
+          <button
+            v-if="previewComposition?.file_path"
+            type="button"
+            class="cx-link cx-stage-reload"
+            @click="retryVideo"
+          >重新载入</button>
+        </div>
 
-          <div v-if="previewComposition?.file_path" class="video-frame" :style="{ '--preview-ratio': ratioValue }">
-            <video
-              :key="videoKey"
-              class="video-player"
-              controls
-              playsinline
-              preload="metadata"
-              @error="videoError = true"
-            >
-              <source :src="mediaUrl(previewComposition.file_path)" type="video/mp4" />
-            </video>
+        <div v-if="previewComposition?.file_path" class="cx-frame" :style="{ '--cx-ratio': ratioValue }">
+          <video
+            :key="videoKey"
+            class="cx-video"
+            controls
+            playsinline
+            preload="metadata"
+            @error="videoError = true"
+          >
+            <source :src="mediaUrl(previewComposition.file_path)" type="video/mp4" />
+          </video>
+        </div>
+        <div v-else class="cx-frame is-empty" :style="{ '--cx-ratio': ratioValue }">
+          <div class="cx-frame-empty">
+            <p class="cx-frame-empty-title">{{ compositions.length ? '选一个版本预览' : '还没有成片' }}</p>
+            <p class="cx-frame-empty-hint">
+              {{ compositions.length ? '点右侧「产出记录」里的任一合成版本' : '先在右侧提交一次合成' }}
+            </p>
           </div>
-          <div v-else class="video-frame is-empty" :style="{ '--preview-ratio': ratioValue }">
-            <n-empty
-              size="small"
-              :description="compositions.length ? '从右侧合成记录中选择一个版本预览' : '还没有合成版本，先提交一次合成'"
-            />
-          </div>
+        </div>
 
-          <n-alert v-if="videoError" type="error" class="video-error" closable @close="videoError = false">
-            视频加载失败：文件可能被移动或服务异常。
-            <n-button text type="primary" size="tiny" @click="retryVideo">重试</n-button>
-          </n-alert>
-        </n-card>
+        <p v-if="videoError" class="cx-frame-error">
+          视频加载失败：文件可能被移动或服务异常。
+          <button type="button" class="cx-link" @click="retryVideo">重试</button>
+        </p>
       </section>
 
-      <!-- 中：合成设置 + 导出 -->
-      <section class="col-forms">
+      <!-- 右：01 合成 → 02 导出。序号成立，这两步确有先后 -->
+      <section class="cx-flow">
+        <div class="cx-step">
+          <div class="cx-step-head">
+            <span class="cx-step-no">01</span>
+            <h2 class="cx-step-title">合成</h2>
+            <span class="cx-step-note">本地 FFmpeg，不占用 ComfyUI 算力</span>
+          </div>
 
-        <n-card size="small" title="合成设置" class="panel-card">
-          <div class="form-grid">
-            <div class="form-item">
-              <span class="field-label">集数</span>
+          <div class="cx-fields">
+            <label class="cx-field">
+              <span class="cx-field-label">集数</span>
               <n-input-number
                 v-model:value="composeEpisode"
                 :min="1"
-                placeholder="留空则合成全部"
+                placeholder="留空 = 全部"
                 clearable
-                style="width: 100%"
+                size="small"
               />
-            </div>
-            <div class="form-item">
-              <span class="field-label">字幕</span>
-              <div class="inline-control">
+            </label>
+            <div class="cx-field">
+              <span class="cx-field-label">字幕</span>
+              <div class="cx-field-inline">
                 <n-switch v-model:value="composeSubtitle" size="small" />
                 <n-select
                   v-model:value="composeSubtitleMode"
                   :options="subtitleModeOptions"
                   size="small"
-                  class="inline-select"
                   :disabled="!composeSubtitle"
                 />
               </div>
             </div>
           </div>
 
-          <div class="form-actions">
+          <div class="cx-step-foot">
             <n-button
               type="primary"
+              size="small"
+              class="btn-brand"
               :loading="composeMutation.isPending.value"
               :disabled="hasBlockingIssues"
               @click="handleCompose"
             >开始合成</n-button>
-            <span class="form-hint">{{ blockingReason || '合成使用本地 FFmpeg，不占用 ComfyUI 算力' }}</span>
+            <span v-if="blockingReason" class="cx-hint is-warn">{{ blockingReason }}</span>
           </div>
 
-          <n-alert v-if="composeJobId" :type="composeJobAlertType" class="job-alert" closable
-                   @close="composeJobId = null; stopComposePoll()">
-            合成任务 {{ composeJobId }}：{{ composeJobText }}
-            <span v-if="composeJobError">（{{ composeJobError }}）</span>
-          </n-alert>
-        </n-card>
+          <div v-if="composeJobId" class="cx-job" :class="composeJobAlertType">
+            <span class="cx-job-text">{{ composeJobText }}</span>
+            <span v-if="composeJobError" class="cx-job-err">{{ composeJobError }}</span>
+            <button type="button" class="cx-link" @click="composeJobId = null; stopComposePoll()">收起</button>
+          </div>
+        </div>
 
-        <n-card size="small" title="导出" class="panel-card">
-          <div class="form-grid">
-            <div class="form-item">
-              <span class="field-label">合成版本</span>
+        <div class="cx-step">
+          <div class="cx-step-head">
+            <span class="cx-step-no">02</span>
+            <h2 class="cx-step-title">导出</h2>
+            <span class="cx-step-note">先落服务器，再下载到本机</span>
+          </div>
+
+          <div class="cx-fields">
+            <label class="cx-field">
+              <span class="cx-field-label">合成版本</span>
               <n-select
                 v-model:value="exportCompositionId"
                 :options="compositionOptions"
-                placeholder="选择非失效的合成版本"
+                size="small"
+                placeholder="选择未失效的合成版本"
               />
-            </div>
-            <div class="form-item">
-              <span class="field-label">导出质量</span>
-              <n-select v-model:value="exportProfile" :options="profileOptions" />
-            </div>
+            </label>
+            <label class="cx-field">
+              <span class="cx-field-label">质量</span>
+              <n-select v-model:value="exportProfile" :options="profileOptions" size="small" />
+            </label>
           </div>
-          <div class="form-actions">
+
+          <div class="cx-step-foot">
             <n-popconfirm @positive-click="handleExport">
               <template #trigger>
                 <n-button
                   type="primary"
+                  size="small"
+                  class="btn-brand"
                   :loading="exportMutation.isPending.value"
                   :disabled="!exportCompositionId"
                   :title="exportCompositionId ? '导出当前合成版本为 MP4' : '请先选择一个已完成的合成版本'"
@@ -573,296 +602,525 @@ function statusTagClass(status: string) {
               </template>
               确认使用当前选择的合成版本导出 MP4？
             </n-popconfirm>
-            <span class="form-hint">导出先写入服务器 media 目录，完成后点「下载到本机」保存到本机；右侧记录可再次下载</span>
+            <span class="cx-hint">完成后可在下方产出记录里再次下载</span>
           </div>
 
-          <n-alert v-if="exportJobId" :type="exportJobAlertType" class="job-alert" closable
-                   @close="exportJobId = null; stopExportPoll()">
-            <div>导出任务 {{ exportJobId }}：{{ exportJobText }}</div>
-            <div v-if="exportJobFile" class="path-row">
-              <span class="path-label">文件</span>
-              <code class="path-text" :title="exportJobPath || exportJobFile">{{ exportJobFile }}</code>
-            </div>
-            <div v-if="exportJobPath" class="path-row">
-              <span class="path-label">位置</span>
-              <code class="path-text" :title="exportJobPath">{{ exportJobPath }}</code>
-              <n-button size="tiny" quaternary @click="copyText(exportJobPath)">复制</n-button>
-            </div>
-            <div v-if="exportJobDownloadUrl && exportJobStatus === 'succeeded'" class="path-row">
-              <n-button type="primary" size="tiny" @click="downloadFile(exportJobDownloadUrl)">
-                下载到本机
-              </n-button>
-              <span class="path-hint">保存到本机浏览器下载目录</span>
-            </div>
-            <div v-if="exportJobError" class="path-row">{{ exportJobError }}</div>
-          </n-alert>
-        </n-card>
-      </section>
+          <div v-if="exportJobId" class="cx-job" :class="exportJobAlertType">
+            <span class="cx-job-text">{{ exportJobText }}</span>
+            <template v-if="exportDone">
+              <span class="cx-job-file" :title="exportJobPath || exportJobFile">{{ exportJobFile }}</span>
+              <button type="button" class="cx-link" @click="downloadFile(exportJobDownloadUrl)">下载到本机</button>
+            </template>
+            <span v-if="exportJobError" class="cx-job-err">{{ exportJobError }}</span>
+            <button
+              v-if="exportJobPath"
+              type="button"
+              class="cx-link is-quiet"
+              @click="copyText(exportJobPath)"
+            >复制路径</button>
+            <button type="button" class="cx-link is-quiet" @click="exportJobId = null; stopExportPoll()">收起</button>
+          </div>
+        </div>
+        <!-- 产出记录：合成与导出合成一份「产出了什么」，一行一条，不再各占一张卡。
+             与 01/02 同列，右列不再在两张卡之后留一大片空白。 -->
+        <section class="cx-out">
+          <div class="cx-out-head">
+            <h2 class="cx-out-title">产出记录</h2>
+            <span class="cx-out-count">合成 {{ compositions.length }} · 导出 {{ exportsList.length }}</span>
+            <n-button
+              size="tiny"
+              quaternary
+              :loading="compositionsQuery.isFetching.value || exportsQuery.isFetching.value"
+              @click="compositionsQuery.refetch(); exportsQuery.refetch()"
+            >刷新</n-button>
+          </div>
 
-      <!-- 右：记录 -->
-      <aside class="col-records">
-        <n-card size="small" title="合成记录" class="panel-card">
-          <template #header-extra>
-            <n-button size="tiny" quaternary :loading="compositionsQuery.isFetching.value"
-                      @click="() => compositionsQuery.refetch()">刷新</n-button>
-          </template>
+          <div v-if="compositionsQuery.isLoading.value || exportsQuery.isLoading.value" class="cx-out-loading">
+            <n-spin size="small" />
+          </div>
 
-          <n-spin v-if="compositionsQuery.isLoading.value" size="small" />
-          <n-empty v-else-if="compositions.length === 0" size="small" description="暂无合成记录" style="padding: 16px 0" />
-          <div v-else class="record-list">
-            <div
-              v-for="comp in compositions"
-              :key="comp.composition_id"
-              class="record-item"
-              :class="{
-                stale: comp.stale,
-                active: previewComposition?.composition_id === comp.composition_id,
-              }"
-              @click="selectPreview(comp)"
-            >
-              <div class="record-head">
-                <span class="record-title">{{ episodeLabel(comp.episode) }}</span>
-                <span class="status-tag" :class="statusTagClass(comp.status)">
-                  {{ comp.status === 'composing' ? '合成中' : comp.status === 'done' ? '已完成' : comp.status }}
+          <template v-else>
+            <div v-if="!compositions.length && !exportsList.length" class="cx-out-empty">
+              <n-empty size="small" description="还没有成片或导出文件" />
+            </div>
+
+            <ul v-else class="cx-rows">
+              <li
+                v-for="comp in compositions"
+                :key="comp.composition_id"
+                class="cx-row"
+                :class="{
+                  'is-active': previewComposition?.composition_id === comp.composition_id,
+                  'is-stale': comp.stale,
+                }"
+              >
+                <span class="cx-row-kind">合成</span>
+                <button type="button" class="cx-row-main" @click="selectPreview(comp)">
+                  <span class="cx-row-name">{{ episodeLabel(comp.episode) }}</span>
+                  <span class="cx-row-meta">
+                    <span>{{ formatDuration(comp.duration) }}</span>
+                    <span>{{ formatTime(comp.created_at) }}</span>
+                  </span>
+                </button>
+                <span class="status-tag" :class="`is-${statusKind(comp.status, comp.stale)}`">
+                  {{ comp.stale ? '已失效' : comp.status === 'composing' ? '合成中' : comp.status === 'done' ? '已完成' : '失败' }}
                 </span>
-              </div>
-              <div class="record-meta">
-                <span>{{ formatDuration(comp.duration) }}</span>
-                <span class="dot">·</span>
-                <span>{{ formatTime(comp.created_at) }}</span>
-                <span v-if="comp.stale" class="status-tag is-stale">已失效</span>
-                <n-button
-                  size="tiny"
-                  text
-                  type="primary"
-                  class="record-action"
-                  @click.stop="selectPreview(comp)"
-                >预览</n-button>
-              </div>
-            </div>
-          </div>
-        </n-card>
+                <button
+                  type="button"
+                  class="cx-link cx-row-act"
+                  :disabled="comp.stale"
+                  @click="selectPreview(comp)"
+                >预览</button>
+              </li>
 
-        <n-card size="small" title="导出记录" class="panel-card">
-          <n-spin v-if="exportsQuery.isLoading.value" size="small" />
-          <n-empty v-else-if="exportsList.length === 0" size="small" description="暂无导出记录" style="padding: 16px 0" />
-          <div v-else class="record-list">
-            <div v-for="exp in exportsList" :key="exp.id" class="record-item is-plain">
-              <div class="record-head">
-                <span class="record-title">{{ exp.file_name ?? '导出文件' }}</span>
-                <span class="status-tag" :class="statusTagClass(exp.status)">
+              <li v-for="exp in exportsList" :key="exp.id" class="cx-row">
+                <span class="cx-row-kind is-export">导出</span>
+                <div class="cx-row-main is-static">
+                  <span class="cx-row-name is-mono" :title="exp.file_name">{{ exp.file_name ?? '导出文件' }}</span>
+                  <span class="cx-row-meta">
+                    <template v-if="exp.size">{{ formatSize(exp.size) }}</template>
+                    <span>{{ formatTime(exp.created_at) }}</span>
+                  </span>
+                </div>
+                <span class="status-tag" :class="`is-${statusKind(exp.status)}`">
                   {{ exp.status === 'exporting' ? '处理中' : exp.status === 'done' ? '已完成' : '失败' }}
                 </span>
-              </div>
-              <div class="record-meta">
-                <span>{{ formatTime(exp.created_at) }}</span>
-                <template v-if="exp.size">
-                  <span class="dot">·</span>
-                  <span>{{ formatSize(exp.size) }}</span>
-                </template>
-                <n-button
+                <button
                   v-if="exp.status === 'done'"
-                  size="tiny"
-                  secondary
-                  class="record-action"
-                  @click.stop="handleDownload(exp.id)"
-                >下载</n-button>
-              </div>
-              <div
-                v-if="(exp.abs_path || exp.file_path) && baseName(exp.abs_path || exp.file_path) !== exp.file_name"
-                class="record-path"
-                :title="exp.abs_path || exp.file_path"
-              >
-                {{ baseName(exp.abs_path || exp.file_path) }}
-              </div>
-            </div>
-          </div>
-        </n-card>
-      </aside>
+                  type="button"
+                  class="cx-dl"
+                  @click="handleDownload(exp.id)"
+                >下载</button>
+                <span v-else class="cx-row-act"></span>
+              </li>
+            </ul>
+          </template>
+        </section>
+      </section>
+
     </div>
+
   </div>
 </template>
 
 <style scoped>
 .compose-page {
-  padding: var(--sp-6);
+  padding: var(--sp-6) var(--sp-8) var(--sp-12);
   max-width: 1440px;
   margin: 0 auto;
-  min-height: calc(100vh - var(--app-header-height, 56px));
+  min-height: calc(100vh - var(--app-header-height, 64px));
   box-sizing: border-box;
 }
-/* 页头退化为单行工具条：只有画幅标识与回退入口，右对齐 */
-.compose-bar {
+
+/* 工具条：只留项目标识与回退，右对齐，不占一整行高度 */
+.cx-bar {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
-  margin: 0 0 var(--sp-4);
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  min-width: 0;
+}
+.cx-bar-project {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cx-bar-ratio {
+  flex: none;
+  padding: 1px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
 }
 
-.page-alert { margin-bottom: var(--sp-4); }
+/* 错误条：单行、贴边、不抢焦点 */
+.cx-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-4);
+  font-size: 13px;
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius);
+}
+.cx-error-text { flex: 1; min-width: 0; }
 
-.compose-grid {
+/* 主区：预览 + 流水线。预览列宽度直接跟着画幅走 ——
+   竖屏项目收成窄列，画面贴着列边，不再在宽列里嵌一条窄视频、两侧各留一大块黑。 */
+.cx-main {
   display: grid;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(300px, 380px);
-  gap: var(--sp-4);
-  /* 三栏等高：预览最高，记录列吃掉剩余高度，底部不再参差 */
+  grid-template-columns:
+    minmax(240px, min(40%, calc((100vh - 300px) * var(--cx-ratio-num, 0.5625))))
+    minmax(340px, 1fr);
+  gap: var(--sp-6);
+  /* 两列等高：右列拉到与左侧预览同高，记录吃满剩余高度，右列底部不再留一大片空白 */
   align-items: stretch;
 }
-.col-preview,
-.col-forms,
-.col-records { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
-.col-forms .panel-card { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
-.col-forms :deep(.n-card__content) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.col-forms .form-actions { margin-top: auto; }
-.col-records { min-height: 0; }
-.col-records .panel-card { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
-.col-records :deep(.n-card__content) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.col-records .record-list { flex: 1; min-height: 0; overflow-y: auto; }
 
-.panel-card {
-  --n-color: var(--bg-panel);
+/* ── 成片预览 ── */
+.cx-stage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.cx-stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.cx-stage-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  color: var(--text-primary);
+}
+.cx-stage-meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.cx-stage-reload { margin-left: auto; }
+
+.cx-frame {
+  width: 100%;
+  /* 宽度跟着高度收：竖屏项目不再在宽容器里嵌一条窄画面 */
+  max-width: calc(calc(100vh - 300px) * var(--cx-ratio-num, 0.5625));
+  aspect-ratio: var(--cx-ratio, 9 / 16);
+  max-height: calc(100vh - 300px);
+  margin: 0 auto;
+  background: var(--media-backdrop);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-}
-.panel-card :deep(.n-card-header) { padding-bottom: var(--sp-2); }
-.panel-card :deep(.n-card__content) { padding-top: 0; }
-
-.preview-meta { font-size: 13px; color: var(--text-secondary); margin-right: var(--sp-2); }
-
-.video-frame {
-  width: 100%;
-  aspect-ratio: var(--preview-ratio, 9 / 16);
-  min-height: 180px;
-  background: var(--media-backdrop);
-  border-radius: var(--radius);
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  transition: border-color var(--transition-base);
 }
-.video-frame.is-empty { background: var(--bg-elevated); }
-.video-player {
+/* 就绪：唯一被强调的元素，只用描边，不加外发光——光晕在黑色画框上会糊成一圈 */
+.cx-stage.is-ready .cx-frame {
+  border-color: var(--brand-line);
+}
+.cx-frame.is-empty {
+  background: var(--bg-panel);
+  border-style: dashed;
+}
+.cx-frame-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-6);
+  text-align: center;
+}
+.cx-frame-empty-title {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.cx-frame-empty-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+.cx-video {
   width: 100%;
   height: 100%;
   object-fit: contain;
   background: var(--media-backdrop);
   display: block;
 }
-.video-error { margin-top: var(--sp-3); }
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--sp-4);
-  margin-bottom: var(--sp-4);
-}
-.form-item { min-width: 0; }
-.inline-control { display: flex; align-items: center; gap: var(--sp-2); }
-.inline-select { flex: 1 1 auto; min-width: 0; }
-.field-label {
-  display: block;
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: var(--sp-2);
-}
-.form-actions { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
-.form-hint {
+.cx-frame-error {
+  margin: 0;
   font-size: 12px;
   line-height: 1.6;
-  color: var(--text-secondary);
+  color: var(--danger-text);
 }
-/* 禁用态也要看得见：灰底 + 描边，别只剩一行几乎与背景同色的字 */
-.form-actions :deep(.n-button--disabled),
-.form-actions :deep(.n-button:disabled) {
-  opacity: 1;
-  color: var(--text-tertiary);
-  background: var(--bg-sunken);
+
+/* ── 01 合成 / 02 导出 ──
+   两列排：序号 01→02 天然是左→右的阅读顺序，两张卡并排，
+   比竖着堆成一条窄柱更能用满预览列右侧的宽度；产出记录跨满整行。 */
+.cx-flow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--sp-4);
+  /* 不写 align-items:start —— 它会让第二行回到内容高度，
+     产出记录就吃不满右列剩余空间，底部又出现空白。 */
+  min-width: 0;
+  min-height: 0;
+}
+.cx-step {
+  padding: var(--sp-4);
+  background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-sheen);
 }
-.form-actions {
+.cx-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+  min-width: 0;
+}
+/* 序号是真实步骤顺序（先合成后导出），不是装饰 */
+.cx-step-no {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--brand-primary);
+}
+.cx-step-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  color: var(--text-primary);
+}
+.cx-step-note {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cx-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.cx-field { display: block; min-width: 0; }
+.cx-field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.cx-field-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.cx-field-inline :deep(.n-select) { flex: 1 1 auto; min-width: 0; }
+
+.cx-step-foot {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
 }
-.job-alert { margin-top: var(--sp-3); }
-
-.record-list { display: flex; flex-direction: column; gap: var(--sp-2); }
-.record-item {
-  padding: 10px 12px;
-  background: var(--bg-elevated);
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast);
-}
-.record-item.is-plain { cursor: default; }
-.record-item:hover { border-color: var(--border-strong); }
-.record-item.active { border-color: var(--brand-primary); background: var(--brand-soft); }
-.record-item.stale { opacity: 0.55; }
-.record-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  margin-bottom: 6px;
-}
-.record-title {
-  font-size: 14px;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.record-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  flex-wrap: wrap;
-}
-.record-meta .dot { color: var(--text-tertiary); }
-.record-action { margin-left: auto; }
-.record-path {
-  margin-top: var(--sp-1);
+.cx-hint {
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.path-hint { font-size: 11px; color: var(--text-tertiary); }
-.path-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; min-width: 0; }
-.path-label { flex: none; font-size: 12px; color: var(--text-secondary); }
-.path-text {
-  flex: 1 1 auto;
+.cx-hint.is-warn { color: var(--state-warning); }
+
+/* 任务状态：一行文字 + 行内动作，不再用整块 alert */
+.cx-job {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
   min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.cx-job::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--brand-primary);
+}
+.cx-job.success::before { background: var(--state-success); }
+.cx-job.error::before { background: var(--danger); }
+.cx-job.error { border-color: var(--danger-line); }
+.cx-job-text { color: var(--text-secondary); }
+.cx-job-file {
+  min-width: 0;
+  font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text-secondary);
-  white-space: nowrap;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cx-job-err { color: var(--danger-text); }
+.cx-job .cx-link { margin-left: auto; }
+
+/* 行内文字按钮：全页统一这一种，不再混用 n-button text / 蓝色链接 */
+.cx-link {
+  padding: 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--brand-hover);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cx-link:hover { color: var(--brand-mint); }
+.cx-link:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.cx-link.is-quiet { color: var(--text-tertiary); }
+.cx-link.is-quiet:hover { color: var(--text-secondary); }
+
+/* ── 产出记录（右列第三段，跨满两栏） ── */
+.cx-out {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
+}
+.cx-out-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.cx-out-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  color: var(--text-primary);
+}
+.cx-out-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.cx-out-head :deep(.n-button) { margin-left: auto; }
+.cx-out-loading { padding: var(--sp-6); display: flex; justify-content: center; }
+.cx-out-empty { padding: var(--sp-6) 0; }
+
+.cx-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* 一行一条：类型 · 名称+元信息 · 状态 · 动作。用分隔线而非卡片，密度更高 */
+.cx-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto 64px;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-2);
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--transition-fast);
+}
+.cx-row:hover { background: var(--overlay-hover); }
+.cx-row.is-active { background: var(--overlay-selected); }
+.cx-row.is-stale { opacity: 0.55; }
+
+.cx-row-kind {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+.cx-row-kind.is-export { color: var(--brand-deep); }
+
+.cx-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.cx-row-main.is-static { cursor: default; }
+.cx-row-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cx-row-name.is-mono { font-family: var(--font-mono); font-size: 12px; }
+.cx-row-meta {
+  display: flex;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.cx-row-act { justify-self: end; text-align: right; }
+.cx-dl {
+  justify-self: end;
+  padding: 3px var(--sp-3);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.cx-dl:hover {
+  color: var(--brand-hover);
+  border-color: var(--brand-line);
 }
 
 @media (max-width: 1100px) {
-  .compose-grid { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); }
-  .col-records {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
+  .cx-main { grid-template-columns: minmax(0, 1fr); }
+  .cx-frame { max-width: 100%; max-height: 60vh; }
+}
+@media (max-width: 768px) {
+  .compose-page { padding: var(--sp-4) var(--sp-4) var(--sp-10); }
+  /* 窄屏 01/02 竖排：两列各 200px 会把下拉与按钮挤到换行 */
+  .cx-flow {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
   }
-}
-@media (max-width: 768px) {
-  .compose-grid { grid-template-columns: minmax(0, 1fr); }
-  .col-records { grid-template-columns: minmax(0, 1fr); }
-  .video-frame { max-width: 360px; }
-}
-@media (max-width: 768px) {
-  .compose-page { padding: var(--sp-4); }
-  .video-frame { max-width: 100%; }
+  .cx-out { grid-column: 1; }
+  .cx-rows { overflow-y: visible; }
+  .cx-row { grid-template-columns: 36px minmax(0, 1fr) auto; row-gap: var(--sp-1); }
+  .cx-row-act,
+  .cx-dl { grid-column: 2 / -1; justify-self: start; }
+  .cx-step-note { display: none; }
 }
 </style>

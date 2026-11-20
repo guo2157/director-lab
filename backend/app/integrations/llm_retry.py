@@ -11,6 +11,7 @@
 | llm_non_json_output | 追加「只输出 JSON」提示 | 格式漂移，加 token 无用 |
 | llm_invalid_output | 追加格式修复提示 | 语法错误 |
 | llm_schema_mismatch | 追加 Schema 约束提示 | 结构不符 |
+| llm_input_too_long | **不重试，立即抛出** | 输入已超上下文窗口，原样重试必然再失败 |
 
 纪律：每次重试都记录 attempt / max_tokens / finish_reason / content_length /
 reasoning_length / usage / request_id / error_code，且**放大后的 max_tokens 必须
@@ -25,6 +26,7 @@ from typing import Any, Callable
 from app.integrations.llm import LLMClient, LLMError
 from app.integrations.llm_response import (
     ERR_EMPTY_CONTENT,
+    ERR_INPUT_TOO_LONG,
     ERR_INVALID_OUTPUT,
     ERR_NON_JSON_OUTPUT,
     ERR_OUTPUT_TRUNCATED,
@@ -239,6 +241,11 @@ def call_with_retry(
                 on_attempt(record)
 
             if attempt >= retry_limit:
+                raise
+
+            # 输入超上下文属于配置类错误：重试、退避、加 token、改提示词都不可能
+            # 让它通过，只会把一次明确失败拖成 N 次无谓请求。
+            if exc.code == ERR_INPUT_TOO_LONG:
                 raise
 
             # ---- 按错误码决定重试方式 ----

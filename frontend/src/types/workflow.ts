@@ -115,11 +115,15 @@ export interface WorkflowCandidateItem {
   generation_modes: string[]
   usable: boolean
   missing: string[]
+  /** 该业务槽位的推荐默认项（由后端按槽位显式声明，非按排序推导） */
+  is_recommended?: boolean
 }
 
 export interface WorkflowCandidateResponse {
   slot: string
   workflow_type: WorkflowType
+  /** 该槽位声明的推荐默认工作流名称；对应项会带 is_recommended=true */
+  default_workflow_name?: string | null
   items: WorkflowCandidateItem[]
   usable_count: number
 }

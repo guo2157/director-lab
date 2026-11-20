@@ -575,11 +575,6 @@ def adopt_candidate(asset_id: str, db: Session = Depends(get_db)) -> dict:
     target.validity = "current"
     target.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    # 人工审核闸口（D-23）：实体类公共资产换版后原审核结论失效，需重新提交审核
-    if target.asset_type in ("character", "scene", "prop"):
-        from app.services.assets_review import reset_assets_review
-        reset_assets_review(db, target.project_id)
-
     # 同步实体主引用指针，避免详情页仍指向旧版本
     for shot_id in shot_ids:
         shot = db.get(Shot, shot_id)

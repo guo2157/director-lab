@@ -19,11 +19,17 @@ export const STAGE_ORDER = [
 
 export type Stage = (typeof STAGE_ORDER)[number]
 
-/** 后端阶段枚举 → 中文阶段名 */
+/**
+ * 后端阶段枚举 → 中文阶段名。
+ *
+ * 2026-11-20：解析独立成制作节点后，这三个标签只描述「后端枚举此刻的含义」，
+ * 不再暗示页面上存在对应的子步骤。枚举本身与 STAGE_ORDER 一律不动
+ * （后端 derive_progress 依赖它，前端 stageIndex 也依赖它）。
+ */
 export const STAGE_LABELS: Record<string, string> = {
-  estimate: '剧本评估',
-  select_range: '选取范围',
-  parse: '剧本解析',
+  estimate: '剧本编写',
+  select_range: '待解析',
+  parse: '解析中',
   characters: '角色定妆',
   scenes: '场景基准',
   assets_review: '资产审核',

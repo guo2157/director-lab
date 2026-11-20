@@ -1,27 +1,24 @@
 <script setup lang="ts">
 /**
- * 镜头详情弹窗：左预览 + 右三标签页（提示词 / 参考图 / 生成）。
+ * 镜头详情弹窗（分镜看板）：扁平布局。
  *
- * 键盘：← / → 切换上一个/下一个镜头，Enter 执行当前标签页的主操作，
- * Esc 关闭，R 重新生成视频。输入框内不拦截 ←/→，避免影响提示词编辑；
- * 输入框内按 Ctrl/Cmd + Enter 同样视为确认。
+ * 布局：镜头视频 → 可编辑提示词 → 参考图管理（新增/替换/移除）→ 重新生成按钮。
+ * 重新生成按当前提示词、参考图与对应角色音色提交，新视频生成后原地覆盖旧版，只保留一份。
+ *
+ * 键盘：← / → 切换上一个/下一个镜头，Esc 关闭。输入框内不拦截 ←/→。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NModal, NTabPane, NTabs } from 'naive-ui'
+import { NButton, NInput, NModal, NSpin, NUpload, useMessage } from 'naive-ui'
 import type { Character, Prop, Scene, Shot } from '@/types/script'
 import { useShotDetail } from './useShotDetail'
-import ShotPreviewPane from './ShotPreviewPane.vue'
-import ShotPromptTab from './ShotPromptTab.vue'
-import ShotReferencesTab from './ShotReferencesTab.vue'
-import ShotGenerateTab from './ShotGenerateTab.vue'
+import type { Asset } from '@/types/asset'
+import { listAssets, uploadAsset } from '@/api/assets'
 
-type TabKey = 'prompt' | 'refs' | 'generate'
 type StatusKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'locked' | 'stale'
 
 const props = defineProps<{
   show: boolean
   shotId: string | null
-  /** 当前集的有序镜头列表：键盘与箭头切换都按这个顺序 */
   shots: Shot[]
   projectId: string
   readinessAll: boolean
@@ -38,47 +35,34 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:show': [value: boolean]
   'update:shotId': [value: string]
-  /** 生成任务提交成功：页面刷新场景/任务列表并启动进度轮询 */
   submitted: []
-  /** 提示词已保存：页面需要重新拉取该镜头（后端做失效传播） */
   'prompts-saved': [shot: Shot]
 }>()
+
+const message = useMessage()
 
 const activeIndex = computed(() => props.shots.findIndex((s) => s.id === props.shotId))
 const activeShot = computed<Shot | null>(() =>
   activeIndex.value >= 0 ? props.shots[activeIndex.value] : null,
 )
-const activeSeq = computed(() => (activeIndex.value >= 0 ? activeIndex.value + 1 : 0))
 const canPrev = computed(() => activeIndex.value > 0)
 const canNext = computed(() => activeIndex.value >= 0 && activeIndex.value < props.shots.length - 1)
-
-const activeTab = ref<TabKey>('generate')
 
 const {
   videoPrompt,
   negativePrompt,
   negativeSupported,
   defaultNegativePrompt,
-  savingPrompts,
   refBindingsLoading,
-  refBindingsSaving,
   bindings,
-  chainFrameStatus,
   unboundSlots,
-  assetOptions,
   generating,
-  directRegenLoading,
-  clipActionIsRegenerate,
   clipActionLabel,
   open,
-  savePrompts,
-  saveRefBindings,
   addBinding,
   removeBinding,
   setBindingAsset,
-  setBindingEnabled,
   handleClipActionClick,
-  handleGenerateKeyframe,
   regenerateClipDirect,
 } = useShotDetail({
   projectId: () => props.projectId,
@@ -94,7 +78,6 @@ const {
   onClose: () => emit('update:show', false),
 })
 
-// 打开或切换镜头时同步提示词并拉取参考图绑定；同镜头的数据刷新不重置用户编辑
 watch(
   [() => props.show, () => props.shotId],
   ([show, shotId]) => {
@@ -114,23 +97,6 @@ function close() {
   emit('update:show', false)
 }
 
-
-/** Enter：执行当前标签页的主操作（与页面上的主按钮一致） */
-function confirmPrimary() {
-  if (activeTab.value === 'prompt') {
-    void savePrompts()
-    return
-  }
-  if (activeTab.value === 'refs') {
-    void saveRefBindings()
-    return
-  }
-  if (props.readinessAll) {
-    if (activeShot.value?.keyframe_confirmed) handleClipActionClick()
-    else handleGenerateKeyframe()
-  }
-}
-
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null
   if (!el || !el.tagName) return false
@@ -145,37 +111,10 @@ function onKeydown(e: KeyboardEvent) {
     close()
     return
   }
-  if (isTypingTarget(e.target)) {
-    // 文本框内只接受 Ctrl/Cmd + Enter 作为确认，其余按键交给输入法/编辑器
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault()
-      confirmPrimary()
-    }
-    return
-  }
-  switch (e.key) {
-    case 'ArrowLeft':
-      if (!canPrev.value) return
-      e.preventDefault()
-      navigate(-1)
-      break
-    case 'ArrowRight':
-      if (!canNext.value) return
-      e.preventDefault()
-      navigate(1)
-      break
-    case 'Enter':
-      e.preventDefault()
-      confirmPrimary()
-      break
-    case 'r':
-    case 'R':
-      e.preventDefault()
-      regenerateClipDirect()
-      break
-    default:
-      break
-  }
+  if (isTypingTarget(e.target)) return
+  if (e.key === 'ArrowLeft' && canPrev.value) { e.preventDefault(); navigate(-1) }
+  if (e.key === 'ArrowRight' && canNext.value) { e.preventDefault(); navigate(1) }
+  if (e.key === 'r' || e.key === 'R') { e.preventDefault(); regenerateClipDirect() }
 }
 
 watch(
@@ -188,6 +127,73 @@ watch(
 )
 
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
+// ── 资产选择器（为参考图槽位选择已有资产）──
+const assetPickerVisible = ref(false)
+const assetPickerSlot = ref('')
+const assetPickerKeyword = ref('')
+const assetPickerLoading = ref(false)
+const assetPickerItems = ref<Asset[]>([])
+const assetUploading = ref(false)
+
+function openPicker(slotParam: string) {
+  assetPickerSlot.value = slotParam
+  assetPickerKeyword.value = ''
+  assetPickerVisible.value = true
+  void loadPickerItems()
+}
+
+/** 已有绑定的 reference_id，用于 setBindingAsset */
+function refIdForSlot(slotParam: string): string {
+  return bindings.value.find((b) => b.slot_id === slotParam)?.reference_id ?? slotParam
+}
+
+async function loadPickerItems() {
+  assetPickerLoading.value = true
+  try {
+    const res = await listAssets({
+      project_id: props.projectId,
+      keyword: assetPickerKeyword.value || undefined,
+      page_size: 50,
+    })
+    assetPickerItems.value = (res.items ?? []) as Asset[]
+  } catch (e: any) {
+    message.error(e?.message ?? '加载资产列表失败')
+    assetPickerItems.value = []
+  } finally {
+    assetPickerLoading.value = false
+  }
+}
+
+function pickAndClose(asset: Asset) {
+  const slotParam = assetPickerSlot.value
+  if (!slotParam) return
+  const refId = refIdForSlot(slotParam)
+  const exists = bindings.value.some((b) => b.slot_id === slotParam)
+  if (!exists) {
+    addBinding(slotParam)
+  }
+  setBindingAsset(refId, asset.id)
+  assetPickerVisible.value = false
+}
+
+async function uploadRefImage(file: File) {
+  const slotParam = assetPickerSlot.value
+  if (!slotParam) return
+  assetUploading.value = true
+  try {
+    const asset = await uploadAsset(file, {
+      project_id: props.projectId,
+      asset_type: 'reference',
+      name: file.name.replace(/\.[^.]+$/, ''),
+    })
+    pickAndClose(asset)
+  } catch (e: any) {
+    message.error(e?.message ?? '上传参考图失败')
+  } finally {
+    assetUploading.value = false
+  }
+}
 </script>
 
 <template>
@@ -198,140 +204,340 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     closable
     :bordered="false"
     class="shot-detail-modal"
-    :style="{ width: 'min(1180px, 94vw)' }"
+    :style="{ width: 'min(1100px, 94vw)' }"
     :content-style="{ maxHeight: 'calc(85vh - 96px)', overflowY: 'auto' }"
     @update:show="emit('update:show', $event)"
   >
-    <div v-if="activeShot" class="detail-grid">
-      <ShotPreviewPane
-        class="detail-preview"
-        :shot="activeShot"
-        :seq="activeSeq"
-        :status-kind="statusKind"
-        :status-label="statusLabel"
-        :kind-label="kindLabel"
-        :can-prev="canPrev"
-        :can-next="canNext"
-        @navigate="navigate"
-      />
-
-      <div class="detail-body">
-        <n-tabs v-model:value="activeTab" type="line" size="small" animated>
-          <n-tab-pane name="prompt" tab="提示词">
-            <ShotPromptTab
-              v-model:video-prompt="videoPrompt"
-              v-model:negative-prompt="negativePrompt"
-              :negative-supported="negativeSupported"
-              :default-negative-prompt="defaultNegativePrompt"
-              :saving="savingPrompts"
-              @save="savePrompts"
+    <div v-if="activeShot" class="dg">
+      <div class="dg-main">
+        <!-- 镜头视频 -->
+        <div class="dg-sec">
+          <div class="dg-label">镜头视频</div>
+          <div v-if="activeShot.current_assets?.clip" class="dg-video">
+            <video
+              v-if="activeShot.current_assets.clip.url"
+              :src="activeShot.current_assets.clip.url"
+              controls
+              preload="metadata"
+              class="dg-video-el"
             />
-          </n-tab-pane>
+            <div v-else class="dg-empty">视频文件不存在</div>
+          </div>
+          <div v-else class="dg-empty">尚未生成视频</div>
+        </div>
 
-          <n-tab-pane name="refs" :tab="`参考图（${bindings.length}）`">
-            <ShotReferencesTab
-              :loading="refBindingsLoading"
-              :saving="refBindingsSaving"
-              :bindings="bindings"
-              :unbound-slots="unboundSlots"
-              :asset-options="assetOptions"
-              :chain-frame-status="chainFrameStatus"
-              @save="saveRefBindings"
-              @add="addBinding"
-              @remove="removeBinding"
-              @update-asset="setBindingAsset"
-              @update-enabled="setBindingEnabled"
+        <!-- 提示词 -->
+        <div class="dg-sec">
+          <div class="dg-label">提示词</div>
+          <n-input
+            v-model:value="videoPrompt"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 12 }"
+            placeholder="描述该镜头的视频画面要求…"
+          />
+          <template v-if="negativeSupported">
+            <div class="dg-label" style="margin-top: var(--sp-2)">负面提示词</div>
+            <n-input
+              v-model:value="negativePrompt"
+              type="textarea"
+              :autosize="{ minRows: 2, maxRows: 6 }"
+              :placeholder="defaultNegativePrompt || '不希望出现的元素'"
             />
-          </n-tab-pane>
+          </template>
 
-          <n-tab-pane name="generate" tab="生成">
-            <ShotGenerateTab
-              :project-id="projectId"
-              :shot-id="activeShot.id"
-              :episode="activeShot.episode"
-              :readiness-all="readinessAll"
-              :keyframe-confirmed="Boolean(activeShot.keyframe_confirmed)"
-              :clip-action-label="clipActionLabel"
-              :clip-action-is-regenerate="clipActionIsRegenerate"
-              :generating="generating"
-              :direct-regen-loading="directRegenLoading"
-              @generate-keyframe="handleGenerateKeyframe"
-              @clip-action="handleClipActionClick"
-            />
-          </n-tab-pane>
-        </n-tabs>
+        </div>
+
+        <!-- 参考图 -->
+        <div class="dg-sec">
+          <div class="dg-label">
+            参考图
+            <span class="dg-hint">（{{ bindings.length }} 张）</span>
+          </div>
+          <n-spin :show="refBindingsLoading" size="small">
+            <div v-if="bindings.length" class="rf-grid">
+              <div v-for="b in bindings" :key="b.reference_id" class="rf-card">
+                <div class="rf-preview">
+                  <img
+                    v-if="b.asset_id"
+                    :src="`/api/assets/${b.asset_id}/file?thumb=true`"
+                    :alt="b.slot_id"
+                  />
+                  <div v-else class="rf-empty">未绑定</div>
+                </div>
+                <div class="rf-meta">
+                  <span class="rf-slot">{{ b.slot_id }}</span>
+                </div>
+                <div class="rf-actions">
+                  <n-button size="tiny" @click="openPicker(b.slot_id)">
+                    {{ b.asset_id ? '替换' : '添加' }}
+                  </n-button>
+                  <n-button size="tiny" @click="removeBinding(b.reference_id)">移除</n-button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="rf-none">暂无参考图绑定</div>
+          </n-spin>
+
+          <!-- 未绑定槽位 -->
+          <template v-if="unboundSlots.length">
+            <div class="dg-label" style="margin-top: var(--sp-3)">可用槽位</div>
+            <div class="rf-grid">
+              <div v-for="s in unboundSlots" :key="s.param" class="rf-card">
+                <div class="rf-preview"><div class="rf-empty">空</div></div>
+                <div class="rf-meta">
+                  <span class="rf-slot">{{ s.param }}<span v-if="s.required" class="rf-required">*</span></span>
+                </div>
+                <div class="rf-actions">
+                  <n-button size="tiny" @click="openPicker(s.param)">添加</n-button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+
+        </div>
+
+        <!-- 重新生成按钮 -->
+        <div class="dg-sec is-last">
+          <n-button
+            type="primary"
+            :loading="generating"
+            :disabled="!props.readinessAll"
+            @click="handleClipActionClick"
+          >
+            {{ clipActionLabel }}
+          </n-button>
+          <span v-if="!props.readinessAll" class="dg-note">资产库未就绪，请先完成必需资产的生成</span>
+        </div>
       </div>
     </div>
 
-    <template #footer>
-      <div class="modal-foot">
-        <span class="foot-keys">
-          <kbd>←</kbd><kbd>→</kbd> 切换镜头
-          <kbd>Enter</kbd> 确认
-          <kbd>R</kbd> 重新生成
-          <kbd>Esc</kbd> 关闭
-        </span>
-        <n-button size="small" @click="close">关闭</n-button>
-      </div>
-    </template>
+  </n-modal>
+
+  <!-- 资产选择器 -->
+  <n-modal
+    v-model:show="assetPickerVisible"
+    preset="card"
+    :title="`选择参考图（槽位 ${assetPickerSlot}）`"
+    closable
+    :bordered="false"
+    :style="{ width: 'min(560px, 92vw)' }"
+  >
+    <n-space vertical>
+      <n-input
+        v-model:value="assetPickerKeyword"
+        placeholder="搜索资产名称"
+        clearable
+        size="small"
+        @update:value="loadPickerItems"
+      />
+      <n-spin :show="assetPickerLoading || assetUploading">
+        <div v-if="assetPickerItems.length" class="picker-list">
+          <div
+            v-for="a in assetPickerItems"
+            :key="a.id"
+            class="picker-item"
+            @click="pickAndClose(a)"
+          >
+            <n-image
+              :src="`/api/assets/${a.id}/file?thumb=true`"
+              :width="44"
+              :height="44"
+              object-fit="cover"
+              :img-props="{ style: 'width:44px;height:44px;object-fit:cover;border-radius:var(--radius)' }"
+            />
+            <div class="picker-meta">
+              <div class="picker-name">{{ a.name || a.id }}</div>
+              <div class="picker-sub">{{ a.asset_type }} · v{{ a.version }}</div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="picker-empty">没有匹配的资产</div>
+      </n-spin>
+      <n-upload
+        :show-file-list="false"
+        accept="image/*"
+        :custom-request="(opt: any) => uploadRefImage(opt.file.file as File)"
+      >
+        <n-button size="small" secondary :loading="assetUploading">本地上传参考图</n-button>
+      </n-upload>
+    </n-space>
   </n-modal>
 </template>
 
 <style scoped>
-.detail-grid {
-  display: grid;
-  grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
-  gap: var(--sp-6);
-  align-items: start;
+.dg {
+  display: flex;
+  flex-direction: column;
 }
-.detail-preview {
-  position: sticky;
-  top: 0;
-}
-.detail-body {
+.dg-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
   min-width: 0;
 }
-.modal-foot {
+.dg-sec {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
 }
-.foot-keys {
+.dg-sec:first-child {
+  padding-top: 0;
+}
+.dg-sec.is-last {
+  border-bottom: none;
+  padding-bottom: 0;
+  align-items: flex-start;
+}
+.dg-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.dg-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+.dg-row {
   display: flex;
-  align-items: center;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--sp-1);
+}
+.dg-note {
   font-size: 12px;
   color: var(--text-tertiary);
 }
-kbd {
-  padding: 0 5px;
-  margin-right: 2px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 17px;
-  color: var(--text-secondary);
+.dg-video {
+  width: 100%;
+}
+.dg-video-el {
+  width: 100%;
+  max-height: 360px;
+  border-radius: var(--radius-lg);
+  background: #000;
+}
+.dg-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  font-size: 13px;
+  color: var(--text-tertiary);
   background: var(--bg-sunken);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-lg);
 }
-/* 弹窗标题接入页面衬线标题体系 */
+
+/* 参考图 */
+.rf-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.rf-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.rf-preview {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+.rf-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.rf-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.rf-meta {
+  flex: 1;
+  min-width: 0;
+}
+.rf-slot {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.rf-required {
+  color: var(--state-error);
+  margin-left: 2px;
+}
+.rf-actions {
+  flex: none;
+  display: flex;
+  gap: var(--sp-1);
+}
+.rf-none {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: var(--sp-3) 0;
+  text-align: center;
+}
+
+/* 资产选择器 */
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.picker-item:hover {
+  border-color: var(--brand-line);
+  background: var(--bg-elevated);
+}
+.picker-meta {
+  flex: 1;
+  min-width: 0;
+}
+.picker-name {
+  font-size: 13px;
+}
+.picker-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.picker-empty {
+  padding: var(--sp-6) 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
 :deep(.n-card-header__main) {
   font-family: var(--font-display);
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.01em;
 }
-@media (max-width: 768px) {
-  .detail-grid {
-    grid-template-columns: 1fr;
-    gap: var(--sp-4);
-  }
-  .detail-preview {
-    position: static;
-  }
-  .modal-foot {
-    flex-wrap: wrap;
-  }
-}
+
 </style>

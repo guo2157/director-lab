@@ -1,4 +1,4 @@
-﻿"""生成进度接口：把「正在生成什么 / 批量进度 / 是否全部生成完」聚合到一次查询。
+"""生成进度接口：把「正在生成什么 / 批量进度 / 是否全部生成完」聚合到一次查询。
 
 API.md §生成进度：
 - GET /api/projects/{id}/asset-generation-progress
@@ -252,15 +252,17 @@ def keyframe_generation_progress(
     if db.get(Project, project_id) is None:
         raise errors.project_not_found()
 
+    # 逐镜人工确认（keyframe_confirmed）已取消：进度只反映产物是否生成，
+    # 不再查询确认标记，也不返回 confirmed / all_confirmed 统计。
     rows = (
-        db.query(Shot.id, Shot.seq, Shot.episode, Shot.keyframe_confirmed,
+        db.query(Shot.id, Shot.seq, Shot.episode,
                  Scene.id, Scene.title, Scene.seq)
         .join(Scene, Shot.scene_id == Scene.id)
         .filter(Scene.project_id == project_id)
         .order_by(Shot.episode, Scene.seq, Shot.seq)
         .all()
     )
-    scene_ids = sorted({row[4] for row in rows})
+    scene_ids = sorted({row[3] for row in rows})
 
     # 当前有效分镜图：一次性取回后回填，避免逐镜查询
     current_shots: set[str] = set()
@@ -286,16 +288,15 @@ def keyframe_generation_progress(
 
     total = len(rows)
     with_keyframe = sum(1 for row in rows if row[0] in current_shots)
-    confirmed = sum(1 for row in rows if row[0] in current_shots and row[3])
 
     shot_meta = {
         row[0]: {
             "shot_id": row[0],
             "seq": row[1],
             "episode": row[2],
-            "scene_id": row[4],
-            "scene_title": row[5],
-            "scene_seq": row[6],
+            "scene_id": row[3],
+            "scene_title": row[4],
+            "scene_seq": row[5],
             "has_keyframe": row[0] in current_shots,
         }
         for row in rows
@@ -373,10 +374,8 @@ def keyframe_generation_progress(
         "total": total,
         "with_keyframe": with_keyframe,
         "done": with_keyframe,
-        "confirmed": confirmed,
         "percent": (round(with_keyframe / total * 100) if total else 0),
         "all_done": total > 0 and with_keyframe == total,
-        "all_confirmed": total > 0 and confirmed == total,
         "started": with_keyframe > 0 or bool(inflight_jobs),
         "inflight_count": len(inflight),
         "inflight_queued": sum(1 for j in inflight if j["status"] == "queued"),
@@ -387,6 +386,46 @@ def keyframe_generation_progress(
         "has_inflight": bool(inflight),
         "last_completed_at": _iso(last_done_job.finished_at if last_done_job else None),
     }
+
+
+@router.get("/{project_id}/stage-readiness/{stage}")
+def stage_readiness(project_id: str, stage: str, db: Session = Depends(get_db)) -> dict:
+    """统一阶段就绪检查：资产库 / 分镜图 / 分镜视频 / 合成导出。
+
+    - assets：资产库 → 分镜图，校验必需角色/场景/必需道具图片是否真实生成完成
+      （内部复用 assets_gate，与后端生成门禁同口径）；
+    - storyboard_images / storyboard_videos / compose：镜头级产物就绪判定。
+
+    前端点击阶段跳转按钮时先查本接口：未就绪则展示阻断镜头明细，
+    已就绪才弹出确认窗口；确认后前端再查一次（防止弹窗期间状态变化）。
+
+    与进度接口的区别：进度接口回答「做到哪了」（含在途与失败统计），
+    本接口回答「能不能进入下一阶段」——判定口径是当前有效产物 + 文件真实存在，
+    不看任务历史，也不看任何人工审核状态。
+    """
+    from app.services.stage_readiness import (
+        STAGE_ASSETS,
+        STAGE_COMPOSE,
+        STAGE_STORYBOARD_IMAGES,
+        STAGE_STORYBOARD_VIDEOS,
+        check_stage_readiness,
+    )
+
+    allowed = (
+        STAGE_ASSETS,
+        STAGE_STORYBOARD_IMAGES,
+        STAGE_STORYBOARD_VIDEOS,
+        STAGE_COMPOSE,
+    )
+    if stage not in allowed:
+        raise errors.AppError(
+            "invalid_request",
+            "stage 必须为 assets / storyboard_images / storyboard_videos / compose",
+            400,
+        )
+    if db.get(Project, project_id) is None:
+        raise errors.project_not_found()
+    return check_stage_readiness(db, project_id, stage).to_dict()
 
 
 @router.get("/{project_id}/clip-generation-progress")

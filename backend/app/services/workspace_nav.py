@@ -32,7 +32,6 @@ NAV_PAGE_WHITELIST: set[str] = {
     "projects",
     "director",
     "script",
-    "estimate",
     "parse",
     "storyboard-images",
     "storyboard",
@@ -40,6 +39,8 @@ NAV_PAGE_WHITELIST: set[str] = {
     "compose",
     # "jobs" 已下线（2026-11-19）：任务中心页面移除，任务进度改在产出页面内联展示。
     # 保留在 Agent 白名单里会让 Agent 声称「已切到任务页」而前端只能落到作品列表。
+    # "estimate" 同步移除（2026-11-20）：评估页早已下线，解析独立成制作节点后
+    # 也没有「评估」这一步，白名单里留着会让 Agent 导航到一个 404 路由。
     "settings",
     "series-list",
 }
@@ -47,7 +48,6 @@ NAV_PAGE_WHITELIST: set[str] = {
 # 需要项目上下文才能导航的路由名
 PROJECT_REQUIRED_PAGES: set[str] = {
     "script",
-    "estimate",
     "parse",
     "storyboard-images",
     "storyboard",
@@ -60,7 +60,9 @@ PROJECT_REQUIRED_PAGES: set[str] = {
 
 NAVIGATE_KEYWORD_TO_ROUTE: dict[str, str] = {
     "剧本": "script",
-    "评估": "estimate",
+    # 「评估」不再映射到已下线的 estimate 页：评估已并入解析（script-agent 一体化完成），
+    # 用户说「评估剧本」时送他去解析页才是真实可执行的动作。
+    "评估": "parse",
     "解析": "parse",
     "分镜图": "storyboard-images",
     "分镜": "storyboard",

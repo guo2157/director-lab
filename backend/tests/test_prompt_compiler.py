@@ -283,7 +283,12 @@ def test_compile_asset_without_identity_is_blocked(db, tmp_path, monkeypatch):
 
 
 # ---------- 分镜图槽位与门禁 ----------
-def test_storyboard_blocked_without_asset_review(db, tmp_path):
+def test_storyboard_not_blocked_by_asset_review_status(db, tmp_path):
+    """资产审核闸口已取消：assets_review_status=pending 不再阻断提示词编译。
+
+    资产可用性改由 assets_gate 的产物校验（指针/版本/文件）决定，
+    提示词编译阶段不再读审核状态。
+    """
     from app.services.prompt_compiler import compile_storyboard_image
 
     project = _project(db, tmp_path, review="pending")
@@ -292,8 +297,8 @@ def test_storyboard_blocked_without_asset_review(db, tmp_path):
     shot = _shot(db, scene, character)
     compiled = compile_storyboard_image(db, shot.id, workflow=_workflow(
         {"reference_slots": ["ref_identity", "ref_scene"]}))
-    assert compiled.status == "needs_review"
-    assert any(i["code"] == "assets_review_pending" for i in compiled.blocking_issues)
+    assert not any(i["code"] == "assets_review_pending" for i in compiled.blocking_issues)
+    assert not any(i["code"] == "assets_review_rejected" for i in compiled.blocking_issues)
 
 
 def test_storyboard_slots_map_to_approved_assets(db, tmp_path):
@@ -366,7 +371,8 @@ def test_storyboard_blocks_slot_capacity_exceeded(db, tmp_path):
 
 
 # ---------- 视频连续性与校验 ----------
-def test_shot_video_blocked_without_confirmed_storyboard(db, tmp_path):
+def test_shot_video_blocked_without_storyboard_asset(db, tmp_path):
+    """逐镜确认（keyframe_confirmed）已取消：视频编译只看是否存在当前有效分镜图。"""
     from app.services.prompt_compiler import compile_shot_video
 
     project = _project(db, tmp_path)
@@ -375,7 +381,9 @@ def test_shot_video_blocked_without_confirmed_storyboard(db, tmp_path):
     compiled = compile_shot_video(db, shot.id, workflow=_workflow(
         {"fps": 24, "reference_slots": ["ref_prev_frame"]}))
     assert compiled.status == "needs_review"
-    assert any(i["code"] == "storyboard_not_approved" for i in compiled.blocking_issues)
+    # 阻断原因从「未确认」变为「缺少分镜图产物」
+    assert not any(i["code"] == "storyboard_not_approved" for i in compiled.blocking_issues)
+    assert any(i["code"] == "storyboard_asset_missing" for i in compiled.blocking_issues)
 
 
 def test_shot_video_without_reference_uses_text_only_skeleton(db, tmp_path):

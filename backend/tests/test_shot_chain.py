@@ -105,6 +105,38 @@ def _make_video_workflow(client, name="v-wf"):
     return r.json()
 
 
+
+def _seed_keyframe(db, pid, shot_id, tmp_path, validity="current"):
+    """为镜头构造真实有效分镜图产物（含来源任务 succeeded + 文件存在）。
+
+    2026-11 流程简化后，生成 clip 的闸口从「keyframe_confirmed 标记」改为
+    「当前有效分镜图 + 文件真实存在」，因此需要真实产物，不能只置标记。
+    """
+    from app.models import Job, ids
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    job = Job(
+        id=ids.job_id(), project_id=pid, shot_id=shot_id,
+        job_type="generate_keyframe", status="succeeded",
+        created_at=now, finished_at=now,
+    )
+    db.add(job)
+    db.flush()
+    media = tmp_path / "media"
+    media.mkdir(exist_ok=True)
+    f = media / f"kf_{ids.asset_id()}.png"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    a = Asset(
+        id=ids.asset_id(), project_id=pid, asset_type="keyframe",
+        name=f"{shot_id}-keyframe", version=1, file_path=str(f),
+        validity=validity, source_job_id=job.id,
+    )
+    db.add(a)
+    db.commit()
+    return a.id
+
+
 # ── shot_chain 单元测试 ───────────────────────────────────────────
 
 
@@ -198,16 +230,21 @@ def test_invalidate_clip_retains_keyframe_confirmed(client, tmp_path):
         shot1 = s.get(Shot, s1["id"])
         shot1.last_frame_asset_id = "ta-clip"
         shot1.keyframe_confirmed = True
+        _seed_keyframe(s, pid, shot1.id, tmp_path)
         s.commit()
 
         from app.services.shot_chain import invalidate_chain_after_regenerate
         info = invalidate_chain_after_regenerate(s, shot1, reset_keyframe_confirmed=False)
-        assert info["cleared_last_frame"] is True
+        # 实现契约：本镜尾帧不置 superseded（重新生成成功后原地覆盖，
+        # 失败时下游仍需旧尾帧串联），因此 cleared_last_frame 恒为 False。
+        assert info["cleared_last_frame"] is False
         assert info["keyframe_confirmed_reset"] is False
         assert s2["id"] in info["downstream_shot_ids"]
         s.refresh(shot1)
         assert shot1.keyframe_confirmed is True
-        assert s.get(Asset, "ta-clip").validity == "superseded"
+        # 实现契约（见 invalidate_chain_after_regenerate docstring）：
+        # 本镜尾帧不置 superseded —— 每镜只保留一张尾帧，重新生成成功后原地覆盖。
+        assert s.get(Asset, "ta-clip").validity == "current"
     finally:
         s.close()
 
@@ -230,16 +267,19 @@ def test_invalidate_keyframe_resets_confirmed(client, tmp_path):
         shot1 = s.get(Shot, s1["id"])
         shot1.last_frame_asset_id = "ta-kf"
         shot1.keyframe_confirmed = True
+        _seed_keyframe(s, pid, shot1.id, tmp_path)
         s.commit()
 
         from app.services.shot_chain import invalidate_chain_after_regenerate
         info = invalidate_chain_after_regenerate(s, shot1, reset_keyframe_confirmed=True)
-        assert info["cleared_last_frame"] is True
+        # 同上：keyframe 重做也不清理本镜尾帧（尾帧在 clip 生成时原地覆盖）
+        assert info["cleared_last_frame"] is False
         assert info["keyframe_confirmed_reset"] is True
         s.flush()  # 确保 pending 修改写入 DB 后再 reload（autoflush=False）
         s.refresh(shot1)
         assert shot1.keyframe_confirmed is False
-        assert s.get(Asset, "ta-kf").validity == "superseded"
+        # 同上：尾帧保留（不置 superseded），与 invalidate_chain_after_regenerate 契约一致
+        assert s.get(Asset, "ta-kf").validity == "current"
     finally:
         s.close()
 
@@ -264,6 +304,8 @@ def test_clip_injects_ref_prev_frame_for_non_first_shot(client, tmp_path):
         s.add(asset)
         s.get(Shot, s1["id"]).last_frame_asset_id = "ta-inj"
         s.get(Shot, s2["id"]).keyframe_confirmed = True
+        # 新闸口要求真实有效分镜图，不能只置确认标记
+        _seed_keyframe(s, pid, s2["id"], tmp_path)
         s.commit()
     finally:
         s.close()
@@ -288,6 +330,7 @@ def test_requires_prev_frame_missing_returns_409(client, tmp_path):
     try:
         s.get(Shot, s2["id"]).requires_prev_frame = True
         s.get(Shot, s2["id"]).keyframe_confirmed = True
+        _seed_keyframe(s, pid, s2["id"], tmp_path)
         s.commit()
     finally:
         s.close()
@@ -301,7 +344,7 @@ def test_requires_prev_frame_missing_returns_409(client, tmp_path):
     assert r.json()["detail"]["code"] == "prev_frame_missing"
 
 
-def test_first_shot_skips_prev_frame(client):
+def test_first_shot_skips_prev_frame(client, tmp_path):
     """集首镜生成 clip 不注入尾帧，reason 标记为连续性流程接管。"""
     pid = _make_project(client)
     scn = client.post("/api/scenes", json={
@@ -315,6 +358,7 @@ def test_first_shot_skips_prev_frame(client):
     s = _session()
     try:
         s.get(Shot, s1["id"]).keyframe_confirmed = True
+        _seed_keyframe(s, pid, s1["id"], tmp_path)
         s.commit()
     finally:
         s.close()
@@ -339,6 +383,7 @@ def test_batch_clip_precheck_blocks_all_or_none(client, tmp_path):
         s.get(Shot, shots[1]["id"]).requires_prev_frame = True
         for sh in shots:
             s.get(Shot, sh["id"]).keyframe_confirmed = True
+            _seed_keyframe(s, pid, sh["id"], tmp_path)
         s.commit()
     finally:
         s.close()
@@ -351,10 +396,11 @@ def test_batch_clip_precheck_blocks_all_or_none(client, tmp_path):
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "prev_frame_missing"
 
-    # 确认没有任务被创建（全量拦截，无部分入队）
+    # 确认没有 clip 任务被创建（全量拦截，无部分入队）。
+    # 注意只统计 generate_clip：夹具为通过分镜图闸口已预置了 generate_keyframe 成功任务。
     s2 = _session()
     try:
-        assert s2.query(Job).count() == 0
+        assert s2.query(Job).filter(Job.job_type == "generate_clip").count() == 0
     finally:
         s2.close()
 
@@ -377,6 +423,7 @@ def test_regenerate_clip_persists_chain_invalidation(client, tmp_path):
         shot1 = s.get(Shot, s1["id"])
         shot1.last_frame_asset_id = "ta-regen"
         shot1.keyframe_confirmed = True
+        _seed_keyframe(s, pid, shot1.id, tmp_path)
         s.commit()
     finally:
         s.close()
@@ -389,12 +436,13 @@ def test_regenerate_clip_persists_chain_invalidation(client, tmp_path):
     assert r.status_code == 202, r.text
     eff = r.json().get("effective_inputs", {})
     ci = eff.get("chain_invalidation", {})
-    assert ci.get("cleared_last_frame") is True
+    # 本镜尾帧保留（不置 superseded），与 invalidate_chain_after_regenerate 契约一致
+    assert ci.get("cleared_last_frame") is False
     assert ci.get("keyframe_confirmed_reset") is False
     assert s2["id"] in ci.get("downstream_shot_ids", [])
 
 
-def test_prev_frame_snapshot_always_recorded_for_clip(client):
+def test_prev_frame_snapshot_always_recorded_for_clip(client, tmp_path):
     """clip 生成无论注入成功与否都在 input_snapshot 记录 prev_frame 判定。"""
     pid = _make_project(client)
     _, s1, s2 = _make_two_shots(client, pid)
@@ -402,6 +450,7 @@ def test_prev_frame_snapshot_always_recorded_for_clip(client):
     s = _session()
     try:
         s.get(Shot, s2["id"]).keyframe_confirmed = True
+        _seed_keyframe(s, pid, s2["id"], tmp_path)
         s.commit()
     finally:
         s.close()

@@ -39,16 +39,19 @@ def db(tmp_path, monkeypatch):
 
 
 def test_pipeline_nodes_ordered():
-    """流程节点链有序且覆盖完整制作流程，审核闸口节点正确标记。"""
+    """流程节点链有序且覆盖完整制作流程。
+
+    2026-11 流程简化：资产库/分镜图/分镜看板三处阶段人工审核节点已删除，
+    节点链只剩「生成 → 生成 → 生成 → 合成」，不再有 review_gate 节点。
+    """
     from app.services.pipeline_state import PIPELINE_NODES
     keys = [n.key for n in PIPELINE_NODES]
     assert keys == [
         "create_project", "save_script", "analyze_script", "generate_assets",
-        "review_assets", "generate_keyframes", "review_keyframes",
-        "generate_clips", "review_clips", "compose",
+        "generate_keyframes", "generate_clips", "compose",
     ]
     gates = [n.key for n in PIPELINE_NODES if n.review_gate]
-    assert gates == ["review_assets", "review_keyframes", "review_clips"]
+    assert gates == []
 
 
 def test_get_pipeline_status_empty_project(db):
@@ -62,10 +65,10 @@ def test_get_pipeline_status_empty_project(db):
 
 
 def test_gate_blocks_early_actions(db):
-    """状态机门禁：空项目不能审核资产/确认分镜/合成/导出。"""
+    """状态机门禁：空项目不能生成分镜图/合成/导出。"""
     from app.services.pipeline_state import PipelineStateError, assert_action_allowed
     session, pid = db
-    for action in ("review_assets", "confirm_keyframe", "compose_video", "export_video"):
+    for action in ("generate_keyframe", "generate_clip", "compose_video", "export_video"):
         with pytest.raises(PipelineStateError) as exc:
             assert_action_allowed(session, pid, action)
         assert exc.value.required_node
@@ -89,13 +92,11 @@ def test_save_and_analyze_script_flow(db):
     assert r2.data["job_status"] == "queued"
 
 
-def test_review_assets_requires_assets(db):
-    """资产审核：无资产时 approve 被资产门禁阻断（不跳过审核闸口）。"""
-    from app.services.pipeline_tools import execute_pipeline_tool
-    session, pid = db
-    execute_pipeline_tool(session, "save_script", project_id=pid, text="第一幕：少年离家。")
-    r = execute_pipeline_tool(session, "review_assets", project_id=pid, action="approve")
-    assert not r.ok
+def test_review_assets_tool_removed(db):
+    """资产审核工具已删除：流程工具注册表里不再有 review_assets / confirm_keyframes。"""
+    from app.services.pipeline_tools import PIPELINE_TOOL_REGISTRY
+    assert "review_assets" not in PIPELINE_TOOL_REGISTRY
+    assert "confirm_keyframes" not in PIPELINE_TOOL_REGISTRY
 
 
 def test_compose_requires_approval(db):
@@ -139,8 +140,8 @@ def test_pipeline_tool_specs_metadata():
     from app.services.pipeline_tools import pipeline_tool_specs
     specs = {s["name"]: s for s in pipeline_tool_specs()}
     assert set(specs) == {
-        "create_project", "save_script", "analyze_script", "review_assets",
-        "confirm_keyframes", "compose_video", "export_video", "get_pipeline_status",
+        "create_project", "save_script", "analyze_script",
+        "compose_video", "export_video", "get_pipeline_status",
         # 异步解析链路：候选解析版本落库闸口 + 解析进度查询（只读）
         "confirm_parse", "query_parse_status",
     }

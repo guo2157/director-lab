@@ -446,8 +446,8 @@ _STAGE_GUIDANCE = {
     "parse": "剧本分析尚未产出镜头：请先完成剧本分析（或等待进行中的分析任务完成）。",
     "characters": "项目还有角色缺少定妆图：请先在资产库生成角色定妆图（对话中给出角色 ID，chr_ 开头，即可提交生成申请）。",
     "scenes": "项目还有场景缺少基准图：请先在资产库生成场景基准图（对话中给出场景 ID，scn_ 开头，即可提交生成申请）。",
-    "assets_review": "公共资产尚未通过人工审核：请先在资产库确认资产无误并通过审核，之后才能生成分镜图。",
-    "keyframes": "项目还有分镜图未生成或未人工确认：可以先对我说『为第 N 镜生成关键帧』（或给出镜头 ID，sht_ 开头）生成分镜图，人工确认后再生成视频。",
+    "assets_review": "公共资产已生成完成，可直接生成分镜图（阶段人工审核已取消）。",
+    "keyframes": "项目还有分镜图未生成：可以先对我说『为第 N 镜生成关键帧』（或给出镜头 ID，sht_ 开头）生成分镜图，全部出图后即可生成视频。",
     "clips": "分镜图已就绪：可以直接对我说『为第 N 镜生成视频』，或给出镜头 ID（sht_ 开头）。",
     "audio": "视频已生成，还有对白/旁白镜头缺少音频：可对我说『为第 N 镜生成配音』。",
     "compose": "镜头产物已就绪：可到合成页进行成片合成。",
@@ -771,10 +771,9 @@ def _handle_pipeline_action(
             st = get_pipeline_status(db, session.project_id)
         except Exception:
             return ("项目状态查询失败，请确认项目是否存在。", None)
+        # 阶段人工审核已取消（资产库/分镜图/分镜看板三处审核闸口删除），
+        # 泛化确认只剩「分析完成 → 确认解析结果」一个真实闸口。
         node_review_map = {
-            "review_assets": "review_assets",
-            "review_keyframes": "confirm_keyframes",
-            # 分析完成节点：泛化确认（没问题/确认无误）落为确认解析结果
             "analyze_script": "confirm_parse",
         }
         action = node_review_map.get(st.node_key)
@@ -861,12 +860,6 @@ def _handle_pipeline_action(
     if action == "analyze_script":
         # 解析是异步耗时任务：把发起方会话带进去，完成后据此把结果回推到本对话
         kwargs["session_id"] = session_id
-    if action == "review_assets":
-        # 资产库审核：ReviewAssetsInput 必填 action（approve/reject）。
-        # 意图路由命中『资产审核通过/资产没问题』即视为通过；
-        # 消息含驳回表述时落 reject，避免缺参报 tool_invalid_args。
-        _neg = any(w in text for w in ("驳回", "不通过", "有问题", "打回", "返工"))
-        kwargs["action"] = "reject" if _neg else "approve"
     if action == "save_script":
         # 保存剧本：从消息中提取剧本文本（『保存剧本』指令之后的部分，允许冒号/换行分隔）。
         # 无剧本文本时不猜测执行，明确要求用户提供（工具入参 text 必填）。

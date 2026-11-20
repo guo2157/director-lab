@@ -115,13 +115,14 @@ def derive_progress(db: Session, project: Project) -> tuple[int, int, str]:
     if missing_baseline > 0:
         return shot_total, shot_done, "scenes"
 
-    # 规则 5.5：公共资产已齐全，但尚未通过人工审核（D-23 资产审核闸口）
-    # 资产库出图后必须人工确认，未通过前不得进入分镜图生成
-    if (project.assets_review_status or "pending") != "approved":
-        return shot_total, shot_done, "assets_review"
-    # 规则 6：存在分镜图未完成或未人工确认的镜头（D-13 静图先行闸口）
+    # 规则 5.5 已删除：公共资产齐全后不再需要人工审核，直接进入分镜图阶段。
+    # 阶段审核机制取消（2026-11），assets_review 阶段不再由 derive_progress 产出
+    # （枚举值保留在 STAGE_ORDER 中兼容旧数据与前端映射）。
+    #
+    # 规则 6：存在分镜图未生成的镜头。逐镜人工确认（keyframe_confirmed）已取消，
+    # 只看「这一镜是否已有当前有效分镜图」。
     for s in shots:
-        if not _shot_has_current_asset(db, s.id, "keyframe") or not s.keyframe_confirmed:
+        if not _shot_has_current_asset(db, s.id, "keyframe"):
             return shot_total, shot_done, "keyframes"
 
     # 规则 7：分镜图全部完成，但存在视频未完成的镜头

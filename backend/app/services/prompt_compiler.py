@@ -862,16 +862,6 @@ def _shot_props(db: Session, shot: Shot, project_id: str) -> list[Prop]:
     return [p for p in rows if p.name in names]
 
 
-def _review_gate(project: Project | None) -> dict | None:
-    if project is None:
-        return _issue("project_not_found", "项目不存在")
-    if project.assets_review_status != "approved":
-        return _issue("assets_review_pending",
-                      "公共资产尚未审核通过，禁止生成分镜图",
-                      assets_review_status=project.assets_review_status)
-    return None
-
-
 def _append_slot(slots: list[dict], declared_param_map: dict, param: str, *,
                  entity_id: str, entity_type: str, asset: Asset, role: str,
                  blocking: list[dict], asset_label: str) -> None:
@@ -1149,9 +1139,8 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
 
     blocking: list[dict] = []
     warnings: list[str] = []
-    gate_issue = _review_gate(project)
-    if gate_issue:
-        blocking.append(gate_issue)
+    # 人工审核闸口已取消（2026-11）：资产是否可用由 assets_gate 的产物校验决定，
+    # 提示词编译阶段不再因 assets_review_status 阻断。
 
     caps = _capabilities(workflow)
     declared = _declared_slots(caps)
@@ -1799,8 +1788,8 @@ def compile_shot_video(db: Session, shot_id: str, *,
     caps = _capabilities(workflow)
     declared_map = {item["param"]: item for item in _declared_slots(caps)}
 
-    if not shot.keyframe_confirmed:
-        blocking.append(_issue("storyboard_not_approved", "分镜图尚未确认，禁止生成分镜视频"))
+    # 逐镜人工确认（keyframe_confirmed）已取消：视频生成只看是否存在当前有效分镜图，
+    # 下面 storyboard_asset_missing / storyboard_file_missing 已覆盖该判定。
 
     # Asset 无 shot_id 字段（见 DATABASE.md），镜头产物经 source_job_id → job.shot_id 关联
     storyboard = (db.query(Asset)

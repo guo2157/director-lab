@@ -86,7 +86,7 @@ def verify_execution_result(
     区分两类执行结果：
     - 异步 Job 类（run_generate / 返工 / 解析 / 合成 / 导出）：返回含 job_id，
       必须验证库中真实 Job（存在/状态合法/项目归属）
-    - 同步状态变更类（create_project / save_script / review_assets / confirm_keyframes）：
+    - 同步状态变更类（create_project / save_script / confirm_parse）：
       直接变更数据库状态后返回，不含 job_id，透传不误报
     """
     if isinstance(result_data, dict) and result_data.get("job_id"):

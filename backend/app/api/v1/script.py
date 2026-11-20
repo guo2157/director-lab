@@ -226,12 +226,16 @@ def evaluate_project_script(project_id: str, payload: dict, db: Session = Depend
             text,
             episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
             max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch),
+            settings=get_settings(),
         )
     except LLMError as e:
         raise errors.AppError(e.code, e.message, 502)
     # LLM 深度评估（短事务外）
     try:
-        report = evaluate_script(text, estimate_data, p.settings or {})
+        report = evaluate_script(
+            text, estimate_data, p.settings or {},
+            settings=get_settings(),
+        )
     except LLMError as e:
         raise errors.AppError(e.code, e.message, 502)
     return {
@@ -329,6 +333,12 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, text)
+    # 输入预算预检（分级放行）：同 create_parse，单集放不下才拒绝，
+    # 仅整本超预算的剧本放行并由分段大纲处理
+    from app.integrations.token_estimate import precheck_input_budget
+    _pre = precheck_input_budget(text, settings=get_settings(), allow_segmented=True)
+    if not _pre["ok"]:
+        raise errors.AppError(_pre["code"], _pre["message"], 400)
     episode_start = int(payload.get("episode_start") or 1)
     if episode_start < 1:
         raise errors.invalid_request("episode_start 不得小于 1")
@@ -360,6 +370,8 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
         params={
             "script_version_id": sv.id,
             "episode_start": episode_start,
+            # 建任务时的预检结论：full=整本送大纲，segmented=按集分窗口
+            "outline_mode": _pre["outline_mode"],
         },
         status="queued", created_at=_now(),
     )
@@ -428,6 +440,14 @@ def create_parse(project_id: str, payload: ParseCreate,
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, payload.text)
+    # 输入预算预检（分级放行）：
+    # - 单集正文都放不下 → 建任务前直接 400（任何切分都救不回来，避免
+    #   用户看到一个「排队 → 失败」的无效任务）
+    # - 仅整本超预算、单集放得下 → 放行，由分段大纲按集切窗口处理
+    from app.integrations.token_estimate import precheck_input_budget
+    _pre = precheck_input_budget(payload.text, settings=get_settings(), allow_segmented=True)
+    if not _pre["ok"]:
+        raise errors.AppError(_pre["code"], _pre["message"], 400)
     # 解析区间归一化：episode_count/episode_end 可选（LLM parser 自主分析集数）
     # 未提供时默认从第1集开始，episode_count 传 None 由 parser 自行确定
     if payload.episode_count is not None and payload.episode_end is not None:
@@ -444,6 +464,8 @@ def create_parse(project_id: str, payload: ParseCreate,
             "script_version_id": sv.id,
             "episode_start": payload.episode_start,
             "episode_count": episode_count,
+            # 建任务时的预检结论：full=整本送大纲，segmented=按集分窗口
+            "outline_mode": _pre["outline_mode"],
         },
         status="queued", created_at=_now(),
     )

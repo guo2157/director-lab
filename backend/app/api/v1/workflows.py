@@ -160,6 +160,16 @@ _SLOT_SELECTION_RULES: dict[str, dict] = {
     },
 }
 
+# 业务槽位 → 推荐默认工作流（按内置工作流名声明，不依赖列表排序巧合）。
+# 同一 workflow_type 下 is_default 只能有一个（图片类既要有纯文生图又要有图生图），
+# 因此「各页面默认选哪个」必须按槽位声明，而不是复用 is_default。
+_SLOT_DEFAULT_WORKFLOWS: dict[str, str] = {
+    'asset_image': 'wf_image_t2i_qwen21_turbo',
+    'storyboard_image': 'wf_image_ref_qwen21_multi',
+    # 「极速5秒图生视频」已按用户要求从库中移除，默认项改指标准 5 秒版
+    'video': 'wf_video_h3_ref2va_std_5s',
+}
+
 
 def _slot_selection_caps(wf: Workflow) -> dict:
     """归一化能力；definition 缺失时退回原始 capabilities（不虚构能力）。"""
@@ -211,11 +221,14 @@ def list_workflow_candidates(
         .order_by(Workflow.is_default.desc(), Workflow.is_builtin.desc(), Workflow.name)
         .all()
     )
+    slot_default = _SLOT_DEFAULT_WORKFLOWS.get(slot)
     items: list[dict] = []
     for wf in rows:
         caps = _slot_selection_caps(wf)
         usable, reasons = _slot_selection_check(caps, rule)
         items.append({
+            # 推荐默认项：只有真实可用的工作流才会被推荐，避免默认值指向不可用模型
+            'is_recommended': usable and wf.name == slot_default,
             'id': wf.id,
             'name': wf.name,
             'description': wf.description or wf.name,
@@ -231,6 +244,7 @@ def list_workflow_candidates(
     return {
         'slot': slot,
         'workflow_type': rule['workflow_type'],
+        'default_workflow_name': slot_default,
         'items': items,
         'usable_count': sum(1 for i in items if i['usable']),
     }

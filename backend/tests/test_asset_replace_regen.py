@@ -1,4 +1,9 @@
-"""资产上传 / 替换 / 重新生成接口回归测试（Mock 渲染，不依赖外部 ComfyUI）。"""
+"""资产上传 / 替换 / 重新生成接口回归测试（Mock 渲染，不依赖外部 ComfyUI）。
+
+锁定功能已于 2026-11 整体废弃（lock/unlock 端点删除、Asset.locked 恒为 False），
+原本的 asset_locked 冲突用例已迁移为 test_lock_gate.py 中的反向断言：
+历史 locked=True 的资产不再阻止替换 / 重新生成 / 删除。
+"""
 import json
 import pytest
 from fastapi.testclient import TestClient
@@ -124,18 +129,6 @@ def test_replace_overwrites_in_place(client):
     assert Path(new["file_path"]).read_bytes() == PNG
 
 
-def test_replace_locked_asset_conflicts(client):
-    pid = _project(client)
-    first = _upload(client, pid, "prop").json()
-    client.post(f"/api/assets/{first['id']}/lock")
-    r = client.post(
-        f"/api/assets/{first['id']}/replace",
-        files={"file": ("b.png", PNG, "image/png")},
-    )
-    assert r.status_code == 409, r.text
-    assert r.json()["detail"]["code"] == "asset_locked"
-
-
 def test_replace_rejects_type_mismatch(client):
     pid = _project(client)
     first = _upload(client, pid, "scene", name="操场").json()
@@ -207,19 +200,4 @@ def test_regenerate_submits_job_with_prompt(client):
     db.close()
 
 
-def test_regenerate_locked_conflicts(client):
-    _image_workflow(client)
-    pid = _project(client)
-    ch = client.post("/api/characters", json={"project_id": pid, "name": "小刚", "appearance": "寸头"}).json()
-    asset = _upload(client, pid, "character", name="小刚").json()
-    from app.core.database import SessionLocal
-    from app.models import Character
-    db = SessionLocal()
-    obj = db.get(Character, ch["id"])
-    obj.portrait_asset_id = asset["id"]
-    db.commit()
-    db.close()
-    client.post(f"/api/assets/{asset['id']}/lock")
-    r = client.post(f"/api/assets/{asset['id']}/regenerate", json={})
-    assert r.status_code == 409, r.text
-    assert r.json()["detail"]["code"] == "asset_locked"
+

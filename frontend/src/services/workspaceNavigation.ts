@@ -48,7 +48,11 @@ export interface NavResult {
   fullPath?: string
 }
 
-/** 页面白名单 → 前端路由名映射（与后端 workspace_nav.NAV_PAGE_WHITELIST 保持一致） */
+/**
+ * 页面白名单 → 前端路由名映射（与后端 workspace_nav.NAV_PAGE_WHITELIST 保持一致）。
+ * 2026-11-20：移除已下线的 `jobs`（任务中心已删，保留会让 Agent 声称「已切到任务页」
+ * 而前端只能落到作品列表）；`estimate` 评估页同样已下线，不在此列。
+ */
 export const PAGE_ROUTES: Record<string, string> = {
   projects: 'projects',
   director: 'director',
@@ -58,7 +62,6 @@ export const PAGE_ROUTES: Record<string, string> = {
   storyboard: 'storyboard',
   assets: 'assets',
   compose: 'compose',
-  jobs: 'jobs',
   settings: 'settings',
   'series-list': 'series-list',
 }

@@ -1,21 +1,24 @@
-"""统一资产就绪门禁测试（D-23 强化）。
+"""统一资产就绪门禁测试（2026-11 流程简化后）。
 
-核心规则：所有必需角色、场景、道具均已生成完成，并且人工审核通过后，
-才允许开始分镜图生成。
+核心规则：所有必需角色、场景、道具的图片均已真实生成完成、文件有效，
+且没有正在生成的必需资产，才允许开始分镜图生成。
 
-覆盖场景（任务书 §12）：
-1. 全部生成并审核通过 → 可创建分镜图任务
-2. 缺少必需角色 → 不能创建
-3. 缺少必需场景 → 不能创建
-4. 缺少必需道具 → 不能创建
-5. 任一必需资产仍在生成 → 不能创建
-6. 任一必需资产待审核 → 不能创建
-7. 任一必需资产审核驳回 → 不能创建
-8. 资产版本失效 → 不能使用该版本生成
-9. 审核通过后重新生成 → 审核状态回退，重新拦截
-10. 直接调用后端 API（批量通道）不能绕过门禁
-11. Agent 发起的任务不能绕过门禁
-12. 执行器二次校验（入队后资产状态变化）
+**人工审核闸口已取消**：不再有 assets-review 接口、不再有
+assets_review_pending / assets_review_rejected 阻断原因。
+
+覆盖场景（任务书 §10.1）：
+1. 全部生成完成 → 放行（可打开确认弹窗）
+2. 缺少必需角色 → 拦截
+3. 缺少必需场景 → 拦截
+4. 缺少必需道具 → 拦截
+5. 缺少可选道具（anchor_required=False）→ 不拦截
+6. 必需资产仍在生成 → 拦截（assets_generating）
+7. 资产版本失效 → 拦截
+8. 资产文件不存在 → 拦截
+9. 批量通道不能绕过门禁
+10. Agent 通道不能绕过门禁
+11. 执行器二次校验（入队后资产被删除/失效）
+12. 门禁返回分项统计 summary（角色/场景/道具 total·done）
 """
 import json
 from datetime import datetime, timezone
@@ -64,8 +67,8 @@ def _make_project(client: TestClient) -> str:
     return r.json()["id"]
 
 
-def _add_entities(client: TestClient, project_id: str) -> dict:
-    """创建角色/场景/道具实体与首个镜头（镜头挂在已建场景下，避免产生第二个无基准图的场景）。"""
+def _add_entities(client: TestClient, project_id: str, *, optional_prop: bool = False) -> dict:
+    """创建角色/场景/道具实体（镜头挂在已建场景下，避免产生第二个无基准图的场景）。"""
     from app.core.database import SessionLocal
     from app.models import Character, Prop, Scene, SceneEpisode
 
@@ -74,12 +77,21 @@ def _add_entities(client: TestClient, project_id: str) -> dict:
         ch = Character(id="chr_test_0001", project_id=project_id, name="主角")
         sc = Scene(id="scn_test_0001", project_id=project_id, seq=1, title="教室")
         db.add_all([ch, sc])
-        # 场景-集出场记录：创建镜头的前置条件（shots.py 校验 SceneEpisode 存在）
         db.add(SceneEpisode(scene_id=sc.id, episode=1, seq_in_episode=1))
         pr = Prop(id="prp_test_0001", project_id=project_id, name="宝剑", anchor_required=True)
         db.add(pr)
+        out = {"character": ch.id, "scene": sc.id, "prop": pr.id}
+        if optional_prop:
+            op = Prop(
+                id="prp_test_0002",
+                project_id=project_id,
+                name="背景报纸",
+                anchor_required=False,
+            )
+            db.add(op)
+            out["optional_prop"] = op.id
         db.commit()
-        return {"character": ch.id, "scene": sc.id, "prop": pr.id}
+        return out
     finally:
         db.close()
 
@@ -102,7 +114,8 @@ def _make_workflow(client: TestClient, name: str) -> str:
     return r.json()["id"]
 
 
-def _make_asset(db, project_id: str, asset_type: str, name: str, file_path: str, validity: str = "current") -> str:
+def _make_asset(db, project_id: str, asset_type: str, name: str, file_path: str,
+                validity: str = "current") -> str:
     """直接落库一个资产并返回 id（绕过生成流程，用于门禁状态构造）。"""
     from app.models import Asset, ids
 
@@ -154,10 +167,6 @@ def _with_db(fn):
         db.close()
 
 
-def _approve_review(client: TestClient, project_id: str):
-    return client.post(f"/api/projects/{project_id}/assets-review", json={"action": "approve"})
-
-
 def _generate_keyframe(client: TestClient, shot_id: str, workflow_id: str):
     return client.post(
         f"/api/shots/{shot_id}/generate",
@@ -165,7 +174,7 @@ def _generate_keyframe(client: TestClient, shot_id: str, workflow_id: str):
     )
 
 
-# --- 场景 1：全部生成并审核通过 → 放行 ---
+# --- 场景 1：全部生成完成 → 放行 ---
 
 
 def test_gate_passes_when_all_ready(client: TestClient, tmp_path):
@@ -176,12 +185,34 @@ def test_gate_passes_when_all_ready(client: TestClient, tmp_path):
         _bind_assets(db, pid, tmp_path, entities)
 
     _with_db(_fill)
-    r = _approve_review(client, pid)
-    assert r.status_code == 200, r.text
     sid = _make_shot(client, entities["scene"])
     wf = _make_workflow(client, "gate-pass")
     r = _generate_keyframe(client, sid, wf)
     assert r.status_code == 202, r.text
+
+
+def test_gate_summary_reports_per_type_progress(client: TestClient, tmp_path):
+    """门禁结果携带分项统计：角色/场景/道具各自的 total·done，供前端展示进度。"""
+    pid = _make_project(client)
+    entities = _add_entities(client, pid, optional_prop=True)
+
+    def _fill(db):
+        _bind_assets(db, pid, tmp_path, entities, skip={"scene"})
+
+    _with_db(_fill)
+    from app.services.assets_gate import evaluate_assets_gate
+
+    def _gate(db):
+        return evaluate_assets_gate(db, pid).to_dict()
+
+    data = _with_db(_gate)
+    assert data["ready"] is False
+    assert data["summary"]["character"] == {"total": 1, "done": 1}
+    assert data["summary"]["scene"] == {"total": 1, "done": 0}
+    # 可选道具不计入必需统计（anchor_required=False）
+    assert data["summary"]["prop"] == {"total": 1, "done": 1}
+    assert data["total"] == 3 and data["done"] == 2
+    assert [b["name"] for b in data["blockers"]] == ["教室"]
 
 
 # --- 场景 2/3/4：缺少必需角色/场景/道具 → 拦截 ---
@@ -200,10 +231,6 @@ def test_gate_blocks_missing_required(client: TestClient, tmp_path, skip, expect
         _bind_assets(db, pid, tmp_path, entities, skip={skip})
 
     _with_db(_fill)
-    # 审核接口同样拦截（资产不完整时不可审核通过）
-    r = _approve_review(client, pid)
-    assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "assets_incomplete"
     sid = _make_shot(client, entities["scene"])
     wf = _make_workflow(client, f"gate-m-{expect_type}")
     r = _generate_keyframe(client, sid, wf)
@@ -213,7 +240,30 @@ def test_gate_blocks_missing_required(client: TestClient, tmp_path, skip, expect
     assert any(b["asset_type"] == expect_type and b["reason"] == "asset_missing" for b in blockers)
 
 
-# --- 场景 5：必需资产仍在生成 → 拦截 ---
+# --- 场景 5：可选道具缺失不阻断 ---
+
+
+def test_gate_ignores_optional_prop(client: TestClient, tmp_path):
+    """anchor_required=False 的道具没有图片时，不得阻断进入分镜图。"""
+    pid = _make_project(client)
+    entities = _add_entities(client, pid, optional_prop=True)
+
+    def _fill(db):
+        _bind_assets(db, pid, tmp_path, entities)
+
+    _with_db(_fill)
+    from app.services.assets_gate import evaluate_assets_gate
+
+    def _gate(db):
+        return evaluate_assets_gate(db, pid)
+
+    result = _with_db(_gate)
+    assert result.ready is True
+    # 可选道具不进入统计分母
+    assert result.summary["prop"]["total"] == 1
+
+
+# --- 场景 6：必需资产仍在生成 → 拦截 ---
 
 
 def test_gate_blocks_generating(client: TestClient, tmp_path):
@@ -221,7 +271,7 @@ def test_gate_blocks_generating(client: TestClient, tmp_path):
     entities = _add_entities(client, pid)
 
     def _fill(db):
-        _bind_assets(db, pid, tmp_path, entities)
+        _bind_assets(db, pid, tmp_path, entities, skip={"character"})
         from app.models import Job, ids
 
         j = Job(
@@ -243,42 +293,7 @@ def test_gate_blocks_generating(client: TestClient, tmp_path):
     assert r.json()["detail"]["code"] == "assets_generating"
 
 
-# --- 场景 6/7：待审核 / 审核驳回 → 拦截 ---
-
-
-def test_gate_blocks_pending_review(client: TestClient, tmp_path):
-    pid = _make_project(client)
-    entities = _add_entities(client, pid)
-
-    def _fill(db):
-        _bind_assets(db, pid, tmp_path, entities)
-
-    _with_db(_fill)
-    sid = _make_shot(client, entities["scene"])
-    wf = _make_workflow(client, "gate-pr")
-    r = _generate_keyframe(client, sid, wf)
-    assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "assets_review_pending"
-
-
-def test_gate_blocks_rejected_review(client: TestClient, tmp_path):
-    pid = _make_project(client)
-    entities = _add_entities(client, pid)
-
-    def _fill(db):
-        _bind_assets(db, pid, tmp_path, entities)
-
-    _with_db(_fill)
-    r = client.post(f"/api/projects/{pid}/assets-review", json={"action": "reject"})
-    assert r.status_code == 200
-    sid = _make_shot(client, entities["scene"])
-    wf = _make_workflow(client, "gate-rj")
-    r = _generate_keyframe(client, sid, wf)
-    assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "assets_review_rejected"
-
-
-# --- 场景 8：资产版本失效 → 拦截 ---
+# --- 场景 7：资产版本失效 → 拦截 ---
 
 
 def test_gate_blocks_invalid_version(client: TestClient, tmp_path):
@@ -295,10 +310,6 @@ def test_gate_blocks_invalid_version(client: TestClient, tmp_path):
         db.commit()
 
     _with_db(_fill)
-    # 审核接口同样拦截失效版本
-    r = _approve_review(client, pid)
-    assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "assets_incomplete"
     sid = _make_shot(client, entities["scene"])
     wf = _make_workflow(client, "gate-iv")
     r = _generate_keyframe(client, sid, wf)
@@ -307,38 +318,32 @@ def test_gate_blocks_invalid_version(client: TestClient, tmp_path):
     assert any(b["reason"] == "asset_invalid" for b in r.json()["detail"].get("blockers", []))
 
 
-# --- 场景 9：审核通过后重新生成 → 审核回退，重新拦截 ---
+# --- 场景 8：资产文件不存在 → 拦截 ---
 
 
-def test_regenerate_resets_review_and_blocks(client: TestClient, tmp_path):
+def test_gate_blocks_missing_file(client: TestClient, tmp_path):
     pid = _make_project(client)
     entities = _add_entities(client, pid)
 
     def _fill(db):
         _bind_assets(db, pid, tmp_path, entities)
+        from app.models import Asset, Scene
+
+        sc = db.get(Scene, entities["scene"])
+        a = db.get(Asset, sc.baseline_asset_id)
+        a.file_path = str(tmp_path / "media" / "gone.png")  # 记录存在但文件不存在
+        db.commit()
 
     _with_db(_fill)
-    r = _approve_review(client, pid)
-    assert r.status_code == 200, r.text
-    # 触发角色定妆图重新生成（API 通道），审核状态应回退 pending
-    wf = _make_workflow(client, "gate-rg")
-    r = client.post(f"/api/characters/{entities['character']}/generate", json={"workflow_id": wf})
-    assert r.status_code == 202, r.text
-
-    def _check(db):
-        from app.models import Project
-
-        p = db.get(Project, pid)
-        return p.assets_review_status or "pending"
-
-    assert _with_db(_check) == "pending"
     sid = _make_shot(client, entities["scene"])
+    wf = _make_workflow(client, "gate-mf")
     r = _generate_keyframe(client, sid, wf)
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] in ("assets_generating", "assets_review_pending")
+    assert r.json()["detail"]["code"] == "assets_incomplete"
+    assert any(b["reason"] == "asset_file_missing" for b in r.json()["detail"].get("blockers", []))
 
 
-# --- 场景 10：批量生成不能绕过门禁 ---
+# --- 场景 9：批量生成不能绕过门禁 ---
 
 
 def test_batch_generate_blocked(client: TestClient, tmp_path):
@@ -346,17 +351,16 @@ def test_batch_generate_blocked(client: TestClient, tmp_path):
     entities = _add_entities(client, pid)
 
     def _fill(db):
-        _bind_assets(db, pid, tmp_path, entities)
+        _bind_assets(db, pid, tmp_path, entities, skip={"prop"})
 
     _with_db(_fill)
     sid = _make_shot(client, entities["scene"])
-    # 未审核 → 项目批量 keyframe 通道拦截
     r = client.post(f"/api/projects/{pid}/generate", json={"target": "keyframe", "shot_ids": [sid]})
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "assets_review_pending"
+    assert r.json()["detail"]["code"] == "assets_incomplete"
 
 
-# --- 场景 11：Agent 通道不能绕过门禁 ---
+# --- 场景 10：Agent 通道不能绕过门禁 ---
 
 
 def test_agent_channel_blocked(client: TestClient, tmp_path):
@@ -364,7 +368,7 @@ def test_agent_channel_blocked(client: TestClient, tmp_path):
     entities = _add_entities(client, pid)
 
     def _fill(db):
-        _bind_assets(db, pid, tmp_path, entities)
+        _bind_assets(db, pid, tmp_path, entities, skip={"prop"})
 
     _with_db(_fill)
     sid = _make_shot(client, entities["scene"])
@@ -375,7 +379,7 @@ def test_agent_channel_blocked(client: TestClient, tmp_path):
         from app.models import AgentConfirmation, AgentTask, Job, Project, ScriptVersion
 
         # 状态机门禁前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
-        # 使 derive_progress 推进到 keyframes 阶段（本用例验证 D-23 资产门禁）
+        # 使 derive_progress 推进到 keyframes 阶段（本用例验证资产门禁）
         project = db.get(Project, pid)
         script_text = "第一场：主角在河边。"
         script_hash = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
@@ -427,14 +431,14 @@ def test_agent_channel_blocked(client: TestClient, tmp_path):
             tool_run_generate(db, "agc_test_0001")
         return exc_info.value.code
 
-    assert _with_db(_run) == "assets_review_pending"
+    assert _with_db(_run) == "assets_incomplete"
 
 
-# --- 场景 12：执行器二次校验（入队后资产状态变化） ---
+# --- 场景 11：执行器二次校验（入队后资产状态变化） ---
 
 
 def test_executor_rechecks_gate(client: TestClient, tmp_path):
-    """任务入队后审核状态回退 → 执行器二次校验拦截，任务标记 failed。"""
+    """任务入队后必需资产文件被删除 → 执行器二次校验拦截，任务标记 failed。"""
     pid = _make_project(client)
     entities = _add_entities(client, pid)
 
@@ -442,22 +446,22 @@ def test_executor_rechecks_gate(client: TestClient, tmp_path):
         _bind_assets(db, pid, tmp_path, entities)
 
     _with_db(_fill)
-    r = _approve_review(client, pid)
-    assert r.status_code == 200, r.text
     sid = _make_shot(client, entities["scene"])
     wf = _make_workflow(client, "gate-ex")
     r = _generate_keyframe(client, sid, wf)
     assert r.status_code == 202, r.text
     jid = r.json().get("id") or r.json().get("job", {}).get("id")
 
-    def _reset(db):
-        from app.models import Project
+    def _break(db):
+        """入队后把场景基准图转 superseded：模拟资产在队列期间被替换/失效。"""
+        from app.models import Asset, Scene
 
-        p = db.get(Project, pid)
-        p.assets_review_status = "pending"
+        sc = db.get(Scene, entities["scene"])
+        a = db.get(Asset, sc.baseline_asset_id)
+        a.validity = "superseded"
         db.commit()
 
-    _with_db(_reset)
+    _with_db(_break)
     from app.worker.executor import execute_generate_job
 
     result = execute_generate_job(jid)
@@ -469,8 +473,18 @@ def test_executor_rechecks_gate(client: TestClient, tmp_path):
 
         job = db.get(Job, jid)
         assert job.status == "failed"
-        assert job.error_code == "assets_review_pending"
+        assert job.error_code == "assets_incomplete"
         snap = job.input_snapshot or {}
         assert "assets_gate" in snap
 
     _with_db(_verify)
+
+
+# --- 审核机制确实已移除 ---
+
+
+def test_assets_review_endpoint_removed(client: TestClient):
+    """资产人工审核接口已删除：不再有审核通过/驳回入口，也不会写审核状态。"""
+    pid = _make_project(client)
+    r = client.post(f"/api/projects/{pid}/assets-review", json={"action": "approve"})
+    assert r.status_code in (404, 405), r.text

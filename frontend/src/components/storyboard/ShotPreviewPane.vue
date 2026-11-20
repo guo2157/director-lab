@@ -57,9 +57,9 @@ const emit = defineEmits<{ navigate: [delta: 1 | -1] }>()
         class="media-empty"
         title="该镜头尚未生成视频"
         :description="
-          shot.keyframe_confirmed
-            ? '分镜图已确认，可在「生成」标签页提交视频生成。'
-            : '需先到分镜图环节确认关键帧，之后才能生成视频。'
+          shot.current_assets?.keyframe
+            ? '分镜图已生成，可在「生成」标签页提交视频生成。'
+            : '该镜头还没有分镜图，请先到分镜图环节生成后再出视频。'
         "
       >
         <template #icon>▷</template>

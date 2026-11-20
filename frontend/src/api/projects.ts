@@ -69,11 +69,6 @@ export async function purgeProject(id: string) {
   return del<PurgeResult>(`/projects/${id}/purge`)
 }
 
-/** 公共资产人工审核（action=approve 审核通过并放行分镜图 / reject 驳回返工） */
-export function reviewProjectAssets(id: string, action: 'approve' | 'reject') {
-  return post<Project>(`/projects/${id}/assets-review`, { action })
-}
-
 /** 归档项目 */
 export function archiveProject(id: string) {
   return post<Project>(`/projects/${id}/archive`)
@@ -197,43 +192,4 @@ export function saveProjectStyleConfig(projectId: string, config: StyleConfig) {
   return put<SaveStyleConfigResponse>(`/projects/${projectId}/style-config`, { config })
 }
 
-// ── 项目级默认工作流（G2，v2 §11.3） ─────────────────────────────────
 
-/** 候选工作流：usable/missing 由后端按槽位必需能力算好，前端只展示与禁用 */
-export interface WorkflowCandidate {
-  id: string
-  name: string
-  description?: string | null
-  alias?: string | null
-  workflow_type: string
-  version: number
-  is_default?: boolean
-  runtime_status?: string
-  generation_modes?: string[]
-  modalities?: Record<string, unknown>
-  tier?: string | null
-  usable: boolean
-  missing: string[]
-}
-
-export interface ProjectWorkflowConfig {
-  project_id: string
-  /** 已配置的项目默认：slot → workflow_id；未配置的槽位不出现 */
-  defaults: Record<string, string>
-  slots: string[]
-  slot_required: Record<string, Record<string, unknown>>
-  candidates: Record<string, WorkflowCandidate[]>
-}
-
-/** 读取项目工作流配置（含各槽位候选与可用性） */
-export function getProjectWorkflowConfig(projectId: string) {
-  return get<ProjectWorkflowConfig>(`/projects/${projectId}/workflow-config`)
-}
-
-/** 保存项目默认工作流（空字符串 = 恢复系统默认；不绕过能力校验） */
-export function saveProjectWorkflowConfig(projectId: string, defaults: Record<string, string>) {
-  return put<{ project_id: string; defaults: Record<string, string>; saved: boolean; note: string }>(
-    `/projects/${projectId}/workflow-config`,
-    { defaults },
-  )
-}

@@ -134,10 +134,8 @@ export interface KeyframeGenerationProgress {
   total: number
   with_keyframe: number
   done: number
-  confirmed: number
   percent: number
   all_done: boolean
-  all_confirmed: boolean
   started: boolean
   inflight_count: number
   inflight_queued: number

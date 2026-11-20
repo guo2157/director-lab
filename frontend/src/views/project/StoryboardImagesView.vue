@@ -4,10 +4,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
 import { NButton, NIcon, NProgress, useMessage } from 'naive-ui'
 import { ArrowForwardOutline } from '@vicons/ionicons5'
-import { listScenes, listSceneShots, confirmShotKeyframe, unconfirmShotKeyframe } from '@/api/script'
+import { listScenes, listSceneShots } from '@/api/script'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
-import { lockAsset, unlockAsset, replaceAsset } from '@/api/assets'
+import { replaceAsset } from '@/api/assets'
 import { getProject } from '@/api/projects'
 import { getKeyframeGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
@@ -15,26 +15,27 @@ import type { Shot } from '@/types/script'
 import type { KeyframeGenerationJob, KeyframeGenerationProgress } from '@/types/generation'
 import type { GenerateShotPayload } from '@/types/job'
 import StageCard from '@/components/ui/StageCard.vue'
-import StatusTag from '@/components/ui/StatusTag.vue'
 import SkeletonList from '@/components/ui/SkeletonList.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import ErrorRetry from '@/components/ui/ErrorRetry.vue'
 import ShotCard from '@/components/storyboard-images/ShotCard.vue'
 import BatchToolbar from '@/components/storyboard-images/BatchToolbar.vue'
 import ShotDetailDialog from '@/components/storyboard-images/ShotDetailDialog.vue'
+import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
+import { useStageTransition } from '@/composables/useStageTransition'
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const projectId = computed(() => route.params.id as string)
 
-// 资产审核状态：决定是否放行分镜图生成
+// 项目数据：只用于取画幅比例（分镜图卡片按项目比例展示）
+// 资产审核状态已取消：分镜图能否生成由后端 assets_gate 的产物校验决定，
+// 前端不再读 assets_review_status，也不再因未审核禁用生成按钮。
 const projectQuery = useQuery({
   queryKey: computed(() => ['project', projectId.value]),
   queryFn: () => getProject(projectId.value),
 })
-const reviewApproved = computed(() => (projectQuery.data.value?.assets_review_status ?? 'pending') === 'approved')
-const reviewRejected = computed(() => projectQuery.data.value?.assets_review_status === 'rejected')
 
 // 画幅：分镜图卡片按项目比例展示，竖屏项目不再被 16:9 裁切
 const aspectPair = computed(() => {
@@ -106,8 +107,18 @@ const globalSeqMap = computed(() => {
 /** 全片镜号：取不到时回落到场景内序号 */
 const shotGlobalSeq = (shot: Shot) => globalSeqMap.value.get(shot.id) ?? shot.seq
 const keyframeShots = computed(() => allShots.value.filter((s) => !!s.current_assets?.keyframe))
-const allConfirmed = computed(
-  () => allShots.value.length > 0 && allShots.value.every((s) => !!s.current_assets?.keyframe && s.keyframe_confirmed),
+/**
+ * 全部镜头是否都已有当前有效分镜图（进入分镜看板的前端展示口径）。
+ *
+ * 注意：这里只用于进度条/按钮提示的即时反馈，**不是跳转依据**——
+ * 跳转前一律以后端 stage-readiness 的 ready 为准（会额外校验文件真实存在、
+ * 版本有效、失败任务等前端拿不到的信息）。
+ *
+ * 变量名从 allConfirmed 改为 allStoryboardImagesReady：逐镜人工确认已取消，
+ * 沿用「confirmed」会让人误以为还存在确认标记这层语义。
+ */
+const allStoryboardImagesReady = computed(
+  () => allShots.value.length > 0 && allShots.value.every((s) => !!s.current_assets?.keyframe),
 )
 
 // --- 生成进度（后端聚合：整体 X/Y、正在生成哪几镜、是否全部完成） ---
@@ -118,7 +129,7 @@ const keyframeProgress = useGenerationProgress<KeyframeGenerationProgress>({
     refreshAll()
   },
   onAllComplete: () => {
-    message.success('全部分镜图已生成完成，请逐镜确认后进入分镜看板')
+    message.success('全部分镜图已生成完成，可进入分镜看板')
   },
 })
 
@@ -152,18 +163,6 @@ const progressPercent = computed(() => {
 const progressNums = computed(
   () => `${keyframeShots.value.length}/${allShots.value.length}（${progressPercent.value}%）`,
 )
-
-/** 审核标签只在未通过时出现：通过后它是已完成的事，标签本身没有信息量 */
-const reviewTag = computed(() => {
-  if (reviewRejected.value) return { kind: 'failed' as const, label: '审核已驳回' }
-  return { kind: 'pending' as const, label: '待审核' }
-})
-
-/** 仅在审核未通过时渲染（模板有 v-if 守卫），因此不再需要「已通过」分支 */
-const gateText = computed(() => {
-  if (reviewRejected.value) return '公共资产审核被驳回：请返回资产库修改或替换资产后重新提交审核'
-  return '公共资产尚未通过人工审核：请先在资产库完成审核，才能生成分镜图'
-})
 
 function inflightTextOf(shot: Shot): string {
   const job = inflightByShot.value.get(shot.id)
@@ -280,20 +279,13 @@ const batchMutation = useMutation({
 })
 
 function handleBatchGenerate() {
-  if (!reviewApproved.value) {
-    message.warning('公共资产尚未通过人工审核，暂不可生成分镜图')
-    return
-  }
   const picked = selectedList.value
   if (!picked.length) {
     message.warning('请先勾选需要生成分镜图的镜头')
     return
   }
-  const locked = picked.filter((s) => s.current_assets?.keyframe?.locked)
-  if (locked.length) {
-    message.warning(`已勾选镜头中有 ${locked.length} 个分镜图已锁定，请先解锁后再批量生成`)
-    return
-  }
+  // 不再有前端审核前置与锁定检查：生成条件由后端 assets_gate 权威校验
+  // （必需资产是否真实生成完成），前端重复判断只会造成两套口径。
   void submitByPlans(picked)
 }
 
@@ -319,30 +311,6 @@ async function submitByPlans(picked: Shot[]) {
   }
 }
 
-// 锁定与解锁：锁定的分镜图不会被重绘覆盖
-async function handleToggleLock(shot: Shot) {
-  const kf = shot.current_assets?.keyframe
-  if (!kf?.asset_id) {
-    message.warning('该镜暂无可锁定的分镜图')
-    return
-  }
-  busyShot.value = shot.id
-  try {
-    if (kf.locked) {
-      await unlockAsset(kf.asset_id)
-      message.success('已解锁，该镜分镜图可重新生成或替换')
-    } else {
-      await lockAsset(kf.asset_id)
-      message.success('已锁定，该镜分镜图不会被重新生成覆盖')
-    }
-    refreshAll()
-  } catch (e: any) {
-    message.error(`操作失败: ${e?.message ?? e}`)
-  } finally {
-    busyShot.value = ''
-  }
-}
-
 // 替换上传：人工替换当前分镜图，保持与镜头的关联
 const replaceTarget = ref<Shot | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -351,10 +319,6 @@ function pickReplace(shot: Shot) {
   const kf = shot.current_assets?.keyframe
   if (!kf?.asset_id) {
     message.warning('该镜暂无分镜图，请先生成后再替换')
-    return
-  }
-  if (kf.locked) {
-    message.warning('该镜分镜图已锁定，请先解锁再替换')
     return
   }
   replaceTarget.value = shot
@@ -387,50 +351,22 @@ async function onReplaceFileChange(e: Event) {
   }
 }
 
-async function handleConfirm(shot: Shot, sceneId: string, episode: number) {
-  try {
-    await confirmShotKeyframe(shot.id)
-    message.success('已确认该镜分镜图')
-    await loadSceneShots(sceneId, episode)
-  } catch (e: any) {
-    message.error(`确认失败: ${e?.message ?? e}`)
-  }
-}
-
-async function handleUnconfirm(shot: Shot, sceneId: string, episode: number) {
-  try {
-    await unconfirmShotKeyframe(shot.id)
-    message.success('已取消确认，可重新生成或重新审核')
-    await loadSceneShots(sceneId, episode)
-  } catch (e: any) {
-    message.error(`取消失败: ${e?.message ?? e}`)
-  }
-}
-
-// 批量审核通过：对勾选镜头中已出图且未确认的逐一执行确认（复用单镜确认接口）
-const batchConfirming = ref(false)
-async function handleBatchConfirm() {
-  const targets = selectedList.value.filter((s) => !!s.current_assets?.keyframe && !s.keyframe_confirmed)
-  if (!targets.length) {
-    message.warning('勾选镜头中没有待确认的分镜图')
-    return
-  }
-  batchConfirming.value = true
-  let ok = 0
-  const failed: string[] = []
-  for (const shot of targets) {
-    try {
-      await confirmShotKeyframe(shot.id)
-      ok++
-    } catch {
-      failed.push(shot.title || shot.id)
-    }
-  }
-  batchConfirming.value = false
-  if (ok) message.success(`批量审核通过 ${ok} 个分镜图`)
-  if (failed.length) message.error(`审核失败 ${failed.length} 个：${failed.join('、')}`)
-  refreshAll()
-}
+// --- 出口：去分镜看板（查后端就绪 → 确认弹窗 → 确认时再查一次 → 跳转）---
+const stageTransition = useStageTransition({
+  projectId: () => projectId.value,
+  stage: 'storyboard_images',
+  to: (pid) => `/project/${pid}/storyboard`,
+  notReadyTitle: '分镜图片尚未全部生成完成',
+  confirmTitle: '确认进入分镜看板？',
+  confirmDescription: [
+    '所有分镜图片已经生成完成。',
+    '请确认分镜图片的构图、人物形象、角色站位、场景和道具均没有问题。',
+    '确认后将进入分镜看板，开始生成分镜视频。',
+  ].join('\n'),
+  confirmText: '确认，进入分镜看板',
+  notify: { warning: (m) => message.warning(m), error: (m) => message.error(m) },
+  push: (path) => router.push(path),
+})
 
 // --- 网格分组 ---
 /** 场景分组：组内按全片镜号顺序。状态筛选 chips 已删除，
@@ -493,7 +429,6 @@ function onFirstGenerate(shot: Shot, prompt: string) {
         :color="allShots.length > 0 && keyframeShots.length === allShots.length ? 'var(--state-success)' : 'var(--brand-primary)'"
         rail-color="var(--border-subtle)"
       />
-      <StatusTag v-if="!reviewApproved" :status="reviewTag.kind" :label="reviewTag.label" />
       <span v-if="keyframeProgress.data.value?.inflight_queued" class="gen-state queued">
         排队 {{ keyframeProgress.data.value.inflight_queued }}
       </span>
@@ -516,24 +451,20 @@ function onFirstGenerate(shot: Shot, prompt: string) {
             </span>
           </span>
         </div>
-        <!-- 审核未通过时，阻断原因放在进度卡第二行：它与「做到哪了」同属状态陈述 -->
-        <span v-if="!reviewApproved" class="gate-text">{{ gateText }}</span>
       </template>
 
       <template #actions>
-        <n-button v-if="!reviewApproved" size="small" quaternary @click="router.push(`/project/${projectId}/assets`)">
-          去资产库
-        </n-button>
         <n-button size="small" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
           刷新进度
         </n-button>
         <n-button size="small" quaternary @click="refreshAll">刷新镜头</n-button>
+        <!-- 跳转按钮不禁用：未完成时点击会展示缺哪些镜头，禁用则点不到这条提示 -->
         <n-button
           size="small"
           type="primary"
-          :disabled="!allConfirmed"
-          :title="allConfirmed ? '进入分镜看板生成视频' : '需先逐镜确认全部分镜图'"
-          @click="router.push(`/project/${projectId}/storyboard`)"
+          :loading="stageTransition.loading.value"
+          :title="allStoryboardImagesReady ? '进入分镜看板生成视频' : '点击查看还差哪些镜头'"
+          @click="stageTransition.request()"
         >
           去分镜看板 <n-icon :component="ArrowForwardOutline" :size="14" />
         </n-button>
@@ -545,15 +476,12 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       :total="allShots.length"
       :selected="selectedList.length"
       :all-selected="allSelected"
-      :can-generate="reviewApproved"
       :batch-loading="batchMutation.isPending.value"
-      :confirm-loading="batchConfirming"
       :inflight-count="keyframeProgress.data.value?.inflight_count ?? 0"
       :workflow-id="generateWorkflowId"
       @update:workflow-id="(v: string | undefined) => (generateWorkflowId = v)"
       @toggle-all="toggleSelectAll"
       @generate="handleBatchGenerate"
-      @confirm="handleBatchConfirm"
     />
 
     <ErrorRetry
@@ -591,25 +519,35 @@ function onFirstGenerate(shot: Shot, prompt: string) {
             :failed="failedByShot.has(shot.id)"
             :failed-message="failedByShot.get(shot.id) ?? ''"
             :busy="busyShot === shot.id || pendingShotId === shot.id"
-            :can-generate="reviewApproved"
             :prompt="promptDraft[shot.id] ?? shot.image_prompt ?? ''"
             @select="(v) => toggleSelect(shot, v)"
             @open="openDetail(shot)"
             @generate="handleGenerate(shot)"
-            @confirm="handleConfirm(shot, g.scene.id, g.episode)"
-            @unconfirm="handleUnconfirm(shot, g.scene.id, g.episode)"
-            @lock="handleToggleLock(shot)"
             @replace="pickReplace(shot)"
           />
         </div>
       </section>
     </div>
 
+    <!-- 阶段跳转确认弹窗 -->
+    <StageTransitionDialog
+      v-model:visible="stageTransition.visible.value"
+      :title="stageTransition.confirmTitle"
+      :description="stageTransition.confirmDescription"
+      :confirm-text="stageTransition.confirmText"
+      :total="stageTransition.readiness.value.total"
+      :done="stageTransition.readiness.value.done"
+      :blockers="stageTransition.blockers.value"
+      :ready="stageTransition.readiness.value.ready"
+      :loading="stageTransition.loading.value"
+      @confirm="stageTransition.confirm()"
+      @cancel="stageTransition.cancel()"
+    />
+
     <!-- 镜头详情：大图 + 参考图 + 重新生成工作台 -->
     <ShotDetailDialog
       ref="dialogRef"
       :project-id="projectId"
-      :review-approved="reviewApproved"
       :scenes="scenesLite"
       :seq-of="shotGlobalSeq"
       @submitted="trackAfterSubmit"
@@ -686,13 +624,6 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 }
 .gen-inflight-state.queued {
   color: var(--accent-amber);
-}
-
-/* 审核未通过时的阻断说明：位于进度卡第二行，不再是独立横幅 */
-.gate-text {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--danger-text, var(--state-danger));
 }
 
 /* ===== 场景分组 + 镜头网格 ===== */

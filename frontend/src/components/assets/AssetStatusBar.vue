@@ -1,18 +1,17 @@
 <script setup lang="ts">
 /**
- * 资产库顶部两卡之一：执行进度（只读）。
+ * 资产库顶部两卡之一：执行进度（只读）+ 推进闸口。
  *
- * 改造前这里是四条独立横幅：PageHeader 状态行 / 生成状态句 / 分项 chips / 审核说明句，
- * 加上 AssetBatchToolbar 自成一条，视觉上四层横条叠加，层级相同、信息互相重复。
- * 现在：进度卡只回答「做到哪了」，操作卡只回答「接下来批量做什么」。
- *
- * 卡内只留三样：总分 X/Y + 进度条 + 审核状态标签。
+ * 卡内只留三样：总分 X/Y + 进度条 + 在途/失败状态。
  * 「公共资产图已全部生成完成（最近完成于 04:49:04）」「角色定妆图 2/2 / 场景基准图 5/5 /
- * 道具锚定图 4/4」已删除——总分与进度条已经回答同一件事，分项拆解属于资产卡片自身信息，
- * 放在进度条旁边只是把「已完成」这个结论重复三遍。
+ * 道具锚定图 4/4」已删除——总分与进度条已经回答同一件事。
  *
- * 审核动作（通过 / 驳回返工）留在进度卡右端：它是「放行下一步」的闸门，
- * 与「去分镜图」同属推进流程，不属于批量生成。
+ * 人工审核已取消：审核状态标签、审核通过 / 驳回返工按钮、审核说明句全部删除。
+ * 资产图的把关动作改为「去分镜图」时的一次确认弹窗——弹窗里明确写出「确认图片都已
+ * 审核过没问题」，确认后直接进入分镜图。比在页面顶部维护一套 pending/approved/rejected
+ * 状态机更贴近实际用法：资产是一次性看完再推进，不需要留驳回痕迹。
+ *
+ * 必要条件：资产图全部生成完成（allDone）。未完成时按钮禁用并说明还差几项。
  */
 import { NButton, NIcon, NProgress } from 'naive-ui'
 import { ArrowForwardOutline } from '@vicons/ionicons5'
@@ -24,41 +23,32 @@ const props = withDefaults(
     done: number
     total: number
     allDone: boolean
-    reviewStatus: string
-    reviewText: string
     inflightCount?: number
-    /** 审核请求进行中 */
-    reviewing?: boolean
     /** 进度刷新中 */
     loading?: boolean
   }>(),
   {
     inflightCount: 0,
-    reviewing: false,
     loading: false,
   },
 )
 
 const emit = defineEmits<{
-  approve: []
-  reject: []
   next: []
   refresh: []
 }>()
 
 const percent = () => (props.total ? Math.round((props.done / props.total) * 100) : 0)
-const reviewKind = () => {
-  if (props.reviewStatus === 'approved') return 'succeeded' as const
-  if (props.reviewStatus === 'rejected') return 'failed' as const
-  return 'pending' as const
+/**
+ * 跳转按钮**不禁用**：任务书 §3.4 要求「点击后检查生成情况，未完成时提示缺哪些图」。
+ * 禁用按钮会让用户点不到这条提示，只能看到一个灰按钮却不知道为什么。
+ * 真正的拦截在后端 stage-readiness（就绪未通过则不弹窗、不跳转）。
+ */
+const nextTitle = () => {
+  if (props.total === 0) return '当前项目还没有资产，请先在解析页完成解析并生成资产'
+  if (!props.allDone) return `还有 ${props.total - props.done} 项资产未生成完成，点击查看缺失明细`
+  return '确认资产图无误后进入分镜图生成'
 }
-const reviewLabel = () => {
-  if (props.reviewStatus === 'approved') return '审核通过'
-  if (props.reviewStatus === 'rejected') return '已驳回'
-  return '待审核'
-}
-/** 未通过时才需要审核动作与说明；通过后这两个按钮/这句话都是已完成的事 */
-const needsReview = () => props.reviewStatus !== 'approved'
 </script>
 
 <template>
@@ -77,48 +67,20 @@ const needsReview = () => props.reviewStatus !== 'approved'
       :color="allDone ? 'var(--state-success)' : 'var(--brand-primary)'"
       rail-color="var(--border-subtle)"
     />
-    <StatusTag :status="reviewKind()" :label="reviewLabel()" />
-    <span v-if="inflightCount" class="inflight">生成中 {{ inflightCount }}</span>
-
-    <template #meta>
-      <!-- 审核说明只在未通过时出现：通过后审核状态已由标签和主按钮表达。
-           分项进度（角色 2/2 场景 5/5 道具 4/4）与「已全部生成完成」状态句已删除：
-           总分 X/Y 与进度条已经回答「做到哪了」，分项拆解属于资产卡片自己的信息。 -->
-      <span v-if="needsReview()" class="review-text">{{ reviewText }}</span>
-    </template>
+    <StatusTag
+      v-if="inflightCount"
+      status="generating"
+      :label="`生成中 ${inflightCount}`"
+    />
 
     <template #actions>
       <n-button size="small" quaternary :loading="loading" @click="emit('refresh')">
         刷新进度
       </n-button>
-      <template v-if="needsReview()">
-        <n-button
-          size="small"
-          quaternary
-          :disabled="reviewStatus !== 'approved'"
-          :loading="reviewing"
-          :title="reviewStatus !== 'approved' ? '仅当资产审核通过后，才能驳回返工' : undefined"
-          @click="emit('reject')"
-        >
-          驳回返工
-        </n-button>
-        <n-button
-          size="small"
-          type="primary"
-          secondary
-          :disabled="!allDone"
-          :loading="reviewing"
-          :title="!allDone ? (total === 0 ? '当前项目还没有资产，请先在解析页完成解析并生成资产' : `还有 ${total - done} 项资产未生成完成，全部完成后才能审核`) : undefined"
-          @click="emit('approve')"
-        >
-          审核通过
-        </n-button>
-      </template>
       <n-button
         size="small"
         type="primary"
-        :disabled="reviewStatus !== 'approved'"
-        :title="reviewStatus !== 'approved' ? '资产审核通过后才能进入分镜图生成' : undefined"
+        :title="nextTitle()"
         @click="emit('next')"
       >
         去分镜图 <n-icon :component="ArrowForwardOutline" :size="14" />
@@ -156,12 +118,5 @@ const needsReview = () => props.reviewStatus !== 'approved'
 .bar {
   width: 84px;
   flex: none;
-}
-.inflight {
-  font-size: 12px;
-  color: var(--state-generating);
-}
-.review-text {
-  color: var(--text-secondary);
 }
 </style>

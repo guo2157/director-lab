@@ -1,19 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useQuery, useMutation } from '@tanstack/vue-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { NButton, useMessage } from 'naive-ui'
 import {
   createScriptVersion,
   getCurrentScript,
   normalizeScript,
-  runScriptAgent,
   type ScriptNormalizeResult,
 } from '@/api/projects'
 import type { ScriptVersion } from '@/types/script'
-import { useScriptFlowStore } from '@/stores/scriptFlow'
 import StyleConfigPanel from '@/components/StyleConfigPanel.vue'
-import FlowNav from '@/components/FlowNav.vue'
 import ScriptEditor from '@/components/script/ScriptEditor.vue'
 import ScriptToolbar from '@/components/script/ScriptToolbar.vue'
 import ScriptStageBar from '@/components/script/ScriptStageBar.vue'
@@ -23,7 +20,7 @@ import ScriptCompareModal from '@/components/script/ScriptCompareModal.vue'
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const flow = useScriptFlowStore()
+const queryClient = useQueryClient()
 const projectId = computed(() => String(route.params.id ?? ''))
 const MAX_CHARS = 50000
 
@@ -35,18 +32,21 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : '请求失败'
 }
 
-/* ---------- 四步流程：初始剧本 → 校验补充 → 保存 → 分析 ---------- */
-type Stage = 'draft' | 'checked' | 'saved' | 'analyzing'
+/* ---------- 三步流程：初始剧本 → 校验补充 → 保存版本 ---------- */
+/*
+ * 解析已独立成制作节点（2026-11-20），本页不再有「开始分析」，
+ * 因此阶段条从四步收回三步：本页只负责产出一个已保存的剧本版本。
+ */
+type Stage = 'draft' | 'checked' | 'saved'
 const stage = ref<Stage>('draft')
 /*
  * 阶段条描述「现在处于哪个阶段」，按钮描述「可以做什么」。
- * 两者语义不同，因此标签不与按钮同名——否则同一屏出现两遍"校验补充/保存版本/开始分析"。
+ * 两者语义不同，因此标签不与按钮同名——否则同一屏出现两遍"校验补充/保存版本"。
  */
 const steps = [
   { key: 'draft', label: '剧本编辑' },
   { key: 'checked', label: '内容校验' },
   { key: 'saved', label: '版本已存' },
-  { key: 'analyzing', label: '智能分析' },
 ] as const
 const stageIndex = computed(() => {
   const i = steps.findIndex((s) => s.key === stage.value)
@@ -54,10 +54,9 @@ const stageIndex = computed(() => {
 })
 const stageHint = computed(() => {
   if (normalizing.value) return 'AI 正在分析剧本并整理为标准格式，请稍候…'
-  if (stage.value === 'draft') return '编辑剧本后建议先校验补充，再保存与分析'
+  if (stage.value === 'draft') return '编辑剧本后建议先校验补充，再保存版本'
   if (stage.value === 'checked') return '校验已完成，下一步保存版本'
-  if (stage.value === 'saved') return '版本已保存，可以开始分析'
-  return '分析已提交，正在跳转解析页'
+  return '版本已保存，可以进入解析'
 })
 
 /* 校验结果与版本状态 */
@@ -65,11 +64,10 @@ const normalizeResult = ref<ScriptNormalizeResult | null>(null)
 const savedVersion = ref<ScriptVersion | null>(null)
 const compareVisible = ref(false)
 
-/* 项目切换时重置流程状态（防止其他项目残留状态误显示） */
+/* 项目切换时重置本页状态（防止其他项目残留状态误显示） */
 watch(
   projectId,
-  (id) => {
-    if (id) flow.ensureProject(id)
+  () => {
     stage.value = 'draft'
     normalizeResult.value = null
     savedVersion.value = null
@@ -233,37 +231,24 @@ function keepOriginal() {
   message.info('已保留原文，继续保存版本')
 }
 
-/* ---------- 第三步：保存版本 ---------- */
+/* ---------- 第三步：保存版本（本页唯一出口动作） ---------- */
 const { mutate: saveVersionMut, isPending: saving } = useMutation({
   mutationFn: () => createScriptVersion(projectId.value, { text: text.value }),
   onSuccess: (v) => {
-    flow.scriptVersionId = v.script_version_id
-    flow.scriptText = text.value
-    flow.resetAfterSave()
     savedVersion.value = v
     stage.value = 'saved'
+    // 左栏「剧本」完成态与解析页的可用性都读这份缓存，保存后必须立刻失效，
+    // 否则左栏要等下一次 staleTime 到期才会变成「已完成」。
+    void queryClient.invalidateQueries({ queryKey: ['currentScript', projectId.value] })
     message.success(`已保存为第 ${v.version} 版`)
   },
   onError: (e) => message.error(errMsg(e)),
 })
 
-/* ---------- 第四步：开始分析（必须使用已保存版本，保证版本与正文一致） ---------- */
-const { mutate: runAgentMut, isPending: analyzing } = useMutation({
-  mutationFn: () => {
-    const v = savedVersion.value
-    if (!v) throw new Error('请先保存剧本版本')
-    return runScriptAgent(projectId.value, v.script_version_id, text.value)
-  },
-  onSuccess: (res) => {
-    flow.parseJobId = res.job_id
-    stage.value = 'analyzing'
-    message.success('已开始分析，Agent 将自动完成评估与解析')
-    setTimeout(() => router.push(`/project/${projectId.value}/parse`), 600)
-  },
-  onError: (e) => {
-    message.error(errMsg(e))
-  },
-})
+/** 去解析：只有存在已保存版本时才出现（保存前没有可解析的文本） */
+function goParse() {
+  void router.push(`/project/${projectId.value}/parse`)
+}
 
 /* ---------- 加载当前剧本 ---------- */
 const { data: scriptData } = useQuery({
@@ -278,10 +263,8 @@ watch(
       // 回填期间屏蔽 text watch：它的 reset 逻辑针对「用户改正文」，不适用于服务端回填
       hydrating = true
       text.value = sv.text ?? ''
-      flow.scriptVersionId = sv.script_version_id
-      flow.scriptText = sv.text ?? ''
       // 刷新或重新进入页面时恢复已保存版本状态：
-      // 否则 savedVersion 恒为 null，「开始分析」按钮一直禁用，点击无任何反应。
+      // 否则 savedVersion 恒为 null，「去解析」入口一直不出现。
       if (!savedVersion.value) {
         savedVersion.value = {
           script_version_id: sv.script_version_id,
@@ -306,12 +289,17 @@ watch(
     <header class="script-header">
       <div class="header-left">
         <div class="title-block">
-          <!-- 左侧「制作流程」栏已高亮 01 剧本，页内不再画同名可视大标题；
-               H1 降为 visually-hidden 保留文档大纲与读屏语义 -->
+          <!-- 左侧「制作流程」栏已高亮 01 剧本。解析独立成 02 后，页内不再有子流程胶囊，
+               页头保留一个低权重的步骤标识（14px + 状态点），不恢复 22px 大标题 ——
+               那会和左栏「01 剧本」形成同一信息说两遍。 -->
           <h1 class="visually-hidden">剧本</h1>
-          <!-- FlowNav 是页内子流程（剧本 → 解析），与左侧 01 剧本不是同一层级，
-               它表达「本阶段内进行到哪一步」，必须保留 -->
-          <FlowNav :project-id="projectId" />
+          <span class="step-title">
+            <span class="step-title-no">01</span>
+            <span class="step-title-text">剧本</span>
+            <span class="step-title-state" :class="{ 'is-done': stage === 'saved' }">
+              {{ stage === 'saved' ? '版本已保存' : '编辑中' }}
+            </span>
+          </span>
         </div>
       </div>
       <div class="header-actions">
@@ -330,6 +318,7 @@ watch(
         </NButton>
         <NButton
           size="small"
+          :type="stage === 'saved' ? 'default' : 'primary'"
           :loading="saving"
           :disabled="!textValid || saving"
           :title="!textValid ? '剧本正文为空或超出字数上限，无法保存版本' : undefined"
@@ -338,21 +327,14 @@ watch(
         >
           {{ saving ? '保存中…' : savedVersion ? '重新保存' : '保存版本' }}
         </NButton>
-        <NButton
-          size="small"
-          type="primary"
-          :loading="analyzing"
-          :disabled="!savedVersion || analyzing"
-          :title="!savedVersion ? '请先保存剧本版本，分析会以已保存版本为准' : undefined"
-          :aria-label="!savedVersion ? '开始分析（不可用：需先保存剧本版本）' : '开始分析'"
-          @click="runAgentMut()"
-        >
-          开始分析
+        <!-- 去解析：保存后本页唯一的前进出口，主按钮位随之让给它 -->
+        <NButton v-if="stage === 'saved'" size="small" type="primary" @click="goParse()">
+          去解析 →
         </NButton>
       </div>
     </header>
 
-    <!-- 四步流程指示：初始剧本 → 校验补充 → 保存 → 分析 -->
+    <!-- 三步流程指示：初始剧本 → 校验补充 → 保存版本 -->
     <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" :hint="stageHint" />
 
     <div v-if="showStylePanel" class="style-drawer">
@@ -411,9 +393,45 @@ watch(
 }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
-/* FlowNav 是页头唯一的可视元素（标题已 hidden），它是带描边填充的胶囊控件，
-   自身有 2px 内 padding，页头不再额外叠加 gap */
+/* 步骤标识：01 + 名称 + 状态。三档信息按「序号弱 / 名称中 / 状态弱」排布，
+   与左栏 active 项构成呼应，但视觉权重明显低于左栏（14px vs 13.5px + 品牌底），
+   不会和左栏抢「我在哪一页」这个信号。 */
 .title-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.step-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
+.step-title-no {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.step-title-text {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.step-title-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+/* 状态点：未保存为中性，已保存为成功色（形状一致、只换色，因为文字已说明状态） */
+.step-title-state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--neutral-line);
+}
+.step-title-state.is-done {
+  color: var(--state-success);
+}
+.step-title-state.is-done::before {
+  background: var(--state-success);
+}
 
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 

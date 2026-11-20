@@ -931,16 +931,21 @@ _STAGE_ORDER = [
 
 # 生成目标 → 允许生成的最早制作阶段（状态机门禁：
 # 目标生成不得早于其所属制作阶段，阶段判定以 derive_progress 为唯一权威）
+#
+# 注意：阶段审核机制已于 2026-11 取消，derive_progress 不再产出 "assets_review"。
+# 该枚举值仅作为 _STAGE_ORDER 中的「位置哨兵」保留：其索引正好落在
+# characters/scenes 之后、keyframes 之前，语义为「公共资产（角色/场景）已齐全」。
+# 真正的资产齐全校验由 assets_gate.assert_assets_gate 负责（含必需道具与文件有效性）。
 _STAGE_GATE_MIN_STAGE = {
-    "character": "characters",  # 角色定妆图：characters 阶段起（重生成会重置资产审核，D-23）
+    "character": "characters",  # 角色定妆图：characters 阶段起
     "scene": "scenes",  # 场景基准图：scenes 阶段起
     "prop": "characters",  # 道具锚定图：公共资产，与角色同批可生成
-    # 分镜图：公共资产齐全（assets_review 阶段）即可发起申请，
-    # 审核未通过/资产缺失/版本无效等细粒度阻断由 D-23 evaluate_assets_gate 给出精确错误码
-    # （assets_review_pending 等），阶段门禁只拦截更早阶段（estimate/parse/characters/scenes）
+    # 分镜图：角色/场景齐全即可发起申请（不再要求人工审核）。
+    # 资产缺失/文件失效/在途任务等细粒度阻断由 assets_gate 给出精确错误码
+    # （asset_missing / asset_generating 等），阶段门禁只拦截更早阶段。
     "keyframe": "assets_review",
-    # clip/audio 与 API 通道同等强度：项目级门禁到 keyframes 阶段
-    # （公共资产审核通过），单镜细粒度由 D-13（keyframe_confirmed）逐镜校验，
+    # clip/audio 与 API 通道同等强度：项目级门禁到 keyframes 阶段，
+    # 单镜细粒度由 _check_keyframe_ready（查当前有效分镜图）校验，
     # 不要求全部分镜图/视频完成（逐镜生成是正常操作）
     "clip": "keyframes",
     "audio": "keyframes",
@@ -1116,15 +1121,31 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
     entity = None
     if shot_id:
         shot = _assert_shot_in_project(db, shot_id, project_id)
-        # 静图先行闸口（D-13）：生成 clip 前校验分镜图已人工确认，
-        # 与 API 通道（generate.py _check_keyframe_gate）同等校验，不可绕过
-        if target == "clip" and not shot.keyframe_confirmed:
-            raise ToolError(
-                "keyframe_not_confirmed",
-                f"镜头 {shot_id} 的分镜图尚未人工确认，请先在分镜审核页确认后再生成视频",
+        # 分镜图就绪校验：生成 clip 前该镜必须有当前有效且文件存在的分镜图，
+        # 与 API 通道（generate.py _check_keyframe_ready）同等校验，不可绕过。
+        # 逐镜人工确认（keyframe_confirmed）已取消，不再作为前置条件。
+        if target == "clip":
+            from app.services.assets_gate import media_file_exists
+
+            _kf = (
+                db.query(Asset)
+                .join(Job, Job.id == Asset.source_job_id)
+                .filter(
+                    Job.shot_id == shot_id,
+                    Job.status == "succeeded",
+                    Asset.asset_type == "keyframe",
+                    Asset.validity == "current",
+                )
+                .order_by(Asset.version.desc())
+                .first()
             )
-        # 统一资产就绪门禁（D-23 强化）：Agent 通道与 API 通道同等校验，
-        # keyframe 生成前必须满足必需资产齐全/有效/审核通过，不可绕过
+            if _kf is None or not media_file_exists(_kf.file_path):
+                raise ToolError(
+                    "keyframe_not_ready",
+                    f"镜头 {shot_id} 没有可用的分镜图，请先生成分镜图后再生成视频",
+                )
+        # 统一资产就绪门禁：Agent 通道与 API 通道同等校验，
+        # keyframe 生成前必须满足必需资产已真实生成完成，不可绕过
         if target == "keyframe":
             from app.services.assets_gate import evaluate_assets_gate
 
@@ -1288,12 +1309,6 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
         )
     except Exception:  # noqa: BLE001
         pass  # 编排层失败不影响既有生成链路
-    if owner_key is not None:
-        # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
-        # 与 API 通道（generate.py 实体生成端点）行为一致
-        from app.services.assets_review import reset_assets_review
-
-        reset_assets_review(db, project_id)
     db.commit()
     db.refresh(job)
 
@@ -1551,7 +1566,8 @@ def tool_script_evaluate(db: Session, project_id: str) -> dict:
             episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
             max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch),
         )
-        report = evaluate_script(text, estimate_data, settings_map)
+        report = evaluate_script(text, estimate_data, settings_map,
+                                 settings=get_settings())
     except LLMError as e:
         raise ToolError(e.code, e.message)
     return {"script_version_id": sv.id, "version": sv.version, "report": report}

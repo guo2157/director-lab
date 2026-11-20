@@ -103,8 +103,9 @@ def tool_regenerate_asset(db: Session, project_id: str, asset_id: str,
             "分镜图/视频请用 regenerate_shot",
         )
     _gate("generate_character", db, project_id)
-    if asset.locked:
-        raise ToolError("asset_locked", "资产已锁定，请先解锁再重新生成")    # 复用 API 层实现（同构逻辑，避免重复维护提示词渲染与工作流匹配）
+    # 锁定功能已整体废弃（2026-11 流程简化）：Asset.locked 恒为 False，
+    # 不再有任何基于 locked 的操作限制。此处原先的 asset_locked 拦截已删除。
+    # 复用 API 层实现（同构逻辑，避免重复维护提示词渲染与工作流匹配）
     from app.api.v1.assets import regenerate_asset as api_regenerate
     payload: dict = {}
     if prompt:
@@ -132,13 +133,11 @@ def tool_regenerate_asset(db: Session, project_id: str, asset_id: str,
 def tool_replace_asset(db: Session, project_id: str, asset_id: str, file_path: str) -> dict:
     """替换资产图片：用服务器上已存在的文件原地替换（覆盖原文件，不产生新版本）。
 
-    闸口联动：公共资产替换后原审核结论失效（需重新审核）；
-    分镜图替换后该镜人工确认重置（需重新确认）。
+    闸口联动：资产替换后旧版本转 superseded，阶段就绪判定随之按新产物重算
+    （审核机制已取消，不再有「重新审核」动作）。
     """
     _gate("generate_character", db, project_id)
     asset = _get_asset(db, asset_id, project_id)
-    if asset.locked:
-        raise ToolError("asset_locked", "资产已锁定，请先解锁再替换")
     from pathlib import Path
     src = stored_path(file_path)
     if not src.is_file():
