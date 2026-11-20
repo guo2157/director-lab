@@ -6,9 +6,9 @@
  * 与上方进度卡重复表达进度。批量进度属于「执行进度」，已归入第一张卡；
  * 本卡只保留操作与其直接反馈（失败项重试、收起）。
  *
- * 工作流选择器固定 `asset_image` 槽位：候选由后端按真实能力过滤
- * （只允许无图片输入的纯文生图），角色/场景/道具共用同一份选择，
- * 避免出现角色用文生图、道具用图生图的混用。
+ * 工作流选择器固定 `asset_image` 槽位 + `image_text_to_image` 模型类型：
+ * 资产库定妆图只能是文生图模型，模型类型不需要用户选，页面上不展示该下拉，
+ * 只在选择器上方以标签提示「文生图模型」。角色/场景/道具共用同一份选择。
  */
 import { computed, ref, watch } from 'vue'
 import { NButton, NCheckbox } from 'naive-ui'
@@ -65,6 +65,7 @@ watch(someChecked, (v) => {
       <WorkflowSelector
         :model-value="workflowId"
         slot="asset_image"
+        fixed-model-type="image_text_to_image"
         size="small"
         placeholder="选择出图工作流"
         @update:model-value="(v: string | undefined) => emit('update:workflowId', v)"
@@ -139,11 +140,12 @@ watch(someChecked, (v) => {
   color: var(--text-secondary);
 }
 
-/* 窄屏让工作流选择器独占一行：768px 下其它控件已折行，
-   选择器再挤在半行里会被压到 170px 下限以下，选项文字截断。 */
+/* 窄屏：工作流选择器不再独占整行（独占会把卡片撑到 180px），
+   改为与全选/计数同排的弹性项；宽度下限降到 130px 以适配 390 视口。 */
 @media (max-width: 768px) {
   .wf-pick {
-    flex: 1 1 100%;
+    flex: 1 1 130px;
+    min-width: 130px;
     max-width: none;
   }
 }

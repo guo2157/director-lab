@@ -8,6 +8,9 @@
   /* 布局常量 */
   --app-header-height: 64px;
   --app-rail-width: 216px;
+  /* 页面内容区唯一宽度上限（见 .page）。1440 是 1440 视口的自然满宽，
+     更宽的屏幕靠 margin:auto 居中留白，不再由各页自写 max-width。 */
+  --page-max: 1440px;
 
   /* 背景层级：近纯黑，四级明度差极小 —— 靠边框与内高光建立层级 */
   --bg-base: #080809;
@@ -168,8 +171,15 @@ body {
 }
 
 /* ===== 页面骨架 ===== */
+/* 内容宽度只有一个上限：--page-max。此前 .page（无上限）/ .page-body（1520）
+   / .content-body（1680）/ 各页自带（1440、1180）四套并存，同一套导航下
+   每个页面内容区左右边界都不同，切换页面时视觉上像换了个产品。
+   取 1440：这是作品列表、设置页已经在用的值，也是 1440 视口下的自然满宽，
+   更宽的屏留白由 margin:auto 居中消化，不再靠各页自己写 max-width。 */
 .page {
   padding: var(--sp-6) var(--sp-8) var(--sp-16);
+  max-width: var(--page-max);
+  margin: 0 auto;
   min-width: 0;
 }
 
@@ -216,11 +226,8 @@ body {
   color: var(--text-secondary);
 }
 
-.page-body {
-  max-width: 1520px;
-  margin: 0 auto;
-  padding: var(--sp-6) var(--sp-8) var(--sp-16);
-}
+/* .page-body 已删除（2026-11-20）：全站 grep 无任何模板使用它，
+   它只是历史上第二套内容宽度规则（1520px），留着会诱导后来者继续分裂宽度。 */
 
 /* ===== 统一状态标签：胶囊 + 圆点双通道（颜色 + 形状） ===== */
 .status-tag {

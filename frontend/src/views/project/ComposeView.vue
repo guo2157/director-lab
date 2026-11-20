@@ -706,7 +706,7 @@ const exportDone = computed(() => exportJobStatus.value === 'succeeded' && !!exp
 <style scoped>
 .compose-page {
   padding: var(--sp-6) var(--sp-8) var(--sp-12);
-  max-width: 1440px;
+  max-width: var(--page-max);
   margin: 0 auto;
   min-height: calc(100vh - var(--app-header-height, 64px));
   box-sizing: border-box;

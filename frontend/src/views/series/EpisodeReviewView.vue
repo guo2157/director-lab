@@ -379,7 +379,7 @@ onMounted(async () => {
 
 <style scoped>
 .episode-review-page {
-  max-width: 1180px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: var(--sp-6) var(--sp-8) var(--sp-16);
 }

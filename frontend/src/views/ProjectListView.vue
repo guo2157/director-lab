@@ -282,15 +282,6 @@ function clearFilters() {
             @action="onCardAction"
           />
         </div>
-
-        <!-- 尾部新建条：不占栅格格位，避免 4 张卡 + 1 个孤儿格造成的参差。
-             权重必须低于页头主 CTA：收窄居中 + 虚线描边，不做渐变发光
-             （通栏渐变条在实测里被读成「比主按钮还抢眼」）。 -->
-        <button type="button" class="launch-strip" @click="openCreateModal">
-          <span class="launch-plus" aria-hidden="true">+</span>
-          <span class="launch-text">新建作品</span>
-          <span class="launch-sub">从剧本开始，走完整条生产流程</span>
-        </button>
       </template>
     </template>
 
@@ -306,8 +297,6 @@ function clearFilters() {
 .project-list-page {
   min-height: calc(100vh - var(--app-header-height, 64px));
   padding: var(--sp-6) var(--sp-6) var(--sp-16);
-  max-width: 1440px;
-  margin: 0 auto;
   background: var(--bg-base);
   color: var(--text-primary);
 }
@@ -386,62 +375,21 @@ function clearFilters() {
 /* ---------- 栅格 ---------- */
 /* 骨架与正式栅格同宽同列，避免加载完成时跳变 */
 .grid-skeleton {
-  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)) !important;
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)) !important;
 }
+/* 列宽下限 250px：封面改为 3:4 后必须重新算列数。
+   实测内容区宽 1392（1440 视口 − 左栏已由 .content-body 消化），
+   250px 下限 → 5 列，卡宽 266、封面 355、卡高约 485，
+   1440×900 下一屏可见 1.5 行（改前 4 列卡宽 336、封面 251 横版、卡高 381，
+   一屏可见 1.8 行但封面是被横裁的竖图）。
+   项目数不是 5 的倍数时最后一行会有空位 —— 这是数据量，不是布局缺陷；
+   为了让 4 个项目刚好铺满而把卡宽拉到 336，封面会涨到 448，
+   单卡 578 反而一屏只看得到一行。 */
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
   gap: var(--sp-4);
   align-items: stretch;
-}
-
-/* ---------- 尾部新建条 ----------
-   收窄居中（max-width 520px）+ 虚线描边：视觉权重严格低于页头主 CTA。
-   通栏 + 渐变描边会形成第二个高亮焦点，把视线从卡片区拽走。 */
-.launch-strip {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sp-2);
-  width: 100%;
-  max-width: 520px;
-  margin: var(--sp-4) auto 0;
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-xl);
-  background: transparent;
-  font-family: inherit;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition:
-    border-color var(--transition-fast),
-    background-color var(--transition-fast),
-    color var(--transition-fast);
-}
-.launch-strip:hover {
-  border-color: var(--brand-line);
-  background: var(--brand-soft);
-  color: var(--brand-primary);
-}
-.launch-strip:focus-visible {
-  outline: 2px solid var(--brand-hover);
-  outline-offset: 2px;
-}
-.launch-plus {
-  font-size: 16px;
-  line-height: 1;
-  font-weight: 500;
-}
-.launch-text {
-  font-size: 13.5px;
-  font-weight: 600;
-}
-.launch-sub {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-.launch-strip:hover .launch-sub {
-  color: var(--brand-hover);
 }
 
 @media (max-width: 768px) {
@@ -471,11 +419,14 @@ function clearFilters() {
   .new-btn {
     order: 3;
   }
-}
-/* 窄屏：隐藏副文案，只留「+ 新建作品」 */
-@media (max-width: 480px) {
-  .launch-sub {
-    display: none;
+  /* 窄屏必须双列，不能单列：封面改 3:4 后，390 视口单列卡宽 358 → 封面 477px，
+     加信息区单卡约 610px，一屏只看得到 1 张 —— 列表页失去「横向比较」这个
+     唯一的存在理由（实测改前单列时首屏只有 1.2 张卡）。
+     双列后卡宽约 165、封面 220、单卡约 330，一屏可见 2.5 张。 */
+  .project-grid,
+  .grid-skeleton {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: var(--sp-3);
   }
 }
 </style>

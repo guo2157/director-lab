@@ -326,6 +326,16 @@ const statusSummary = computed(() => {
 function statusLabel(s: string) {
   return s === 'succeeded' ? '已完成' : s === 'failed' ? '失败' : s === 'running' ? '进行中' : '待解析'
 }
+/**
+ * 集级状态是否「混杂」：只有混杂时状态图例才提供新信息。
+ * 全部成功 → 集格统一绿底 + 标题旁「1/1 集完成」已经说清，图例是第三次复述；
+ * 全部待解析 → 集格统一灰底，同理。
+ */
+const hasMixedEpisodeStatus = computed(() => {
+  const s = statusSummary.value
+  const nonZero = [s.pending, s.running, s.succeeded, s.failed].filter((n) => n > 0)
+  return nonZero.length > 1
+})
 const { mutate: doRetryParse, isPending: retrying } = useMutation({
   mutationFn: () => retryParse(projectId.value),
   onSuccess: (res) => {
@@ -878,12 +888,14 @@ const canStartParse = computed(() => {
   return statusSummary.value.succeeded < statusTotalEpisodes.value
 })
 
-/** 页头步骤状态：与左栏 02 解析保持同一口径，但只用文字 + 色点，不重复整条进度条 */
+/** 页头步骤状态：与左栏 02 解析保持同一口径，但只用文字 + 色点，不重复整条进度条。
+ *  完成态只写「已完成」不带集数——集数 X/Y 已在下方面板标题旁给出，
+ *  页头再写一遍「1 集已完成」是同一个数字的第二次出现。 */
 const parseHeaderState = computed<{ label: string; tone: string }>(() => {
   if (parseJobRunning.value) return { label: '解析中', tone: 'running' }
   if (failedEpisodes.value.length) return { label: `${failedEpisodes.value.length} 集失败`, tone: 'failed' }
   if (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded === statusTotalEpisodes.value) {
-    return { label: `${statusTotalEpisodes.value} 集已完成`, tone: 'done' }
+    return { label: '已完成', tone: 'done' }
   }
   if (!hasScript.value) return { label: '待保存剧本', tone: 'idle' }
   return { label: '待解析', tone: 'idle' }
@@ -1143,8 +1155,15 @@ async function copyRawReport() {
         <!-- 解析原文：低频内容，改由页头「解析原文」按钮打开弹窗查看，
              不再在内容区常驻一条折叠条（曾占 47px 高 + 20px 间距） -->
 
-        <!-- 集数解析状态：分析进行中不展示，分析完成后才显示 -->
-        <div v-if="statusTotalEpisodes && !parseJobRunning" class="parse-status-panel panel-card">
+        <!-- 集数解析状态：分析进行中不展示，分析完成后才显示。
+             单集且全部成功时整块不渲染：此时「分集解析结果」里的每一项
+             （1/1 集完成、第 1 集 26 个分镜）在下方「解析结果」卡里都已出现
+             （解析完成徽章、1 集、分镜 26），只是同一批数字换了地方再说一遍，
+             却占掉 162px（实测首屏 36%）。多集时它才是新信息（哪集失败、哪集待解析）。 -->
+        <div
+          v-if="statusTotalEpisodes && !parseJobRunning && !(statusTotalEpisodes === 1 && parseAllSucceeded)"
+          class="parse-status-panel panel-card"
+        >
           <div class="episode-toolbar">
             <span class="pane-label">分集解析结果</span>
             <span class="episode-count-tag">{{ statusSummary.succeeded }}/{{ statusTotalEpisodes || 0 }} 集完成</span>
@@ -1176,7 +1195,11 @@ async function copyRawReport() {
               <span v-if="g.attempts" class="failure-attempt">已尝试 {{ g.attempts }} 次</span>
             </li>
           </ul>
-          <!-- 集格与状态图例同排：集数少时图例靠右补位，避免右侧整片留白 -->
+          <!-- 集格与状态图例同排：集数少时图例靠右补位，避免右侧整片留白。
+               图例只解释「集格颜色」这一件事：全部成功时集格全是绿底，
+               再列一遍「待解析 0 / 进行中 0 / 已完成 1 / 失败 0」是同一批数字的
+               第三次出现（标题旁已有「1/1 集完成」），因此整条不渲染；
+               有非成功集时才出现，且只列计数 > 0 的档位。 -->
           <div class="episode-row">
             <div class="episode-grid">
               <div
@@ -1190,11 +1213,11 @@ async function copyRawReport() {
                 <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? (episodeShotCount(ep) ?? 0) + ' 个分镜' : statusLabel(ep.status) }}</span>
               </div>
             </div>
-            <div class="episode-legend">
-              <span class="legend-item" :class="{ 'is-zero': !statusSummary.pending }"><i class="dot is-pending" />待解析 {{ statusSummary.pending }}</span>
-              <span class="legend-item" :class="{ 'is-zero': !statusSummary.running }"><i class="dot is-running" />进行中 {{ statusSummary.running }}</span>
-              <span class="legend-item" :class="{ 'is-zero': !statusSummary.succeeded }"><i class="dot is-succeeded" />已完成 {{ statusSummary.succeeded }}</span>
-              <span class="legend-item" :class="{ 'is-zero': !statusSummary.failed }"><i class="dot is-failed" />失败 {{ statusSummary.failed }}</span>
+            <div v-if="hasMixedEpisodeStatus" class="episode-legend">
+              <span v-if="statusSummary.pending" class="legend-item"><i class="dot is-pending" />待解析 {{ statusSummary.pending }}</span>
+              <span v-if="statusSummary.running" class="legend-item"><i class="dot is-running" />进行中 {{ statusSummary.running }}</span>
+              <span v-if="statusSummary.succeeded" class="legend-item"><i class="dot is-succeeded" />已完成 {{ statusSummary.succeeded }}</span>
+              <span v-if="statusSummary.failed" class="legend-item"><i class="dot is-failed" />失败 {{ statusSummary.failed }}</span>
             </div>
           </div>
         </div>
@@ -1655,9 +1678,6 @@ async function copyRawReport() {
 /* 失败原因统一在顶部失败面板展示，集格内不再重复重试入口 */
 .episode-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--text-secondary); flex: none; }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
-/* 计数为 0 的状态降权：色点去饱和、文字转弱，避免「失败 0」的红点抢视觉焦点 */
-.legend-item.is-zero { opacity: 0.5; }
-.legend-item.is-zero .dot { background: var(--neutral-line) !important; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.is-pending { background: var(--neutral-line); }
 .dot.is-running { background: var(--brand-primary); }

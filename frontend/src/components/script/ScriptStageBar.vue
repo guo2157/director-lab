@@ -19,7 +19,6 @@ defineProps<{
   /** 当前阶段下标；之前的视为已完成 */
   index: number
   savedVersion: SaveVersion
-  hint: string
 }>()
 </script>
 
@@ -46,7 +45,6 @@ defineProps<{
         aria-hidden="true"
       />
     </template>
-    <span class="stage-hint">{{ hint }}</span>
   </div>
 </template>
 
@@ -142,16 +140,7 @@ defineProps<{
   background: var(--brand-gradient-line);
 }
 
-.stage-hint {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
 @media (max-width: 768px) {
-  .stage-hint {
-    display: none;
-  }
   /* 窄屏下连接线缩短，优先保住四个步骤标签的可读性 */
   .stage-link {
     width: 10px;

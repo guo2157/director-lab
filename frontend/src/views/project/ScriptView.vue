@@ -52,12 +52,6 @@ const stageIndex = computed(() => {
   const i = steps.findIndex((s) => s.key === stage.value)
   return i < 0 ? 0 : i
 })
-const stageHint = computed(() => {
-  if (normalizing.value) return 'AI 正在分析剧本并整理为标准格式，请稍候…'
-  if (stage.value === 'draft') return '编辑剧本后建议先校验补充，再保存版本'
-  if (stage.value === 'checked') return '校验已完成，下一步保存版本'
-  return '版本已保存，可以进入解析'
-})
 
 /* 校验结果与版本状态 */
 const normalizeResult = ref<ScriptNormalizeResult | null>(null)
@@ -334,8 +328,11 @@ watch(
       </div>
     </header>
 
-    <!-- 三步流程指示：初始剧本 → 校验补充 → 保存版本 -->
-    <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" :hint="stageHint" />
+    <!-- 三步流程指示：剧本编辑 → 内容校验 → 版本已存。
+         不再传 hint：原 hint 三句里「编辑后建议先校验」「校验已完成，下一步保存」
+         「版本已保存，可以进入解析」都在复述右侧按钮已经说的事（按钮文案本身就是
+         下一步动作），且第三句是恒真陈述——保存完成后永远显示，不携带变化信息。 -->
+    <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" />
 
     <div v-if="showStylePanel" class="style-drawer">
       <StyleConfigPanel :project-id="projectId" />

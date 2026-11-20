@@ -163,7 +163,7 @@ function onSearch() {
 
 <style scoped>
 .series-list-page {
-  max-width: 1180px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: var(--sp-6) var(--sp-8) var(--sp-16);
 }

@@ -418,7 +418,8 @@ async function uploadRefImage(file: File) {
   width: 100%;
   max-height: 360px;
   border-radius: var(--radius-lg);
-  background: #000;
+  /* 视频 letterbox 黑场：DESIGN.md 规定这是唯一允许的纯黑，必须走令牌 */
+  background: var(--media-backdrop);
 }
 .dg-empty {
   display: flex;

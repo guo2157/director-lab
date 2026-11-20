@@ -963,6 +963,12 @@ onMounted(() => {
   background: var(--muted-soft);
   border-radius: var(--radius-sm);
 }
+/* 网格列宽：保持 auto-fill + 1fr。
+   曾试过 `minmax(220px, 340px)` + justify-content:start，想让 2 个角色时单卡
+   从 278px 涨到 340px，但实测 1440 与 1920 都只算出 3 列（列数由 min 值决定后
+   再被 max 截断，行为不可预测），右侧空白仅从 588 收到 464，收益不足。
+   右侧空白真正的成因是「角色 tab 只有 2 项」——场景 5 项、道具 4 项时 4 列是
+   正确密度。按数据量调列宽会让同一页在不同 tab 下跳动，不做。 */
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

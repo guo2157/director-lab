@@ -289,10 +289,17 @@ function onCardKey(e: KeyboardEvent) {
 
 /* 封面：占位态与有图态必须同高，否则同一行卡片高矮不齐
    （实测占位 116px vs 有图 251px，第 1 张卡被拉伸到 381px 且内容区多出空白）。
-   统一用 4:3 比例，由卡片宽度推导高度，跨卡自然对齐。 */
+
+   比例必须跟随项目画幅，不能一律 4:3：
+   本产品做的是短剧 / 漫剧，项目绝大多数是 9:16 竖屏（实测库内 4/4 全是 9:16），
+   而 4:3 横版容器会把竖图从上下各裁掉约 44% —— 卡片左上角写着「9:16 竖屏」、
+   封面却是横条，这是语义矛盾，也是首屏最主要的画面损失。
+   基准改为 3:4（竖版海报比例）：竖图只做轻微裁切，横图 / 方图各有专属分支。
+   3:4 而不是原生的 9:16 是因为 9:16 在 336px 列宽下会得到 597px 高的封面，
+   单卡超过 730px，一屏放不下一行，列表失去可比性。 */
 .cover {
   position: relative;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 3 / 4;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -300,11 +307,11 @@ function onCardKey(e: KeyboardEvent) {
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(160deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
-/* 有图时容器比例已一致，无需再单独覆盖；按项目画幅微调容器比例 */
-.cover.has-image.cover-16-9 {
+/* 按项目画幅覆盖容器比例；占位态与有图态共用同一套，避免混排时高矮不齐 */
+.cover.cover-16-9 {
   aspect-ratio: 16 / 9;
 }
-.cover.has-image.cover-1-1 {
+.cover.cover-1-1 {
   aspect-ratio: 1 / 1;
 }
 
@@ -616,5 +623,35 @@ function onCardKey(e: KeyboardEvent) {
 /* 已完成：只让进度条（绿 + ✓）表达完成，阶段 chip 保持中性 */
 .progress-block.is-done .progress-text {
   color: var(--state-success);
+}
+
+/* 窄屏双列（390 视口卡宽约 165px）：内边距与标题档位必须同时收，
+   否则 16px 内边距 + 15.5px 标题会把可读宽度压到 133px，
+   标题只能显示 6–7 个字，封面占比也被挤小。 */
+@media (max-width: 480px) {
+  .card-body {
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .card-title {
+    font-size: 13.5px;
+    line-height: 19px;
+  }
+  .card-meta {
+    font-size: 11px;
+  }
+  .stage-chip {
+    font-size: 11px;
+  }
+  .progress-block {
+    padding-top: var(--sp-2);
+    min-height: 44px;
+  }
+  /* 双列下「⋯」与标题争宽，且卡片本身可点开详情，更多操作在窄屏不是高频入口；
+     收成 24px 触摸目标并去掉负边距，避免压到标题基线 */
+  .more-btn {
+    min-width: 24px;
+    min-height: 24px;
+    margin-top: -1px;
+  }
 }
 </style>

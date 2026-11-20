@@ -101,28 +101,46 @@ withDefaults(
 }
 
 @media (max-width: 768px) {
+  /* 窄屏压缩：改前把 body / actions 都强制成 `flex: 1 1 100%`（整行），
+     于是「标签 / 内容 / 操作」各占一行，一张卡就要 3 行。
+     实测资产库 390 视口：执行进度 112px + 批量生成 180px = 292px，
+     加 tabs 42px 与间距，首屏 525px 才开始出现资产卡。
+     改为「内容参与行内排布、操作靠右并在放不下时自然折行」后，
+     两张卡各压到约 86px（合计 −120px）。 */
+  .stage-card {
+    padding: var(--sp-2) var(--sp-3);
+    margin-bottom: var(--sp-2);
+  }
   .stage-row {
     flex-wrap: wrap;
     gap: var(--sp-2);
+    row-gap: 6px;
   }
-  /* 窄屏标签退为行内小标，不再占一整列 */
+  /* 标签退为行内小标，不再占一整列，也不再独占一行 */
   .stage-label {
     flex: 0 0 auto;
+    font-size: 11px;
     line-height: 18px;
+    letter-spacing: 0.04em;
   }
+  /* 内容不再强制整行：数字/进度条与标签同排，放不下时自身折行 */
   .stage-body {
-    flex: 1 1 100%;
-    order: 3;
+    flex: 1 1 auto;
+    min-width: 0;
+    order: 0;
+    gap: 6px var(--sp-2);
   }
+  /* 操作靠右；放不下时折到下一行但依然右对齐，不独占整行宽度 */
   .stage-actions {
-    order: 4;
-    flex: 1 1 100%;
-    margin-left: 0;
-    flex-wrap: wrap;
+    order: 1;
+    flex: 0 0 auto;
+    margin-left: auto;
+    gap: 6px;
   }
   .stage-meta {
     padding-left: 0;
-    order: 5;
+    order: 2;
+    margin-top: 6px;
   }
 }
 </style>
