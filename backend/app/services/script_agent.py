@@ -37,6 +37,12 @@ from app.services.script_parse import (
 )
 from app.services.prompt_store import get_prompt
 from app.services import style_config
+from app.services.script_chunker import (
+    EpisodeChunk,
+    fallback_split,
+    slice_range,
+    split_episodes,
+)
 
 
 def _now() -> datetime:
@@ -112,6 +118,33 @@ def _find_or_create_parse_version(db: Session, project_id: str, script_version_i
     db.add(pv)
     db.flush()
     return pv
+
+
+def _build_global_context(preamble: str, char_map: dict, outline_episodes: dict,
+                          b_start: int, b_end: int, *, limit: int = 800) -> str:
+    """拼「全剧上下文」块（≤ limit 字）：已知角色名 + 本批集大纲标题 + 人物表节选。
+
+    并行批次互相看不到对方正文，角色/场景命名容易漂移；这里只喂已入库角色名
+    与大纲标题做缓解，不引入批次间串行依赖（跨批去重仍走 normalize_entity_name）。
+    """
+    parts: list[str] = []
+    names = [n for n in (char_map or {}) if n]
+    if names:
+        parts.append("全剧上下文——已知角色：" + "、".join(names[:40]) + "\n")
+    titles = []
+    for ep in range(b_start, b_end + 1):
+        info = (outline_episodes or {}).get(ep) or {}
+        title = str(info.get("title") or "").strip()
+        if title:
+            titles.append(f"第{ep}集《{title}》")
+    if titles:
+        parts.append("本批集大纲标题：" + "；".join(titles) + "\n")
+    used = sum(len(p) for p in parts)
+    room = max(0, limit - used)
+    head = (preamble or "").strip()
+    if head and room > 0:
+        parts.append("人物表/序言节选：\n" + head[:room] + "\n")
+    return "".join(parts)
 
 
 def execute_script_agent_job(job_id: str) -> dict:
@@ -242,6 +275,45 @@ def execute_script_agent_job(job_id: str) -> dict:
             c.name: c.id
             for c in db.query(Character).filter(Character.project_id == job.project_id).all()
         }
+
+        # ---- 4.5 按集切片：每批只发送本批集正文 ----
+        # 旧实现 `hasattr(sv, "get_episode_chunk")` 恒为 False（ScriptVersion 上
+        # 并无该方法），于是每一批都发送整本剧本。这里改为显式切分。
+        split = split_episodes(text)
+        preamble = ""
+        chunk_mode = "markers"
+        if split is not None:
+            chunks: list[EpisodeChunk] = list(split.chunks)
+            preamble = split.preamble
+            if len(chunks) != total_episodes:
+                # 标记数与大纲口径不一致：不让任务失败，只留痕
+                _write_event(db, job, "agent.chunk_mismatch", {
+                    "marker_count": len(chunks),
+                    "total_episodes": total_episodes,
+                })
+            if len(chunks) < total_episodes:
+                # 缺失集走近似均分补齐，避免切片后漏集
+                have = {c.number for c in chunks}
+                chunks += [c for c in fallback_split(text, total_episodes) if c.number not in have]
+                chunk_mode = "markers+fallback"
+        else:
+            # 全无集标记：按场次/段落边界近似均分
+            chunks = fallback_split(text, total_episodes)
+            chunk_mode = "fallback"
+        outline_episodes = {
+            int(e.get("episode") or 0): e
+            for e in (outline_data.get("episode_breakdown") or [])
+        }
+        _write_event(db, job, "agent.chunking", {
+            "mode": chunk_mode,
+            "chunk_count": len(chunks),
+            "preamble_chars": len(preamble or ""),
+            "batch_chars": [
+                {"range": f"{bs}-{be}", "chars": len(slice_range(chunks, bs, be))}
+                for bs, be in batches
+            ],
+        })
+        db.commit()
         client = LLMClient()
         style_settings = (project.settings if project is not None else {}) or {}
         style_snap = style_config.style_snapshot(style_settings, project_id=job.project_id)
@@ -294,17 +366,14 @@ def execute_script_agent_job(job_id: str) -> dict:
             """
             b_count = b_end - b_start + 1
 
-            # 只提取当前批次的剧本片段，而非传入全文，减少无关 token 消耗
-            episode_text = text
-            try:
-                if hasattr(sv, "get_episode_chunk"):
-                    episode_text = sv.get_episode_chunk(b_start) or text
-            except Exception:
-                pass
+            # 只发送本批集正文；切片缺失时退回全文，避免发出空正文让模型凭空编造
+            episode_text = slice_range(chunks, b_start, b_end) or text
             user_prompt = (
                 style_config.parse_context_block(style_settings)
+                + _build_global_context(preamble, char_map, outline_episodes, b_start, b_end)
                 + f"请解析以下剧本，仅解析第 {b_start} 集到第 {b_end} 集，"
-                + f"共 {b_count} 集。范围外的集不要输出。\n\n剧本全文：\n{episode_text}"
+                + f"共 {b_count} 集。范围外的集不要输出。\n\n"
+                + f"第 {b_start}–{b_end} 集剧本：\n{episode_text}"
             )
 
             def _on_delta(delta_text: str) -> None:

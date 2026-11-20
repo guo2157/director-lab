@@ -12,11 +12,14 @@
 import re
 
 from app.services.prompt_store import _register_default
+from app.services.script_chunker import SECTION_LINE_RE
 
 # 「人物名：台词」行，说话人限 1-10 字，避免把「第1集」误判为人物
 _DIALOGUE_RE = re.compile(r"^\s*([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_·]{0,9})\s*[:：]\s*(.+?)\s*$", re.M)
-# 场次标题行（第X集 / 场次N），用于排除非人物行
-_SECTION_RE = re.compile(r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*集|场次\s*[0-9一二三四五六七八九十]+)")
+# 场次标题行（第X集 / 场次N），用于排除非人物行。
+# 判定口径已抽到 script_chunker.SECTION_LINE_RE（分集切分与台词过滤共用一份），
+# 此处保留 _SECTION_RE 别名，既有调用方与测试引用不变、行为不变。
+_SECTION_RE = SECTION_LINE_RE
 # 比对时需忽略的字符：全部标点与空白。只做等价剔除，不改动任何文字内容。
 # 注意必须是剔除而不是全半角转换——『！』本身就是全角，转换不会让它消失，
 # 会导致有标点与无标点的同一句台词得到两个不同指纹，去重失效。
