@@ -18,6 +18,15 @@ from app.main import app
 from app.models import Base, ids
 
 WF_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
+# 已退役的工作流定义（数据库记录已删除、seed 不再导入）仍保留 JSON 作为
+# 解析/分类逻辑的测试样本，放在 _retired/ 下；读取时回退到这里。
+WF_RETIRED_DIR = WF_DIR / "_retired"
+
+
+def wf_path(name: str) -> Path:
+    """工作流 JSON 路径：优先在用目录，其次已退役目录。"""
+    p = WF_DIR / f"{name}.json"
+    return p if p.exists() else WF_RETIRED_DIR / f"{name}.json"
 
 
 @pytest.fixture()
@@ -43,7 +52,7 @@ def _upload(client: TestClient, name: str, wtype: str) -> str:
         files={
             "file": (
                 f"{name}.json",
-                (WF_DIR / f"{name}.json").read_bytes(),
+                wf_path(name).read_bytes(),
                 "application/json",
             )
         },
@@ -273,7 +282,7 @@ def test_upload_without_description_generates_from_name(client):
         files={
             "file": (
                 "wf_video_h3_ref2va_std_5s.json",
-                (WF_DIR / "wf_video_h3_ref2va_std_5s.json").read_bytes(),
+                wf_path("wf_video_h3_ref2va_std_5s").read_bytes(),
                 "application/json",
             )
         },
@@ -313,9 +322,12 @@ def test_candidates_default_storyboard_image_is_ref_multi(client):
     assert _recommended(resp)["name"] == "wf_image_ref_qwen21_multi"
 
 
-def test_candidates_default_video_is_h3_ref2va_fast_5s(client):
-    """分镜看板默认推荐多参考图生视频 wf_video_h3_ref2va_fast_5s。"""
+def test_candidates_default_video_is_h3_ref2va_std_5s(client):
+    """分镜看板默认推荐多参考图生视频 wf_video_h3_ref2va_std_5s。
+
+    原默认项 wf_video_h3_ref2va_fast_5s 已按用户要求从库中移除，默认改指标准 5 秒版。
+    """
     _seed_all(client)
     resp = client.get("/api/workflows/candidates", params={"slot": "video"})
     assert resp.status_code == 200, resp.text
-    assert _recommended(resp)["name"] == "wf_video_h3_ref2va_fast_5s"
+    assert _recommended(resp)["name"] == "wf_video_h3_ref2va_std_5s"

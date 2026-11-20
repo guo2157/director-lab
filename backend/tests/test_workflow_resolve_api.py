@@ -20,10 +20,19 @@ from app.models.narrative import Project
 from app.models.production import Workflow
 
 WF_DIR = Path(__file__).resolve().parents[1] / "data" / "workflows"
+# 已退役的工作流定义（数据库记录已删除、seed 不再导入）仍保留 JSON 作为
+# 解析/分类逻辑的测试样本，放在 _retired/ 下；读取时回退到这里。
+WF_RETIRED_DIR = WF_DIR / "_retired"
+
+
+def wf_path(name: str) -> Path:
+    """工作流 JSON 路径：优先在用目录，其次已退役目录。"""
+    p = WF_DIR / f"{name}.json"
+    return p if p.exists() else WF_RETIRED_DIR / f"{name}.json"
 
 
 def _load(name: str) -> tuple[dict, dict]:
-    definition = json.loads((WF_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    definition = json.loads(wf_path(name).read_text(encoding="utf-8"))
     meta_path = WF_DIR / f"{name}.meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     return definition, meta
@@ -54,7 +63,7 @@ def _seed(client: TestClient) -> dict[str, str]:
         resp = client.post(
             "/api/workflows",
             data={"name": name, "workflow_type": wtype},
-            files={"file": (f"{name}.json", (WF_DIR / f"{name}.json").read_bytes(), "application/json")},
+            files={"file": (f"{name}.json", wf_path(name).read_bytes(), "application/json")},
         )
         assert resp.status_code == 201, resp.text
         out[name] = resp.json()["id"]

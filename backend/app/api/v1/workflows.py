@@ -166,7 +166,8 @@ _SLOT_SELECTION_RULES: dict[str, dict] = {
 _SLOT_DEFAULT_WORKFLOWS: dict[str, str] = {
     'asset_image': 'wf_image_t2i_qwen21_turbo',
     'storyboard_image': 'wf_image_ref_qwen21_multi',
-    'video': 'wf_video_h3_ref2va_fast_5s',
+    # 「极速5秒图生视频」已按用户要求从库中移除，默认项改指标准 5 秒版
+    'video': 'wf_video_h3_ref2va_std_5s',
 }
 
 
