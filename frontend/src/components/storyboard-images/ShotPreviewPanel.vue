@@ -18,17 +18,11 @@ const props = withDefaults(
     statusKind: StatusKind
     statusLabel: string
     hasKeyframe?: boolean
-    locked?: boolean
-    confirmed?: boolean
-    canGenerate?: boolean
     generating?: boolean
     validating?: boolean
   }>(),
   {
     hasKeyframe: false,
-    locked: false,
-    confirmed: false,
-    canGenerate: true,
     generating: false,
     validating: false,
   },
@@ -45,13 +39,10 @@ const generateLabel = computed(() => {
   return props.hasKeyframe ? '重新生成分镜图' : '生成分镜图'
 })
 const generateTitle = computed(() => {
-  if (!props.canGenerate) return '需先在资产库通过人工审核'
-  if (props.locked) return '该镜已锁定，先解锁再生成'
   return props.hasKeyframe ? '用当前提示词与参考图重绘本镜' : '按当前提示词与参考图生成'
 })
 const replaceTitle = computed(() => {
   if (!props.hasKeyframe) return '尚无分镜图，生成后才能替换'
-  if (props.locked) return '该镜已锁定，先解锁再替换'
   return '用本地上传的图替换该镜分镜图'
 })
 </script>
@@ -75,8 +66,6 @@ const replaceTitle = computed(() => {
       <span class="sp-name" :title="title">{{ title }}</span>
       <span class="sp-tags">
         <StatusTag :status="statusKind" :label="statusLabel" />
-        <span v-if="locked" class="sp-chip is-warn">已锁定</span>
-        <span v-if="confirmed" class="sp-chip is-ok">已确认</span>
       </span>
     </div>
 
@@ -85,7 +74,7 @@ const replaceTitle = computed(() => {
         type="primary"
         block
         :loading="generating"
-        :disabled="!canGenerate || locked || generating"
+        :disabled="generating"
         :title="generateTitle"
         @click="emit('generate')"
       >
@@ -94,7 +83,7 @@ const replaceTitle = computed(() => {
       <div class="sp-row">
         <n-button
           secondary
-          :disabled="!hasKeyframe || locked || generating"
+          :disabled="!hasKeyframe || generating"
           :title="replaceTitle"
           @click="emit('replace')"
         >
@@ -110,7 +99,6 @@ const replaceTitle = computed(() => {
           校验
         </n-button>
       </div>
-      <p v-if="!canGenerate" class="sp-gate">公共资产尚未通过人工审核，暂不可生成分镜图。</p>
     </div>
   </div>
 </template>
@@ -212,15 +200,5 @@ const replaceTitle = computed(() => {
 }
 .sp-row :deep(.n-button) {
   flex: 1;
-}
-.sp-gate {
-  margin: 0;
-  padding: var(--sp-2) var(--sp-3);
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--accent-amber);
-  background: var(--warning-soft);
-  border: 1px solid var(--warning-line);
-  border-radius: var(--radius);
 }
 </style>

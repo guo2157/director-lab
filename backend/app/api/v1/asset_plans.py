@@ -269,15 +269,14 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
 
     workflow_id = payload.get("workflow_id")
 
-    # 分镜图闸口：公共资产须通过人工审核
+    # 分镜图闸口：仅校验必需资产就绪（不再要求人工审核）
     if plan_type == "keyframe":
-        # 统一资产就绪门禁（D-23 强化）：校验必需资产齐全/有效/文件存在/无在途生成任务/审核通过
         from app.services.assets_gate import assert_assets_gate
 
         assert_assets_gate(db, project_id)
 
     from app.api.v1.generate import (  # 复用既有匹配与建任务逻辑，保证行为一致
-        _TARGET_WF_TYPE, _check_keyframe_gate, _create_job, _match_workflow,
+        _TARGET_WF_TYPE, _check_keyframe_ready, _create_job, _match_workflow,
         _match_workflow_exact, _apply_chain_mode,
         _filter_already_generated, _workflow_binds_param,
     )
@@ -296,7 +295,7 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
         if not shot_ids:
             raise errors.AppError("invalid_request", "定义缺少镜头归属，无法生成", 400)
         if target == "clip":
-            _check_keyframe_gate(db, shot_ids)
+            _check_keyframe_ready(db, shot_ids)
         # 幂等过滤（P0）：同一工作流已生成过视频的镜头跳过，避免重复点击批量出视频时重复渲染；
         # 需要重做时走分镜视频详情页的重新生成，不受此处限制
         _shot_objs = [s for s in (db.get(Shot, sid) for sid in shot_ids) if s is not None]
@@ -315,18 +314,6 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
                     "workflow_id": wf.id,
                 })
                 continue
-            # 已锁定分镜图跳过（锁定只作用于图片，不涉及分镜视频）
-            if target == "keyframe":
-                locked = (
-                    db.query(Asset.id)
-                    .join(Job, Job.id == Asset.source_job_id)
-                    .filter(Job.shot_id == shot.id, Asset.asset_type == "keyframe",
- Asset.locked.is_(True))
-                    .first()
-                )
-                if locked is not None:
-                    skipped.append({"plan_id": plan.id, "reason": "asset_locked"})
-                    continue
             params: dict = {}
             if plan.prompt:
                 params["prompt"] = plan.prompt

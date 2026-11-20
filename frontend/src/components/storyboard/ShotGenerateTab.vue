@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 「生成」标签页：按当前阶段只展示可行的生成动作
- * （未确认分镜图先出图，确认后再出视频），并保留镜头音频面板入口。
+ * （没有分镜图先出图，已有分镜图再出视频），并保留镜头音频面板入口。
  *
  * 视频工作流不在这里选择：分镜看板顶部的「视频工作流」选择器是唯一入口，
  * 批量生成、这里的生成与重新生成共用同一份选择，避免出现批量用标准版、
@@ -15,7 +15,8 @@ defineProps<{
   shotId: string
   episode: number
   readinessAll: boolean
-  keyframeConfirmed: boolean
+  /** 是否已有当前分镜图产物（取代原「是否已人工确认」） */
+  hasKeyframe: boolean
   clipActionLabel: string
   clipActionIsRegenerate: boolean
   generating: boolean
@@ -34,7 +35,7 @@ const emit = defineEmits<{ 'generate-keyframe': []; 'clip-action': [] }>()
     <div class="gen-line">
       <span class="line-label">当前阶段</span>
       <span class="line-value">
-        {{ keyframeConfirmed ? '分镜图已确认，可生成视频' : '待确认分镜图，先出关键帧' }}
+        {{ hasKeyframe ? '分镜图已生成，可生成视频' : '尚未生成分镜图，先出关键帧' }}
       </span>
     </div>
 
@@ -46,7 +47,7 @@ const emit = defineEmits<{ 'generate-keyframe': []; 'clip-action': [] }>()
     </div>
 
     <div class="gen-actions">
-      <n-tooltip v-if="!keyframeConfirmed">
+      <n-tooltip v-if="!hasKeyframe">
         <template #trigger>
           <n-button
             type="primary"

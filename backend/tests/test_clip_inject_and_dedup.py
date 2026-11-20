@@ -81,7 +81,13 @@ def _make_workflow(client, wf_type, name):
     ).json()
 
 
-def _gen_keyframe_and_confirm(client, shot_id, wf_id, monkeypatch):
+def _gen_keyframe(client, shot_id, wf_id, monkeypatch):
+    """为镜头生成一张真实分镜图。
+
+    逐镜人工确认已取消（2026-11 流程简化）：/keyframe/confirm 端点已移除，
+    视频闸口改为校验「当前有效分镜图 + 来源任务 succeeded + 文件存在」，
+    因此这里只要真正跑完一次分镜图生成任务即可，不再需要确认动作。
+    """
     import app.worker.executor as ex_mod
     from app.core.config import Settings
     monkeypatch.setattr(ex_mod, "get_settings", lambda: Settings(render_mock=True))
@@ -89,8 +95,6 @@ def _gen_keyframe_and_confirm(client, shot_id, wf_id, monkeypatch):
     jid = j.get("id") or j.get("job", {}).get("id")
     from app.worker.executor import execute_generate_job
     assert execute_generate_job(jid)["ok"] is True
-    r = client.post(f"/api/shots/{shot_id}/keyframe/confirm")
-    assert r.status_code == 200, r.text
 
 
 def _run_clip_job(client, shot_id, wf_id, monkeypatch):
@@ -112,7 +116,7 @@ def test_clip_injects_ref_image_and_wh_length(client, monkeypatch):
     pid = _make_project(client, "9:16")
     _, shot = _make_shot(client, pid, duration=5)
     wf = _make_workflow(client, "image", "inj-image")
-    _gen_keyframe_and_confirm(client, shot["id"], wf["id"], monkeypatch)
+    _gen_keyframe(client, shot["id"], wf["id"], monkeypatch)
     jid, result = _run_clip_job(client, shot["id"], wf["id"], monkeypatch)
     assert result["ok"] is True, result
     # 校验注入结果：从数据库读取任务 input_snapshot
@@ -137,7 +141,7 @@ def test_clip_length_clamped_to_range(client, monkeypatch):
     pid = _make_project(client, "16:9")
     _, shot = _make_shot(client, pid, duration=30)
     wf = _make_workflow(client, "image", "clamp-image")
-    _gen_keyframe_and_confirm(client, shot["id"], wf["id"], monkeypatch)
+    _gen_keyframe(client, shot["id"], wf["id"], monkeypatch)
     jid, result = _run_clip_job(client, shot["id"], wf["id"], monkeypatch)
     assert result["ok"] is True, result
     import app.core.database as db_mod
@@ -159,7 +163,7 @@ def test_generate_rejected_while_inflight(client, monkeypatch):
     pid = _make_project(client)
     _, shot = _make_shot(client, pid)
     wf = _make_workflow(client, "image", "dup-image")
-    _gen_keyframe_and_confirm(client, shot["id"], wf["id"], monkeypatch)
+    _gen_keyframe(client, shot["id"], wf["id"], monkeypatch)
     # 第一次提交 clip（queued，不执行）
     r1 = client.post(f"/api/shots/{shot['id']}/generate", json={"target": "clip", "workflow_id": wf["id"]})
     assert r1.status_code == 202, r1.text
@@ -177,7 +181,7 @@ def test_retry_rejected_while_inflight(client, monkeypatch):
     pid = _make_project(client)
     _, shot = _make_shot(client, pid)
     wf = _make_workflow(client, "image", "retry-image")
-    _gen_keyframe_and_confirm(client, shot["id"], wf["id"], monkeypatch)
+    _gen_keyframe(client, shot["id"], wf["id"], monkeypatch)
     # 创建一个 clip 任务并直接置为 failed（不执行）
     r1 = client.post(f"/api/shots/{shot['id']}/generate", json={"target": "clip", "workflow_id": wf["id"]})
     jid = r1.json()["id"]

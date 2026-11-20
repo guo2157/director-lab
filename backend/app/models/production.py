@@ -26,6 +26,9 @@ class Asset(Base):
     thumb_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     ref_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # 锁定功能已废弃（2026-11 流程简化）：字段保留仅为兼容历史数据，
+    # 不再有任何写入路径（lock/unlock 端点已删除），恒为 False，
+    # 且不参与任何操作限制或阶段门禁判定。
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     validity: Mapped[str] = mapped_column(String(16), nullable=False, default="current", server_default="current")
     input_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)

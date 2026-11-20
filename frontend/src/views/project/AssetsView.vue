@@ -4,16 +4,16 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { NTab, NTabs, useMessage } from 'naive-ui'
 import {
-  listAssets, deleteAsset, lockAsset, unlockAsset,
+  listAssets,
   replaceAsset, getAssetRegenerateConfig,
 } from '@/api/assets'
 import type { Asset } from '@/types/asset'
 import { listCharacters, listProps, listScenes } from '@/api/script'
-import { getProject, reviewProjectAssets } from '@/api/projects'
 import { generateCharacterPortrait, generatePropAnchor, generateSceneBaseline } from '@/api/storyboard'
 import { getAssetGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
-import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import { useStageTransition } from '@/composables/useStageTransition'
+import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
 import type { AssetGenerationJob, AssetGenerationProgress } from '@/types/generation'
 import VoiceConfigDrawer from '@/components/VoiceConfigDrawer.vue'
 import VoiceMatchPanel from '@/components/VoiceMatchPanel.vue'
@@ -35,32 +35,36 @@ import {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const confirmDialog = useConfirmDialog()
 const queryClient = useQueryClient()
 
 const projectId = computed(() => route.params.id as string)
 
-// --- 人工审核闸口（资产库 → 分镜图 的必经环节） ---
-const projectQuery = useQuery({
-  queryKey: computed(() => ['project', projectId.value]),
-  queryFn: () => getProject(projectId.value),
+// --- 推进闸口（资产库 → 分镜图）---
+// 人工审核状态机已取消：不再调审核接口、不再读 assets_review_status。
+// 把关动作改为「查后端阶段就绪 → 确认弹窗 → 确认时再查一次 → 跳转」。
+// 就绪判定走后端 stage-readiness 的 assets 阶段：检查必需角色/场景/必需道具
+// 的图片是否真实生成完成（指针有效 + 版本 current + 文件存在），前端不自己算。
+// 不能复用 storyboard_images 阶段——那是镜头级分镜图产物，此刻还没生成。
+const stageTransition = useStageTransition({
+  projectId: () => projectId.value,
+  stage: 'assets',
+  to: (pid) => `/project/${pid}/storyboard-images`,
+  notReadyTitle: '资产图片尚未全部生成完成',
+  confirmTitle: '确认进入分镜图？',
+  confirmDescription: [
+    '所有必要资产图片已经生成完成。',
+    '请确认角色、场景和道具图片均已检查，没有问题，可以开始生成分镜图。',
+    '进入下一阶段后，你仍然可以返回资产库替换或重新生成图片。',
+  ].join('\n'),
+  confirmText: '确认，进入分镜图',
+  notify: { warning: (m) => message.warning(m), error: (m) => message.error(m) },
+  push: (path) => router.push(path),
 })
-const assetsReviewStatus = computed(() => projectQuery.data.value?.assets_review_status ?? 'pending')
-const reviewStatusText = computed(() => {
-  if (assetsReviewStatus.value === 'approved') return '公共资产已通过人工审核，可进入分镜图生成'
-  if (assetsReviewStatus.value === 'rejected') return '审核被驳回：请修改或替换不满意的资产后重新提交审核'
-  return '确认资产无误后审核通过，方可生成分镜图'
-})
-const reviewMutation = useMutation({
-  mutationFn: (action: 'approve' | 'reject') => reviewProjectAssets(projectId.value, action),
-  onSuccess: (data) => {
-    message.success(
-      data.assets_review_status === 'approved' ? '审核通过，已放行分镜图生成' : '已驳回，请修改或替换资产后重新提交',
-    )
-    queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
-  },
-  onError: (e: any) => message.error(`审核失败: ${e?.message ?? e}`),
-})
+
+/** 去分镜图：先查就绪，未就绪提示缺失项；就绪才弹确认框 */
+function gotoStoryboardImages() {
+  void stageTransition.request()
+}
 
 // --- 分类标签页 ---
 // 分类值必须与后端权威枚举 enums.ASSET_TYPE 完全一致，否则后端过滤条件永远无匹配
@@ -109,32 +113,17 @@ const assetsQuery = useQuery({
 // --- Upload（独立上传入口已移除）：单独上传的角色/场景/道具资产无法绑定实体参考关系，
 // 资产图统一走角色/场景/道具卡片的生成入口，替换走资产卡片的『上传替换』 ---
 
-// --- Lock/Unlock ---
-const lockMutation = useMutation({
-  mutationFn: (params: { id: string; lock: boolean }) =>
-    params.lock ? lockAsset(params.id) : unlockAsset(params.id),
-  onSuccess: () => {
-    message.success('操作成功')
-    queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
-  },
-  onError: (e: any) => message.error(`操作失败: ${e?.message ?? e}`),
-})
-
 // --- Delete ---
-const deleteMutation = useMutation({
-  mutationFn: (id: string) => deleteAsset(id),
-  onSuccess: () => {
-    message.success('删除成功')
-    queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
-  },
-  onError: (e: any) => message.error(`删除失败: ${e?.message ?? e}`),
-})
+// 卡片上的删除入口已移除（资产库只做生成/替换/重生成），
+// 删除能力保留在后端接口，前端不再调用。
 
 // --- 详情弹窗 ---
 const detailVisible = ref(false)
 const activeAsset = ref<Asset | null>(null)
 const detailPrompt = ref('')
 const detailPromptVersion = ref('')
+/** 提示词来源：edited=用户保存过的编辑值 / template=模板默认值 */
+const detailPromptSource = ref<'edited' | 'template'>('template')
 
 async function copyText(text: string) {
   try {
@@ -150,12 +139,15 @@ async function openDetail(asset: Asset) {
   detailVisible.value = true
   detailPrompt.value = ''
   detailPromptVersion.value = ''
-  // 展示用：可重新生成的资产附带提示词（只读展示，读取失败不影响详情）
+  detailPromptSource.value = 'template'
+  // 可重新生成的资产带出提示词：后端优先回显用户保存过的编辑值，
+  // 没编辑过才返回模板默认值，prompt_source 标明是哪种。
   if (canRegenerate(asset)) {
     try {
       const cfg = await getAssetRegenerateConfig(asset.id)
       detailPrompt.value = cfg.prompt || ''
       detailPromptVersion.value = cfg.asset_prompt_version || ''
+      detailPromptSource.value = cfg.prompt_source === 'edited' ? 'edited' : 'template'
     } catch {
       detailPrompt.value = ''
     }
@@ -216,7 +208,7 @@ async function confirmReplace(file: File) {
   }
 }
 
-// --- 重新生成（角色/场景/道具：可改提示词，结果落候选版本；逻辑在 AssetRegenDrawer 内） ---
+// --- 重新生成（角色/场景/道具：可改提示词，新结果直接覆盖旧版；逻辑在 AssetRegenDrawer 内） ---
 const REGEN_TYPES = ['character', 'scene', 'prop']
 function canRegenerate(asset: Asset): boolean {
   return REGEN_TYPES.includes(asset.asset_type)
@@ -224,29 +216,25 @@ function canRegenerate(asset: Asset): boolean {
 
 const regenVisible = ref(false)
 const regenAsset = ref<Asset | null>(null)
+/** 详情弹窗带入的提示词（含未保存编辑），作为重新生成抽屉的初值 */
+const regenPresetPrompt = ref('')
 
-function openRegenerate(asset: Asset) {
+function openRegenerate(asset: Asset, prompt?: string) {
   detailVisible.value = false
   regenAsset.value = asset
+  // 详情页带出的提示词优先，避免抽屉打开后被模板默认值覆盖
+  regenPresetPrompt.value = (prompt ?? detailPrompt.value ?? '').trim()
   regenVisible.value = true
 }
 
-// --- 卡片更多操作下拉（锁定/删除收进菜单，删除保留二次确认） ---
-function onCardMenu(key: string, item: AssetCardItem) {
-  const asset = item.asset
-  if (!asset) return
-  if (key === 'lock') {
-    lockMutation.mutate({ id: asset.id, lock: !asset.locked })
-  } else if (key === 'delete') {
-    confirmDialog({
-      title: '删除资产',
-      message: `确认删除资产「${asset.name || asset.id}」？删除后不可恢复。`,
-      impact: [`资产「${asset.name || asset.id}」`],
-      confirmText: '删除',
-      onConfirm: () => deleteMutation.mutate(asset.id),
-    })
-  }
+/** 详情弹窗保存提示词后，本地记录为已编辑态，重新生成沿用这份内容 */
+function onDetailPromptSaved(prompt: string) {
+  detailPrompt.value = prompt
+  detailPromptSource.value = 'edited'
 }
+
+// --- 卡片更多操作下拉已移除：资产图只保留替换与重生成，
+// 删除入口下线（锁定/解锁此前已随锁定功能一并删除）。
 
 // --- 拖拽资产（供分镜槽位绑定）：拖动逻辑在 AssetCard 内实现 ---
 
@@ -399,7 +387,7 @@ const assetProgress = useGenerationProgress<AssetGenerationProgress>({
     await refreshAll()
   },
   onAllComplete: () => {
-    message.success('公共资产图已全部生成完成，请检查效果后提交人工审核')
+    message.success('公共资产图已全部生成完成，检查效果后即可进入分镜图')
   },
 })
 
@@ -501,8 +489,6 @@ const genPortrait = useMutation({
   onSuccess: () => {
     message.success('角色定妆图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['characters', projectId] })
-    // 公共资产变更会使审核结论失效（后端回退为 pending），同步刷新审核状态
-    queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
   },
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
 })
@@ -512,7 +498,6 @@ const genBaseline = useMutation({
   onSuccess: () => {
     message.success('场景基准图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
   },
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
 })
@@ -522,7 +507,6 @@ const genAnchor = useMutation({
   onSuccess: () => {
     message.success('道具锚定图任务已提交')
     queryClient.invalidateQueries({ queryKey: ['props', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
   },
   onError: (e: any) => message.error(`生成失败: ${e?.message ?? e}`),
 })
@@ -825,14 +809,9 @@ onMounted(() => {
       :done="projectReadiness.done"
       :total="projectReadiness.total"
       :all-done="projectReadiness.all"
-      :review-status="assetsReviewStatus"
-      :review-text="reviewStatusText"
       :inflight-count="assetProgress.inflightCount.value"
-      :reviewing="reviewMutation.isPending.value"
       :loading="assetProgress.loading.value"
-      @approve="reviewMutation.mutate('approve')"
-      @reject="reviewMutation.mutate('reject')"
-      @next="router.push(`/project/${projectId}/storyboard-images`)"
+      @next="gotoStoryboardImages"
       @refresh="assetProgress.refresh()"
     />
 
@@ -909,7 +888,6 @@ onMounted(() => {
         @replace="onCardReplace(item)"
         @regenerate="onCardRegenerate(item)"
         @voice="onCardVoice(item)"
-        @menu="(key: string) => onCardMenu(key, item)"
         @update:selected="(v: boolean) => item.entityId && toggleCraft(item.entityId, v)"
       />
     </div>
@@ -920,9 +898,10 @@ onMounted(() => {
       :asset="activeAsset"
       :prompt="detailPrompt"
       :prompt-version="detailPromptVersion"
+      :prompt-source="detailPromptSource"
       @replace="activeAsset && openReplace(activeAsset)"
-      @regenerate="activeAsset && openRegenerate(activeAsset)"
-      @toggle-lock="activeAsset && lockMutation.mutate({ id: activeAsset.id, lock: !activeAsset.locked })"
+      @regenerate="(p: string) => activeAsset && openRegenerate(activeAsset, p)"
+      @prompt-saved="onDetailPromptSaved"
       @copy="copyText"
     />
 
@@ -934,13 +913,29 @@ onMounted(() => {
       @confirm="confirmReplace"
     />
 
-    <!-- 重新生成：提示词 + 候选版本 -->
+    <!-- 重新生成：提示词可改，新结果直接覆盖旧版，只保留一份 -->
     <AssetRegenDrawer
       v-model:show="regenVisible"
       :workflow-id="assetImageWorkflowId"
       :asset="regenAsset"
+      :preset-prompt="regenPresetPrompt"
       @refresh="refreshAll"
       @submitted="assetProgress.start({ notifyOnComplete: true })"
+    />
+
+    <!-- 阶段跳转确认弹窗：就绪时确认进入分镜图，未就绪时展示缺失资产 -->
+    <StageTransitionDialog
+      v-model:visible="stageTransition.visible.value"
+      :title="stageTransition.confirmTitle"
+      :description="stageTransition.confirmDescription"
+      :confirm-text="stageTransition.confirmText"
+      :total="stageTransition.readiness.value.total"
+      :done="stageTransition.readiness.value.done"
+      :blockers="stageTransition.blockers.value"
+      :ready="stageTransition.readiness.value.ready"
+      :loading="stageTransition.loading.value"
+      @confirm="stageTransition.confirm()"
+      @cancel="stageTransition.cancel()"
     />
 
     <!-- 音色配置抽屉（音频模块改造） -->

@@ -56,7 +56,8 @@ def db(tmp_path):
         version=1,
         definition={},
     )
-    # D-23 资产门禁：场景须绑定有效基准图（文件真实存在），项目审核状态须为 approved
+    # 资产门禁：场景须绑定有效基准图（文件真实存在）。
+    # 阶段审核已于 2026-11 取消，assets_review_status 不再参与任何门禁判定。
     media = tmp_path / "media"
     media.mkdir(exist_ok=True)
     baseline_file = media / "baseline.png"
@@ -71,7 +72,6 @@ def db(tmp_path):
         validity="current",
     )
     scene.baseline_asset_id = baseline.id
-    project.assets_review_status = "approved"
     # 状态机门禁前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
     # 使 derive_progress 推进到 keyframes 阶段
     import hashlib
@@ -310,11 +310,49 @@ def test_entity_generate_rejects_foreign_entity(db):
     assert _job_count(session) == 0
 
 
-def test_clip_blocked_by_keyframe_not_confirmed(db):
-    """D-13 闸口：分镜图未人工确认时，Agent 通道 clip 生成被拦下。"""
+def _seed_keyframe_asset(session, pid, sid):
+    """为镜头造一张真实存在的当前有效分镜图（含 succeeded 来源任务）。
+
+    逐镜人工确认（keyframe_confirmed）已取消，视频闸口改为校验
+    「当前有效分镜图 + 来源任务 succeeded + 文件真实存在」，因此测试
+    必须造真实产物，只翻 keyframe_confirmed 标记不再能让闸口放行。
+    """
+    import tempfile
+    from pathlib import Path
+
+    now = datetime.now()
+    job = Job(
+        id=ids.job_id(),
+        project_id=pid,
+        shot_id=sid,
+        job_type="generate_keyframe",
+        status="succeeded",
+        created_at=now,
+    )
+    f = Path(tempfile.mkdtemp()) / "keyframe.png"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    asset = Asset(
+        id=ids.asset_id(),
+        project_id=pid,
+        asset_type="keyframe",
+        name="分镜图",
+        version=1,
+        file_path=str(f),
+        validity="current",
+        source_job_id=job.id,
+    )
+    session.add_all([job, asset])
+    session.commit()
+    return asset
+
+
+def test_clip_blocked_without_keyframe_asset(db):
+    """闸口：镜头没有有效分镜图时，Agent 通道 clip 生成被拦下。"""
     session, pid, sid = db
     shot = session.get(Shot, sid)
-    assert shot.keyframe_confirmed is False
+    # 确认标记即使为 True 也不再是放行依据（旧 D-13 机制已取消）
+    shot.keyframe_confirmed = True
+    session.commit()
 
     requested = execute_tool(
         session,
@@ -330,16 +368,14 @@ def test_clip_blocked_by_keyframe_not_confirmed(db):
 
     run = execute_tool(session, "run_generate", confirmation_id=confirmation_id, approved=True)
     assert not run.ok
-    assert run.error_code == "keyframe_not_confirmed"
+    assert run.error_code == "keyframe_not_ready"
     assert _job_count(session) == 0
 
 
-def test_clip_passes_after_keyframe_confirmed(db):
-    """D-13 闸口：分镜图人工确认后，Agent 通道 clip 生成放行。"""
+def test_clip_passes_with_valid_keyframe_asset(db):
+    """闸口：镜头已有当前有效分镜图时，Agent 通道 clip 生成放行（无需人工确认）。"""
     session, pid, sid = db
-    shot = session.get(Shot, sid)
-    shot.keyframe_confirmed = True
-    session.commit()
+    _seed_keyframe_asset(session, pid, sid)
 
     requested = execute_tool(
         session,

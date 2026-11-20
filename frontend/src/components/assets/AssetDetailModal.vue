@@ -3,10 +3,11 @@
  * 资产详情：左图右文（窄屏回落单列）。
  * 只出现在点击卡片之后——列表页不再为单张图展开一大块详情。
  */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NButton, NImage, NModal } from 'naive-ui'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import PromptEditor from '@/components/ui/PromptEditor.vue'
+import { saveAssetRegeneratePrompt } from '@/api/assets'
 import { assetImgUrl } from './assetMedia'
 import type { Asset } from '@/types/asset'
 
@@ -14,18 +15,20 @@ const props = withDefaults(
   defineProps<{
     show: boolean
     asset: Asset | null
-    /** 生成提示词（只读展示，读取失败时为空） */
+    /** 生成提示词：优先是用户保存过的编辑值，否则为模板默认值 */
     prompt?: string
     promptVersion?: string
+    /** 提示词来源：edited=用户保存值 / template=模板默认值 */
+    promptSource?: 'edited' | 'template'
   }>(),
-  { prompt: '', promptVersion: '' },
+  { prompt: '', promptVersion: '', promptSource: 'template' },
 )
 
 const emit = defineEmits<{
   'update:show': [boolean]
   replace: []
-  regenerate: []
-  'toggle-lock': []
+  /** 重新生成：携带详情页当前（可能刚编辑过的）提示词 */
+  regenerate: [prompt: string]
   copy: [string]
 }>()
 
@@ -45,18 +48,35 @@ const TYPE_LABELS: Record<string, string> = {
 const typeLabel = computed(() => TYPE_LABELS[props.asset?.asset_type ?? ''] ?? props.asset?.asset_type ?? '')
 const imgUrl = computed(() => assetImgUrl(props.asset))
 const canRegenerate = computed(() => ['character', 'scene', 'prop'].includes(props.asset?.asset_type ?? ''))
-const statusKind = computed(() => {
-  const s = (props.asset?.status ?? '').toLowerCase()
-  if (s === 'current') return 'succeeded' as const
-  if (s === 'stale') return 'stale' as const
-  if (s === 'archived') return 'locked' as const
-  return 'pending' as const
-})
-const statusLabel = computed(() => {
-  const s = (props.asset?.status ?? '').toLowerCase()
-  const map: Record<string, string> = { pending: '待处理', current: '当前版本', stale: '已过期', archived: '已归档' }
-  return map[s] ?? (props.asset?.status || '未知状态')
-})
+/** 只映射已知状态；未知/空状态不渲染标签，避免出现「未知状态」这种无信息量的描述 */
+const STATUS_MAP: Record<string, { kind: 'succeeded' | 'stale' | 'pending'; label: string }> = {
+  current: { kind: 'succeeded', label: '当前版本' },
+  stale: { kind: 'stale', label: '已过期' },
+  pending: { kind: 'pending', label: '待处理' },
+  archived: { kind: 'stale', label: '已归档' },
+}
+const statusMeta = computed(() => STATUS_MAP[(props.asset?.status ?? '').toLowerCase()] ?? null)
+
+/** 详情页提示词：可编辑。打开弹窗/切换资产时回显（优先用户保存值，其次模板默认值） */
+const promptModel = ref('')
+watch(
+  () => [props.show, props.asset?.id, props.prompt] as const,
+  () => {
+    promptModel.value = props.prompt
+  },
+  { immediate: true },
+)
+/** 重新生成：先落盘当前提示词，再把这份提示词交给重新生成流程，避免被模板默认值覆盖 */
+async function regenerateWithPrompt() {
+  const asset = props.asset
+  if (!asset || !canRegenerate.value) return
+  try {
+    await saveAssetRegeneratePrompt(asset.id, { prompt: promptModel.value })
+  } catch {
+    // 保存失败不阻断：本次重新生成仍会显式携带这份提示词
+  }
+  emit('regenerate', promptModel.value)
+}
 </script>
 
 <template>
@@ -79,8 +99,7 @@ const statusLabel = computed(() => {
       <div class="detail-body">
         <div class="detail-title-row">
           <span class="detail-name">{{ asset.name || asset.id }}</span>
-          <StatusTag :status="statusKind" :label="statusLabel" />
-          <span v-if="asset.locked" class="status-tag is-locked">已锁定</span>
+          <StatusTag v-if="statusMeta" :status="statusMeta.kind" :label="statusMeta.label" />
         </div>
 
         <div class="detail-meta">
@@ -92,26 +111,22 @@ const statusLabel = computed(() => {
         </div>
 
         <PromptEditor
-          v-if="prompt"
-          :model-value="prompt"
+          v-model="promptModel"
           :label="promptVersion ? `生成提示词 · v${promptVersion}` : '生成提示词'"
-          placeholder="暂无提示词"
-          disabled
+          :placeholder="canRegenerate ? '可在此编辑，重新生成会用这份提示词' : '暂无提示词'"
+          :disabled="!canRegenerate"
           @copy="(v: string) => emit('copy', v)"
         />
 
         <div class="detail-actions">
-          <n-button size="small" :disabled="asset.locked" @click="emit('replace')">上传替换</n-button>
+          <n-button size="small" @click="emit('replace')">上传替换</n-button>
           <n-button
             size="small"
             type="primary"
-            :disabled="asset.locked || !canRegenerate"
-            @click="emit('regenerate')"
+            :disabled="!canRegenerate"
+            @click="regenerateWithPrompt"
           >
             重新生成
-          </n-button>
-          <n-button size="small" quaternary @click="emit('toggle-lock')">
-            {{ asset.locked ? '解锁' : '锁定' }}
           </n-button>
         </div>
       </div>
@@ -205,6 +220,14 @@ const statusLabel = computed(() => {
   border-radius: var(--radius);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.detail-prompt-hint {
+  margin-top: calc(-1 * var(--sp-2));
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.detail-prompt-hint .is-dirty {
+  color: var(--state-warning);
 }
 .detail-actions {
   display: flex;

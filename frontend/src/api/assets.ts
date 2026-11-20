@@ -1,4 +1,4 @@
-import { get, post, del } from './client'
+import { get, post, put, del } from './client'
 import { apiClient } from './client'
 import type { Paginated, PaginationParams } from '@/types/common'
 import type { Asset, AssetVersion } from '@/types/asset'
@@ -57,13 +57,16 @@ export function replaceAsset(id: string, file: File) {
   }).then((res) => res.data)
 }
 
-/** 重新生成弹窗初值（默认沿用资产模板渲染的提示词） */
+/** 重新生成配置：优先回显用户在详情页保存过的提示词，否则为模板默认值 */
 export interface AssetRegenerateConfig {
   asset_id: string
   asset_type: string
   version: number
   prompt: string
   negative_prompt: string
+  /** edited=用户编辑保存值 / template=模板默认值 */
+  prompt_source?: 'edited' | 'template'
+  is_edited?: boolean
   asset_prompt_version: string
   editable: {
     prompt: boolean
@@ -77,6 +80,17 @@ export interface AssetRegenerateConfig {
 /** 读取资产重新生成配置（仅角色/场景/道具支持，其余返回 422） */
 export function getAssetRegenerateConfig(id: string) {
   return get<AssetRegenerateConfig>(`/assets/${id}/regenerate/config`)
+}
+
+/** 保存详情页编辑的提示词（仅落编辑值，不触发任务、不改版本） */
+export function saveAssetRegeneratePrompt(
+  id: string,
+  payload: { prompt: string; negative_prompt?: string },
+) {
+  return put<{ asset_id: string; prompt: string; negative_prompt: string; is_edited: boolean }>(
+    `/assets/${id}/regenerate/prompt`,
+    payload,
+  )
 }
 
 /** 重新生成任务回执 */
@@ -99,16 +113,6 @@ export function regenerateAsset(
   return post<AssetRegenerateResult>(`/assets/${id}/regenerate`, payload)
 }
 
-/** 锁定资产（锁定资产删除禁用） */
-export function lockAsset(id: string) {
-  return post<Asset>(`/assets/${id}/lock`)
-}
-
-/** 解锁资产 */
-export function unlockAsset(id: string) {
-  return post<Asset>(`/assets/${id}/unlock`)
-}
-
 /** 回滚资产版本（传 target_version，生成新版本，镜头标记待重做但不自动触发任务） */
 export function rollbackAsset(id: string, targetVersion: number) {
   return post<Asset>(`/assets/${id}/rollback`, { target_version: targetVersion })
@@ -119,19 +123,9 @@ export async function deleteAsset(id: string) {
   await del<void>(`/assets/${id}`)
 }
 
-/** 批量删除（任一锁定或引用则整批 409，不部分执行） */
+/** 批量删除（任一资产被引用则整批 409，不部分执行） */
 export function batchDeleteAssets(ids: string[]) {
   return post<{ deleted: number }>('/assets/batch/delete', { ids })
-}
-
-/** 批量锁定 */
-export function batchLockAssets(ids: string[]) {
-  return post<{ locked: number }>('/assets/batch/lock', { ids })
-}
-
-/** 批量解锁 */
-export function batchUnlockAssets(ids: string[]) {
-  return post<{ unlocked: number }>('/assets/batch/unlock', { ids })
 }
 
 /** 导出资产打包（POST 避免 URL 过长，返回打包下载流） */

@@ -726,92 +726,58 @@ def _project_id_from_shot(db: Session, shot: Shot) -> str:
     return scene.project_id if scene else ""
 
 
-def _check_keyframe_gate(db: Session, shot_ids: list[str]) -> None:
-    """静图先行闸口（D-13）：生成 clip 前校验分镜图已人工确认，未确认返回 409。"""
-    unconfirmed = (
-        db.query(Shot)
-        .filter(Shot.id.in_(shot_ids), Shot.keyframe_confirmed.is_(False))
+def _check_keyframe_ready(db: Session, shot_ids: list[str]) -> None:
+    """分镜图就绪校验：生成视频前校验每个镜头都有当前有效且文件存在的分镜图。
+
+    人工逐镜确认（keyframe_confirmed）已取消：阶段推进不再依赖确认标记，
+    只依赖「这一镜的分镜图是否真的生成出来了」。资产替换/重绘会让旧版本转
+    superseded，因此这里查的是 validity=current + 来源任务 succeeded + 文件存在。
+    """
+    from app.services.assets_gate import media_file_exists
+
+    if not shot_ids:
+        return
+    rows = (
+        db.query(Asset, Job.shot_id)
+        .join(Job, Job.id == Asset.source_job_id)
+        .filter(
+            Job.shot_id.in_(shot_ids),
+            Job.status == "succeeded",
+            Asset.asset_type == "keyframe",
+            Asset.validity == "current",
+        )
         .all()
     )
-    if unconfirmed:
-        ids = ", ".join(s.id for s in unconfirmed[:10])
+    ready: dict[str, Asset] = {}
+    for asset, shot_id in rows:
+        if shot_id:
+            ready[shot_id] = asset
+    missing: list[str] = []
+    for shot_id in shot_ids:
+        asset = ready.get(shot_id)
+        if asset is None or not media_file_exists(asset.file_path):
+            missing.append(shot_id)
+    if missing:
+        ids = ", ".join(missing[:10])
         raise errors.AppError(
-            "keyframe_not_confirmed",
-            f"存在未确认分镜图的镜头（{ids}{' 等' if len(unconfirmed) > 10 else ''}），请先在分镜审核页确认后再生成视频",
+            "keyframe_not_ready",
+            f"存在缺少有效分镜图的镜头（{ids}{' 等' if len(missing) > 10 else ''}），请先生成分镜图后再生成视频",
             409,
         )
 
 
-def _check_assets_reviewed(db: Session, project_id: str) -> None:
-    """公共资产人工审核闸口（D-23）：生成分镜图前校验资产库已人工审核通过。
+def _check_assets_ready(db: Session, project_id: str) -> None:
+    """公共资产就绪闸口：生成分镜图前校验必需资产图片已真实生成完成。
 
-    统一委托 assets_gate 门禁服务：除审核状态外，同时校验必需资产
-    指针/版本有效性/文件存在/在途生成任务，未就绪时返回结构化阻断明细
-    （blockers：资产 ID/名称/类型/原因/建议操作）。
+    统一委托 assets_gate 门禁服务：校验必需资产指针/版本有效性/文件存在/
+    在途生成任务，未就绪时返回结构化阻断明细（blockers：资产 ID/名称/类型/原因）
+    与分项统计（summary：角色/场景/道具各自的 total/done）。
+
+    人工审核状态不再参与判定：阶段审核机制已取消。
     """
     from app.services.assets_gate import assert_assets_gate
 
     assert_assets_gate(db, project_id)
-
-
-def _check_keyframe_not_locked(db: Session, shot_ids: list[str]) -> None:
-    """分镜图锁定保护（D-23 扩展）：已锁定的分镜图禁止被重新生成覆盖。
-
-    锁定代表人工对某张分镜图的保护性确认，重绘会将该版本转 superseded，
-    因此所有出图通道（单镜/重做/场景批量/跨场景批量）都须先校验。
-    """
-    if not shot_ids:
-        return
-    rows = (
-        db.query(Job.shot_id)
-        .join(Asset, Asset.source_job_id == Job.id)
-        .filter(
-            Job.shot_id.in_(shot_ids),
-            Asset.asset_type == "keyframe",
-            Asset.validity == "current",
-            Asset.locked.is_(True),
-        )
-        .all()
-    )
-    if rows:
-        locked = ", ".join(sorted({r[0] for r in rows if r[0]})[:10])
-        raise errors.AppError(
-            "asset_locked",
-            f"以下镜头的分镜图已锁定，请先解锁再重新生成（{locked}）",
-            409,
-        )
-
-
-def _check_character_portraits(db: Session, project_id: str) -> None:
-    """角色定妆图闸口（P2 合规）：生成 keyframe 前校验项目内所有角色均已生成定妆图。"""
-    missing = (
-        db.query(Character)
-        .filter(Character.project_id == project_id, Character.portrait_asset_id.is_(None))
-        .all()
-    )
-    if missing:
-        names = ", ".join(c.name for c in missing[:10])
-        raise errors.AppError(
-            "character_portrait_missing",
-            f"以下角色未生成定妆图（{names}{' 等' if len(missing) > 10 else ''}），请先生成角色定妆图",
-            409,
-        )
-
-
-def _check_scene_baselines(db: Session, project_id: str) -> None:
-    """场景基准图闸口（P2 合规）：生成 keyframe 前校验项目内所有场景均已生成基准图。"""
-    missing = (
-        db.query(Scene)
-        .filter(Scene.project_id == project_id, Scene.baseline_asset_id.is_(None))
-        .all()
-    )
-    if missing:
-        titles = ", ".join(s.title for s in missing[:10])
-        raise errors.AppError(
-            "scene_baseline_missing",
-            f"以下场景未生成基准图（{titles}{' 等' if len(missing) > 10 else ''}），请先生成场景基准图",
-            409,
-        )
 
 
 # 资产补生成任务优先级：高于镜头任务（0），保证缺失的定妆图/基准图/锚定图先出
@@ -1092,12 +1058,10 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
     if target not in _TARGET_WF_TYPE:
         raise errors.AppError("invalid_request", "target 必须为 keyframe/clip/audio/bgm/sfx", 400)
     if target == "keyframe":
-        # 人工审核闸口（D-23）：公共资产未审核通过时，禁止生成分镜图
-        _check_assets_reviewed(db, scene.project_id)
-        # 锁定保护：已锁定的分镜图不允许被覆盖
-        _check_keyframe_not_locked(db, [shot.id])
+        # 资产就绪闸口：必需资产图片未全部生成完成时禁止生成分镜图
+        _check_assets_ready(db, scene.project_id)
     if target == "clip":
-        _check_keyframe_gate(db, [shot.id])
+        _check_keyframe_ready(db, [shot.id])
     # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重复提交
     _check_inflight_duplicate(db, shot.id, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"), scene.project_id)
@@ -1183,12 +1147,10 @@ def regenerate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
     if target not in _TARGET_WF_TYPE:
         raise errors.AppError("invalid_request", "target 无效", 400)
     if target == "keyframe":
-        # 人工审核闸口（D-23）：重做分镜图属于出图通道，同样要求公共资产已审核通过
-        _check_assets_reviewed(db, scene.project_id)
-        # 锁定保护：已锁定的分镜图不允许被重做覆盖
-        _check_keyframe_not_locked(db, [shot.id])
+        # 资产就绪闸口：重做分镜图属于出图通道，同样要求必需资产已生成完成
+        _check_assets_ready(db, scene.project_id)
     if target == "clip":
-        _check_keyframe_gate(db, [shot.id])
+        _check_keyframe_ready(db, [shot.id])
     # 在途任务去重：同镜头同目标已有 queued/running 任务时拒绝重复提交
     _check_inflight_duplicate(db, shot.id, target)
     # 旧资产转历史版本 + 下游失效传播
@@ -1290,8 +1252,8 @@ def regenerate_shot_clip(shot_id: str, payload: dict | None = None,
     shot = _get_shot(db, shot_id)
     scene = db.get(Scene, shot.scene_id)
     target = "clip"
-    # 关键帧门禁：未确认分镜图不允许生成视频
-    _check_keyframe_gate(db, [shot.id])
+    # 分镜图就绪校验：没有有效分镜图不允许生成视频
+    _check_keyframe_ready(db, [shot.id])
     # 先取消历史在途任务（含 running 的 ComfyUI 中断），释放显卡资源并解除在途去重
     cancelled = _cancel_inflight_jobs(db, shot.id, target)
     # 旧视频转历史版本 + 下游尾帧失效传播（分镜图不变，不回退关键帧确认状态）
@@ -1366,9 +1328,6 @@ def generate_character(character_id: str, payload: dict | None = None, db: Sessi
                       request_key=(payload or {}).get("idempotency_key"))
     _attach_compilation(job, compilation)
     job.params = {**job.params, "__character_id__": ch.id}
-    # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
-    from app.services.assets_review import reset_assets_review
-    reset_assets_review(db, ch.project_id)
     db.commit()
     return _job_out(job)
 
@@ -1391,9 +1350,6 @@ def generate_prop(prop_id: str, payload: dict | None = None, db: Session = Depen
                       request_key=(payload or {}).get("idempotency_key"))
     _attach_compilation(job, compilation)
     job.params = {**job.params, "__prop_id__": p.id}
-    # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
-    from app.services.assets_review import reset_assets_review
-    reset_assets_review(db, p.project_id)
     db.commit()
     return _job_out(job)
 
@@ -1433,9 +1389,6 @@ def generate_scene_baseline(scene_id: str, payload: dict | None = None, db: Sess
                       request_key=(payload or {}).get("idempotency_key"))
     _attach_compilation(job, compilation)
     job.params = {**job.params, "__scene_id__": sc.id}
-    # 人工审核闸口（D-23）：公共资产重新生成后原审核结论失效，需重新提交审核
-    from app.services.assets_review import reset_assets_review
-    reset_assets_review(db, sc.project_id)
     db.commit()
     return _job_out(job)
 
@@ -1465,12 +1418,10 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
             409,
         )
     if target == "keyframe":
-        # 人工审核闸口（D-23）：公共资产未审核通过时，禁止批量生成分镜图
-        _check_assets_reviewed(db, sc.project_id)
-        # 锁定保护（D-23 扩展）：已锁定的分镜图不允许被场景批量重绘覆盖
-        _check_keyframe_not_locked(db, [s.id for s in shots])
+        # 资产就绪闸口：必需资产图片未全部生成完成时禁止批量生成分镜图
+        _check_assets_ready(db, sc.project_id)
     if target == "clip":
-        _check_keyframe_gate(db, [s.id for s in shots])
+        _check_keyframe_ready(db, [s.id for s in shots])
         # 尾帧依赖预检（P0）：避免循环中途失败导致部分任务已入队
         _assert_prev_frames_available(db, shots, target)
     wf = _match_workflow(db, target, payload.get("workflow_id"), sc.project_id)
@@ -1569,19 +1520,15 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
             409,
         )
     if target == "keyframe":
-        # 人工审核闸口（D-23）：公共资产未审核通过时，禁止批量生成分镜图
-        _check_assets_reviewed(db, project_id)
-        # 锁定保护：已锁定的分镜图不允许被批量覆盖
-        _check_keyframe_not_locked(db, [s.id for s in shots])
-        # 前置闸口（P2 合规）：生成分镜图前校验角色定妆图与场景基准图齐全
-        _check_character_portraits(db, project_id)
-        _check_scene_baselines(db, project_id)
+        # 资产就绪闸口：必需资产图片未全部生成完成时禁止批量生成分镜图
+        # （含角色定妆图 / 场景基准图 / anchor_required 道具锚定图的真实状态校验）
+        _check_assets_ready(db, project_id)
     # 批量生成方式（仅 clip）：independent 独立并行（不依赖上一镜尾帧）/ chained 链式串行（逐镜衔接）
     chain_mode = payload.get("chain_mode") if target == "clip" else None
     if chain_mode is not None and chain_mode not in ("independent", "chained"):
         raise errors.AppError("invalid_request", "chain_mode 仅允许 independent/chained", 400)
     if target == "clip":
-        _check_keyframe_gate(db, [s.id for s in shots])
+        _check_keyframe_ready(db, [s.id for s in shots])
         # 尾帧依赖预检（P0）：仅传统模式（未指定 chain_mode）执行；
         # independent 不依赖尾帧；chained 由链式任务在执行时解析上一镜尾帧
         if chain_mode is None:

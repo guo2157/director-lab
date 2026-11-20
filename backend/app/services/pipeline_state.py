@@ -6,22 +6,22 @@
 - 人工审核闸口（资产审核 / 分镜审核 / 视频审核）
 - 下一步指引（agent 根据当前节点与状态给出）
 
-流程节点链：
+流程节点链（2026-11 简化：删除资产库/分镜图/分镜看板三处阶段人工审核）：
   create_project（新建项目）
   → save_script（保存剧本）
   → analyze_script（分析剧本）
   → generate_assets（资产库生成角色图/场景图/道具图）
-  → review_assets（人工审核资产库）
   → generate_keyframes（生成分镜图）
-  → review_keyframes（人工审核分镜图）
   → generate_clips（批量生成分镜看板视频）
-  → review_clips（人工审核视频）
   → compose（合成导出视频）
 
 设计约束：
 - 阶段判定以 progress.derive_progress 为唯一权威，本模块不另行推导
 - 门禁只拦截『过早』的操作，细粒度阻断（资产缺失/版本失效等）由各业务闸口给出精确错误码
-- 审核类节点是闸口：未通过前不得进入下一节点
+- 阶段推进不再需要人工审核：能否进入下一阶段由「产物是否真的生成完成」决定
+  （assets_gate / stage_readiness 权威判定），确认弹窗只是用户自查，不写审核状态
+- 剧本审核（review_confirmation 的 script_review）与生成操作安全审批（approvals）
+  是独立机制，不受本次简化影响
 """
 from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
@@ -69,45 +69,21 @@ PIPELINE_NODES: list[PipelineNode] = [
         name="资产库生成",
         description="生成角色定妆图、场景基准图、道具锚定图",
         stages=("characters", "scenes"),
-        next_hint="公共资产已生成，请人工审核资产库",
-    ),
-    PipelineNode(
-        key="review_assets",
-        name="人工审核资产库",
-        description="审核角色/场景/道具图无误后放行分镜图生成",
-        stages=("assets_review",),
-        review_gate=True,
-        next_hint="资产审核已通过，可生成分镜图",
+        next_hint="公共资产已生成，可开始生成分镜图",
     ),
     PipelineNode(
         key="generate_keyframes",
         name="生成分镜图",
         description="为各镜头生成分镜图（关键帧）",
         stages=("keyframes",),
-        next_hint="分镜图已生成，请人工审核分镜图",
-    ),
-    PipelineNode(
-        key="review_keyframes",
-        name="人工审核分镜图",
-        description="逐镜确认分镜图无误（D-13 静图先行闸口）",
-        stages=("keyframes",),
-        review_gate=True,
-        next_hint="分镜图已确认，可批量生成分镜看板视频",
+        next_hint="分镜图已生成，可批量生成分镜看板视频",
     ),
     PipelineNode(
         key="generate_clips",
         name="生成分镜看板视频",
         description="批量生成分镜看板视频片段（含音频）",
         stages=("clips", "audio"),
-        next_hint="看板视频已生成，请人工审核视频",
-    ),
-    PipelineNode(
-        key="review_clips",
-        name="人工审核视频",
-        description="审核视频片段与音画同步，超容差镜头须放行或重生成",
-        stages=("audio",),
-        review_gate=True,
-        next_hint="视频审核完成，可合成导出成片",
+        next_hint="看板视频已生成，可合成导出成片",
     ),
     PipelineNode(
         key="compose",
@@ -132,9 +108,7 @@ ACTION_NODE_MAP: dict[str, str] = {
     "generate_character": "generate_assets",
     "generate_scene": "generate_assets",
     "generate_prop": "generate_assets",
-    "review_assets": "review_assets",
     "generate_keyframe": "generate_keyframes",
-    "confirm_keyframe": "review_keyframes",
     "generate_clip": "generate_clips",
     "generate_audio": "generate_clips",
     "compose_video": "compose",
@@ -185,7 +159,8 @@ def get_pipeline_status(db: Session, project_id: str) -> PipelineStatus:
     node = _stage_to_node(stage)
     extra: dict = {}
     if stage == "keyframes":
-        # 细分：全部镜头已有当前有效分镜图但未全部确认 → 审核节点
+        # 分镜图阶段只统计「还差几镜没出图」：逐镜人工确认已取消，
+        # 不再有 review_keyframes 审核节点，因此不再统计未确认数。
         from app.models import Scene, Shot
         from app.services.progress import _shot_has_current_asset
         shots = (
@@ -195,13 +170,7 @@ def get_pipeline_status(db: Session, project_id: str) -> PipelineStatus:
             .all()
         )
         has_kf = [s for s in shots if _shot_has_current_asset(db, s.id, "keyframe")]
-        unconfirmed = [s for s in has_kf if not s.keyframe_confirmed]
-        if shots and len(has_kf) == len(shots) and unconfirmed:
-            node = _NODE_BY_KEY["review_keyframes"]
-            extra["unconfirmed_keyframe_count"] = len(unconfirmed)
-        else:
-            extra["missing_keyframe_count"] = len(shots) - len(has_kf)
-            extra["unconfirmed_keyframe_count"] = len(unconfirmed)
+        extra["missing_keyframe_count"] = len(shots) - len(has_kf)
     return PipelineStatus(
         project_id=project_id,
         stage=stage,
@@ -231,9 +200,7 @@ SCRIPT_REVIEW_GATED_ACTIONS: frozenset[str] = frozenset(
         "generate_character",
         "generate_scene",
         "generate_prop",
-        "review_assets",
         "generate_keyframe",
-        "confirm_keyframe",
         "generate_clip",
         "generate_audio",
         "compose_video",

@@ -2,10 +2,13 @@
 
 验证点：
 - 解析确认后可查询到五类定义，计数准确
-- 公共资产未审核通过时，分镜图按定义生成返回 409 assets_review_pending
+- 必需资产未生成完成时，分镜图按定义生成返回 409 assets_incomplete
 - 公共资产（角色）按定义生成放行 202
-- 分镜图审核通过后可批量生成，已锁定分镜图被跳过
-- 分镜视频闸口：分镜图未确认时返回 409 keyframe_not_confirmed
+- 必需资产就绪后分镜图可批量生成
+- 分镜视频闸口：缺少有效分镜图时返回 409 keyframe_not_ready
+
+阶段审核机制已于 2026-11 取消：不再有 assets_review_pending /
+keyframe_not_confirmed 这类阻断，闸口只看产物是否真实生成。
 """
 import json
 
@@ -87,18 +90,6 @@ def _prepare(client, monkeypatch):
     return pid, wf.json()["id"]
 
 
-def _approve(pid):
-    from app.core.database import SessionLocal
-    from app.models import Project
-    db = SessionLocal()
-    try:
-        p = db.get(Project, pid)
-        p.assets_review_status = "approved"
-        db.commit()
-    finally:
-        db.close()
-
-
 def _seed_assets(pid):
     """D-23 资产门禁：为项目下所有角色构造真实定妆图、所有场景构造真实基准图。
 
@@ -145,15 +136,27 @@ def test_list_plans_after_parse(client, monkeypatch):
     assert "ref_scene" in {d["slot"] for d in kf["dependencies"]}
 
 
-def test_keyframe_blocked_without_review(client, monkeypatch):
-    """公共资产未审核通过时，分镜图按定义生成被拦截。"""
+def test_keyframe_blocked_without_assets(client, monkeypatch):
+    """必需资产（角色定妆图/场景基准图）未生成时，分镜图按定义生成被拦截。
+
+    审核取消后的新语义：阻断原因是「资产未生成完成」，不再有
+    assets_review_pending。返回体须携带分项统计与阻断明细，供前端展示
+    「角色 x/y 场景 x/y」与具体缺失资产名。
+    """
     pid, wf = _prepare(client, monkeypatch)
-    # D-23：先补齐真实资产（资产完整但未审核 → assets_review_pending）
-    _seed_assets(pid)
     r = client.post(f"/api/projects/{pid}/asset-plans/generate",
                     json={"plan_type": "keyframe", "workflow_id": wf})
     assert r.status_code == 409, r.text
-    assert r.json()["detail"]["code"] == "assets_review_pending"
+    detail = r.json()["detail"]
+    assert detail["code"] == "assets_incomplete"
+    # 分项统计与阻断明细必须存在，前端依赖它渲染缺失清单
+    assert detail["summary"]["character"]["total"] == 1
+    assert detail["summary"]["character"]["done"] == 0
+    assert detail["summary"]["scene"]["total"] == 1
+    assert detail["summary"]["scene"]["done"] == 0
+    names = {b["name"] for b in detail["blockers"]}
+    assert "林晓" in names and "教室" in names
+    assert all(b["reason"] == "asset_missing" for b in detail["blockers"])
 
 
 def test_character_generate_allowed(client, monkeypatch):
@@ -165,25 +168,28 @@ def test_character_generate_allowed(client, monkeypatch):
     assert r.json()["count"] == 1
 
 
-def test_keyframe_generate_after_review(client, monkeypatch):
-    """审核通过后分镜图可批量生成。"""
+def test_keyframe_generate_after_assets_ready(client, monkeypatch):
+    """必需资产生成完成后分镜图可批量生成（无需任何人工审核动作）。"""
     pid, wf = _prepare(client, monkeypatch)
     _seed_assets(pid)
-    _approve(pid)
     r = client.post(f"/api/projects/{pid}/asset-plans/generate",
                     json={"plan_type": "keyframe", "workflow_id": wf})
     assert r.status_code == 200, r.text
     assert r.json()["count"] == 2
 
 
-def test_clip_blocked_without_keyframe_confirm(client, monkeypatch):
-    """分镜图未确认时，分镜视频按定义生成被闸口拦截。"""
+def test_clip_blocked_without_keyframe_ready(client, monkeypatch):
+    """镜头缺少有效分镜图时，分镜视频按定义生成被闸口拦截。
+
+    逐镜人工确认（keyframe_confirmed）已取消，闸口改为查「当前有效分镜图」，
+    因此错误码是 keyframe_not_ready。
+    """
     pid, wf = _prepare(client, monkeypatch)
-    _approve(pid)
+    _seed_assets(pid)
     r = client.post(f"/api/projects/{pid}/asset-plans/generate",
                     json={"plan_type": "clip", "workflow_id": wf})
     assert r.status_code == 409, r.text
-    assert r.json()["detail"]["code"] == "keyframe_not_confirmed"
+    assert r.json()["detail"]["code"] == "keyframe_not_ready"
 
 
 NEGATIVE_WF = {

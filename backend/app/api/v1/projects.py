@@ -234,40 +234,6 @@ def unarchive_project(project_id: str, db: Session = Depends(get_db)) -> Project
     return _to_out(db, p)
 
 
-@router.post("/{project_id}/assets-review")
-def review_project_assets(project_id: str, payload: dict, db: Session = Depends(get_db)) -> ProjectOut:
-    """公共资产人工审核闸口（D-23）：资产库出图后必须人工确认，才允许生成分镜图。
-
-    payload.action：approve=审核通过（放行分镜图）/ reject=驳回（需返工修改或替换资产）。
-    审核通过前要求角色定妆图、场景基准图、道具锚定图全部生成完成。
-    """
-    p = _get_project(db, project_id)
-    action = payload.get("action")
-    if action not in ("approve", "reject"):
-        raise errors.AppError("invalid_request", "action 必须为 approve 或 reject", 400)
-    if action == "approve":
-        # 统一资产就绪门禁（D-23 强化）：审核通过前校验必需资产真实状态
-        # （指针/版本有效性/文件存在/在途生成任务），不再只查指针非空
-        from app.services.assets_gate import evaluate_assets_gate
-
-        gate = evaluate_assets_gate(db, project_id)
-        if not gate.ready and gate.reason_code in (
-            "assets_incomplete",
-            "assets_generating",
-        ):
-            raise errors.AppError(
-                gate.reason_code,
-                gate.message,
-                409,
-                blockers=[b.to_dict() for b in gate.blockers],
-                gate_status=gate.status,
-            )
-    p.assets_review_status = "approved" if action == "approve" else "rejected"
-    p.assets_reviewed_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(p)
-    return _to_out(db, p)
-
 @router.get("/{project_id}/style-config")
 def get_style_config(project_id: str, db: Session = Depends(get_db)) -> dict:
     # 读取项目风格配置：返回规范化配置、原始取值与校验问题

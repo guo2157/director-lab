@@ -2,7 +2,8 @@
 
 将制作流程各节点接口注册为受控工具，每个工具执行前经 pipeline_state 状态机门禁：
 - 操作不得早于其所属流程节点（阶段不足 → pipeline_gate_blocked，不猜测、不降级）
-- 审核闸口（资产审核/分镜审核/视频审核）未通过前不得进入下一节点
+- 阶段推进不再需要人工审核：资产库/分镜图/分镜看板三处审核闸口已取消（2026-11），
+  能否进入下一阶段由「产物是否真的生成完成」决定（assets_gate / stage_readiness）
 - 高风险操作（合成/导出）须人工审批后执行（requires_approval）
 - 工具返回真实执行结果与执行后的流程状态（节点 + 下一步指引）
 
@@ -10,8 +11,6 @@
 - create_project        新建项目
 - save_script           保存剧本
 - analyze_script        分析剧本（创建解析任务）
-- review_assets         人工审核资产库（approve/reject）
-- confirm_keyframes     批量确认分镜图（人工审核）
 - compose_video         合成成片（需审批）
 - export_video          导出成片（需审批）
 - get_pipeline_status   查询当前流程节点与状态（只读）
@@ -82,16 +81,6 @@ class AnalyzeScriptInput(BaseModel):
     episode_end: int | None = Field(default=None, ge=1)
     # 发起方会话：解析为异步任务，完成后据此把结果回推到对应对话框
     session_id: str | None = None
-
-
-class ReviewAssetsInput(BaseModel):
-    project_id: str
-    action: str  # approve / reject
-
-
-class ConfirmKeyframesInput(BaseModel):
-    project_id: str
-    shot_ids: list[str] | None = None  # 缺省为全部已生成分镜图的镜头
 
 
 class ComposeVideoInput(BaseModel):
@@ -418,67 +407,6 @@ def tool_analyze_script(db: Session, project_id: str, episode_start: int = 1,
     }
 
 
-def tool_review_assets(db: Session, project_id: str, action: str) -> dict:
-    """人工审核资产库（审核闸口）：approve 放行分镜图生成 / reject 驳回返工。"""
-    if action not in ("approve", "reject"):
-        raise ToolError("tool_invalid_args", "action 必须为 approve 或 reject")
-    try:
-        assert_action_allowed(db, project_id, "review_assets")
-    except PipelineStateError as e:
-        raise ToolError("pipeline_gate_blocked", e.message)
-    p = db.get(Project, project_id)
-    if p is None or p.deleted_at is not None:
-        raise ToolError("project_not_found", "项目不存在")
-    if action == "approve":
-        from app.services.assets_gate import evaluate_assets_gate
-        gate = evaluate_assets_gate(db, project_id)
-        if not gate.ready and gate.reason_code in ("assets_incomplete", "assets_generating"):
-            raise ToolError(gate.reason_code, gate.message)
-    p.assets_review_status = "approved" if action == "approve" else "rejected"
-    p.assets_reviewed_at = _now()
-    db.commit()
-    return {
-        "project_id": project_id,
-        "assets_review_status": p.assets_review_status,
-        **_pipeline_ctx(db, project_id),
-    }
-
-
-def tool_confirm_keyframes(db: Session, project_id: str,
-                            shot_ids: list[str] | None = None) -> dict:
-    """批量确认分镜图（人工审核闸口，D-13）：仅确认已具备当前有效分镜图的镜头。"""
-    try:
-        assert_action_allowed(db, project_id, "confirm_keyframe")
-    except PipelineStateError as e:
-        raise ToolError("pipeline_gate_blocked", e.message)
-    p = db.get(Project, project_id)
-    if p is None or p.deleted_at is not None:
-        raise ToolError("project_not_found", "项目不存在")
-    from app.services.progress import _shot_has_current_asset
-    q = (
-        db.query(Shot)
-        .join(Scene, Shot.scene_id == Scene.id)
-        .filter(Scene.project_id == project_id)
-    )
-    if shot_ids:
-        q = q.filter(Shot.id.in_(shot_ids))
-    confirmed, skipped = [], []
-    for s in q.all():
-        if _shot_has_current_asset(db, s.id, "keyframe"):
-            s.keyframe_confirmed = True
-            confirmed.append(s.id)
-        else:
-            skipped.append(s.id)
-    db.commit()
-    return {
-        "confirmed": confirmed,
-        "skipped": skipped,
-        "confirmed_count": len(confirmed),
-        "skipped_count": len(skipped),
-        **_pipeline_ctx(db, project_id),
-    }
-
-
 def tool_compose_video(db: Session, project_id: str, episode: int | None = None,
                        include_subtitle: bool = True, subtitle_mode: str = "burn") -> dict:
     """合成成片（需人工审批）：创建合成任务（异步），返回任务 ID 与流程状态。"""
@@ -660,35 +588,6 @@ PIPELINE_TOOL_REGISTRY: dict = {
             "episode_end": "可选：结束集数（与 episode_count 二选一）",
         },
         "fn": tool_analyze_script,
-    },
-    "review_assets": {
-        "description": "人工审核资产库（审核闸口）：approve=审核通过放行分镜图 / reject=驳回返工；须公共资产已生成",
-        "permission": "write",
-        "risk_level": "medium",
-        "side_effect": True,
-        "idempotent": True,
-        "requires_approval": False,
-        "timeout_seconds": 30,
-        "max_retries": 0,
-        "input_model": ReviewAssetsInput,
-        "params": {"project_id": "项目 ID", "action": "approve / reject"},
-        "fn": tool_review_assets,
-    },
-    "confirm_keyframes": {
-        "description": "批量确认分镜图（人工审核闸口）：仅确认已具备当前有效分镜图的镜头，返回确认/跳过明细",
-        "permission": "write",
-        "risk_level": "medium",
-        "side_effect": True,
-        "idempotent": True,
-        "requires_approval": False,
-        "timeout_seconds": 30,
-        "max_retries": 0,
-        "input_model": ConfirmKeyframesInput,
-        "params": {
-            "project_id": "项目 ID",
-            "shot_ids": "可选：镜头 ID 列表（缺省为全部已生成分镜图的镜头）",
-        },
-        "fn": tool_confirm_keyframes,
     },
     "compose_video": {
         "description": "合成成片（需人工审批）：创建合成任务；须分镜视频与音频就绪且无未放行的超容差镜头",

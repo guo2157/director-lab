@@ -269,7 +269,10 @@ def _overwrite_asset_file(asset: Asset, content: bytes) -> str:
 
 def _apply_regenerate_gates(db: Session, job: Job, asset: Asset) -> None:
     """资产库 regenerate 原地覆盖后的闸口（与 replace_asset 保持一致）：
-    引用镜头标记待重做；公共资产重置人工审核。"""
+    引用镜头标记待重做（失效传播），分镜图重绘后取消该镜的旧确认标记。
+
+    人工审核状态不再回退：阶段审核机制已取消，资产变更只需让受影响的镜头
+    走失效/重做流程，下一次阶段推进由就绪检查重新判定。"""
     from app.models import AssetRef
 
     for ref in db.query(AssetRef).filter(AssetRef.asset_id == asset.id).all():
@@ -280,10 +283,6 @@ def _apply_regenerate_gates(db: Session, job: Job, asset: Asset) -> None:
             shot.redo_required = True
         if hasattr(shot, "keyframe_confirmed"):
             shot.keyframe_confirmed = False
-    if asset.asset_type in ("character", "scene", "prop"):
-        from app.services.assets_review import reset_assets_review
-
-        reset_assets_review(db, job.project_id)
 
 
 def _task_progress(db: Session, job_id: str, progress: int) -> None:
@@ -691,6 +690,207 @@ def _store_shot_keyframe(db: Session, job: Job, shot: Shot, content: bytes, ext:
     }
 
 
+def _purge_asset_refs(db: Session, asset_id: str) -> None:
+    """删除资产前清理全部外键引用，避免约束冲突导致覆盖落库失败。
+
+    AssetRef / JobInputRef 为分镜与任务引用；SeriesAsset / EpisodeAssetRef
+    为系列化创作的共享与每集引用，四张表均以 asset.id 为外键，必须先删。
+    """
+    from app.models import AssetRef, JobInputRef
+    from app.models.series_asset import EpisodeAssetRef, SeriesAsset
+
+    db.query(AssetRef).filter(AssetRef.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(JobInputRef).filter(JobInputRef.asset_id == asset_id).delete(
+        synchronize_session=False
+    )
+    db.query(SeriesAsset).filter(SeriesAsset.asset_id == asset_id).delete(
+        synchronize_session=False
+    )
+    db.query(EpisodeAssetRef).filter(EpisodeAssetRef.asset_id == asset_id).delete(
+        synchronize_session=False
+    )
+
+
+def _store_shot_clip(db: Session, job: Job, shot: Shot, content: bytes, ext: str) -> dict:
+    """分镜视频每镜唯一：命名 storyboard_{镜号}_clip，重新生成原地覆盖。
+
+    与分镜图一致的单资产模型：复用同一 Asset 行（同 id / 同文件路径），
+    不再产生历史版本；同镜旧视频资产连文件一起清理，保证资产库与分镜工作台
+    每个镜头只保留一份当前视频，页面展示的就是重新生成后的那一份。
+    """
+    import os
+
+    from app.models import AssetRef, JobInputRef, ids as id_gen
+    from app.services.shot_chain import shot_global_index
+
+    name = f"storyboard_{shot_global_index(db, shot)}_clip"
+    clip_dir = os.path.join(str(get_settings().media_dir), "storyboards")
+    os.makedirs(clip_dir, exist_ok=True)
+    clip_path = os.path.join(clip_dir, f"{name}.{ext}")
+
+    # 复用本镜当前生效视频，其次同名资产，都没有才新建
+    asset = (
+        db.query(Asset)
+        .join(Job, Job.id == Asset.source_job_id)
+        .filter(
+            Job.shot_id == shot.id,
+            Asset.asset_type == "clip",
+            Asset.validity == "current",
+        )
+        .order_by(Asset.version.desc())
+        .first()
+    )
+    if asset is None:
+        asset = (
+            db.query(Asset)
+            .filter(
+                Asset.project_id == job.project_id,
+                Asset.asset_type == "clip",
+                Asset.name == name,
+            )
+            .first()
+        )
+    if asset is None:
+        asset = Asset(
+            id=id_gen.asset_id(),
+            project_id=job.project_id,
+            asset_type="clip",
+            name=name,
+            version=1,
+            validity="current",
+        )
+        db.add(asset)
+        db.flush()
+
+    with open(clip_path, "wb") as f:
+        f.write(content)
+
+    old_path = asset.file_path
+    asset.name = name
+    asset.file_path = clip_path
+    asset.source_job_id = job.id
+    asset.validity = "current"
+    asset.version = 1
+    asset.quality_status = None
+    # 破前端缓存：前端以 v=updated_at 拉取文件，必须变化才能看到新视频
+    asset.updated_at = _now().replace(tzinfo=None)
+    asset.input_snapshot = job.input_snapshot
+    if old_path and old_path != clip_path and os.path.exists(old_path):
+        try:
+            os.remove(old_path)
+        except OSError:
+            pass
+    db.flush()
+
+    # 清理同镜历史分镜视频，只保留当前这一份
+    duplicates = (
+        db.query(Asset)
+        .join(Job, Job.id == Asset.source_job_id)
+        .filter(
+            Job.shot_id == shot.id,
+            Asset.asset_type == "clip",
+            Asset.id != asset.id,
+        )
+        .all()
+    )
+    for dup in duplicates:
+        _purge_asset_refs(db, dup.id)
+        dup_path = dup.file_path
+        db.delete(dup)
+        if dup_path and dup_path != clip_path and os.path.exists(dup_path):
+            try:
+                os.remove(dup_path)
+            except OSError:
+                pass
+    db.flush()
+
+    return {
+        "asset_id": asset.id,
+        "asset_type": "clip",
+        "out_name": "clip",
+        "file_path": clip_path,
+    }
+
+
+def _store_entity_asset(
+    db: Session, job: Job, asset_type: str, name: str, content: bytes, ext: str
+) -> dict | None:
+    """实体资产（角色定妆图 / 场景基准图 / 道具锚定图）重新生成：原地覆盖。
+
+    已有同名 current 资产时沿用其 id / 文件路径原地覆盖，并把同范围内的历史
+    资产连文件一起清理，保证资产库每个实体只保留一份当前图；返回 None 表示
+    该实体尚无资产，调用方按首次生成流程处理。
+    """
+    import os
+
+    existing = (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == job.project_id,
+            Asset.asset_type == asset_type,
+            Asset.name == name,
+            Asset.validity == "current",
+        )
+        .order_by(Asset.version.desc())
+        .first()
+    )
+    if existing is None:
+        return None
+
+    filepath = _overwrite_asset_file(existing, content)
+    try:
+        from app.services.thumbnail import make_thumb
+        existing.thumb_path = make_thumb(
+            filepath, os.path.splitext(os.path.basename(filepath))[0]
+        )
+    except Exception:
+        pass
+    _snap = dict(existing.input_snapshot or {})
+    _snap["regenerated_at"] = _now().isoformat()
+    _snap["regenerate_job_id"] = job.id
+    existing.input_snapshot = _snap
+    existing.source_job_id = job.id
+
+    duplicates = (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == job.project_id,
+            Asset.asset_type == asset_type,
+            Asset.name == name,
+            Asset.id != existing.id,
+        )
+        .all()
+    )
+    for dup in duplicates:
+        # 实体主图指针若指向将被清理的旧版本，先切到保留版本，避免悬空引用
+        if asset_type == "character":
+            for ch in db.query(Character).filter(Character.portrait_asset_id == dup.id).all():
+                ch.portrait_asset_id = existing.id
+        elif asset_type == "scene":
+            for sc in db.query(Scene).filter(Scene.baseline_asset_id == dup.id).all():
+                sc.baseline_asset_id = existing.id
+        elif asset_type == "prop":
+            for pr in db.query(Prop).filter(Prop.anchor_asset_id == dup.id).all():
+                pr.anchor_asset_id = existing.id
+        # 先清理引用记录，否则外键约束会阻止删除历史资产
+        _purge_asset_refs(db, dup.id)
+        dup_path = dup.file_path
+        db.delete(dup)
+        if dup_path and dup_path != filepath and os.path.exists(dup_path):
+            try:
+                os.remove(dup_path)
+            except OSError:
+                pass
+    db.flush()
+
+    return {
+        "asset_id": existing.id,
+        "asset_type": existing.asset_type,
+        "out_name": "cover",
+        "file_path": filepath,
+    }
+
+
 def _release_chained_next(db: Session, job: Job) -> None:
     """链式生成（chained）：本任务成功后释放链上下一个 chained_wait 任务。
 
@@ -862,9 +1062,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     _shot.status = "generating"
             db.commit()
 
-        # 统一资产就绪门禁二次校验（D-23 强化）：任务创建与真正执行之间存在时间差，
-        # 执行前必须重新校验资产就绪状态，防止入队后资产被重新生成（审核回退 pending）
-        # 或失效仍提交 ComfyUI。实体资产图（定妆/基准/锚定图）自身不适用该门禁。
+        # 统一资产就绪门禁二次校验：任务创建与真正执行之间存在时间差，
+        # 执行前必须重新校验资产就绪状态，防止入队后资产被重新生成或失效
+        # 仍提交 ComfyUI。实体资产图（定妆/基准/锚定图）自身不适用该门禁。
         if job.job_type == "generate_keyframe":
             _params_peek = dict(job.params or {})
             _is_entity_asset = any(
@@ -1185,6 +1385,23 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                         created_assets.append(
                                             _store_shot_keyframe(db, job, _resume_shot, content, ext)
                                         )
+                                        continue
+                                # 分镜视频与分镜图同口径：每镜只保留一份，重新生成原地覆盖
+                                if asset_type == "clip" and job.shot_id:
+                                    _resume_shot = db.get(Shot, job.shot_id)
+                                    if _resume_shot is not None:
+                                        created_assets.append(
+                                            _store_shot_clip(db, job, _resume_shot, content, ext)
+                                        )
+                                        continue
+                                # 资产图（角色定妆图/场景基准图/道具锚定图）重新生成：
+                                # 已有同名 current 资产时原地覆盖并清掉历史，只保留一份
+                                if _entity_asset_type and _entity_asset_name:
+                                    _overwritten = _store_entity_asset(
+                                        db, job, _entity_asset_type, _entity_asset_name, content, ext
+                                    )
+                                    if _overwritten is not None:
+                                        created_assets.append(_overwritten)
                                         continue
                                 asset_id = id_gen.asset_id()
                                 # 版本号必须在产物类型与实体归属确定之后再计算，
@@ -1795,6 +2012,21 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 _shot = db.get(Shot, job.shot_id)
                 if _shot is not None:
                     created_assets.append(_store_shot_keyframe(db, job, _shot, rec["content"], ext))
+                    continue
+            # 分镜视频与分镜图同口径：每镜只保留一份，重新生成原地覆盖旧视频
+            if asset_type == "clip" and job.shot_id:
+                _shot = db.get(Shot, job.shot_id)
+                if _shot is not None:
+                    created_assets.append(_store_shot_clip(db, job, _shot, rec["content"], ext))
+                    continue
+            # 资产图（角色定妆图/场景基准图/道具锚定图）重新生成：
+            # 已有同名 current 资产时原地覆盖并清掉历史，资产库只保留一份
+            if _entity_asset_type and _entity_asset_name:
+                _overwritten = _store_entity_asset(
+                    db, job, _entity_asset_type, _entity_asset_name, rec["content"], ext
+                )
+                if _overwritten is not None:
+                    created_assets.append(_overwritten)
                     continue
             version = _next_asset_version(db, job, asset_type, _entity_asset_name)
             # 分镜图重新生成直接覆盖当前版本，不保留候选版本概念

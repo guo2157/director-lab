@@ -25,10 +25,8 @@ const props = withDefaults(
     inflightText?: string
     failed?: boolean
     failedMessage?: string
-    /** 该卡有写操作在进行（锁定 / 替换） */
+    /** 该卡有写操作在进行（替换 / 重新生成） */
     busy?: boolean
-    /** 公共资产审核通过才可生成 */
-    canGenerate?: boolean
     prompt: string
   }>(),
   {
@@ -38,7 +36,6 @@ const props = withDefaults(
     failed: false,
     failedMessage: '',
     busy: false,
-    canGenerate: true,
     prompt: '',
   },
 )
@@ -47,14 +44,10 @@ const emit = defineEmits<{
   select: [boolean]
   open: []
   generate: []
-  confirm: []
-  unconfirm: []
-  lock: []
   replace: []
 }>()
 
 const thumbUrl = computed(() => shotThumbUrl(props.shot))
-const locked = computed(() => Boolean(props.shot.current_assets?.keyframe?.locked))
 const hasKeyframe = computed(() => Boolean(props.shot.current_assets?.keyframe))
 const status = computed(() => shotStatus(props.shot, { inflightText: props.inflightText, failed: props.failed }))
 const title = computed(() => props.shot.title || `镜头 ${props.seq}`)
@@ -104,7 +97,6 @@ function onPick(e: Event) {
         <StatusTag :status="status.kind" :label="status.label" />
       </span>
 
-      <span v-if="locked" class="sb-lock" title="已锁定，不会被重绘覆盖">已锁定</span>
     </div>
 
     <div class="sb-body">
@@ -121,18 +113,11 @@ function onPick(e: Event) {
 
     <ShotCardActions
       :has-keyframe="hasKeyframe"
-      :locked="locked"
-      :confirmed="!!shot.keyframe_confirmed"
       :inflight-text="inflightText"
-      :can-generate="canGenerate"
       :busy="busy"
       :primary-label="primaryLabel"
       @generate="emit('generate')"
       @replace="emit('replace')"
-      @confirm="emit('confirm')"
-      @unconfirm="emit('unconfirm')"
-      @lock="emit('lock')"
-      @open="emit('open')"
     />
   </article>
 </template>
@@ -250,20 +235,6 @@ function onPick(e: Event) {
 .sb-card:focus-within .sb-badge.is-quiet {
   opacity: 1;
 }
-.sb-lock {
-  position: absolute;
-  left: var(--sp-2);
-  bottom: var(--sp-2);
-  z-index: 2;
-  padding: 0 var(--sp-2);
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--text-secondary);
-  background: var(--neutral-soft);
-  border: 1px solid var(--neutral-line);
-  border-radius: var(--radius-sm);
-}
-
 .sb-body {
   display: flex;
   flex-direction: column;

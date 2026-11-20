@@ -1,18 +1,23 @@
 """导演台 Agent 全流程端到端测试。
 覆盖（不依赖 LLM，生成请求走意图规则快路径）：
-- 镜头目标链路：chat『为第 N 镜生成关键帧』→ 审批记录 → 批准 → 执行 → 任务创建（D-23 门禁）
-- clip 链路：D-13 闸口拦截（分镜图未确认）与放行（确认后）
-- 实体目标链路：chat 含 chr_ ID → 实体生成申请 → 批准执行 → 任务参数含归属键与模板提示词 → 审核状态回退 pending
+- 镜头目标链路：chat『为第 N 镜生成关键帧』→ 审批记录 → 批准 → 执行 → 任务创建
+- clip 链路：镜头无有效分镜图时拦截，生成出分镜图后放行
+- 实体目标链路：chat 含 chr_ ID → 实体生成申请 → 批准执行 → 任务参数含归属键与模板提示词
 - 异常路径：未关联项目、跨项目实体、重复裁决 409、重复执行幂等复用、未批准执行被拦
+
+阶段审核机制已于 2026-11 取消：不再有 assets_review / keyframe_confirmed 门禁，
+闸口只看产物是否真实生成（当前有效版本 + 来源任务 succeeded + 文件存在）。
 """
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.database import make_engine
 from app.main import app
-from app.models import Base
+from app.models import Base, ids
 
 
 @pytest.fixture()
@@ -65,7 +70,6 @@ def project_env(client, tmp_path):
         status="active",
         created_at=now,
         updated_at=now,
-        assets_review_status="approved",
     )
     session.add(project)
     session.commit()
@@ -146,7 +150,8 @@ def project_env(client, tmp_path):
     character.portrait_asset_id = portrait.id
 
     # 补齐状态机前置状态：剧本版本 + 评估哈希一致 + parse 任务已成功，
-    # 使 derive_progress 推进到 keyframes 阶段（公共资产已审核通过）
+    # 使 derive_progress 推进到 keyframes 阶段（公共资产已生成完成；
+    # 阶段审核已于 2026-11 取消，不再需要 assets_review_status）
     from app.models import Job, ParseVersion, ScriptVersion
 
     script_text = "第一场：主角在河边。"
@@ -253,13 +258,17 @@ def test_e2e_keyframe_flow(client, project_env):
 
 
 def test_e2e_clip_blocked_then_allowed(client, project_env):
-    """clip 链路：D-13 闸口先拦截，分镜图确认后放行。"""
-    from app.models import Shot
+    """clip 链路：镜头无有效分镜图时拦截，生成出分镜图后放行。
+
+    逐镜人工确认（keyframe_confirmed）已取消，闸口改为校验「当前有效分镜图」，
+    因此造真实分镜图产物才能放行，只翻确认标记不再生效。
+    """
+    from app.models import Asset, Job, Shot
     import app.core.database as db_mod
 
     sid = _make_session(client, project_env["project_id"])
 
-    # 分镜图未确认：申请可建，执行被 D-13 拦下
+    # 无有效分镜图：申请可建，执行被闸口拦下
     resp = _chat(client, sid, "为第 1 镜生成视频")
     approval = (resp["assistant_message"].get("payload") or {}).get("approval") or {}
     assert approval.get("ok") is True, resp["assistant_message"]["content"]
@@ -270,12 +279,25 @@ def test_e2e_clip_blocked_then_allowed(client, project_env):
     )
     r = client.post(f"/api/agent/sessions/{sid}/approvals/{cid}/execute")
     assert r.status_code == 400, r.text
-    assert "keyframe_not_confirmed" in r.text
+    assert "keyframe_not_ready" in r.text
 
-    # 确认分镜图后重新走链路：放行
+    # 造一张真实有效的分镜图后重新走链路：放行
     session = db_mod.SessionLocal()
-    shot = session.get(Shot, project_env["shot_id"])
-    shot.keyframe_confirmed = True
+    now = datetime.now()
+    kf_job = Job(
+        id=ids.job_id(), project_id=project_env["project_id"],
+        shot_id=project_env["shot_id"], job_type="generate_keyframe",
+        status="succeeded", created_at=now,
+    )
+    media = Path(tempfile.mkdtemp())
+    kf_file = media / "keyframe.png"
+    kf_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    kf_asset = Asset(
+        id=ids.asset_id(), project_id=project_env["project_id"],
+        asset_type="keyframe", name="分镜图", version=1,
+        file_path=str(kf_file), validity="current", source_job_id=kf_job.id,
+    )
+    session.add_all([kf_job, kf_asset])
     session.commit()
     session.close()
 
@@ -323,9 +345,12 @@ def test_e2e_entity_flow(client, project_env):
     assert job.params.get("prompt"), "实体生成空 prompt 未兜底"
     assert "主角" in job.params["prompt"]
 
-    # D-23：公共资产重新生成后审核状态回退 pending
+    # 阶段审核已取消：公共资产重新生成不再写回任何审核状态，
+    # 也不再创建审核记录。审核字段保持初始值（schema 默认 pending），
+    # 仅作历史兼容，不参与任何门禁判定。
     project = session.get(Project, project_env["project_id"])
     assert project.assets_review_status == "pending"
+    assert project.assets_reviewed_at is None
     session.close()
 
 

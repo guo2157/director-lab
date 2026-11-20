@@ -5,8 +5,8 @@
  * 角色卡多一条音色条：音色是角色资产的第二个必配项，不能藏在抽屉里。
  */
 import { computed } from 'vue'
-import { NDropdown, NIcon } from 'naive-ui'
-import { ChevronForwardOutline, LockClosedOutline, MicOutline } from '@vicons/ionicons5'
+import { NIcon } from 'naive-ui'
+import { ChevronForwardOutline, MicOutline } from '@vicons/ionicons5'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import { assetImgUrl } from './assetMedia'
 import { ASSET_KIND_LABELS, ASSET_UNIT_LABELS, type AssetCardItem } from './types'
@@ -31,16 +31,14 @@ const emit = defineEmits<{
   replace: []
   regenerate: []
   voice: []
-  menu: [string]
   'update:selected': [boolean]
 }>()
 
 const thumbUrl = computed(() => assetImgUrl(props.item.asset))
 const kindLabel = computed(() => ASSET_KIND_LABELS[props.item.kind])
 const unitLabel = computed(() => ASSET_UNIT_LABELS[props.item.kind])
-const locked = computed(() => Boolean(props.item.asset?.locked))
 
-type TagKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'locked' | 'stale'
+type TagKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'stale'
 const status = computed<{ kind: TagKind; label: string }>(() => {
   if (props.inflightText) return { kind: 'generating', label: props.inflightText }
   if (props.failed) return { kind: 'failed', label: '生成失败' }
@@ -48,21 +46,8 @@ const status = computed<{ kind: TagKind; label: string }>(() => {
   return { kind: 'pending', label: '待生成' }
 })
 
-const menuOptions = computed(() => [
-  { label: locked.value ? '解锁' : '锁定', key: 'lock' },
-  {
-    label: '删除',
-    key: 'delete',
-    disabled: locked.value,
-    props: { style: 'color: var(--danger);' },
-  },
-])
-
 function onPick(e: Event) {
   emit('update:selected', (e.target as HTMLInputElement).checked)
-}
-function onMenu(key: string | number) {
-  emit('menu', String(key))
 }
 function onDragStart(e: DragEvent) {
   const asset = props.item.asset
@@ -95,7 +80,6 @@ function onDragStart(e: DragEvent) {
       <label v-if="selectable" class="a-pick" @click.stop>
         <input type="checkbox" :checked="selected" @change="onPick" />
       </label>
-      <span v-if="locked" class="a-lock" title="已锁定"><n-icon :component="LockClosedOutline" :size="13" /></span>
     </div>
 
     <div class="a-body">
@@ -130,11 +114,8 @@ function onDragStart(e: DragEvent) {
         生成{{ unitLabel }}
       </button>
       <template v-else>
-        <button type="button" class="a-act" :disabled="locked" @click="emit('replace')">替换</button>
-        <button type="button" class="a-act" :disabled="locked" @click="emit('regenerate')">重生成</button>
-        <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
-          <button type="button" class="a-act is-icon" aria-label="更多操作" title="更多操作（锁定 / 删除）">⋯</button>
-        </n-dropdown>
+        <button type="button" class="a-act" @click="emit('replace')">替换</button>
+        <button type="button" class="a-act" @click="emit('regenerate')">重生成</button>
       </template>
     </footer>
   </article>
@@ -231,13 +212,6 @@ function onDragStart(e: DragEvent) {
   margin: 0;
   accent-color: var(--brand-primary);
   cursor: pointer;
-}
-.a-lock {
-  position: absolute;
-  bottom: var(--sp-2);
-  right: var(--sp-2);
-  font-size: 12px;
-  line-height: 1;
 }
 
 .a-body {
@@ -355,10 +329,5 @@ function onDragStart(e: DragEvent) {
   color: var(--text-on-brand);
   background: var(--brand-hover);
   border-color: var(--brand-hover);
-}
-.a-act.is-icon {
-  margin-left: auto;
-  min-width: 28px;
-  font-size: 14px;
 }
 </style>

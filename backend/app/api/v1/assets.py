@@ -2,12 +2,15 @@
 - GET /api/assets：资产列表（project_id 必填，分页）
 - POST /api/assets/upload：上传资产（multipart，单文件 ≤500MB）
 - GET /api/assets/{id}：资产详情（含 versions 与 referenced_by）
-- POST /api/assets/{id}/lock|unlock：锁定/解锁
 - POST /api/assets/{id}/rollback：回滚版本（生成新版本，镜头标记待重做）
-- DELETE /api/assets/{id}：删除（被引用 409 asset_in_use，已锁定 409 asset_locked）
-- POST /api/assets/batch/delete|lock|unlock：批量操作（整批校验，不部分执行）
+- DELETE /api/assets/{id}：删除（被引用 409 asset_in_use）
+- POST /api/assets/batch/delete：批量删除（整批校验，不部分执行）
 - POST /api/assets/export：打包导出（zip 流）
 - GET /api/assets/{id}/versions：版本时间线
+
+2026-11 流程简化：锁定功能（lock/unlock 端点与 asset_locked 拒绝）已移除，
+资产锁定不再作为替换/重生成/删除的前置条件；阶段推进也不再依赖人工审核。
+资产版本管理与引用保护（ref_count / validity）不受影响。
 """
 import io
 import zipfile
@@ -53,7 +56,8 @@ def _to_out(a: Asset) -> dict:
         "thumb_url": f"/api/assets/{a.id}/file?thumb=true&v={stamp}" if a.thumb_path else None,
         "source_job_id": a.source_job_id,
         "ref_count": a.ref_count,
-        "locked": bool(a.locked),
+        # 锁定功能已移除：字段保留兼容旧调用方，恒为 False
+        "locked": False,
         "validity": a.validity,
         "created_at": a.input_snapshot.get("created_at") if a.input_snapshot else None,
         "updated_at": a.updated_at.isoformat() if a.updated_at else None,
@@ -182,8 +186,6 @@ def batch_delete_assets(payload: dict, db: Session = Depends(get_db)) -> dict:
     assets = []
     for aid in asset_ids:
         a = _get_asset(db, aid)
-        if a.locked:
-            raise errors.AppError("asset_locked", f"资产 {aid} 已锁定", 409)
         if a.ref_count > 0:
             raise errors.AppError("asset_in_use", f"资产 {aid} 被引用中", 409)
         assets.append(a)
@@ -191,32 +193,6 @@ def batch_delete_assets(payload: dict, db: Session = Depends(get_db)) -> dict:
         db.delete(a)
     db.commit()
     return {"deleted": len(assets)}
-
-
-@router.post("/batch/lock")
-def batch_lock_assets(payload: dict, db: Session = Depends(get_db)) -> dict:
-    asset_ids = payload.get("ids") or payload.get("asset_ids") or []
-    n = 0
-    for aid in asset_ids:
-        a = _get_asset(db, aid)
-        if not a.locked:
-            a.locked = True
-            n += 1
-    db.commit()
-    return {"locked": n}
-
-
-@router.post("/batch/unlock")
-def batch_unlock_assets(payload: dict, db: Session = Depends(get_db)) -> dict:
-    asset_ids = payload.get("ids") or payload.get("asset_ids") or []
-    n = 0
-    for aid in asset_ids:
-        a = _get_asset(db, aid)
-        if a.locked:
-            a.locked = False
-            n += 1
-    db.commit()
-    return {"unlocked": n}
 
 
 @router.post("/export")
@@ -280,22 +256,6 @@ def list_asset_versions(asset_id: str, db: Session = Depends(get_db)) -> list[di
         }
         for v in versions
     ]
-
-
-@router.post("/{asset_id}/lock")
-def lock_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
-    a = _get_asset(db, asset_id)
-    a.locked = True
-    db.commit()
-    return _to_out(a)
-
-
-@router.post("/{asset_id}/unlock")
-def unlock_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
-    a = _get_asset(db, asset_id)
-    a.locked = False
-    db.commit()
-    return _to_out(a)
 
 
 @router.post("/{asset_id}/rollback")
@@ -523,16 +483,28 @@ def get_asset_regenerate_config(asset_id: str, db: Session = Depends(get_db)) ->
             422,
         )
     from app.services import asset_prompts
-    try:
-        prompt, negative = _default_prompt_for(db, asset)
-    except ValueError as e:
-        raise errors.AppError("invalid_request", str(e), 422)
+    # 回显优先级：用户在详情页保存过的提示词 → 模板现场渲染的默认值。
+    # 详情页改为可编辑后，重新打开必须看到上次编辑的内容，不能被模板覆盖。
+    snap = asset.input_snapshot or {}
+    saved_prompt = (snap.get("edited_prompt") or "").strip()
+    saved_negative = (snap.get("edited_negative_prompt") or "").strip()
+    if saved_prompt:
+        prompt, negative, prompt_source = saved_prompt, saved_negative, "edited"
+    else:
+        try:
+            prompt, negative = _default_prompt_for(db, asset)
+        except ValueError as e:
+            raise errors.AppError("invalid_request", str(e), 422)
+        prompt_source = "template"
     return {
         "asset_id": asset.id,
         "asset_type": asset.asset_type,
         "version": asset.version,
         "prompt": prompt,
         "negative_prompt": negative,
+        # 提示词来源：edited=用户编辑保存值 / template=模板默认值
+        "prompt_source": prompt_source,
+        "is_edited": prompt_source == "edited",
         "asset_prompt_version": asset_prompts.ASSET_PROMPTS_VERSION,
         "editable": {
             "prompt": True,
@@ -541,6 +513,44 @@ def get_asset_regenerate_config(asset_id: str, db: Session = Depends(get_db)) ->
             "workflow": False,
             "params": False,
         },
+    }
+
+
+@router.put("/{asset_id}/regenerate/prompt", status_code=200)
+def save_asset_regenerate_prompt(
+    asset_id: str, payload: dict | None = None, db: Session = Depends(get_db)
+) -> dict:
+    """保存资产详情页编辑的提示词，用于重新打开时回显与重新生成默认取值。
+
+    只落「用户编辑值」，不改资产版本、不触发任务；传空字符串表示清除编辑值、
+    回到模板默认。
+    """
+    asset = _get_asset(db, asset_id)
+    if asset.asset_type not in _REGENERATABLE_TYPES:
+        raise errors.AppError(
+            "invalid_request",
+            f"仅角色/场景/道具资产支持保存提示词，当前类型：{asset.asset_type}",
+            422,
+        )
+    payload = payload or {}
+    prompt = (payload.get("prompt") or "").strip()
+    negative = (payload.get("negative_prompt") or "").strip()
+    snap = dict(asset.input_snapshot or {})
+    if prompt:
+        snap["edited_prompt"] = prompt
+        snap["edited_negative_prompt"] = negative
+        snap["edited_prompt_at"] = _now().isoformat()
+    else:
+        snap.pop("edited_prompt", None)
+        snap.pop("edited_negative_prompt", None)
+        snap.pop("edited_prompt_at", None)
+    asset.input_snapshot = snap
+    db.commit()
+    return {
+        "asset_id": asset.id,
+        "prompt": prompt,
+        "negative_prompt": negative,
+        "is_edited": bool(prompt),
     }
 
 
@@ -553,8 +563,6 @@ async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(g
     版本时间线与回滚不适用于替换（无新版本产生）。
     """
     asset = _get_asset(db, asset_id)
-    if asset.locked:
-        raise errors.AppError("asset_locked", "资产已锁定，请先解锁再替换", 409)
     data = await file.read()
     if not data:
         raise errors.AppError("invalid_request", "上传文件为空", 400)
@@ -580,10 +588,6 @@ async def replace_asset(asset_id: str, file: UploadFile, db: Session = Depends(g
     # 更新 updated_at：文件内容已变化，前端以 v=updated_at 破图片缓存，必须变化才能拉到新图
     asset.updated_at = _now()
     affected_shots = _mark_referencing_shots(db, asset.id)
-    # 人工审核闸口（D-23）：公共资产替换后原审核结论失效，需重新提交审核
-    if asset.asset_type in ("character", "scene", "prop"):
-        from app.services.assets_review import reset_assets_review
-        reset_assets_review(db, asset.project_id)
     # 分镜图换图后该镜分镜图需重新人工确认（D-13 静图先行闸口）
     if asset.asset_type == "keyframe":
         from app.models import Shot as _Shot
@@ -612,8 +616,6 @@ def regenerate_asset(asset_id: str, payload: dict | None = None, db: Session = D
             "分镜图/视频请在分镜重新生成工作台操作",
             422,
         )
-    if asset.locked:
-        raise errors.AppError("asset_locked", "资产已锁定，请先解锁再重新生成", 409)
     payload = payload or {}
     idempotency_key = payload.get("idempotency_key")
     if idempotency_key:
@@ -629,6 +631,15 @@ def regenerate_asset(asset_id: str, payload: dict | None = None, db: Session = D
     prompt = (payload.get("prompt") or "").strip()
     negative = (payload.get("negative_prompt") or "").strip()
     prompt_edited = bool(prompt)
+    # 未显式传提示词时，优先沿用详情页保存过的编辑值，再回落到模板默认值，
+    # 保证「详情页编辑 → 重新生成」用的是用户看到的那份提示词。
+    if not prompt:
+        _snap = asset.input_snapshot or {}
+        _saved = (_snap.get("edited_prompt") or "").strip()
+        if _saved:
+            prompt = _saved
+            negative = negative or (_snap.get("edited_negative_prompt") or "").strip()
+            prompt_edited = True
     if not prompt:
         try:
             default_prompt, default_negative = _default_prompt_for(db, asset)
@@ -692,8 +703,6 @@ def regenerate_asset(asset_id: str, payload: dict | None = None, db: Session = D
 @router.delete("/{asset_id}", status_code=204)
 def delete_asset(asset_id: str, db: Session = Depends(get_db)) -> None:
     a = _get_asset(db, asset_id)
-    if a.locked:
-        raise errors.AppError("asset_locked", "资产已锁定，不可删除", 409)
     if a.ref_count > 0:
         raise errors.AppError("asset_in_use", "资产被引用中，不可删除", 409)
     db.delete(a)

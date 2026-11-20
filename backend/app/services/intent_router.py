@@ -35,7 +35,7 @@ INTENT_SUBCATEGORIES: dict[str, set[str]] = {
     "generate_request": {"asset.generate", "shot.generate", "video.generate", "audio.generate"},
     "pipeline_action": {
         "project.create", "script.save", "script.generate", "script.parse",
-        "script.parse_status", "script.parse_confirm", "asset.review", "keyframe.confirm",
+        "script.parse_status", "script.parse_confirm",
         "video.compose", "video.export", "review.confirm",
         "asset.regenerate", "shot.regenerate", "asset.replace",
         "candidate.adopt", "candidate.list",
@@ -51,8 +51,6 @@ _ACTION_SUBCATEGORY: dict[str, str] = {
     "query_parse_status": "script.parse_status",
     "analyze_script": "script.parse",
     "confirm_parse": "script.parse_confirm",
-    "review_assets": "asset.review",
-    "confirm_keyframes": "keyframe.confirm",
     "compose_video": "video.compose",
     "export_video": "video.export",
     "review_current": "review.confirm",
@@ -133,8 +131,6 @@ _PIPELINE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(发起|开始|执行|做)?(一?次?)(分析|解析|拆解)剧本"), "analyze_script"),
     # 确认解析结果：解析产出为候选版本，须确认后角色/场景/道具/镜头才落库
     (re.compile(r"(确认|采纳|应用)(一下|下)?(剧本)?(解析|分析)(结果|版本)?"), "confirm_parse"),
-    (re.compile(r"资产(库)?(人工)?审核(通过)?|审核(通过)?(公共)?资产(库)?|资产(库)?(没|没有)问题"), "review_assets"),
-    (re.compile(r"(确认|通过|审核)(所有|全部)?分镜图?|分镜图?(全部)?(确认|通过|审核|没问题)"), "confirm_keyframes"),
     (re.compile(r"(合成|拼接)(成片|视频|导出)?"), "compose_video"),
     (re.compile(r"导出(视频|成片|文件)?"), "export_video"),
     (re.compile(r"^(审核通过|通过审核|确认无误|没问题|审核没问题)$"), "review_current"),
@@ -218,9 +214,9 @@ _INTENT_SYSTEM_PROMPT = (
     "- query：查询项目信息、任务状态、资产统计、通用知识问答\n"
     "- analysis：剧本分析、结构化评估、内容建议等无副作用分析请求\n"
     "- generate_request：要求生成图片/视频/语音/TTS/批量生成等昂贵操作\n"
-    "- pipeline_action：制作流程节点操作（新建项目/保存剧本/分析剧本/审核资产库/"
-    "确认分镜图/合成成片/导出成片）；须在 entities.pipeline_action 中给出动作键："
-    "create_project/save_script/analyze_script/review_assets/confirm_keyframes/"
+    "- pipeline_action：制作流程节点操作（新建项目/保存剧本/分析剧本/"
+    "合成成片/导出成片）；须在 entities.pipeline_action 中给出动作键："
+    "create_project/save_script/analyze_script/"
     "compose_video/export_video（泛化审核确认用 review_current）；"
     "返工操作的动作键：regenerate_asset（重新生成角色/场景/道具图）/"
     "regenerate_shot（重新生成分镜图/分镜视频）/replace_asset（替换图片）/"

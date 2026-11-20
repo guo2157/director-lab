@@ -1,36 +1,36 @@
 <script setup lang="ts">
 /**
- * 分镜图详情弹窗：左栏大图 + 常驻主操作，右栏三段（提示词 → 参考图 → 重新生成方式）。
- * 状态、槽位推导与提交都在 useKeyframeRegen 里，本组件只做组织与展示。
+ * 分镜图详情弹窗：左栏大图 + 右栏编辑区（提示词 / 参考图 / 重新生成）。
  *
- * 布局原则（DESIGN.md「主操作不进折叠」）：
- *   · 「重新生成 / 替换上传」贴在图上，滚到任何位置都能点到；
- *   · 提示词按段落完整展示，不塞进 textarea 也不折成摘要，要改才进编辑态。
+ * 重新生成按钮直接按当前页面的提示词与参考图提交（modify_refs 模式），
+ * 新分镜图生成后原地覆盖旧版，只保留一份。
  */
-import { computed } from 'vue'
-import { NButton, NImage, NInput, NModal, NSpace, NSpin, NUpload, useMessage } from 'naive-ui'
+import { computed, ref } from 'vue'
+import {
+  NButton,
+  NImage,
+  NInput,
+  NModal,
+  NSpace,
+  NSpin,
+  NUpload,
+  useMessage,
+} from 'naive-ui'
 import type { Shot } from '@/types/script'
 import { useKeyframeRegen } from '@/composables/useKeyframeRegen'
-import { shotStatus } from './types'
-import KeyframeRefList from './KeyframeRefList.vue'
-import PromptPanel from './PromptPanel.vue'
-import RegenWorkbench from './RegenWorkbench.vue'
-import ShotPreviewPanel from './ShotPreviewPanel.vue'
+import type { Asset } from '@/types/asset'
+import { listAssets, uploadAsset } from '@/api/assets'
 
 const props = defineProps<{
   projectId: string
-  reviewApproved: boolean
   scenes: Array<{ id: string; title: string; baseline_asset_id?: string | null }>
   /** 全片镜号 */
   seqOf: (shot: Shot) => number
 }>()
 
 const emit = defineEmits<{
-  /** 提交成功后：页面建立轮询基线 */
   submitted: []
-  /** 尚未出图的镜头：走原生成链路（页面处理） */
   'first-generate': [shot: Shot, prompt: string]
-  /** 替换上传：交给页面弹本地文件选择（保持卡片与详情同一套逻辑） */
   replace: [shot: Shot]
 }>()
 
@@ -43,35 +43,14 @@ const {
   kfSlots,
   kfMaxRefs,
   kfRefsLoading,
-  kfRefList,
   regenPrompt,
-  regenMode,
-  regenModeOptions,
   regenRefs,
-  regenRefRows,
-  regenRefsEditable,
-  regenValidation,
   regenSubmitting,
-  regenValidating,
-  removeRegenRef,
-  runRegenValidation,
-  detailGenerate,
-  assetPickerVisible,
-  assetPickerSlot,
-  assetPickerKeyword,
-  assetPickerLoading,
-  assetPickerItems,
-  assetUploading,
-  openAssetPicker,
-  loadAssetPickerItems,
   pickAsset,
-  uploadRefImage,
-  regenWorkflowId,
-  workflowSchema,
-  regenParams,
+  removeRegenRef,
+  detailGenerate,
 } = useKeyframeRegen({
   projectId: computed(() => props.projectId),
-  reviewApproved: computed(() => props.reviewApproved),
   scenes: computed(() => props.scenes),
   message,
   onSubmitted: () => emit('submitted'),
@@ -84,24 +63,99 @@ const heroUrl = computed(() => {
   const kf = detailShot.value?.current_assets?.keyframe
   return kf?.url || kf?.thumb_url || ''
 })
-const heroTitle = computed(() => {
-  const shot = detailShot.value
-  if (!shot) return ''
-  return shot.title || `镜头 ${props.seqOf(shot)}`
-})
-const heroSeq = computed(() => (detailShot.value ? props.seqOf(detailShot.value) : 0))
-const heroStatus = computed(() => {
-  const shot = detailShot.value
-  return shot ? shotStatus(shot) : { kind: 'stale' as const, label: '待生成' }
-})
-const locked = computed(() => Boolean(detailShot.value?.current_assets?.keyframe?.locked))
-const confirmed = computed(() => Boolean(detailShot.value?.keyframe_confirmed))
 const hasKeyframe = computed(() => Boolean(detailShot.value?.current_assets?.keyframe))
-const boundCount = computed(() => regenRefs.value.length)
 
-function onReplace() {
-  if (detailShot.value) emit('replace', detailShot.value)
+// ── 资产选择器（为参考图槽位选择已有资产）──
+const assetPickerVisible = ref(false)
+const assetPickerSlot = ref('')
+const assetPickerKeyword = ref('')
+const assetPickerLoading = ref(false)
+const assetPickerItems = ref<Asset[]>([])
+const assetUploading = ref(false)
+
+function openPicker(slotParam: string) {
+  assetPickerSlot.value = slotParam
+  assetPickerKeyword.value = ''
+  assetPickerVisible.value = true
+  void loadPickerItems()
 }
+
+async function loadPickerItems() {
+  assetPickerLoading.value = true
+  try {
+    const res = await listAssets({
+      project_id: props.projectId,
+      asset_type: undefined,
+      keyword: assetPickerKeyword.value || undefined,
+      page_size: 50,
+    })
+    assetPickerItems.value = (res.items ?? []) as Asset[]
+  } catch (e: any) {
+    message.error(e?.message ?? '加载资产列表失败')
+    assetPickerItems.value = []
+  } finally {
+    assetPickerLoading.value = false
+  }
+}
+
+function pickAndClose(asset: Asset) {
+  pickAsset(asset)
+  assetPickerVisible.value = false
+}
+
+async function uploadRefImage(file: File) {
+  const slotParam = assetPickerSlot.value
+  if (!slotParam) return
+  assetUploading.value = true
+  try {
+    const asset = await uploadAsset(file, {
+      project_id: props.projectId,
+      asset_type: 'reference',
+      name: file.name.replace(/\.[^.]+$/, ''),
+    })
+    pickAndClose(asset)
+  } catch (e: any) {
+    message.error(e?.message ?? '上传参考图失败')
+  } finally {
+    assetUploading.value = false
+  }
+}
+
+// ── 参考图展示（合并已绑定与可用槽位）──
+const refRows = computed(() => {
+  const bound = new Set(regenRefs.value.map((r) => r.slot_param))
+  const rows: Array<{
+    slot_param: string
+    asset_id: string | null
+    asset_type?: string
+    asset_name?: string
+    version?: number
+    required: boolean
+    enabled: boolean
+  }> = []
+  for (const r of regenRefs.value) {
+    rows.push({
+      slot_param: r.slot_param,
+      asset_id: r.asset_id ?? null,
+      asset_type: r.asset_type ?? undefined,
+      asset_name: r.asset_name ?? undefined,
+      version: r.asset_version ?? undefined,
+      required: r.required ?? false,
+      enabled: r.enabled !== false,
+    })
+  }
+  for (const s of kfSlots.value) {
+    if (bound.has(s.param)) continue
+    rows.push({
+      slot_param: s.param,
+      asset_id: null,
+      required: s.required,
+      enabled: false,
+    })
+  }
+  return rows
+})
+
 </script>
 
 <template>
@@ -111,79 +165,87 @@ function onReplace() {
     title="分镜图详情"
     closable
     :bordered="false"
-    :style="{ width: 'min(1180px, 94vw)' }"
+    :style="{ width: 'min(1100px, 94vw)' }"
     :content-style="{ maxHeight: 'calc(88vh - 56px)', overflowY: 'auto' }"
   >
     <template v-if="detailShot">
       <div class="dg">
+        <!-- 左栏：大图预览 -->
         <aside class="dg-aside">
-          <ShotPreviewPanel
-            :url="heroUrl"
-            :title="heroTitle"
-            :seq="heroSeq"
-            :status-kind="heroStatus.kind"
-            :status-label="heroStatus.label"
-            :has-keyframe="hasKeyframe"
-            :locked="locked"
-            :confirmed="confirmed"
-            :can-generate="reviewApproved"
-            :generating="regenSubmitting"
-            :validating="regenValidating"
-            @generate="detailGenerate(detailShot)"
-            @replace="onReplace"
-            @validate="runRegenValidation"
-          />
+          <n-image v-if="heroUrl" :src="heroUrl" object-fit="contain" class="dg-img" />
+          <div v-else class="dg-empty">暂无预览</div>
         </aside>
 
+        <!-- 右栏：编辑区 -->
         <div class="dg-main">
-          <section class="dg-sec">
-            <header class="dg-sec-head">
-              <span class="dg-sec-idx">1</span>
-              <span class="dg-sec-name">提示词</span>
-              <span class="dg-sec-hint">改动只影响本镜</span>
-            </header>
-            <PromptPanel v-model="regenPrompt" @copied="message.success('已复制提示词')" />
-          </section>
-
-          <section class="dg-sec">
-            <header class="dg-sec-head">
-              <span class="dg-sec-idx">2</span>
-              <span class="dg-sec-name">生成参考图</span>
-              <span class="dg-sec-hint">当前工作流 {{ kfMaxRefs }} 个槽位</span>
-            </header>
-            <KeyframeRefList :items="kfRefList" :loading="kfRefsLoading" :max-refs="kfMaxRefs" />
-            <p class="dg-note">
-              真实入参＝实际提交的图；按槽位推导＝按引用与槽位会传入；无可用槽位＝本次不传；图未生成＝需先到资产库补齐。
-            </p>
-          </section>
-
-          <section class="dg-sec is-last">
-            <header class="dg-sec-head">
-              <span class="dg-sec-idx">3</span>
-              <span class="dg-sec-name">重新生成方式</span>
-              <span class="dg-sec-hint">沿用当前提示词，或连参考图一起改</span>
-            </header>
-            <RegenWorkbench
-              v-model:mode="regenMode"
-              :mode-options="regenModeOptions"
-              :rows="regenRefRows"
-              :slots-count="kfSlots.length"
-              :bound-count="boundCount"
-              :editable="regenRefsEditable"
-              :validation="regenValidation"
-              v-model:workflow-id="regenWorkflowId"
-              v-model:params="regenParams"
-              :schema="workflowSchema"
-              @pick="openAssetPicker"
-              @remove="removeRegenRef"
+          <!-- 提示词 -->
+          <div class="dg-sec">
+            <div class="dg-label">提示词</div>
+            <n-input
+              v-model:value="regenPrompt"
+              type="textarea"
+              :autosize="{ minRows: 4, maxRows: 12 }"
+              placeholder="描述该镜头的画面要求…"
             />
-          </section>
+          </div>
+
+          <!-- 参考图 -->
+          <div class="dg-sec">
+            <div class="dg-label">
+              参考图
+              <span v-if="kfMaxRefs" class="dg-hint">（槽位上限 {{ kfMaxRefs }}）</span>
+            </div>
+            <n-spin :show="kfRefsLoading" size="small">
+              <div v-if="refRows.length" class="rf-grid">
+                <div v-for="row in refRows" :key="row.slot_param" class="rf-card">
+                  <div class="rf-preview">
+                    <img
+                      v-if="row.asset_id"
+                      :src="`/api/assets/${row.asset_id}/file?thumb=true`"
+                      :alt="row.asset_name || row.slot_param"
+                    />
+                    <div v-else class="rf-empty">未绑定</div>
+                  </div>
+                  <div class="rf-meta">
+                    <span class="rf-slot">{{ row.slot_param }}<span v-if="row.required" class="rf-required">*</span></span>
+                    <span v-if="row.asset_name" class="rf-name">{{ row.asset_name }}</span>
+                  </div>
+                  <div class="rf-actions">
+                    <n-button size="tiny" @click="openPicker(row.slot_param)">
+                      {{ row.asset_id ? '替换' : '添加' }}
+                    </n-button>
+                    <n-button
+                      v-if="row.asset_id && !row.required"
+                      size="tiny"
+                      @click="removeRegenRef(row.slot_param)"
+                    >
+                      移除
+                    </n-button>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="rf-none">暂无参考图槽位</div>
+            </n-spin>
+          </div>
+
+          <!-- 重新生成按钮 -->
+          <div class="dg-sec is-last">
+            <n-button
+              type="primary"
+              :loading="regenSubmitting"
+              :disabled="!hasKeyframe"
+              @click="detailShot && detailGenerate(detailShot)"
+            >
+              重新生成分镜图
+            </n-button>
+            <span v-if="!hasKeyframe" class="dg-note">尚未生成分镜图，请先使用左侧按钮生成</span>
+          </div>
         </div>
       </div>
     </template>
   </n-modal>
 
-  <!-- 资产选择器：为参考图槽位选择或上传参考图 -->
+  <!-- 资产选择器 -->
   <n-modal
     v-model:show="assetPickerVisible"
     preset="card"
@@ -198,13 +260,18 @@ function onReplace() {
         placeholder="搜索资产名称"
         clearable
         size="small"
-        @update:value="() => loadAssetPickerItems()"
+        @update:value="loadPickerItems"
       />
       <n-spin :show="assetPickerLoading || assetUploading">
         <div v-if="assetPickerItems.length" class="picker-list">
-          <div v-for="a in assetPickerItems" :key="a.id" class="picker-item" @click="pickAsset(a)">
+          <div
+            v-for="a in assetPickerItems"
+            :key="a.id"
+            class="picker-item"
+            @click="pickAndClose(a)"
+          >
             <n-image
-              :src="`/api/assets/${a.id}/file`"
+              :src="`/api/assets/${a.id}/file?thumb=true`"
               :width="44"
               :height="44"
               object-fit="cover"
@@ -230,26 +297,62 @@ function onReplace() {
 </template>
 
 <style scoped>
-/* 左图右文：左栏 sticky，滚动右栏时主操作常在视野内 */
 .dg {
   display: grid;
-  grid-template-columns: minmax(280px, 400px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 380px) minmax(0, 1fr);
   gap: var(--sp-6);
   align-items: start;
 }
 .dg-aside {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.dg-img {
+  width: 100%;
+  max-height: 380px;
+  display: block;
+  border-radius: var(--radius-lg);
+}
+.dg-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+.dg-info {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.dg-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.dg-quick {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
 }
 .dg-main {
   display: flex;
   flex-direction: column;
+  gap: var(--sp-4);
   min-width: 0;
 }
 .dg-sec {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
-  padding: var(--sp-4) 0;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
   border-bottom: 1px solid var(--border-subtle);
 }
 .dg-sec:first-child {
@@ -258,39 +361,92 @@ function onReplace() {
 .dg-sec.is-last {
   border-bottom: none;
   padding-bottom: 0;
+  align-items: flex-start;
 }
-.dg-sec-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-}
-.dg-sec-idx {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border-radius: var(--radius-sm);
-  background: var(--brand-deep);
-  color: var(--text-on-brand);
-  font-size: 11px;
-  line-height: 18px;
-  text-align: center;
-}
-.dg-sec-name {
+.dg-label {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
 }
-.dg-sec-hint {
-  margin-left: auto;
+.dg-hint {
   font-size: 11px;
+  font-weight: 400;
   color: var(--text-tertiary);
 }
 .dg-note {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.6;
+  font-size: 12px;
   color: var(--text-tertiary);
+}
+
+/* 参考图 */
+.rf-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.rf-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.rf-preview {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+.rf-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.rf-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.rf-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rf-slot {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.rf-required {
+  color: var(--state-error);
+  margin-left: 2px;
+}
+.rf-name {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rf-actions {
+  flex: none;
+  display: flex;
+  gap: var(--sp-1);
+}
+.rf-none {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: var(--sp-4) 0;
+  text-align: center;
 }
 
 /* 资产选择器 */
@@ -333,6 +489,13 @@ function onReplace() {
   color: var(--text-tertiary);
 }
 
+:deep(.n-card-header__main) {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 @media (max-width: 768px) {
   .dg {
     grid-template-columns: 1fr;
@@ -344,22 +507,5 @@ function onReplace() {
     position: sticky;
     top: 0;
   }
-}
-@media (max-width: 768px) {
-  .dg-sec {
-    padding: var(--sp-3) 0;
-  }
-  .dg-sec-name {
-    font-size: 13px;
-  }
-  .dg-sec-hint {
-    display: none;
-  }
-}
-:deep(.n-card-header__main) {
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
 }
 </style>

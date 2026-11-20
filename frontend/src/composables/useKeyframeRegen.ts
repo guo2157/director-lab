@@ -36,7 +36,6 @@ interface SceneLite {
  */
 export function useKeyframeRegen(opts: {
   projectId: ComputedRef<string> | { value: string }
-  reviewApproved: ComputedRef<boolean> | { value: boolean }
   scenes: ComputedRef<SceneLite[]> | { value: SceneLite[] }
   message: Notify
   /** 提交成功后：建立轮询基线（由页面提供） */
@@ -342,14 +341,8 @@ export function useKeyframeRegen(opts: {
   async function submitRegen() {
     const shot = detailShot.value
     if (!shot) return
-    if (!opts.reviewApproved.value) {
-      opts.message.warning('公共资产尚未通过人工审核，暂不可生成分镜图')
-      return
-    }
-    if (shot.current_assets?.keyframe?.locked) {
-      opts.message.warning('该分镜图已锁定，请先解锁')
-      return
-    }
+    // 前端不再做审核/锁定前置判断：生成条件由后端 assets_gate 权威校验
+    // （必需资产是否真实生成完成），锁定功能已整体移除。
     regenSubmitting.value = true
     try {
       // 1. 提交前预检：错误时阻断

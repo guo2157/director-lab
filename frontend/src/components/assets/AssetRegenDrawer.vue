@@ -1,12 +1,10 @@
 <script setup lang="ts">
 /**
- * 重新生成抽屉：改提示词 → 提交任务 → 在候选版本里挑一个采用。
- * 生成结果落在候选版本，不会直接覆盖当前生效图，采用前原图始终可见。
+ * 重新生成抽屉：改提示词 → 提交任务 → 新结果直接覆盖旧版，只保留一份。
+ * 生成期间原图仍可见；成功后页面展示的即为重新生成后的资产图。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { NAlert, NButton, NDrawer, NDrawerContent, NEmpty, NInput, NSpin, NTag, useMessage } from 'naive-ui'
-import { adoptCandidate, fetchCandidates } from '@/api/regeneration'
-import type { CandidateAsset } from '@/api/regeneration'
+import { NAlert, NButton, NDrawer, NDrawerContent, NInput, NSpin, NTag, useMessage } from 'naive-ui'
 import { getAssetRegenerateConfig, regenerateAsset } from '@/api/assets'
 import { getJob } from '@/api/jobs'
 import type { Asset } from '@/types/asset'
@@ -16,11 +14,13 @@ const props = defineProps<{
   asset: Asset | null
   /** 当前选中的资产出图工作流（asset_image 槽位）；未传时由后端按默认解析 */
   workflowId?: string
+  /** 详情页带入的提示词（含未保存编辑），优先于模板默认值 */
+  presetPrompt?: string
 }>()
 
 const emit = defineEmits<{
   'update:show': [boolean]
-  /** 采用候选版本后：父组件刷新资产与实体数据 */
+  /** 重新生成完成、新结果覆盖旧版后：父组件刷新资产与实体数据 */
   refresh: []
   /** 任务已提交：父组件接管顶部进度面板的轮询 */
   submitted: []
@@ -35,8 +35,6 @@ const promptVersion = ref('')
 const submitting = ref(false)
 const jobStatus = ref('')
 const errorMsg = ref('')
-const candidates = ref<CandidateAsset[]>([])
-const adoptingId = ref<string | null>(null)
 let timer: number | null = null
 
 const typeLabel = computed(() => {
@@ -51,15 +49,6 @@ function stopPoll() {
   }
 }
 
-async function loadCandidates(assetId: string) {
-  try {
-    const res = await fetchCandidates(assetId)
-    candidates.value = res?.candidates ?? []
-  } catch {
-    candidates.value = []
-  }
-}
-
 function startPoll(jobId: string) {
   stopPoll()
   timer = window.setInterval(async () => {
@@ -69,11 +58,8 @@ function startPoll(jobId: string) {
       if (['succeeded', 'failed', 'lost', 'cancelled'].includes(job.status)) {
         stopPoll()
         if (job.status === 'succeeded') {
-          message.success('重新生成完成，请在下方候选版本中确认采用')
-          if (props.asset) {
-            await loadCandidates(props.asset.id)
-            emit('refresh')
-          }
+          message.success('重新生成完成，新结果已覆盖旧版')
+          emit('refresh')
         } else {
           errorMsg.value = (job as { error_msg?: string }).error_msg || `任务${job.status}`
         }
@@ -91,13 +77,13 @@ async function load() {
   loading.value = true
   errorMsg.value = ''
   jobStatus.value = ''
-  candidates.value = []
   try {
     const cfg = await getAssetRegenerateConfig(asset.id)
-    prompt.value = cfg.prompt
+    // 详情页带入的提示词优先：用户改过内容时不能被模板默认值覆盖
+    const preset = (props.presetPrompt ?? '').trim()
+    prompt.value = preset || cfg.prompt
     negative.value = cfg.negative_prompt
     promptVersion.value = cfg.asset_prompt_version
-    await loadCandidates(asset.id)
   } catch (e) {
     errorMsg.value = e instanceof Error ? e.message : '读取重新生成配置失败'
   } finally {
@@ -134,20 +120,6 @@ async function submit() {
     errorMsg.value = e instanceof Error ? e.message : '提交失败'
   } finally {
     submitting.value = false
-  }
-}
-
-async function adopt(candidateId: string) {
-  adoptingId.value = candidateId
-  try {
-    await adoptCandidate(candidateId)
-    message.success('已采用该候选版本')
-    emit('refresh')
-    if (props.asset) await loadCandidates(props.asset.id)
-  } catch (e) {
-    message.error(`采用失败: ${e instanceof Error ? e.message : e}`)
-  } finally {
-    adoptingId.value = null
   }
 }
 
@@ -212,29 +184,6 @@ onBeforeUnmount(stopPoll)
             >
               任务状态：{{ jobStatus }}
             </n-tag>
-          </div>
-
-          <div class="regen-candidates">
-            <h4 class="section-title">候选版本（采纳后才会替换当前生效版本）</h4>
-            <n-empty v-if="!candidates.length" size="small" description="暂无候选版本，提交重新生成后在此确认" />
-            <div v-else class="candidate-grid">
-              <div v-for="c in candidates" :key="c.asset_id" class="candidate-card">
-                <div class="candidate-thumb">
-                  <img :src="`/api/assets/${c.asset_id}/file?thumb=true`" :alt="`候选版本 v${c.version}`" loading="lazy" />
-                </div>
-                <div class="candidate-meta">
-                  <span class="candidate-ver">v{{ c.version }}</span>
-                  <n-button
-                    size="tiny"
-                    type="primary"
-                    :loading="adoptingId === c.asset_id"
-                    @click="adopt(c.asset_id)"
-                  >
-                    采用
-                  </n-button>
-                </div>
-              </div>
-            </div>
           </div>
         </template>
       </div>
@@ -316,45 +265,5 @@ onBeforeUnmount(stopPoll)
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
-}
-.regen-candidates {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border-subtle);
-}
-.candidate-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: var(--sp-2);
-}
-.candidate-card {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-}
-.candidate-thumb {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 120px;
-  background: var(--bg-sunken);
-}
-.candidate-thumb img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-}
-.candidate-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--sp-2);
-}
-.candidate-ver {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-secondary);
 }
 </style>
