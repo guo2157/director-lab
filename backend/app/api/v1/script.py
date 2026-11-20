@@ -226,12 +226,16 @@ def evaluate_project_script(project_id: str, payload: dict, db: Session = Depend
             text,
             episode_duration_target=int(settings_map.get("episode_duration_target", 90)),
             max_episodes_per_batch=int(settings_map.get("max_episodes_per_batch") or get_settings().max_episodes_per_batch),
+            settings=get_settings(),
         )
     except LLMError as e:
         raise errors.AppError(e.code, e.message, 502)
     # LLM 深度评估（短事务外）
     try:
-        report = evaluate_script(text, estimate_data, p.settings or {})
+        report = evaluate_script(
+            text, estimate_data, p.settings or {},
+            settings=get_settings(),
+        )
     except LLMError as e:
         raise errors.AppError(e.code, e.message, 502)
     return {
@@ -329,6 +333,11 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, text)
+    # 输入预算预检：同 create_parse，超长输入不创建任务
+    from app.integrations.token_estimate import precheck_input_budget
+    _pre = precheck_input_budget(text, settings=get_settings(), allow_segmented=False)
+    if not _pre["ok"]:
+        raise errors.AppError(_pre["code"], _pre["message"], 400)
     episode_start = int(payload.get("episode_start") or 1)
     if episode_start < 1:
         raise errors.invalid_request("episode_start 不得小于 1")
@@ -428,6 +437,12 @@ def create_parse(project_id: str, payload: ParseCreate,
     if sv.project_id != project_id:
         raise errors.script_version_conflict("剧本版本不属于本项目")
     _check_text_hash(sv, payload.text)
+    # 输入预算预检：超长剧本在创建任务前就明确失败，
+    # 避免任务进队列后走一轮「供应商上下文超限 → 退避重试 → 仍然失败」。
+    from app.integrations.token_estimate import precheck_input_budget
+    _pre = precheck_input_budget(payload.text, settings=get_settings(), allow_segmented=False)
+    if not _pre["ok"]:
+        raise errors.AppError(_pre["code"], _pre["message"], 400)
     # 解析区间归一化：episode_count/episode_end 可选（LLM parser 自主分析集数）
     # 未提供时默认从第1集开始，episode_count 传 None 由 parser 自行确定
     if payload.episode_count is not None and payload.episode_end is not None:

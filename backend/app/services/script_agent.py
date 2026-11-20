@@ -214,8 +214,8 @@ def execute_script_agent_job(job_id: str) -> dict:
         # ---- 0.9 输入预算预检 ----
         # 超长输入必须在发起 LLM 之前明确失败：否则供应商返回「上下文超限」
         # 会被当成可退避重试的供应商错误，白白重试 N 次后仍然失败。
-        # 阶段 3 做完分段大纲后，这里的 allow_segmented 才会改为 True。
-        precheck = precheck_input_budget(text, settings=settings, allow_segmented=False)
+        # allow_segmented=True：整本超预算但单集放得下时，走分段大纲而不是失败。
+        precheck = precheck_input_budget(text, settings=settings, allow_segmented=True)
         _write_event(db, job, "agent.input_precheck", {
             "ok": precheck["ok"],
             "code": precheck["code"],
@@ -234,6 +234,8 @@ def execute_script_agent_job(job_id: str) -> dict:
                 text,
                 episode_duration_target=episode_duration_target,
                 max_episodes_per_batch=max_per_batch,
+                segmented=(precheck["outline_mode"] == "segmented"),
+                settings=settings,
             )
         except LLMError as e:
             _fail_job(db, job, e.code, f"大纲分析失败: {e.message}")
@@ -242,6 +244,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             "estimated_episodes": outline_data.get("estimated_episodes"),
             "estimated_total_duration": outline_data.get("estimated_total_duration"),
             "exceeds_batch_limit": outline_data.get("exceeds_batch_limit"),
+            "outline_mode": precheck["outline_mode"],
         })
         db.commit()
 
@@ -254,7 +257,10 @@ def execute_script_agent_job(job_id: str) -> dict:
                 _write_event(db, job, "agent.llm_delta", {"delta": delta_text, "phase": "evaluation"})
                 db.commit()
 
-            evaluation = evaluate_script(text, outline_data, settings_map, on_delta=_on_eval_delta)
+            evaluation = evaluate_script(
+                text, outline_data, settings_map,
+                on_delta=_on_eval_delta, settings=settings,
+            )
             _write_event(db, job, "agent.eval_info", {
                 "score": evaluation.get("score"),
                 "issues_count": len(evaluation.get("issues") or []),
