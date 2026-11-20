@@ -37,7 +37,8 @@ const VIEWPORTS = [
 
 /**
  * 每页配置：
- *   railLabel    左侧流程栏应高亮的步骤名（解析是剧本阶段的子步骤，高亮「剧本」）
+ *   railLabel    左侧流程栏应高亮的步骤名（6 步各自独立成节点，解析高亮「解析」，
+ *                不再回落到「剧本」——见 2026-11-20 的剧本/解析拆分）
  *   cards        期望的 StageCard 标签，顺序敏感
  *   contentSel   首屏内容锚点
  *   contentMax   锚点 top 预算（桌面）

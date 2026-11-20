@@ -140,7 +140,7 @@ function goProjects() {
       >
         <ProjectProgressRail v-if="isProjectPage && projectId" :project-id="projectId" />
         <div class="content-main">
-          <!-- 页面导航由左侧「制作流程」竖列与页内 FlowNav 承担，不再重复挂载工作区竖列 -->
+          <!-- 页面导航由左侧「制作流程」竖列承担（6 个步骤页各自独立成节点），不再重复挂载工作区竖列 -->
           <slot />
         </div>
         <DirectorAgentPanel v-if="route.name !== 'director'" />

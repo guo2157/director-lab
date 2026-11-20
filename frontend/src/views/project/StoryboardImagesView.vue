@@ -106,7 +106,6 @@ const globalSeqMap = computed(() => {
 /** 全片镜号：取不到时回落到场景内序号 */
 const shotGlobalSeq = (shot: Shot) => globalSeqMap.value.get(shot.id) ?? shot.seq
 const keyframeShots = computed(() => allShots.value.filter((s) => !!s.current_assets?.keyframe))
-const confirmedShots = computed(() => allShots.value.filter((s) => s.keyframe_confirmed))
 const allConfirmed = computed(
   () => allShots.value.length > 0 && allShots.value.every((s) => !!s.current_assets?.keyframe && s.keyframe_confirmed),
 )

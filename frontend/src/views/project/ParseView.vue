@@ -2,7 +2,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { NButton, NEmpty, NIcon, NModal, useMessage } from 'naive-ui'
+import { NButton, NIcon, NModal, useMessage } from 'naive-ui'
 import { SparklesOutline } from '@vicons/ionicons5'
 import {
   confirmParseVersion,
@@ -10,7 +10,6 @@ import {
   getParseStatus,
   getProject,
   getScriptAgentStatus,
-  parseScript,
   retryParse,
   runScriptAgent,
 } from '@/api/projects'
@@ -18,27 +17,21 @@ import { listCharacters, listProps, listScenes } from '@/api/script'
 import { getJob, listJobs } from '@/api/jobs'
 import type { Job } from '@/types/job'
 import type { EpisodeParseStatusItem, Scene, Shot } from '@/types/script'
-import { useScriptFlowStore } from '@/stores/scriptFlow'
-import FlowNav from '@/components/FlowNav.vue'
-import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const route = useRoute()
 const router = useRouter()
-const confirmDialog = useConfirmDialog()
 const message = useMessage()
 const queryClient = useQueryClient()
-const flow = useScriptFlowStore()
 
 const projectId = computed(() => String(route.params.id ?? ''))
 
-/* 项目切换时重置流程状态（防止其他项目残留的剧本/评估状态误显示对号） */
-watch(
-  projectId,
-  (id) => {
-    if (id) flow.ensureProject(id)
-  },
-  { immediate: true },
-)
+/**
+ * 解析页状态全部由「后端事实 + 本页局部状态」组成，不再依赖 scriptFlow store：
+ * 该 store 未持久化，刷新即丢，而解析页必须能直接访问 /project/:id/parse 得到
+ * 正确状态（解析已是独立制作节点）。运行中的任务通过 getScriptAgentStatus 恢复。
+ */
+const parseJobId = ref<string | null>(null)
+const candidateVersionId = ref<string | null>(null)
 
 function errMsg(e: unknown): string {
   if (e && typeof e === 'object' && 'message' in e) {
@@ -68,109 +61,51 @@ const { data: projectData } = useQuery({
 })
 const project = computed(() => projectData.value)
 
-/* ---------- 剧本版本（刷新恢复） ---------- */
+/* ---------- 剧本版本（解析一律以已保存版本为准） ---------- */
 const { data: scriptData } = useQuery({
   queryKey: computed(() => ['currentScript', projectId.value]),
   queryFn: () => getCurrentScript(projectId.value),
   enabled: computed(() => !!projectId.value),
 })
-watch(
-  () => scriptData.value,
-  (sv) => {
-    if (sv?.exists && sv.script_version_id) {
-      flow.scriptVersionId = sv.script_version_id
-      flow.scriptText = sv.text ?? ''
-    }
-  },
-  { immediate: true },
-)
+const scriptVersionId = computed(() => scriptData.value?.script_version_id ?? null)
+const scriptText = computed(() => scriptData.value?.text ?? '')
+const hasScript = computed(() => Boolean(scriptData.value?.exists && scriptVersionId.value))
 
 
-/* ---------- 解析提交 ---------- */
-const { mutate: runParse, isPending: parsing } = useMutation({
-  mutationFn: (p: { replace: boolean; range: { episode_start: number; episode_count?: number; episode_end?: number } }) =>
-    parseScript(projectId.value, {
-      script_version_id: flow.scriptVersionId!,
-      text: flow.scriptText,
-      ...p.range,
-      replace_existing: p.replace || undefined,
-    }),
-  onSuccess: (res) => {
-    flow.parseJobId = res.job_id
-    queryClient.invalidateQueries({ queryKey: ['parse-status'] })
-  },
-  onError: (e) => {
-    // 解析前置条件不满足：评估页已下线，改为引导回剧本页重新发起一体化分析
-    if (errMsg(e).includes('须先评估')) {
-      confirmDialog({
-        title: '需要先完成剧本分析',
-        message: '解析前须先完成剧本评估与制作范围确认。请返回剧本页重新发起分析，由 Agent 自动完成评估与解析。',
-        confirmText: '返回剧本',
-        danger: false,
-        onConfirm: () => {
-          void router.push(`/project/${projectId.value}/script`)
-        },
-      })
-      return
-    }
-    message.error(errMsg(e))
-  },
-})
+/* ---------- 发起解析（本页是唯一入口，不再依赖剧本页跳转） ---------- */
 const submittedEpsLabel = ref('')
-const submitting = ref(false)
-/** 基于 store 的 selectedRanges 严格按选中区间解析：区间内过滤已成功集后重新拆子区间，跳过幂等重复提交 */
-function handleParse() {
-  if (!flow.scriptVersionId || !flow.selectedEpisodes.length || submitting.value) return
-  const succeededSet = new Set(episodeGrid.value.filter((e) => e.status === 'succeeded').map((e) => e.episode_no))
-  // 每个选中区间内过滤已成功集，再拆分为连续待提交子区间
-  const todoRanges: Array<{ start: number; end: number }> = []
-  for (const range of flow.selectedRanges) {
-    let s = -1
-    let prev = -1
-    const pushRange = () => { if (s >= 0) todoRanges.push({ start: s, end: prev }) }
-    for (let ep = range.start; ep <= range.end; ep++) {
-      if (succeededSet.has(ep)) { pushRange(); s = -1; continue }
-      if (s < 0) { s = ep; prev = ep; continue }
-      if (ep === prev + 1) { prev = ep; continue }
-      pushRange()
-      s = ep
-      prev = ep
-    }
-    pushRange()
-  }
-  const todoCount = todoRanges.reduce((n, r) => n + (r.end - r.start + 1), 0)
-  if (!todoCount) {
-    confirmDialog({
-      title: '所选集数均已解析完成',
-      message: '无需重复解析。公共资产图（角色/场景/道具）请在资产库中生成。',
-      confirmText: '去资产库',
-      danger: false,
-      onConfirm: () => {
-        void router.push(`/project/${projectId.value}/assets`)
-      },
-    })
-    return
-  }
-  const skipped = flow.selectedEpisodes.length - todoCount
-  submitting.value = true
-  const firstEp = todoRanges[0].start
-  const lastEp = todoRanges[todoRanges.length - 1].end
-  const submittedLabel = todoCount === 1 ? `第 ${firstEp} 集` : `第 ${firstEp}-${lastEp} 集`
-  submittedEpsLabel.value = submittedLabel
-  for (const r of todoRanges) {
-    runParse({ replace: hasResults.value, range: { episode_start: r.start, episode_end: r.end } })
-  }
-  let msg = '已提交 ' + todoRanges.length + ' 个区间解析任务，共 ' + todoCount + ' 集'
-  if (skipped) msg += '（已跳过 ' + skipped + ' 个已完成集）'
-  message.success(msg)
-  submitting.value = false
+/**
+ * 开始解析：把已保存版本交给 script-agent（评估 + 解析一体化，集数由 Agent 决定）。
+ * 为什么用 script_agent 而不是 /parse：后者要求先有集数评估结果，而评估入口已下线；
+ * script-agent 允许 episode_start 由前端指定，天然支持「首批 + 继续」两段式。
+ */
+const { mutate: startParse, isPending: starting } = useMutation({
+  mutationFn: (episodeStart?: number) => {
+    const vid = scriptVersionId.value
+    if (!vid) throw new Error('尚未保存剧本版本')
+    return runScriptAgent(projectId.value, vid, scriptText.value, episodeStart)
+  },
+  onSuccess: (res) => {
+    parseJobId.value = res.job_id
+    void queryClient.invalidateQueries({ queryKey: ['parse-status', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
+    message.success('已开始解析，Agent 将自动完成评估与拆解')
+  },
+  onError: (e) => message.error(errMsg(e)),
+})
+
+/** 首次解析：无任何集级记录时从第 1 集开始 */
+function handleStartParse() {
+  if (!hasScript.value || starting.value) return
+  submittedEpsLabel.value = '全部集'
+  startParse(undefined)
 }
 
 /* ---------- 解析任务轮询 ---------- */
 const { data: parseJobData, isError: parseJobError } = useQuery({
-  queryKey: computed(() => ['job', flow.parseJobId]),
-  queryFn: () => getJob(flow.parseJobId!),
-  enabled: computed(() => !!flow.parseJobId),
+  queryKey: computed(() => ['job', parseJobId.value]),
+  queryFn: () => getJob(parseJobId.value!),
+  enabled: computed(() => !!parseJobId.value),
   refetchInterval: (query) => {
     const data = query.state.data
     return data && (data.status === 'queued' || data.status === 'running') ? 2000 : false
@@ -179,7 +114,7 @@ const { data: parseJobData, isError: parseJobError } = useQuery({
 const parseJob = computed(() => parseJobData.value ?? null)
 const parseJobRunning = computed(
   () =>
-    !!flow.parseJobId &&
+    !!parseJobId.value &&
     !parseJobError.value &&
     (!parseJob.value || parseJob.value.status === 'queued' || parseJob.value.status === 'running'),
 )
@@ -213,7 +148,7 @@ const elapsedText = computed(() => {
   return h > 0 ? `${p2(h)}:${p2(m)}:${p2(s % 60)}` : `${p2(m)}:${p2(s % 60)}`
 })
 /** 任务状态查询失败（任务已清理或接口异常）：停止转圈，给用户明确出口 */
-const parseJobLost = computed(() => !!flow.parseJobId && parseJobError.value)
+const parseJobLost = computed(() => !!parseJobId.value && parseJobError.value)
 /** 排队过久（worker 未消费该任务）：避免用户误以为模型正在思考 */
 const queuedTooLong = computed(() => parseJob.value?.status === 'queued' && parseElapsed.value >= 60)
 /**
@@ -317,7 +252,7 @@ function connectLlmSse(jobId: string) {
 }
 
 watch(
-  [() => flow.parseJobId, parseJobRunning],
+  [() => parseJobId.value, parseJobRunning],
   ([jobId, running]) => {
     // 任务运行中才订阅；任务结束或无任务时关闭连接
     if (jobId && running) {
@@ -348,32 +283,20 @@ const { data: parseStatusData } = useQuery({
   refetchInterval: computed(() => (parseJobRunning.value ? 2000 : false)),
 })
 const parseStatus = computed(() => parseStatusData.value ?? null)
+/**
+ * 集号列表：唯一来源是后端锁定的总集数 + 已有解析记录的最大集号。
+ * 评估页下线后前端不再持有「用户选中集」（scriptFlow.selectedEpisodes 已移除），
+ * 解析范围由 Agent 自己决定，页面只负责把结果按集展示。
+ */
 const episodeNumbers = computed<number[]>(() => {
-  if (flow.selectedEpisodes.length) return [...flow.selectedEpisodes].sort((a, b) => a - b)
-  // 兜底：历史数据的 version.total_episodes 可能为空，此时用已有解析记录中的最大集号反推集数，
-  // 否则集数会被算成 0，导致集数方格区与完成卡片都显示不出结果
   const records = parseStatus.value?.records ?? []
   const maxRecorded = records.reduce((m, r) => Math.max(m, r.episode_no), 0)
-  // 注意：不要在这里回退到 flow.totalEpisodes —— 它是 `estimate?.estimated_episodes ?? 0`，
-  // 刷新后 estimate 为 null 时恒为 0，会把整条兜底链截断，导致集数面板与失败/重试入口整体消失。
-  const total =
-    flow.estimate?.estimated_episodes ??
-    parseStatus.value?.total_episodes ??
-    maxRecorded
+  // 历史数据的 version.total_episodes 可能为空，此时用记录里的最大集号反推，
+  // 否则集数会被算成 0，集数方格区与失败/重试入口整体消失。
+  const total = parseStatus.value?.total_episodes ?? maxRecorded
   return Array.from({ length: total }, (_, i) => i + 1)
 })
 const statusTotalEpisodes = computed(() => episodeNumbers.value.length)
-/*
- * 评估页已下线，页面不再提供选集入口：集数确定后若未选集则默认全选，
- * 否则『解析选中』按钮将因 selectedEpisodes 为空而永久不显示。
- */
-watch(
-  () => statusTotalEpisodes.value,
-  (total) => {
-    if (total > 0 && !flow.selectedEpisodes.length) flow.selectAllEpisodes(total)
-  },
-  { immediate: true },
-)
 const episodeGrid = computed(() => {
   const eps = episodeNumbers.value
   const recordMap = new Map<EpisodeParseStatusItem['episode_no'], EpisodeParseStatusItem>(
@@ -406,8 +329,9 @@ function statusLabel(s: string) {
 const { mutate: doRetryParse, isPending: retrying } = useMutation({
   mutationFn: () => retryParse(projectId.value),
   onSuccess: (res) => {
-    flow.parseJobId = res.job_id
-    queryClient.invalidateQueries({ queryKey: ['parse-status'] })
+    parseJobId.value = res.job_id
+    void queryClient.invalidateQueries({ queryKey: ['parse-status', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
     message.success(`已重新入队 ${res.retried_episodes.length} 个失败集`)
   },
   onError: (e) => message.error(errMsg(e)),
@@ -415,16 +339,15 @@ const { mutate: doRetryParse, isPending: retrying } = useMutation({
 /* ---------- Agent 继续分析：对未解析集触发 script-agent（episode_start 指向首个未完成集） ---------- */
 const pendingEpisodes = computed(() => episodeGrid.value.filter((e) => e.status !== 'succeeded'))
 const { mutate: doContinueAgent, isPending: continuing } = useMutation({
-  mutationFn: () =>
-    runScriptAgent(
-      projectId.value,
-      flow.scriptVersionId!,
-      flow.scriptText,
-      pendingEpisodes.value[0]?.episode_no,
-    ),
+  mutationFn: () => {
+    const vid = scriptVersionId.value
+    if (!vid) throw new Error('尚未保存剧本版本')
+    return runScriptAgent(projectId.value, vid, scriptText.value, pendingEpisodes.value[0]?.episode_no)
+  },
   onSuccess: (res) => {
-    flow.parseJobId = res.job_id
-    queryClient.invalidateQueries({ queryKey: ['parse-status'] })
+    parseJobId.value = res.job_id
+    void queryClient.invalidateQueries({ queryKey: ['parse-status', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
     message.success('已继续分析未解析集')
   },
   onError: (e) => message.error(errMsg(e)),
@@ -437,7 +360,7 @@ const candidateResult = computed<ParseJobResult | null>(
   () => (parseJob.value?.result as ParseJobResult | undefined) ?? null,
 )
 watch(() => candidateResult.value?.parse_version_id, (v) => {
-  if (v && !flow.candidateVersionId) flow.candidateVersionId = v
+  if (v && !candidateVersionId.value) candidateVersionId.value = v
 }, { immediate: true })
 /* ---------- job.result JSON 转可读格式化文本 ---------- */
 function fmtSeverity(s: string) {
@@ -539,7 +462,7 @@ function formatResult(r: Record<string, any> | null | undefined): string {
 
 /**
  * 从后端补回「最近一次成功解析」的 result。
- * 为什么需要：确认解析后 flow.resetAfterConfirmParse() 会清掉 parseJobId，
+ * 为什么需要：确认解析后 resetAfterConfirmParse() 会清掉 parseJobId，
  * 分析窗（含原文）随之消失，刷新后也没有原文可查。这里独立取一次，只读不写 store。
  *
  * 为什么查两种 job_type：解析入口有两条真实链路 ——
@@ -750,20 +673,33 @@ const shotsWithoutDetail = computed(
 )
 
 /* ---------- 确认候选版本 ---------- */
+/**
+ * 确认后清掉本地候选态：确认意味着「这份解析已是当前版本」，
+ * 候选版本 ID 与跟踪中的任务 ID 都不再有意义（原 scriptFlow.resetAfterConfirmParse 的等价逻辑）。
+ * 用本地 ref 而非全局 store，刷新页面也能靠 archivedParseJobs 恢复展示。
+ */
+function resetAfterConfirmParse() {
+  parseJobId.value = null
+  candidateVersionId.value = null
+}
 const { mutate: doConfirmParse } = useMutation({
-  mutationFn: () => confirmParseVersion(projectId.value, flow.candidateVersionId!, project.value?.current_parse_version_id),
+  mutationFn: (parseVersionId: string) =>
+    confirmParseVersion(projectId.value, parseVersionId, project.value?.current_parse_version_id),
   onSuccess: () => {
     message.success('解析结果已确认，场景/角色/道具已更新')
-    flow.resetAfterConfirmParse()
+    resetAfterConfirmParse()
     void queryClient.invalidateQueries({ queryKey: ['scenes', projectId.value] })
     void queryClient.invalidateQueries({ queryKey: ['characters', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['props', projectId.value] })
     void queryClient.invalidateQueries({ queryKey: ['project', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
   },
   onError: (e) => {
     // 幂等处理：多批次重复确认时版本已是 current（仅候选状态可确认），视为已确认成功，不弹错误
     const msg = errMsg(e)
     if (msg.includes('仅候选状态') || msg.includes('conflict')) {
-      flow.resetAfterConfirmParse()
+      resetAfterConfirmParse()
+      void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
       return
     }
     message.error(msg)
@@ -772,13 +708,6 @@ const { mutate: doConfirmParse } = useMutation({
 /** Agent 分批解析：首批完成后 has_more=true，剩余集需用户『继续分析』推进，此时不自动确认 */
 const agentHasMore = computed(
   () => (parseJob.value?.result as { has_more?: boolean } | undefined)?.has_more === true,
-)
-watch(
-  () => [candidateReady.value, flow.candidateVersionId, agentHasMore.value] as const,
-  ([ready, vid, more]) => {
-    if (ready && vid && !more) doConfirmParse()
-  },
-  { immediate: true },
 )
 
 /* ---------- 场景/角色/道具 ---------- */
@@ -855,33 +784,62 @@ const { data: agentStatusData } = useQuery({
   queryKey: computed(() => ['script-agent-status', projectId.value]),
   queryFn: () => getScriptAgentStatus(projectId.value),
   enabled: computed(() => !!projectId.value),
-  refetchInterval: computed(() => (flow.parseJobId ? false : 5000)),
+  refetchInterval: computed(() => (parseJobId.value ? false : 5000)),
 })
 watch(
   () => agentStatusData.value,
   (s) => {
-    if (!s?.job || flow.parseJobId) return
+    if (!s?.job || parseJobId.value) return
     // 活跃任务必须接管（刷新后继续显示实时输出与耗时）；
     // 失败任务也要接管，否则刷新后看不到「执行失败 + 耗时」；
     // 已成功不接管——成功后按需求收起执行过程，只展示解析结果。
     if (['queued', 'running', 'failed', 'lost'].includes(s.job.status)) {
-      flow.parseJobId = s.job.id
+      parseJobId.value = s.job.id
     }
   },
   { immediate: true },
 )
 
-/* ---------- 统一分析窗：状态 / 阶段 / 底部标签 ---------- */
+/**
+ * 自动确认的判定目标：以「后端事实」为准，不依赖任务态。
+ *
+ * 为什么不能只看 parseJob：parseJobId 是页面局部 ref，刷新或离开页面即丢，
+ * 而 getScriptAgentStatus 只接管 queued/running/failed/lost（成功的任务不接管）。
+ * 旧实现里 parseJobId 存在 Pinia store，离开再回来仍能触发确认；改成局部状态后
+ * 「解析成功 → 场景/角色/道具落库」这一步就断了 ——
+ * 实测 prj_68c1eb304355 解析出 6 个分镜，但场景/角色/道具计数全为 0。
+ *
+ * 因此改读 scope.parse_version_status === 'candidate'：后端已把解析版本写成候选，
+ * 确认它才是让场景/角色/道具真正落库的动作。该字段刷新后依然可取，
+ * 直接访问 /project/:id/parse 也能正确补齐，符合「状态由事实推导」的原则。
+ */
+const confirmTarget = computed<string | null>(() => {
+  const scope = agentStatusData.value?.scope
+  if (!scope?.parse_version_id || scope.parse_version_status !== 'candidate') return null
+  // 分批解析中途不确认：半成品不能定成当前版本
+  if (agentHasMore.value) return null
+  if (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded < statusTotalEpisodes.value) {
+    return null
+  }
+  return scope.parse_version_id
+})
+watch(
+  confirmTarget,
+  (vid) => {
+    if (vid) doConfirmParse(vid)
+  },
+  { immediate: true },
+)
 /** 何时展示分析窗：有任务在跟踪，或项目尚未解析完成（此时需要告诉用户「等待执行」） */
 const analysisVisible = computed(
   () =>
-    !!flow.parseJobId ||
+    !!parseJobId.value ||
     statusTotalEpisodes.value === 0 ||
     statusSummary.value.pending === statusTotalEpisodes.value,
 )
 const analysisState = computed<{ label: string; tone: string }>(() => {
   if (parseJobLost.value) return { label: '状态未知', tone: 'failed' }
-  if (!flow.parseJobId) return { label: '等待执行', tone: 'idle' }
+  if (!parseJobId.value) return { label: '等待执行', tone: 'idle' }
   if (parseJobRunning.value) return { label: '正在分析', tone: 'running' }
   const st = parseJob.value?.status
   if (st === 'succeeded') return { label: '已完成', tone: 'succeeded' }
@@ -890,7 +848,7 @@ const analysisState = computed<{ label: string; tone: string }>(() => {
   return { label: '等待执行', tone: 'idle' }
 })
 const analysisStage = computed(() => {
-  if (!flow.parseJobId) return '尚未提交分析，返回剧本页点击「开始分析」'
+  if (!parseJobId.value) return '尚未开始解析，点击右上角「开始解析」提交任务'
   if (parseJobLost.value) return '无法获取任务状态（任务可能已过期）'
   const st = parseJob.value?.status
   if (st === 'queued') return '任务排队中，等待分析引擎接管'
@@ -903,9 +861,32 @@ const analysisStage = computed(() => {
 })
 const analysisFootLabel = computed(() => {
   if (parseJobRunning.value) return '任务执行中'
-  if (!flow.parseJobId) return '等待任务'
+  if (!parseJobId.value) return '等待任务'
   if (parseJob.value?.status === 'succeeded') return '任务已完成'
   return '任务已结束'
+})
+
+/**
+ * 页头「开始解析」的可见条件：
+ * - 没有任何集级记录 → 首次解析，必须能独立发起；
+ * - 有记录但还有集未成功、且没有任务在跑 → 允许重新发起（幂等复用见后端 script-agent）。
+ * 全部成功时按钮消失（由「去资产库 →」承担出口）；有失败时由「重试失败集」承担。
+ */
+const canStartParse = computed(() => {
+  if (!hasScript.value || parseJobRunning.value) return false
+  if (statusTotalEpisodes.value === 0) return true
+  return statusSummary.value.succeeded < statusTotalEpisodes.value
+})
+
+/** 页头步骤状态：与左栏 02 解析保持同一口径，但只用文字 + 色点，不重复整条进度条 */
+const parseHeaderState = computed<{ label: string; tone: string }>(() => {
+  if (parseJobRunning.value) return { label: '解析中', tone: 'running' }
+  if (failedEpisodes.value.length) return { label: `${failedEpisodes.value.length} 集失败`, tone: 'failed' }
+  if (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded === statusTotalEpisodes.value) {
+    return { label: `${statusTotalEpisodes.value} 集已完成`, tone: 'done' }
+  }
+  if (!hasScript.value) return { label: '待保存剧本', tone: 'idle' }
+  return { label: '待解析', tone: 'idle' }
 })
 /** 从 JSON 文本片段中按 key 统计数组元素数量 */
 function countJsonArrayItems(prefix: string, text: string): number {
@@ -1056,11 +1037,17 @@ async function copyRawReport() {
     <header class="parse-header">
       <div class="parse-header-left">
         <div class="title-block">
-          <!-- 左侧「制作流程」栏已高亮 01 剧本（解析是剧本阶段的子步骤），
-               FlowNav 里也已选中「解析」；页内不再画第三个同名标题。
+          <!-- 左侧「制作流程」栏已高亮 02 解析。解析已是独立制作节点（2026-11-20），
+               页内不再有子流程胶囊；页头保留低权重步骤标识（02 + 状态）。
                H1 降为 visually-hidden 保留文档大纲与读屏语义。 -->
           <h1 class="visually-hidden">解析</h1>
-          <FlowNav :project-id="projectId" />
+          <span class="step-title">
+            <span class="step-title-no">02</span>
+            <span class="step-title-text">解析</span>
+            <span class="step-title-state" :class="`is-${parseHeaderState.tone}`">
+              {{ parseHeaderState.label }}
+            </span>
+          </span>
         </div>
       </div>
       <div class="parse-header-actions">
@@ -1068,6 +1055,7 @@ async function copyRawReport() {
           解析原文
         </NButton>
         <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
+        <!-- 继续分析：只处理「已有记录但还有集未完成」的情况 -->
         <NButton
           v-if="pendingEpisodes.length && !parseJobRunning"
           :loading="continuing"
@@ -1075,14 +1063,29 @@ async function copyRawReport() {
         >
           继续分析（{{ pendingEpisodes.length }} 集未完成）
         </NButton>
+        <!--
+          开始解析：本页唯一入口。原先只有「解析选中」，无分集记录时整页无法独立发起解析，
+          必须回剧本页点「开始分析」再被跳回来 —— 解析独立成节点后这个回路必须断开。
+          已有全部成功记录时不再出现（无意义），失败时由「重试失败集」承担。
+        -->
         <NButton
-          v-if="flow.selectedEpisodes.length"
-          :type="statusTotalEpisodes && flow.selectedEpisodes.length && !flow.candidateVersionId && !failedEpisodes.length ? 'primary' : 'default'"
-          :disabled="!flow.scriptVersionId || !statusTotalEpisodes || !flow.selectedEpisodes.length || !!flow.candidateVersionId || submitting"
-          :loading="parsing"
-          @click="handleParse()"
+          v-if="canStartParse"
+          type="primary"
+          :loading="starting"
+          :disabled="!hasScript"
+          :title="!hasScript ? '请先在剧本页保存剧本版本' : undefined"
+          :aria-label="!hasScript ? '开始解析（不可用：需先保存剧本版本）' : '开始解析'"
+          @click="handleStartParse()"
         >
-          解析选中（{{ flow.selectedEpisodes.length }} 集）
+          开始解析
+        </NButton>
+        <!-- 无剧本版本时的唯一出路：直接给去剧本页的入口，不让用户卡在死页 -->
+        <NButton
+          v-else-if="!hasScript"
+          type="primary"
+          @click="router.push(`/project/${projectId}/script`)"
+        >
+          去保存剧本 →
         </NButton>
       </div>
     </header>
@@ -1145,7 +1148,7 @@ async function copyRawReport() {
           <div class="episode-toolbar">
             <span class="pane-label">分集解析结果</span>
             <span class="episode-count-tag">{{ statusSummary.succeeded }}/{{ statusTotalEpisodes || 0 }} 集完成</span>
-            <span v-if="flow.selectedEpisodes.length" class="episode-count-tag is-selected">选中 {{ flow.selectedEpisodes.length }} 集</span>
+            <span v-if="submittedEpsLabel" class="episode-count-tag is-selected">本次解析 {{ submittedEpsLabel }}</span>
             <span class="toolbar-spacer" />
             <button
               v-if="failedEpisodes.length"
@@ -1337,11 +1340,22 @@ async function copyRawReport() {
           </div>
         </section>
 
-        <NEmpty
-          v-else-if="statusTotalEpisodes > 0 && statusSummary.pending === statusTotalEpisodes"
-          description="尚未解析，点击右上角『解析选中』提交任务"
-        />
-        <NEmpty v-else-if="statusTotalEpisodes === 0" description="尚未确定集数，请返回剧本页完成分析" />
+        <!-- 空态：说清「现在什么情况」，动作由页头那唯一一个主按钮承担 ——
+             同屏两个同名主按钮会让用户犹豫点哪个（PageHeader 的约定是每页一个主操作）。 -->
+        <div v-else class="parse-empty">
+          <p class="pe-title">
+            {{ !hasScript ? '还没有可解析的剧本' : statusTotalEpisodes === 0 ? '剧本已就绪，等待解析' : '解析尚未产出结果' }}
+          </p>
+          <p class="pe-desc">
+            {{
+              !hasScript
+                ? '解析以已保存的剧本版本为准。先到剧本页写入正文并保存版本，再回到这里开始解析。'
+                : statusTotalEpisodes === 0
+                  ? '解析会把已保存的剧本拆成场景、角色、道具与分镜。集数由 Agent 自行判断，无需先选集。'
+                  : `已提交 ${statusTotalEpisodes} 集，其中 ${statusSummary.succeeded} 集完成、${statusSummary.pending + statusSummary.running} 集未完成。失败原因见上方分集面板。`
+            }}
+          </p>
+        </div>
       </div>
     </div>
 
@@ -1420,9 +1434,97 @@ async function copyRawReport() {
 }
 .parse-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
-/* FlowNav 是页头唯一的可视元素（标题已 hidden），它是带描边填充的胶囊控件。
-   gap 保持 8px 以维持 title-block 的纵向节奏，与 ScriptView 一致。 */
+/* 步骤标识：02 + 名称 + 状态。视觉权重明显低于左栏 active 项（左栏有品牌底 + 反色编号），
+   只承担「这是第几步、现在什么状态」，不承担「我在哪一页」。 */
 .title-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.step-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
+.step-title-no {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.step-title-text {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.step-title-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.step-title-state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--neutral-line);
+  flex-shrink: 0;
+}
+.step-title-state.is-running {
+  color: var(--brand-hover);
+}
+.step-title-state.is-running::before {
+  background: var(--brand-primary);
+  animation: step-dot-pulse 1.6s ease-in-out infinite;
+}
+.step-title-state.is-done {
+  color: var(--state-success);
+}
+.step-title-state.is-done::before {
+  background: var(--state-success);
+}
+.step-title-state.is-failed {
+  color: var(--danger-text);
+}
+.step-title-state.is-failed::before {
+  background: var(--brand-error);
+}
+@keyframes step-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--brand-line);
+  }
+  50% {
+    box-shadow: 0 0 0 3px var(--brand-soft);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .step-title-state.is-running::before {
+    animation: none;
+  }
+}
+
+/* 空态：不是 NEmpty 的图标 + 一行字，而是「说清现在什么情况 + 下一步做什么」 */
+.parse-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-8) var(--sp-5);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+.pe-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.pe-desc {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
 
 .parse-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .parse-body { display: flex; flex: 1; min-height: 0; min-width: 0; }
