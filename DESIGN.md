@@ -322,7 +322,132 @@
   `--border-strong` / `--text-tertiary` / `--brand-primary`
 - 不允许在单个页面里再写一套 `themeOverrides`
 
-## 10. 验收
+## 10. 响应式断点
+
+只允许三档，`npm run check:breakpoints:strict` 强制校验：
+
+| 断点 | 语义 | 典型动作 |
+| --- | --- | --- |
+| `1100px` | 桌面收窄 | 侧栏/助手面板退让、网格降列、分栏转单列 |
+| `768px` | 平板 | 布局转单列、紧凑内边距、工具栏换行、触控放大 |
+| `480px` | 手机 | 最小可达点击区域、极端窄屏文字折行 |
+
+配套的 `min-width: 769px` / `min-width: 1101px` 仅用于与上档互补的桌面条件（`ScriptView` 分栏判定）。
+
+- 禁止 900 / 960 / 980 / 1020 / 1024 / 1440 等历史断点值
+- 新断点必须先加进本表并同步 `check-breakpoints.mjs` 白名单，否则 CI 失败
+- 桌面优先：默认样式即最宽档，`@media` 只写降级
+
+## 11. 图标
+
+统一使用 `@vicons/ionicons5`，通过 Naive UI 的 `n-icon` 渲染：
+
+```vue
+<n-icon :component="Checkmark" :size="14" />
+```
+
+| 尺寸 | 用途 |
+| --- | --- |
+| `13px` | 行内状态、标签内、按钮内嵌 |
+| `14px` | 列表操作按钮、工具栏 |
+| `16px` | 卡片标题、区块标识 |
+| `22px` | 创建类型卡片等大图标 |
+
+- 颜色不单独设置，继承 `currentColor`，随文字令牌走
+- 纯装饰图标加 `aria-hidden="true"`；承担点击的图标按钮必须带 `aria-label`
+- **禁止 emoji（🎬🔍🔒）与文字符号（✓ ✗ → ↻ ▶）当图标**；日志文本、`<kbd>` 按键提示、注释中的箭头不受此限
+- 图标不单独承载语义，必须与文字或标签并存
+
+## 12. 按钮
+
+| 层级 | Naive UI | 使用场景 |
+| --- | --- | --- |
+| 主操作 | `type="primary"` | 每屏最多一个，如「开始分析」「去分镜图」 |
+| 次操作 | `secondary` / `quaternary` | 刷新、重试、返回、跳转 |
+| 危险操作 | `ConfirmDialog` + `danger: true` | 删除、覆盖、强制替换 |
+
+- 尺寸固定 `small` / `tiny` 两档，不写自定义 padding
+- 文案动词开头，2–6 字，如「重新解析」「采用优化稿」；不用「确定」「提交」这类空词
+- 危险按钮必须写明作用对象，如「删除作品」而非「删除」
+- 异步操作必须 `:loading`，防止重复提交
+- 同一行内最多一个 primary
+
+## 13. 表单
+
+- 一律用 `n-form` + `n-form-item`，标签在上（`label-placement="top"`），不写自适应左标签
+- 必填项在标签后附红色 `*`，由 `n-form-item` 的 `required` 提供，不手写字符
+- 校验信息走 `n-form-item` 的 `feedback`，不弹 toast
+- 输入框宽度默认撑满容器，短字段用 `n-input-number` 并限制 `min` / `max`
+- 保存按钮置于表单右下，取消在左侧；未改动时保存按钮 `disabled`
+
+## 14. 卡片
+
+- 结构：标题区（`h3` + 状态标签）→ 内容区 → 操作区，三段间距统一 `var(--sp-4)`
+- 容器 `background: var(--bg-elevated)` + `1px solid var(--border-subtle)` + `var(--radius-lg)`
+- **不加阴影、不加 >6px 圆角**，层级靠边框区分
+- 整卡可点击时，hover 只改变边框色与背景，不位移、不缩放
+- 卡内图片统一 `aspect-ratio` 占位，避免加载时撑跳布局
+
+## 15. 状态与组件状态
+
+### 15.1 页面与区块状态矩阵
+
+| 状态 | 表现 | 组件 |
+| --- | --- | --- |
+| Loading | 骨架行/卡片占位，不用转圈遮罩 | `SkeletonList` |
+| Empty | 说明文字 + 一个引导动作 | `EmptyState` |
+| Error | 失败原因 + 重试按钮 | `ErrorRetry` |
+| Success | 结果就地展示，不弹全局提示 | 页面内区块 |
+| Disabled | `--text-disabled` 文字 + 保留容器骨架 | 原生 `disabled` |
+
+### 15.2 任务状态矩阵
+
+| 状态 | 令牌 | 呈现 |
+| --- | --- | --- |
+| Pending | `--text-tertiary` | 排队中 + 时间图标 |
+| Processing | `--brand-primary` | 进行中 + 百分比 + 进度条 |
+| Completed | `--state-success` | 已完成 + Checkmark |
+| Failed | `--danger-text` | 失败 + 错误码 + 重试入口 |
+| Cancelled | `--text-secondary` | 已取消，不提供重试 |
+
+### 15.3 交互态矩阵
+
+| 态 | 视觉 |
+| --- | --- |
+| Hover | 背景提亮一档（`--overlay-hover`），不改字号与位移 |
+| Active | 背景再提亮一档（`--overlay-active`） |
+| Focus | `var(--focus-ring)`，键盘可达必备 |
+| Disabled | 透明度或 `--text-disabled`，同时禁用指针事件 |
+
+## 15.4 层级（z-index）
+
+| 层 | 值 | 使用位置 |
+| --- | --- | --- |
+| 卡片内浮层 | `2` | `ShotCard` 角标、`ChatComposer` 吸底 |
+| 列表批量条 | `4` | `AssetBatchToolbar` / `BatchToolbar` |
+| 面板内吸顶 | `5` | `DirectorAgentPanel` 头部 |
+| 页面级浮层 | `20` | `DirectorConsoleView` |
+| 助手面板 | `150` | `DirectorAgentPanel` 抽屉 |
+| 模态层 | `200` | 全局弹窗（`ConfirmDialog` 等，走 Naive UI 默认） |
+
+新增层级必须写入本表；不允许出现未登记的自定义 z-index 值。
+
+## 15.5 文案规范
+
+| 场景 | 规则 | 示例 |
+| --- | --- | --- |
+| 标题 | ≤ 30 字，名词短语 | 剧本解析、资产库 |
+| 按钮 | 动词开头，写明对象 | 重新解析、删除作品 |
+| 错误 | 发生了什么 + 怎么办 | 无法获取任务状态，请返回剧本页重新发起 |
+| 空状态 | 说明 + 一个动作 | 尚无分镜图，先去资产库生成角色图 |
+| 危险确认 | 写明不可逆后果与影响范围 | 删除后场景、镜头、资产与任务记录一并清除 |
+| 一致性 | 同一概念全站同名 | 统一用「分镜图」，不与「关键帧」混用 |
+
+- 不用「出错了」「操作失败」这类无信息文案
+- 不用感叹号与营销语气
+- 数字与单位之间留半角空格：`3 集`、`12 个分镜`
+
+## 16. 验收
 
 ### 门禁命令（每次提交前必须通过）
 ```bash
