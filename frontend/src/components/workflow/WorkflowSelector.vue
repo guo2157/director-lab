@@ -118,13 +118,46 @@ const rows = computed<Row[]>(() => {
 
 const usableRows = computed(() => rows.value.filter((r) => r.usable))
 
-/** 默认项：优先后端标记的 is_default，否则取第一个可用项 */
+/**
+ * 真正可选的行：能力匹配 **且**（业务槽位下）不缺依赖。
+ *
+ * 两种「不可用」要分开对待：
+ * - `usable=false`（能力不匹配，如资产库要求纯文生图却声明了图片输入）：工作流本身
+ *   干不了这件事，永远不该出现在下拉里。
+ * - `runtime_status='missing_deps'`（实例缺节点/模型）：业务页真跑不起来，不展示。
+ * - `runtime_status='unreachable'`（实例连不上）：这是 ComfyUI 实例/隧道的环境问题，
+ *   不代表工作流有缺陷——隧道域名会轮换，隐藏它会让整个槽位空掉、用户连选都选不了。
+ *   因此保留可选，仅在副文本标注「实例不可达」。
+ * - `unchecked` / `ready`：保留。
+ *
+ * 但**不传 slot** 的场景（设置页「工作流测试与版本」）必须保留全部工作流：
+ * 那里正是用来对缺依赖的工作流做依赖检查/测试提交的，隐藏掉等于没法修。
+ */
+const selectableRows = computed(() =>
+  props.slot
+    ? usableRows.value.filter((r) => r.runtime_status !== 'missing_deps')
+    : usableRows.value,
+)
+
+/**
+ * 默认项优先级：槽位推荐项 → 后端 is_default → 第一个可选行。
+ * 推荐项由后端按业务槽位显式声明（资产库纯文生图 / 分镜图多参考图生图 /
+ * 分镜看板多参考图生视频），不依赖列表排序，工作流新增或改名也不会漂移。
+ */
 const defaultRow = computed<Row | undefined>(
-  () => usableRows.value.find((r) => r.is_default) ?? usableRows.value[0],
+  () =>
+    selectableRows.value.find((r) => r.is_recommended) ??
+    selectableRows.value.find((r) => r.is_default) ??
+    selectableRows.value[0],
 )
 
 const currentRow = computed<Row | undefined>(
   () => rows.value.find((r) => r.id === props.modelValue),
+)
+
+/** 选中值是否还在下拉里；不在就回 null，避免 n-select 直接显示原始 ID */
+const selectValue = computed(() =>
+  selectableRows.value.some((r) => r.id === props.modelValue) ? props.modelValue ?? null : null,
 )
 
 /** 当前选中项失效或不再满足该业务能力：明确提示，不静默改选 */
@@ -136,53 +169,36 @@ const invalidMessage = computed(() => {
     const why = row.missing.length ? `：${row.missing.join('、')}` : ''
     return `当前工作流不满足该业务要求${why}，请改选其他工作流`
   }
+  if (props.slot && row.runtime_status === 'missing_deps') {
+    return '当前工作流在 ComfyUI 实例上缺节点或模型，已从可选项中移除，请改选其他工作流'
+  }
   return ''
 })
 
 const noUsableMessage = computed(() => {
   if (loading.value || loadError.value) return ''
-  if (usableRows.value.length) return ''
+  if (selectableRows.value.length) return ''
   if (!rows.value.length) return '还没有可用的工作流，请先到「设置 → 工作流」导入'
   return '当前没有满足该业务能力要求的工作流，请到「设置 → 工作流」补充'
 })
 
-function modeTags(row: Row): string[] {
-  return (row.generation_modes || [])
-    .filter((m) => m !== 'multi_reference')
-    .slice(0, 2)
-    .map((m) => MODE_LABELS[m] ?? m)
-}
+/**
+ * 下拉项：只列可用工作流，且只显示名称。
+ *
+ * 副标题行（「文生图 · 图生视频 · 实例不可达」「推荐」「默认」）已删除：
+ * 选择器的职责就是「选哪个工作流」，能力标签与运行时状态属于设置页的检查结果，
+ * 摆在选项里只是把每一行撑成两行、让下拉变成一片灰字噪声。
+ * 运行时不可用的行本来就已过滤掉（见 selectableRows），选中值失效另有 invalidMessage 提示。
+ */
+const options = computed(() => selectableRows.value.map((row) => ({
+  value: row.id,
+  label: row.description || row.internalName,
+  row,
+})))
 
-function runtimeText(row: Row): string {
-  if (!row.runtime_status || row.runtime_status === 'ready' || row.runtime_status === 'unchecked') {
-    return ''
-  }
-  return row.runtime_status === 'unreachable' ? '实例不可达' : '缺依赖'
-}
-
-/** 下拉项：主文本 = 描述；副文本 = 能力 / 状态 / 不可用原因 */
-const options = computed(() => rows.value.map((row) => {
-  const secondary: string[] = [...modeTags(row)]
-  const rt = runtimeText(row)
-  if (rt) secondary.push(rt)
-  if (row.is_default) secondary.push('默认')
-  if (!row.usable) secondary.push('不适用')
-  return {
-    value: row.id,
-    label: row.description || row.internalName,
-    secondary: secondary.join(' · '),
-    disabled: !row.usable,
-    row,
-  }
-}))
-
-function renderLabel(option: { label?: string; secondary?: string }) {
-  const primary = String(option.label ?? '')
-  if (!option.secondary) return h('span', primary)
-  return h('div', { style: 'display:flex;flex-direction:column;line-height:1.3;' }, [
-    h('span', primary),
-    h('span', { style: 'font-size:11px;color:var(--text-secondary);' }, option.secondary),
-  ])
+/** 主文本 = 工作流描述；不再渲染副标题行 */
+function renderLabel(option: { label?: string }) {
+  return h('span', String(option.label ?? ''))
 }
 
 /** 选中项能力标签（仅 showTags 时按需拉一次 /capabilities 补充展示） */
@@ -204,11 +220,18 @@ async function loadCapability(id: string | undefined) {
 
 watch(() => props.modelValue, (id) => { void loadCapability(id) }, { immediate: true })
 
-/** 自动落到默认工作流：仅在父组件还没给值且有可用默认项时补一次 */
+/**
+ * 自动落到默认工作流：父组件没给值、或给的值已不在可选列表里（能力不匹配 / 缺依赖）
+ * 时补一次默认值。否则页面会保留一个下拉里看不到、批量生成时必然失败的 ID。
+ * 仅当存在可选默认项时才改，绝不把用户选中的有效项换掉。
+ */
 watch(
-  () => [props.modelValue, defaultRow.value?.id, loading.value] as const,
+  () => [props.modelValue, defaultRow.value?.id, loading.value, selectableRows.value.length] as const,
   ([current, def, isLoading]) => {
-    if (!props.autoDefault || isLoading || current || !def) return
+    if (!props.autoDefault || isLoading || !def) return
+    const currentSelectable = current && selectableRows.value.some((r) => r.id === current)
+    if (currentSelectable) return
+    if (current === def) return
     emit('update:modelValue', def)
   },
   { immediate: true },
@@ -235,7 +258,7 @@ function onChange(value: string | null) {
     <n-spin v-if="loading" :size="12" />
     <n-select
       v-else
-      :value="modelValue ?? null"
+      :value="selectValue"
       :options="options"
       :disabled="disabled"
       :placeholder="placeholder"
