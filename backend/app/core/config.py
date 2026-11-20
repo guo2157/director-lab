@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # token 保守估算系数：CJK 字符 / 其他字符（可校准，见 token_estimate.calibrate_hint）
     llm_cjk_token_factor: float = 1.2
     llm_other_token_factor: float = 0.3
+    # --- 镜头数对账（阶段 4）---
+    # 实际解析镜头数 / 大纲预估镜头数 低于该比例时记 shot_count_low 警告（不阻断任务）。
+    # 0 或负数表示关闭对账。
+    parse_shot_ratio_warn: float = 0.5
     # script-agent 首批自动+后续半自动：true 时首次调用仅解析首批（≤max_episodes_per_batch），
     # result.has_more 提示前端『继续分析』；false 时单次调用解析全部批次范围
     agent_first_batch_auto: bool = True
@@ -165,6 +169,7 @@ _PERSISTED_FIELDS = [
     "llm_parse_retry_limit", "llm_parse_concurrency",
     "llm_context_window_tokens", "llm_input_budget_ratio",
     "llm_cjk_token_factor", "llm_other_token_factor",
+    "parse_shot_ratio_warn",
     "agent_first_batch_auto", "max_episodes_per_batch",
     "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
 ]

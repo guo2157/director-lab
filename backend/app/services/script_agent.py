@@ -541,6 +541,43 @@ def execute_script_agent_job(job_id: str) -> dict:
                 ep = int(sh.get("episode") or episode_start)
                 per_episode_shots[ep] = per_episode_shots.get(ep, 0) + 1
 
+        # ---- 镜头数对账（阶段 4：只警告，不阻断）----
+        # 大纲 estimated_shots 是预估值。实际解析镜头数显著低于预估，通常意味着
+        # 模型漏输出镜头（JSON 合法但镜头被省略/压缩）。只对**本批范围**对账：
+        # 多批次增量解析时 per_episode_shots 只含本批集，越界比较会把未解析的集
+        # 全部误报为 0。
+        low_shot_episodes: list = []
+        ratio_warn = float(getattr(settings, "parse_shot_ratio_warn", 0.5) or 0)
+        if ratio_warn > 0:
+            est_map: dict = {}
+            for item in outline_data.get("episode_breakdown") or []:
+                try:
+                    est_map[int(item.get("episode") or 0)] = max(
+                        1, int(item.get("estimated_shots") or 1))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            for ep in range(episode_start, batch_end + 1):
+                est = est_map.get(ep)
+                if not est:
+                    continue
+                actual = per_episode_shots.get(ep, 0)
+                ratio = actual / est
+                if ratio < ratio_warn:
+                    low_shot_episodes.append({
+                        "episode": ep, "actual": actual,
+                        "estimated": est, "ratio": round(ratio, 3),
+                    })
+                    parse_warnings.append(
+                        f"shot_count_low: 第 {ep} 集实际 {actual} / 预估 {est} 镜"
+                        f"（{ratio:.0%}），可能漏输出镜头"
+                    )
+            _write_event(db, job, "agent.shot_reconcile", {
+                "range": f"{episode_start}-{batch_end}",
+                "threshold": ratio_warn,
+                "low_shot_episodes": low_shot_episodes,
+            })
+            db.commit()
+
         # 落库前最后一道业务门禁：重试循环内的 validate 只校验「单批」结果，
         # 这里校验**合并后**的最终结果。宁可整任务失败，也不能把
         # 「场景 7 个 / 分镜 0 个」这种不可用结果写进 ParseVersion 与 job.result。
@@ -587,6 +624,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             "style_config_diffs": style_diffs,
             "parse_warnings": parse_warnings,
             "review_issues": review_issues,
+            "low_shot_episodes": low_shot_episodes,
             "episode_start": episode_start,
             "episode_count": episode_count,
             "total_episodes": total_episodes,
