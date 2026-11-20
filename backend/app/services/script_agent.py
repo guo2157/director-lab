@@ -444,6 +444,9 @@ def execute_script_agent_job(job_id: str) -> dict:
         writer_thread.start()
         batch_results: list[dict] = []
         batch_errors: list[tuple[tuple[int, int], LLMError]] = []
+        # 失败区间（"start-end"）：写入 job.result，供前端与排障定位哪些集没解析成功。
+        # 必须始终存在（全部成功时为 []），否则前端无法区分「没失败」与「不知道」。
+        failed_ranges: list[str] = []
         max_workers = max(1, min(len(batches), int(getattr(settings, "llm_parse_concurrency", 3) or 3)))
         try:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dlab-parse") as pool:
@@ -463,6 +466,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             for (bs, be), e in batch_errors:
                 _upsert_records(db, job.project_id, bs, be - bs + 1, "failed",
                                 error_msg=e.message[:2000], parse_version_id=pv.id)
+                failed_ranges.append(f"{bs}-{be}")
             failed_desc = "; ".join(
                 f"第 {bs}-{be} 集: {e.message[:200]}" for (bs, be), e in batch_errors[:3]
             )
@@ -598,8 +602,13 @@ def execute_script_agent_job(job_id: str) -> dict:
             _fail_job(db, job, ERR_SCHEMA_MISMATCH, msg)
             return {"ok": False, "reason": ERR_SCHEMA_MISMATCH, "problems": final_problems}
 
-        _upsert_records(db, job.project_id, episode_start, episode_count, "succeeded",
-                        asset_counts=per_episode_shots, parse_version_id=pv.id)
+        # 只对**实际成功**的批次区间写 succeeded。
+        # 旧实现对整个 episode_start..episode_count 写 succeeded，会把上方刚标记的
+        # failed 集覆盖成 succeeded——多批部分失败时，前端因此完全看不到失败集，
+        # 还会给失败集写上成功批次的镜头数。
+        for _bs, _be in sorted((br["start"], br["end"]) for br in batch_results):
+            _upsert_records(db, job.project_id, _bs, _be - _bs + 1, "succeeded",
+                            asset_counts=per_episode_shots, parse_version_id=pv.id)
 
         # diff_summary 增量合并（多批次共用同一 ParseVersion）
         prev_summary = pv.diff_summary or {}
@@ -625,6 +634,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             "parse_warnings": parse_warnings,
             "review_issues": review_issues,
             "low_shot_episodes": low_shot_episodes,
+            "failed_ranges": failed_ranges,
             "episode_start": episode_start,
             "episode_count": episode_count,
             "total_episodes": total_episodes,
