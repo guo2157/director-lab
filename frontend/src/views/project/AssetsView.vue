@@ -9,6 +9,7 @@ import {
 } from '@/api/assets'
 import type { Asset } from '@/types/asset'
 import { listCharacters, listProps, listScenes } from '@/api/script'
+import { getProject } from '@/api/projects'
 import { generateCharacterPortrait, generatePropAnchor, generateSceneBaseline } from '@/api/storyboard'
 import { getAssetGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
@@ -38,6 +39,23 @@ const message = useMessage()
 const queryClient = useQueryClient()
 
 const projectId = computed(() => route.params.id as string)
+
+// 场景基准图按项目画幅出图，卡片缩略图比例需同步，避免 16:9 图被 4:5 容器裁切
+const projectQuery = useQuery({
+  queryKey: ['project', projectId],
+  queryFn: () => getProject(projectId.value),
+  enabled: computed(() => !!projectId.value),
+})
+const projectThumbRatio = computed(() => {
+  const map: Record<string, string> = { '9:16': '9 / 16', '16:9': '16 / 9', '1:1': '1 / 1' }
+  return map[projectQuery.data.value?.aspect_ratio ?? '9:16'] ?? '9 / 16'
+})
+
+function thumbRatioFor(kind: AssetKind): string {
+  if (kind === 'prop') return '1 / 1'
+  if (kind === 'scene') return projectThumbRatio.value
+  return '4 / 5'
+}
 
 // --- 推进闸口（资产库 → 分镜图）---
 // 人工审核状态机已取消：不再调审核接口、不再读 assets_review_status。
@@ -913,6 +931,7 @@ onMounted(() => {
         :inflight-text="item.entityId ? inflightText(inflightById.get(item.entityId)) : ''"
         :failed="!!item.entityId && failedEntityIds.has(item.entityId)"
         :voice-name="item.kind === 'character' ? voiceNameOf(item.name) : ''"
+        :thumb-ratio="thumbRatioFor(item.kind)"
         :class="{ 'is-busy': craftingIdFor(item) }"
         @open="onCardOpen(item)"
         @generate="onCardGenerate(item)"

@@ -129,6 +129,16 @@
 
 注入规则：工作流同时绑定 width 与 height 时按上表注入；仅绑定一侧或均未绑定时不注入，以工作流内置尺寸为准。用户可在生成请求的 `params.width` / `params.height` 中显式覆盖，覆盖值同样需两侧齐全才生效。
 
+图片工作流（分镜图、场景基准图）使用独立的高分辨率画布映射，按项目画幅出图，像素量约 1.8MP：
+
+| project.aspect_ratio | 图片 width × height |
+| --- | --- |
+| 9:16 | 1024 × 1792 |
+| 16:9 | 1792 × 1024 |
+| 1:1 | 1344 × 1344 |
+
+角色定妆图固定 1024 × 1792（9:16 全身像），道具锚定图固定 1344 × 1344（1:1）。重新生成图片任务默认按当前项目画幅重算并覆盖历史任务里的旧画布；仅当 `params.width` 与 `params.height` 同时显式提供时才按调用方值生成。
+
 H3 本地节点（MiniMaxH3ReferenceToVideo / MiniMaxH3ImageToVideo）绑定 width 与 height，分辨率须满足 `capabilities.resolution_constraints`（32 的倍数、短边 384–768、长边 ≤1344），执行器按下表注入：
 
 | project.aspect_ratio | H3 width × height |

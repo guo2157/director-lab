@@ -77,6 +77,15 @@ def test_t2i_schema_has_prompt_size_seed_and_cover_output():
     assert schema["errors"] == []
 
 
+def test_image_workflows_bind_canvas_size():
+    """图片工作流必须绑定 width/height，执行器才能按项目画幅注入画布。"""
+    for name in ("wf_image_t2i_qwen21_turbo", "wf_image_ref_qwen21_multi"):
+        definition, _ = _load(name)
+        schema = build_schema(definition, capabilities=normalize("image", definition))
+        assert schema["params"]["width"]["default"] == 1024
+        assert schema["params"]["height"]["default"] == 1792
+
+
 def test_video_schema_marks_reference_audio_and_frame_range_from_capabilities():
     definition, _ = _load("wf_video_h3_ref2va_std_5s")
     caps = normalize("video", definition)

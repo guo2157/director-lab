@@ -21,8 +21,10 @@ const props = withDefaults(
     failed?: boolean
     /** 角色当前音色名，未配置为空 */
     voiceName?: string
+    /** 缩略图容器比例（场景基准图跟随项目画幅，道具固定 1:1） */
+    thumbRatio?: string
   }>(),
-  { selected: false, selectable: false, inflightText: '', failed: false, voiceName: '' },
+  { selected: false, selectable: false, inflightText: '', failed: false, voiceName: '', thumbRatio: '4 / 5' },
 )
 
 const emit = defineEmits<{
@@ -68,6 +70,7 @@ function onDragStart(e: DragEvent) {
       'is-failed': failed,
     }"
     :draggable="!!item.asset"
+    :style="{ '--a-thumb-ratio': thumbRatio }"
     @dragstart="onDragStart"
     @click="emit('open')"
   >
@@ -155,7 +158,7 @@ function onDragStart(e: DragEvent) {
 .a-thumb {
   position: relative;
   width: 100%;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: var(--a-thumb-ratio, 4 / 5);
   min-height: 0;
   overflow: hidden;
   background: var(--bg-sunken);
