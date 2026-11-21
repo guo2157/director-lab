@@ -51,13 +51,25 @@ const scenesQuery = useQuery({
   queryFn: () => listScenes(projectId.value, { include_shots: false }),
 })
 
+/**
+ * 镜头缓存键：`${sceneId}::${episode}`。
+ *
+ * 为什么不能只用 sceneId（实测事故 prj_9db2e016b337「海风与夏日」）：
+ * 场景是项目级、跨集复用的（同一地点多集只建一条 Scene 记录，集数关系存
+ * scene_episode 关联表）。旧实现键只有 sceneId，且加载时写死
+ * `sc.episodes?.[0] ?? 1` —— 多集项目里第 2 集及以后的镜头永远不会被请求，
+ * 页面「分镜图」只显示第 1 集，而解析页明明写着「第 2 集 11 个分镜」。
+ * 键里带上集号，同一场景的多集镜头才能共存。
+ */
 const shotsMap = ref<Record<string, Shot[]>>({})
 const loadingShots = ref<Record<string, boolean>>({})
 const promptDraft = ref<Record<string, string>>({})
+const shotKey = (sceneId: string, episode: number) => `${sceneId}::${episode}`
 
 /** 全量拉取场景内镜头：进度统计必须覆盖全场镜头，不能只看第一页（单页上限 100） */
 async function loadSceneShots(sceneId: string, episode: number) {
-  loadingShots.value[sceneId] = true
+  const key = shotKey(sceneId, episode)
+  loadingShots.value[key] = true
   try {
     const all: Shot[] = []
     let page = 1
@@ -68,33 +80,71 @@ async function loadSceneShots(sceneId: string, episode: number) {
       if (batch.length < 100 || all.length >= (res?.total ?? 0)) break
       page += 1
     }
-    shotsMap.value[sceneId] = all
+    shotsMap.value[key] = all
   } catch (e: any) {
     message.error(`加载镜头失败: ${e?.message ?? e}`)
   } finally {
-    loadingShots.value[sceneId] = false
+    loadingShots.value[key] = false
   }
 }
 
+// --- 集选择器（与分镜看板同一交互：集数 chip 切换） ---
+const allEpisodes = computed(() => {
+  const eps = new Set<number>()
+  for (const sc of scenesQuery.data.value?.items ?? []) {
+    for (const ep of sc.episodes ?? []) eps.add(ep)
+  }
+  return Array.from(eps).sort((a, b) => a - b)
+})
+const activeEpisode = ref<number | null>(null)
+watch(allEpisodes, (eps) => {
+  if (eps.length && (activeEpisode.value === null || !eps.includes(activeEpisode.value))) {
+    activeEpisode.value = eps[0]
+  }
+}, { immediate: true })
+
+/** 当前集的场景：只保留在该集出现过的场景 */
+const episodeScenes = computed(() => {
+  const items = scenesQuery.data.value?.items ?? []
+  const ep = activeEpisode.value
+  if (ep === null) return items
+  return items.filter((s) => (s.episodes ?? []).includes(ep))
+})
+
 watch(
-  () => scenesQuery.data.value?.items ?? [],
-  (scenes) => {
+  [() => scenesQuery.data.value?.items ?? [], activeEpisode],
+  ([scenes, ep]) => {
+    if (ep === null) return
     for (const sc of scenes) {
-      const episode = sc.episodes?.[0] ?? 1
-      if (!shotsMap.value[sc.id]) void loadSceneShots(sc.id, episode)
+      // 只加载「该场景确实在这一集出现过」的组合，避免请求不存在的关系
+      if (!(sc.episodes ?? []).includes(ep)) continue
+      const key = shotKey(sc.id, ep)
+      if (!shotsMap.value[key]) void loadSceneShots(sc.id, ep)
     }
   },
   { immediate: true },
 )
 
-const allShots = computed(() => Object.values(shotsMap.value).flat())
-// --- 全片连续镜头序号 ---
-// shot.seq 是场景内序号，各场景都会从 1 开始；按场景 seq 升序 + 场景内镜头 seq 升序累加得到 1..N 的全片镜号。
+/** 当前集全部镜头（页面所有统计与批量的口径都限定在本集） */
+const allShots = computed(() => {
+  const ep = activeEpisode.value
+  if (ep === null) return Object.values(shotsMap.value).flat()
+  const out: Shot[] = []
+  for (const sc of episodeScenes.value) {
+    out.push(...(shotsMap.value[shotKey(sc.id, ep)] ?? []))
+  }
+  return out
+})
+// --- 集内连续镜头序号 ---
+// shot.seq 是场景内序号，各场景都会从 1 开始；按场景 seq 升序 + 场景内镜头 seq 升序累加得到 1..N 的集内镜号。
 const orderedShots = computed<Shot[]>(() => {
-  const scenes = [...(scenesQuery.data.value?.items ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+  const ep = activeEpisode.value
+  const scenes = [...episodeScenes.value].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
   const list: Shot[] = []
   for (const sc of scenes) {
-    const shots = [...(shotsMap.value[sc.id] ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    const shots = ep === null
+      ? []
+      : [...(shotsMap.value[shotKey(sc.id, ep)] ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     for (const s of shots) list.push(s)
   }
   return list
@@ -260,7 +310,9 @@ function toggleSelectAll(checked: boolean) {
 }
 
 function refreshAll() {
-  const jobs = (scenesQuery.data.value?.items ?? []).map((sc) => loadSceneShots(sc.id, sc.episodes?.[0] ?? 1))
+  const ep = activeEpisode.value
+  if (ep === null) return Promise.resolve([])
+  const jobs = episodeScenes.value.map((sc) => loadSceneShots(sc.id, ep))
   return Promise.all(jobs)
 }
 
@@ -369,17 +421,20 @@ const stageTransition = useStageTransition({
 })
 
 // --- 网格分组 ---
-/** 场景分组：组内按全片镜号顺序。状态筛选 chips 已删除，
+/** 场景分组：只列当前集的场景，组内按集内镜号顺序。状态筛选 chips 已删除，
  *  所有镜头始终全量展示——进度卡的数字与卡片自身的状态标签已足够定位。 */
-const sceneGroups = computed(() =>
-  [...(scenesQuery.data.value?.items ?? [])]
+const sceneGroups = computed(() => {
+  const ep = activeEpisode.value
+  return [...episodeScenes.value]
     .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     .map((scene) => ({
       scene,
-      episode: scene.episodes?.[0] ?? 1,
-      shots: [...(shotsMap.value[scene.id] ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)),
-    })),
-)
+      episode: ep ?? 1,
+      shots: ep === null
+        ? []
+        : [...(shotsMap.value[shotKey(scene.id, ep)] ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)),
+    }))
+})
 
 /** 场景列表（详情弹窗需要场景名与基准图用于推导参考图） */
 const scenesLite = computed(
@@ -418,6 +473,17 @@ function onFirstGenerate(shot: Shot, prompt: string) {
          数字与进度条已经回答「做到哪了」，通过后的审核标签是已完成的事。
          正在生成的镜头明细并入本卡第二行，不再单独占一条横带。 -->
     <StageCard label="执行进度">
+      <!-- 集数选择：多集项目必须能按集切换。旧实现没有这个入口，且加载逻辑写死
+           `episodes[0]`，导致「分镜图」页永远只显示第 1 集（实测 prj_9db2e016b337
+           第 2 集 11 个分镜在解析页可见、这里完全看不到）。交互与分镜看板一致。 -->
+      <button
+        v-for="ep in allEpisodes"
+        :key="ep"
+        class="episode-chip"
+        :class="{ active: activeEpisode === ep }"
+        @click="activeEpisode = ep"
+      >第 {{ ep }} 集</button>
+      <span v-if="allEpisodes.length" class="gen-sep" aria-hidden="true" />
       <span class="gen-nums">{{ progressNums }}</span>
       <n-progress
         class="gen-bar"
@@ -563,6 +629,30 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 }
 
 /* ===== 执行进度卡内容（容器样式由 StageCard 提供） ===== */
+/* 集数 chip：与分镜看板同一套视觉，多集项目靠它切换当前集 */
+.episode-chip {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  padding: 6px var(--sp-4);
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.episode-chip:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
+.episode-chip.active {
+  background: var(--brand-soft);
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
+  font-weight: 600;
+}
+.gen-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-subtle);
+  flex: none;
+}
 .gen-bar {
   flex: 1;
   min-width: 120px;

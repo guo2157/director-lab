@@ -752,6 +752,12 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     # 仅靠 db.query 判空会重复插入，触发 uq(scene_id, episode) 唯一约束冲突。
     _link_seen = set()
     _seen_episodes = set()  # 已出现镜头的集号，用于判定每集首镜（无上一镜头尾帧）
+    # 本次解析真正处理过的场景 ID。
+    #
+    # 关键：不能用 current_scene_ids / scene_title_map（两者都含项目**全部**场景），
+    # 否则回放历史任务时会把其他任务刚建立的镜头当成「本次未覆盖」删掉。
+    # 实测：prj_9db2e016b337 确认时回放 7 个成功任务，镜头从 17 掉到 7、场景 4→10。
+    _touched_scene_ids: set[str] = set()
 
     for sc in parse_result.get("scenes") or []:
         ep = sc.get("episode")
@@ -794,6 +800,8 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             # timestamp 相同说明 normalized_name 已一致，time_note 也无需改动。
             scene.description = sc.get("description") or scene.description
             scene.time_note = sc.get("time_note") or scene.time_note
+        # 登记本次解析涉及的场景（删除旧镜头的范围以此为准，见第 5 步）
+        _touched_scene_ids.add(scene.id)
         # scene_episode 关联（幂等）：先查本次解析的内存登记，再查库
         _link_key = (scene.id, int(ep or 1))
         if _link_key not in _link_seen:
@@ -895,13 +903,26 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                 db.flush()
                 stats["shots_created"] += 1
 
-    # 5. 删除本次解析范围内、但新解析不再包含的旧镜头（仅限当前生效版本的场景）
+    # 5. 删除本次解析范围内、但新解析不再包含的旧镜头
+    #
+    # 删除范围必须是「本次解析实际涉及的场景」，不能是项目全部场景。
+    #
+    # 实测事故（prj_9db2e016b337「海风与夏日」，2026-11-21 10:46）：
+    # 确认接口会把同一 ParseVersion 下**所有**成功任务按 episode_start 升序回放。
+    # 该项目有 7 个成功任务（第1集 6 次重解析 + 第2集 1 次），旧实现用
+    # `Scene.id.in_(current_ids)`（current_ids = 项目全部场景）作为删除范围，
+    # 于是回放第 1 个任务时，就把后面任务还没重建的镜头全删了 ——
+    # 17 个镜头掉到 7 个，场景数从 4 涨到 10（同名场景因 normalized_name 匹配
+    # 失败被重复创建）。整个过程没有任何报错。
+    #
+    # 修正：只处理本次 parse_result 里真正出现过的场景（_scene_ids_touched），
+    # 且只删这些场景在该集范围内的旧镜头。跨任务的其他场景一概不动。
     ep_end = episode_start + episode_count - 1
-    if current_ids:
+    if _touched_scene_ids:
         stale_shots = (
             db.query(Shot).join(Scene, Shot.scene_id == Scene.id)
             .filter(Scene.project_id == project.id,
-                    Scene.id.in_(current_ids),
+                    Scene.id.in_(_touched_scene_ids),
                     Shot.episode >= episode_start, Shot.episode <= ep_end)
             .all()
         )

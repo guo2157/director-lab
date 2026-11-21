@@ -158,7 +158,7 @@ export function runScriptAgent(projectId: string, scriptVersionId: string, text:
 export function getScriptAgentStatus(projectId: string) {
   return get<{
     job: { id: string; status: string; error_code: string | null; error_msg: string | null; result: Record<string, unknown> | null } | null
-    scope: { total_episodes: number | null; script_hash: string | null; parse_version_id: string | null; parse_version_status: string | null }
+    scope: { total_episodes: number | null; script_hash: string | null; parse_version_id: string | null; parse_version_status: string | null; pending_persist_episodes?: number[] }
     records: Array<{ episode_no: number; status: string; asset_count: number | null; error_msg: string | null }>
   }>(`/projects/${projectId}/script-agent/status`)
 }

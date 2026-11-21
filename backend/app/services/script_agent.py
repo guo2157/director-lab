@@ -249,6 +249,21 @@ def execute_script_agent_job(job_id: str) -> dict:
             _fail_job(db, job, precheck["code"], precheck["message"])
             return {"ok": False, "reason": precheck["code"]}
         db.commit()
+
+        # ---- 0.95 模型输出能力校验（旁路，不阻断）----
+        # 实测事故（2026-11-21）：配置 llm_parse_max_tokens=65536 但模型上限
+        # 只有 16000，网关静默截断且 finish_reason 谎报 stop，导致「翻倍重试」
+        # 永远空转，每个任务白烧 80–90 秒。
+        # 这里只告警不拦截：查不到能力（老网关无该字段）也必须放行，
+        # 否则会把正常任务误杀。告警写进 agent.model_capability，前端可提示。
+        from app.integrations.model_capability import check_and_record
+
+        check_and_record(
+            settings,
+            write_event=lambda et, payload: _write_event(db, job, et, payload),
+        )
+        db.commit()
+
         # 阶段事件：解析前 40 秒只有空输出框，用户无法判断是否在跑。
         # 这些阶段由后端真实上报（不是前端按 JSON 猜），前端只负责展示。
         _write_event(db, job, "agent.stage", {
@@ -364,6 +379,7 @@ def execute_script_agent_job(job_id: str) -> dict:
         split = split_episodes(text)
         preamble = ""
         chunk_mode = "markers"
+        missing_episodes: list[int] = []
         if split is not None:
             chunks: list[EpisodeChunk] = list(split.chunks)
             preamble = split.preamble
@@ -373,11 +389,23 @@ def execute_script_agent_job(job_id: str) -> dict:
                     "marker_count": len(chunks),
                     "total_episodes": total_episodes,
                 })
-            if len(chunks) < total_episodes:
-                # 缺失集走近似均分补齐，避免切片后漏集
-                have = {c.number for c in chunks}
-                chunks += [c for c in fallback_split(text, total_episodes) if c.number not in have]
-                chunk_mode = "markers+fallback"
+            # 只认标记切出的真实集。缺失的集号**不得用 fallback_split 补齐**：
+            #
+            # 旧实现把 ``fallback_split(text, total_episodes)`` 里集号没出现的片段
+            # 追加进来，但 fallback 是按全文均分出的「近似段」，与标记集号毫无对应
+            # 关系。实测（backend/_probe_truth.py，2026-11-21）：
+            #   剧本只有第1/2集标记、大纲 4 集时，补齐进来的「第3集」实际装的是
+            #   **第2集的正文**（fallback 把全文切成 4 份，第 3 份正好落在第2集上）。
+            # 后果是第2集剧情被当成第3集重复解析、落库成重复镜头，比漏集更难查。
+            # 正确做法：缺失集号如实记录，由 _parse_batch 让该批明确失败。
+            have = {c.number for c in chunks}
+            missing_episodes = [n for n in range(1, total_episodes + 1) if n not in have]
+            if missing_episodes:
+                _write_event(db, job, "agent.chunk_missing_episodes", {
+                    "missing": missing_episodes,
+                    "marker_count": len(chunks),
+                    "total_episodes": total_episodes,
+                })
         else:
             # 全无集标记：按场次/段落边界近似均分
             chunks = fallback_split(text, total_episodes)
@@ -390,6 +418,9 @@ def execute_script_agent_job(job_id: str) -> dict:
             "mode": chunk_mode,
             "chunk_count": len(chunks),
             "preamble_chars": len(preamble or ""),
+            # 缺失集号：前端据此提示「第 N 集未在剧本中找到集标记」，
+            # 而不是等解析失败后只看到一句「切片为空」。
+            "missing_episodes": missing_episodes,
             "batch_chars": [
                 {"range": f"{bs}-{be}", "chars": len(slice_range(chunks, bs, be))}
                 for bs, be in batches
@@ -694,8 +725,27 @@ def execute_script_agent_job(job_id: str) -> dict:
             ``llm_parse_segment_chars`` 时按场次/段落边界分段解析，再合并为
             一份结果；合并后仍走完整的业务校验。
             """
-            # 只发送本批集正文；切片缺失时退回全文，避免发出空正文让模型凭空编造
-            episode_text = slice_range(chunks, b_start, b_end) or text
+            # 只发送本批集正文。切片为空时**不得退回全文**：
+            #
+            # 旧实现写的是 ``slice_range(...) or text``，注释理由是「避免发出空正文
+            # 让模型凭空编造」。但实测（backend/_probe_slice.py，2026-11-21）证明
+            # 这条兜底有两个真实触发条件，且后果比空正文严重得多：
+            #
+            #   1. 集标记不连续（第1集 / 第3集 / 第5集）：batch 2-2 取不到内容，
+            #      整本剧本被发给单批，输入直接可能超上下文；
+            #   2. 标记数少于大纲集数：``fallback_split`` 补齐的空片段（text=""），
+            #      凡落在空片段上的批次全部回退全文。
+            #
+            # 长剧本下这等于把「按集切片」彻底失效——本该 2 千字的批发出几万字，
+            # 既超预算又让模型把无关剧情写进本集。正确做法是让该批明确失败，
+            # 由上层把失败区间写入 job.result，而不是静默发全文。
+            episode_text = slice_range(chunks, b_start, b_end)
+            if not (episode_text or "").strip():
+                raise LLMError(
+                    ERR_SCHEMA_MISMATCH,
+                    f"第 {b_start}-{b_end} 集切片为空（集标记与大纲口径不一致），"
+                    f"拒绝回退全文以免超出上下文预算",
+                )
             segs = [episode_text]
             if _seg_budget > 0 and len(episode_text) > _seg_budget:
                 segs = split_text_by_blocks(episode_text, _seg_budget)

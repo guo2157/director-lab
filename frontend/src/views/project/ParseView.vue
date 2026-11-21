@@ -624,13 +624,119 @@ const archivedParseResult = computed<Record<string, any> | null>(() => {
   })[0]
   return (best?.result ?? null) as Record<string, any> | null
 })
-/** 展示用解析结果：当前任务优先，其次后端历史 */
+/** 后端 scope 里的版本 ID：任务 result 缺失时（刷新后）仍能定位版本 */
+const parseVersionIdFromScope = computed<string | null>(() => {
+  const scope = agentStatusData.value?.scope
+  return scope?.parse_version_id ?? null
+})
+
+/**
+ * 同一 ParseVersion 下各批次的合并结果——**按集取最后一次**，不是全部拼接。
+ *
+ * 为什么必须合并（实测 prj_9db2e016b337「海风与夏日」，2026-11-21）：
+ * script_agent 分批解析时，**每个批次是一个独立 Job**，各自只含本批集的
+ * scenes/shots。旧实现 `candidateResult` 只取 `parseJob.result`（单个任务），
+ * 于是页面上「场景 5」（来自 /scenes API，数据库真实值）与
+ * 「分镜 11」（来自最后一个任务，只含第 2 集）两个数字不同源、互相矛盾。
+ *
+ * 为什么不能简单把所有任务拼起来：同一集被重解析多次时会重复累加。
+ * 实测该项目第 1 集被重解析 6 次，全部拼接后「分镜」显示 37，而库里是 25。
+ *
+ * 正确语义与后端 `apply_parse_result` 的 upsert 一致：**同一集后完成的覆盖先完成的**。
+ * 因此按 (episode_start, episode_count) 分组，每组只取 finished_at 最晚的那次，
+ * 再把这些「每集最新」的结果合并成一份完整视图。
+ */
+const mergedParseResult = computed<Record<string, any> | null>(() => {
+  const pvId = candidateResult.value?.parse_version_id
+    ?? parseVersionIdFromScope.value
+  if (!pvId) return candidateResult.value as Record<string, any> | null
+  const items = (archivedParseJobs.value?.items ?? []).filter(
+    (j: Job) => j.status === 'succeeded'
+      && (j.result as Record<string, any> | undefined)?.parse_version_id === pvId,
+  )
+  if (!items.length) return candidateResult.value as Record<string, any> | null
+
+  // 按「批次区间」分组，每组取 finished_at 最晚的一次（= 该区间最终生效结果）
+  const byRange = new Map<string, Job>()
+  for (const j of items) {
+    const r = (j.result ?? {}) as Record<string, any>
+    const key = `${Number(r.episode_start ?? 1)}-${Number(r.episode_count ?? 1)}`
+    const cur = byRange.get(key)
+    if (!cur || String(j.finished_at ?? '') > String(cur.finished_at ?? '')) {
+      byRange.set(key, j)
+    }
+  }
+  // 再按 episode_start 升序拼接各批次（不同区间内容不重叠）
+  const sorted = [...byRange.values()].sort(
+    (a, b) => Number((a.result as any)?.episode_start ?? 1)
+      - Number((b.result as any)?.episode_start ?? 1),
+  )
+
+  const out: Record<string, any> = {
+    characters: [], props: [], scenes: [], episodes: [], prop_events: [],
+  }
+  const seenChar = new Set<string>()
+  const seenProp = new Set<string>()
+  const seenEp = new Set<number>()
+  const sceneIndex = new Map<string, Record<string, any>>()
+  for (const j of sorted) {
+    const r = (j.result ?? {}) as Record<string, any>
+    for (const c of (r.characters as any[] | undefined) ?? []) {
+      const name = String(c?.name ?? '').trim()
+      if (name && !seenChar.has(name)) { seenChar.add(name); out.characters.push(c) }
+    }
+    for (const p of (r.props as any[] | undefined) ?? []) {
+      const name = String(p?.name ?? '').trim()
+      if (name && !seenProp.has(name)) { seenProp.add(name); out.props.push(p) }
+    }
+    for (const e of (r.episodes as any[] | undefined) ?? []) {
+      const no = Number(e?.episode ?? 0)
+      if (no && !seenEp.has(no)) { seenEp.add(no); out.episodes.push(e) }
+    }
+    for (const sc of (r.scenes as any[] | undefined) ?? []) {
+      const title = String(sc?.title ?? '').trim()
+      const ep = Number(sc?.episode ?? 0)
+      // 场景键：集号 + 标题（跨集同名场景是不同场景，不能合并）
+      const key = `${ep}::${title}`
+      const cur = sceneIndex.get(key)
+      if (cur) {
+        // 同场景在多批出现：镜头按 (episode, seq) 去重后拼接
+        const existing = new Set(
+          ((cur.shots as any[] | undefined) ?? []).map(
+            (s: any) => `${s?.episode ?? ep}::${s?.seq ?? 0}`,
+          ),
+        )
+        for (const sh of (sc?.shots as any[] | undefined) ?? []) {
+          const k = `${sh?.episode ?? ep}::${sh?.seq ?? 0}`
+          if (!existing.has(k)) { existing.add(k); cur.shots.push(sh) }
+        }
+      } else {
+        const copy = { ...sc, shots: [...((sc?.shots as any[] | undefined) ?? [])] }
+        sceneIndex.set(key, copy)
+        out.scenes.push(copy)
+      }
+    }
+  }
+  return out
+})
+
+/** 展示用解析结果：合并结果优先，其次历史兜底 */
 const effectiveParseResult = computed<Record<string, any> | null>(
-  () => (candidateResult.value as Record<string, any> | null) ?? archivedParseResult.value,
+  () => mergedParseResult.value ?? archivedParseResult.value,
 )
 
 type ResultGroupKey = 'scene' | 'character' | 'prop' | 'shot' | 'dialogue'
 const activeGroup = ref<ResultGroupKey>('scene')
+
+/**
+ * 当前查看的集：null = 全部集。
+ *
+ * 旧实现集数格是纯展示 `<div>`，没有任何点击事件；下方「解析结果」取的是
+ * 项目级全量数据（scenes / characters / props 都不带集维度），
+ * 于是点多集项目里的任意一集，下面显示的内容完全不变 —— 用户看到的
+ * 「第 2 集」和「下方数据」之间没有任何联动关系。
+ */
+const activeEpisode = ref<number | null>(null)
 
 interface ParseShotRow {
   ep: number
@@ -647,7 +753,11 @@ interface ParseShotRow {
   dialogue: Array<{ speaker: string; text: string; emotion: string }>
 }
 
-const parseShots = computed<ParseShotRow[]>(() => {
+/**
+ * 全部集的解析分镜（未过滤）：集数格上的「N 个分镜」必须用它统计，
+ * 若用过滤后的 parseShots，选中第 2 集时第 1 集的分镜数会变成 0。
+ */
+const allParseShots = computed<ParseShotRow[]>(() => {
   const r = effectiveParseResult.value
   const out: ParseShotRow[] = []
   for (const sc of (r?.scenes as any[] | undefined) ?? []) {
@@ -667,7 +777,7 @@ const parseShots = computed<ParseShotRow[]>(() => {
           ? [{ speaker: String(sh?.speaker ?? ''), text: String(sh.dialogue), emotion: String(sh?.emotion ?? '') }]
           : []
       out.push({
-        ep: Number(sh?.episode ?? 0),
+        ep: Number(sh?.episode ?? sc?.episode ?? 0),
         sceneSeq,
         sceneTitle,
         shotNo: (sh?.shot_no ?? sh?.seq ?? '') as number | string,
@@ -685,6 +795,13 @@ const parseShots = computed<ParseShotRow[]>(() => {
   return out.sort((a, b) => a.ep - b.ep || a.sceneSeq - b.sceneSeq || num(a.shotNo) - num(b.shotNo))
 })
 
+/** 当前集的分镜（activeEpisode 为 null 时即全部）：结果区分镜/台词表用它 */
+const parseShots = computed<ParseShotRow[]>(() => {
+  const ep = activeEpisode.value
+  if (ep === null) return allParseShots.value
+  return allParseShots.value.filter((s) => s.ep === ep)
+})
+
 /**
  * 每集真实分镜数：以解析明细 scenes[].shots[] 为唯一口径。
  *
@@ -697,7 +814,9 @@ const parseShots = computed<ParseShotRow[]>(() => {
  */
 const shotsPerEpisode = computed<Map<number, number>>(() => {
   const m = new Map<number, number>()
-  for (const s of parseShots.value) {
+  // 必须用未过滤的 allParseShots：集数格要显示每一集自己的分镜数，
+  // 用过滤后的 parseShots 会导致「选中第 2 集后第 1 集变成 0 个分镜」
+  for (const s of allParseShots.value) {
     if (!s.ep) continue
     m.set(s.ep, (m.get(s.ep) ?? 0) + 1)
   }
@@ -770,6 +889,14 @@ function resetAfterConfirmParse() {
   parseJobId.value = null
   candidateVersionId.value = null
 }
+/**
+ * 已发起过确认的版本 ID 集合：防止「确认成功 → 状态轮询仍是 current 且 pending 未刷新 →
+ * 再次触发确认」形成请求风暴。
+ *
+ * pending_persist_episodes 由后端按「库里有无该集镜头」推出，落库成功后会变空，
+ * 但 status 轮询有 4 秒间隔，这期间 confirmTarget 仍非空。用集合做一次性闩锁。
+ */
+const confirmedVersionIds = ref<Set<string>>(new Set())
 const { mutate: doConfirmParse } = useMutation({
   mutationFn: (parseVersionId: string) =>
     confirmParseVersion(projectId.value, parseVersionId, project.value?.current_parse_version_id),
@@ -804,23 +931,38 @@ const { data: scenesData } = useQuery({
   queryFn: () => listScenes(projectId.value, { page_size: 100 }),
   enabled: computed(() => !!projectId.value),
 })
-const scenes = computed<SceneWithShots[]>(
+/** 场景（全部集，未过滤）：totalShots 与 hasResults 的口径 */
+const allScenes = computed<SceneWithShots[]>(
   () => (scenesData.value?.items as SceneWithShots[] | undefined) ?? [],
 )
-const hasResults = computed(() => scenes.value.length > 0)
-/** 解析出的镜头总数：场景接口直接带 shot_count */
-const totalShots = computed(() => scenes.value.reduce((n, sc) => n + (sc.shot_count ?? 0), 0))
+/**
+ * 当前集场景：场景是项目级、跨集复用的（同一地点多集只建一条记录，
+ * 集数关系在 scene_episode 关联表 → 接口返回 episodes[]）。
+ * activeEpisode 为 null 时返回全部。
+ */
+const scenes = computed<SceneWithShots[]>(() => {
+  const ep = activeEpisode.value
+  if (ep === null) return allScenes.value
+  return allScenes.value.filter((sc) => (sc.episodes ?? []).includes(ep))
+})
+const hasResults = computed(() => allScenes.value.length > 0)
+/** 解析出的镜头总数：场景接口直接带 shot_count。集数格的分镜数走 shotsPerEpisode，
+ *  这里保持「全项目」口径，供「明细不可用」兜底文案使用。 */
+const totalShots = computed(() => allScenes.value.reduce((n, sc) => n + (sc.shot_count ?? 0), 0))
 const { data: charactersData } = useQuery({
   queryKey: computed(() => ['characters', projectId.value]),
   queryFn: () => listCharacters(projectId.value, { page_size: 100 }),
   enabled: computed(() => !!projectId.value),
 })
+/** 角色是项目级资产（Character 表无 episode 字段），跨集共用同一批角色，
+ *  因此不按集过滤 —— 按集过滤会让用户误以为「第 2 集没有角色」。 */
 const characters = computed(() => charactersData.value?.items ?? [])
 const { data: propsData } = useQuery({
   queryKey: computed(() => ['props', projectId.value]),
   queryFn: () => listProps(projectId.value!),
   enabled: computed(() => !!projectId.value),
 })
+/** 道具同为项目级资产（Prop 表无 episode 字段），不按集过滤 */
 const props = computed(() => propsData.value?.items ?? [])
 
 /* ---------- 解析结果状态：单一事实来源 ---------- */
@@ -920,17 +1062,31 @@ watch(
  */
 const confirmTarget = computed<string | null>(() => {
   const scope = agentStatusData.value?.scope
-  if (!scope?.parse_version_id || scope.parse_version_status !== 'candidate') return null
+  if (!scope?.parse_version_id) return null
   // 任务仍在跑时绝不确认：此时后端 job.result 还是空的，
   // apply_parse_result 拿不到场景/角色/道具，却会把版本置成 current，
   // 结果页面显示「解析完成」但场景/角色/道具全是 0（实测发生过）。
   if (parseJobRunning.value) return null
   // 分批解析中途不确认：半成品不能定成当前版本
   if (agentHasMore.value) return null
+  // 还有失败集未处理时先不确认，让用户看到失败并重试
   if (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded < statusTotalEpisodes.value) {
     return null
   }
-  return scope.parse_version_id
+  // 候选版本：正常自动确认路径
+  if (scope.parse_version_status === 'candidate') return scope.parse_version_id
+  // 已 current 但仍有集「解析成功却未落库」：继续批次复用了同一个 ParseVersion，
+  // 而 candidate 判据已不成立 —— 旧实现到这里直接 return null，
+  // 于是后续批次的镜头永远留在 job.result 里从未落库（实测 prj_9db2e016b337：
+  // 第 2 集 11 个分镜在任务结果里，库里 0 条，页面还显示「第 2 集 11 个分镜」）。
+  // 后端按「集级记录 succeeded 但库里查不到该集镜头」推出 pending_persist_episodes，
+  // 这里据此补一次确认；确认接口对 current 版本允许 script_agent 增量落库。
+  if (scope.parse_version_status === 'current' && (scope.pending_persist_episodes?.length ?? 0) > 0) {
+    // 同一版本已确认过就不再重复：落库后 pending 会变空，但 4 秒轮询间隔内仍非空
+    if (confirmedVersionIds.value.has(scope.parse_version_id)) return null
+    return scope.parse_version_id
+  }
+  return null
 })
 watch(
   confirmTarget,
@@ -1311,16 +1467,31 @@ async function copyRawReport() {
                有非成功集时才出现，且只列计数 > 0 的档位。 -->
           <div class="episode-row">
             <div class="episode-grid">
-              <div
+              <!-- 全部：多集项目的默认视图，也是唯一能同时看到跨集场景的入口 -->
+              <button
+                v-if="episodeGrid.length > 1"
+                type="button"
+                class="episode-cell is-all"
+                :class="{ 'is-active': activeEpisode === null }"
+                :aria-pressed="activeEpisode === null"
+                @click="activeEpisode = null"
+              >
+                <span class="episode-cell-no">全部</span>
+                <span class="episode-cell-meta">{{ statusTotalEpisodes }} 集</span>
+              </button>
+              <button
                 v-for="ep in visibleEpisodes"
                 :key="ep.episode_no"
+                type="button"
                 class="episode-cell"
-                :class="`is-${ep.status}`"
-                :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${episodeShotCount(ep) ? '，解析出 ' + episodeShotCount(ep) + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}`"
+                :class="[`is-${ep.status}`, { 'is-active': activeEpisode === ep.episode_no }]"
+                :aria-pressed="activeEpisode === ep.episode_no"
+                :title="`第 ${ep.episode_no} 集：${statusLabel(ep.status)}${episodeShotCount(ep) ? '，解析出 ' + episodeShotCount(ep) + ' 个分镜' : ''}${ep.error_msg ? '，' + ep.error_msg : ''}（点击查看该集结果）`"
+                @click="activeEpisode = activeEpisode === ep.episode_no ? null : ep.episode_no"
               >
                 <span class="episode-cell-no">第 {{ ep.episode_no }} 集</span>
                 <span class="episode-cell-meta" :class="ep.status !== 'succeeded' ? ['status-tag', `is-${ep.status}`] : undefined">{{ ep.status === 'succeeded' ? (episodeShotCount(ep) ?? 0) + ' 个分镜' : statusLabel(ep.status) }}</span>
-              </div>
+              </button>
             </div>
             <div v-if="hasMixedEpisodeStatus" class="episode-legend">
               <span v-if="statusSummary.pending" class="legend-item"><i class="dot is-pending" />待解析 {{ statusSummary.pending }}</span>
@@ -1336,6 +1507,12 @@ async function copyRawReport() {
           <header class="result-head">
             <h3 class="result-title">解析结果</h3>
             <span class="result-state" :class="`is-${resultState.tone}`">{{ resultState.label }}</span>
+            <!-- 当前筛选的集：结果区所有计数都限定在这个范围，必须显式标注，
+                 否则用户会以为「场景 4」是全项目数字 -->
+            <span v-if="activeEpisode !== null" class="result-scope">
+              第 {{ activeEpisode }} 集
+              <button type="button" class="result-scope-clear" title="查看全部集" @click="activeEpisode = null">×</button>
+            </span>
             <span class="result-spacer" />
             <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/storyboard-images`)">
               去分镜图 →
@@ -1797,6 +1974,13 @@ async function copyRawReport() {
 .episode-grid { display: flex; flex-wrap: wrap; gap: 12px; min-width: 0; }
 .episode-cell { flex: 0 0 140px; width: 140px; position: relative; min-height: 84px; padding: 14px 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: var(--radius-lg); border: 1px solid transparent; transition: transform 0.15s ease; }
 .episode-cell:hover { transform: translateY(-1px); }
+/* 集数格现在是筛选按钮：必须让用户看出「可点」与「当前选中」。
+   选中态用 2px 主色描边 + 外发光，避免与「成功集」的绿底混淆（两者可叠加）。 */
+.episode-cell { cursor: pointer; font: inherit; }
+.episode-cell:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; }
+.episode-cell.is-active { border-color: var(--brand-primary); box-shadow: 0 0 0 2px var(--brand-soft); }
+.episode-cell.is-all { background: var(--bg-panel); color: var(--text-secondary); }
+.episode-cell.is-all.is-active { background: var(--brand-soft); color: var(--brand-primary); }
 .episode-cell-no { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
 .episode-cell-meta { font-size: 14px; line-height: 1.3; opacity: 0.95; white-space: nowrap; }
 @keyframes cell-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--brand-line); } 50% { box-shadow: 0 0 0 4px var(--brand-soft); } }
@@ -1869,6 +2053,31 @@ async function copyRawReport() {
 .result-state.is-warning { color: var(--state-warning); background: var(--warning-soft); border-color: var(--warning-line); }
 .result-state.is-failed { color: var(--danger-text); background: var(--danger-soft); border-color: var(--danger-line); }
 .result-spacer { flex: 1; }
+/* 当前集筛选标记：结果区计数已限定到该集，需要与状态标签区分开（状态是结论，这个是范围） */
+.result-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--brand-line);
+  background: var(--brand-soft);
+  color: var(--brand-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.result-scope-clear {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+.result-scope-clear:hover { background: var(--brand-line); }
 
 /* 紧凑统计条：统计只出现一次，不再是六张大卡片 */
 .overview-stats {

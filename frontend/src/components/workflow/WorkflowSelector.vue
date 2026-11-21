@@ -112,12 +112,9 @@ const activeModelType = computed<WorkflowModelType | null>(
     ?? slotDefaultModelType.value,
 )
 
-/** 固定模型类型的中文标签（业务页面只展示这一项，不给切换） */
-const fixedModelTypeLabel = computed(() => {
-  if (!props.fixedModelType) return ''
-  const hit = modelTypeOptions.value.find((o) => o.value === props.fixedModelType)
-  return hit?.label.replace('（暂未开放）', '') ?? ''
-})
+/** 固定模型类型的中文标签已不再渲染到页面（见 template 注释）：
+ *  每个业务页只开放一种模型类型，标签只是重复「本页能选什么」。
+ *  fixedModelType 本身仍然生效——它决定候选查询范围与默认值。 */
 
 const candidatesQuery = useQuery({
   queryKey: computed(
@@ -342,9 +339,11 @@ function onChange(value: string | null) {
       placeholder="选择模型类型"
       @update:value="onChangeModelType"
     />
-    <n-tag v-else-if="fixedModelTypeLabel" size="small" :bordered="false" type="info">
-      {{ fixedModelTypeLabel }}
-    </n-tag>
+    <!-- 模型类型标签（「文生图模型」「图生图模型」「参考图生视频」）已删除：
+         每个业务页面只开放一种模型类型，标签只是把「本页能选什么」再说一遍，
+         而下拉框里的工作流名已经说明了具体模型。用户要看到的是模型本身，
+         不是分类名。fixedModelType 仍然生效（决定候选查询范围与默认值），
+         只是不再渲染成可见文案。 -->
     <n-spin v-if="loading" :size="12" />
     <n-select
       v-else
@@ -400,9 +399,10 @@ function onChange(value: string | null) {
   font-size: 12px;
 }
 
-/* 窄屏：把「模型类型标签 + 工作流下拉」由竖排改为横排。
-   资产库的 fixedModelTypeLabel（「文生图模型」）在 column 布局下独占一行，
-   是批量卡在 390 视口被撑到 132px 的主因之一；横排后两者共处一行。 */
+/* 窄屏：工作流下拉独占整行宽度。
+   模型类型标签已删除（见 template 注释），此前「标签 + 下拉」竖排是
+   批量卡在 390 视口被撑到 132px 的主因之一；现在只剩一个下拉，横排保持，
+   下拉 flex 撑满即可。 */
 @media (max-width: 768px) {
   .wf-selector {
     flex-direction: row;

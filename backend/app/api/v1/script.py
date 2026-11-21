@@ -483,6 +483,37 @@ def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> d
         .order_by(ParseVersion.version.desc())
         .first()
     )
+    # 未落库批次：本版本下已成功、但其集级范围尚未应用到实体表的任务。
+    #
+    # 为什么需要这个字段（实测事故 prj_9db2e016b337「海风与夏日」）：
+    # 首批解析成功后前端自动确认，ParseVersion 变成 current；之后用户点「继续分析」
+    # 解析第 2 集，任务复用同一个 ParseVersion（_find_or_create_parse_version 兼容
+    # current）。但前端自动确认的判据是 parse_version_status === 'candidate'，
+    # 此时已是 current —— 于是第 2 集的 11 个分镜永远留在 job.result 里，
+    # 从未经过 apply_parse_result 落库：库中 0 条第 2 集镜头，而 job.result 明明有 11 条。
+    # 用户看到「第 2 集 11 个分镜」，去分镜图页却只有第 1 集，且没有任何报错。
+    #
+    # 判据不能只看 pv.status：current 是「已确认过一次」，不代表「后续批次已落库」。
+    # 这里用集级记录的状态做事实判断——记录里有 succeeded 的集，但该集的镜头在库里
+    # 查不到，即说明存在未落库批次。宁可多提示一次，也不能静默丢数据。
+    pending_persist_episodes: list[int] = []
+    if pv is not None:
+        from app.models import Scene as _Scene, Shot as _Shot
+        _ok_eps = sorted({
+            r.episode_no for r in records
+            if r.status == "succeeded" and r.parse_version_id == pv.id
+        })
+        if _ok_eps:
+            _scene_ids = [
+                row[0] for row in db.query(_Scene.id).filter(
+                    _Scene.project_id == project_id).all()
+            ]
+            _ep_with_shots = set()
+            if _scene_ids:
+                for row in db.query(_Shot.episode).filter(
+                        _Shot.scene_id.in_(_scene_ids)).distinct().all():
+                    _ep_with_shots.add(int(row[0]))
+            pending_persist_episodes = [ep for ep in _ok_eps if ep not in _ep_with_shots]
     # 防御性纠正：任务已不在运行，但集级记录仍是 running —— 这是中断残留。
     # 取消（cancelled）、worker 被 SIGKILL、进程重启都会留下这种孤儿记录，
     # 前端据此把该集渲染成「进行中」，于是出现「待解析 0/1 集完成」却
@@ -509,6 +540,8 @@ def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> d
             "script_hash": pv.script_hash if pv else None,
             "parse_version_id": pv.id if pv else None,
             "parse_version_status": pv.status if pv else None,
+            # 已解析成功但尚未落库的集：前端据此再次触发确认（见上方长注释）
+            "pending_persist_episodes": pending_persist_episodes,
         },
         "records": [
             {
