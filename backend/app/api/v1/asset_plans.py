@@ -69,7 +69,11 @@ def _resolve_dep_path(db: Session, dep: AssetPlanDependency) -> tuple[str | None
         if ref_plan is not None:
             if ref_plan.asset_id:
                 asset = db.get(Asset, ref_plan.asset_id)
-                if asset is not None and asset.file_path:
+                # 只有 current 版本才能作为参考图；superseded 是被替换的旧版本，
+                # 直接返回会让门禁（比对实体当前指针）判定「不是本项目任何角色的定妆图」
+                # 而整单 409。实测事故：江屿定妆图 ast_63e5b85ed3ba(v1, superseded)
+                # 绑在定义上，实体指针已指向 ast_43985b693cba(v2, current)。
+                if asset is not None and asset.file_path and asset.validity == "current":
                     return asset.file_path, asset.id, asset.version
             # 绑定资产缺失或已被替换：按归属类型回退到当前有效资产
             if ref_plan.owner_type in ("character", "scene", "prop") and ref_plan.owner_id:
@@ -83,7 +87,7 @@ def _resolve_dep_path(db: Session, dep: AssetPlanDependency) -> tuple[str | None
                     )
                     if cur_id:
                         cur = db.get(Asset, cur_id)
-                        if cur is not None and cur.file_path:
+                        if cur is not None and cur.file_path and cur.validity == "current":
                             return cur.file_path, cur.id, cur.version
             if ref_plan.owner_type == "shot" and ref_plan.owner_id:
                 cur = (
@@ -91,7 +95,7 @@ def _resolve_dep_path(db: Session, dep: AssetPlanDependency) -> tuple[str | None
                     .join(Job, Job.id == Asset.source_job_id)
                     .filter(Job.shot_id == ref_plan.owner_id,
                             Asset.asset_type == ref_plan.plan_type,
-
+                            Asset.validity == "current",
                             Job.status == "succeeded")
                     .order_by(Asset.version.desc())
                     .first()
@@ -389,10 +393,17 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
 
     if not jobs:
         db.rollback()
+        # 全部跳过时把原因明细带回去：前端要据此区分「都生成过了」（正常提示）
+        # 与「有在途任务」（稍等即可），只报「跳过 11 个」用户无法判断该做什么。
+        _reasons: dict[str, int] = {}
+        for s in skipped:
+            _reasons[s.get("reason", "unknown")] = _reasons.get(s.get("reason", "unknown"), 0) + 1
         raise errors.AppError(
             "no_generatable_plans",
             f"没有可生成的定义（跳过 {len(skipped)} 个）",
             409,
+            skipped=skipped,
+            skipped_reasons=_reasons,
         )
 
     db.commit()

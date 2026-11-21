@@ -343,9 +343,19 @@ async function submitByPlans(picked: Shot[]) {
   try {
     const res = await listAssetPlans(projectId.value, { plan_type: 'keyframe' })
     const pickedIds = new Set(picked.map((s) => s.id))
-    const planIds = (res.items || []).filter((p) => p.owner_id && pickedIds.has(p.owner_id)).map((p) => p.id)
+    // 在途镜头不重复提交：任务还在排队/生成中时库里没有产物，
+    // 后端判重也查不到（现已修，但前端仍应提前拦住，减少无效往返）。
+    const inflightIds = new Set(inflightByShot.value.keys())
+    const planIds = (res.items || [])
+      .filter((p) => p.owner_id && pickedIds.has(p.owner_id) && !inflightIds.has(p.owner_id))
+      .map((p) => p.id)
+    const skippedInflight = picked.filter((s) => inflightIds.has(s.id)).length
     if (!planIds.length) {
-      batchMutation.mutate(picked.map((s) => s.id))
+      if (skippedInflight) {
+        message.info(`${skippedInflight} 个分镜图正在生成中，请等待完成后再操作`)
+      } else {
+        batchMutation.mutate(picked.map((s) => s.id))
+      }
       return
     }
     const gen = await generateFromPlans(projectId.value, { plan_type: 'keyframe', plan_ids: planIds })
@@ -368,6 +378,24 @@ async function submitByPlans(picked: Shot[]) {
     }
     await trackAfterSubmit()
   } catch (e: any) {
+    // 幂等：定义对应的分镜图均已生成过 / 正在生成，属于预期跳过而非失败。
+    // 后端 no_generatable_plans 会带回 skipped_reasons，据此给出可操作的提示，
+    // 而不是把「都生成过了」当成错误弹红条。
+    if (e?.code === 'no_generatable_plans' || e?.code === 'already_generated') {
+      const reasons: Record<string, number> =
+        (e?.detail as Record<string, any>)?.skipped_reasons ?? {}
+      const inflight = reasons['already_inflight'] ?? 0
+      const done = reasons['already_generated'] ?? 0
+      if (inflight && !done) {
+        message.info(`${inflight} 个分镜图正在生成中，请等待完成后再操作`)
+      } else if (done && !inflight) {
+        message.info(`${done} 个分镜图已生成过，无需重做；如需重画请在镜头卡片上点「重新生成」`)
+      } else {
+        message.info('所选分镜图均已生成过或正在生成中，已全部跳过')
+      }
+      await trackAfterSubmit()
+      return
+    }
     message.error(`批量生成失败: ${e?.message ?? e}`)
   }
 }

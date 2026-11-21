@@ -303,17 +303,77 @@ const refRows = computed(() => {
   gap: var(--sp-6);
   align-items: start;
 }
+/* 左栏：分镜图 + sticky 吸附。
+ *
+ * sticky（2026-11-21）：弹窗内容区整块滚动（实测内容 1137px vs 可视 620px），
+ * 右栏有提示词 + 9 个参考槽位 + 重新生成按钮，很长。若不吸附，
+ * 用户往下滚看参考图时左侧分镜图会滚出视野 —— 而「看着参考图调提示词」
+ * 正是这个弹窗的核心动作。让左栏吸附在内容区顶部，滚动时图始终可见。
+ */
 .dg-aside {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  position: sticky;
+  top: 0;
+  align-self: start;
 }
+/* 大图预览：必须同时约束「容器」和「容器内的 img」。
+ *
+ * 事故（2026-11-21）：这里原本只写了容器的 `max-height: 380px`，
+ * 而 Naive UI 的 n-image 内部 <img> 是独立元素，不吃容器的 max-height。
+ * 实测：容器 380×380，内部 img 却渲染成 768×1344 —— 图片直接溢出容器，
+ * 向右延伸到 x=926，把右栏的提示词输入框、参考图卡片整片盖住。
+ * 用户看到的就是「大图把提示词和参考图遮住了」。
+ *
+ * 约束手段：
+ *   max-width / max-height 限死外框尺寸
+ *   object-fit: contain  保证不裁切、不变形
+ *   内层 img 同样限死 100%，否则它按固有尺寸渲染
+ *
+ * sticky（2026-11-21 补充）：弹窗内容区是整块滚动（实测内容 1137px vs
+ * 可视 620px），右栏有提示词 + 9 个参考槽位 + 重新生成按钮，很长。
+ * 若不吸附，用户往下滚看参考图时，左侧分镜图会滚出视野 ——
+ * 而「看着参考图调提示词」正是这个弹窗的核心动作。
+ * 让左栏 sticky 在内容区顶部，滚动时图始终可见。
+ */
+/* 大图预览：容器按图片真实比例伸缩，不再锁死正方形。
+ *
+ * 事故（2026-11-21）：这里原本只写了容器的 `max-height: 380px`，
+ * 而 Naive UI 的 n-image 内部 <img> 是独立元素，不吃容器的 max-height。
+ * 实测：容器 380×380，内部 img 却渲染成 768×1344 —— 图片溢出容器，
+ * 向右延伸到 x=926，把右栏提示词输入框、参考图卡片整片盖住。
+ *
+ * 第二层问题（同日）：修好溢出后，容器仍是固定 380×380 的正方形。
+ * 该镜头资产是 768×1344 竖图（比例 0.571），塞进 1:1 的框里 contain 后
+ * 左右各留 100px 黑边，实测渲染比例 1.000 ≠ 真实比例 0.571，
+ * 视觉上像「被压扁的截图」。
+ *
+ * 最终方案：容器不给固定高度，改用 `height: auto` + 内层 img 自然撑开。
+ * Naive UI 会给 .n-image 和 img 都算出 380px 高度（不是内联样式，是它自己的
+ * CSS），普通声明压不过，必须 !important。 */
 .dg-img {
   width: 100%;
-  max-height: 380px;
   display: block;
   border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--media-backdrop);
+}
+/* 外层容器（.n-image）：解除固定高度，让图片决定 */
+.dg-img.n-image {
+  height: auto !important;
+  max-height: none !important;
+}
+/* 内层 img：按宽度铺满、高度按比例自适应，仅用 max-height 兜底 */
+.dg-img :deep(img) {
+  display: block;
+  width: 100% !important;
+  max-width: 100%;
+  height: auto !important;
+  max-height: 380px;
+  object-fit: contain;
+  margin: 0 auto;
 }
 .dg-empty {
   display: flex;

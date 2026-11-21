@@ -199,11 +199,14 @@ def build_references(
                 )
                 char_id = char.id if char is not None else None
         image_index = node.get("image_index")
+        # node 映射缺失时（当前定义提供的槽位尚未与工作流节点对齐）回退到
+        # ref 自带的 input_key，否则详情页的 image_url/input_key 会全空。
+        input_key = node.get("input_key") or ref.get("input_key")
         refs.append({
             "reference_id": f"ref_{slot or seq}",
             "slot_id": slot,
             "node_id": node.get("node_id"),
-            "input_key": node.get("input_key"),
+            "input_key": input_key,
             "image_no": image_index,
             "reference_type": _ref_type_for_slot(slot, role),
             "asset_type": _asset_kind(ref.get("asset_type")),

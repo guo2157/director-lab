@@ -657,19 +657,30 @@ async function handleBatchCraft() {
     return
   }
   /**
-   * 幂等：已生成过的资产直接跳过，不重新提交。
+   * 幂等：已生成过 / 正在生成中的资产直接跳过，不重新提交。
    *
    * 旧实现无脑逐个提交，用户点「全选」→「批量生成」时，
    * 已生成好的定妆图/基准图/锚定图被全部重做，覆盖掉人工挑过的结果，
    * 还白烧 GPU。后端单实体接口（/characters/{id}/generate 等）只查在途任务、
    * 不查已生成，所以必须在提交前用 `done` 过滤。
    *
+   * 在途过滤（2026-11-21 补充）：只过滤 done 不够——任务还在排队/生成中时
+   * `done` 仍是 false，重复点击会为同一实体反复建任务。实测事故：分镜图页
+   * 6 个在途镜头再点一次批量生成，任务数从 11 变 17。
+   *
    * 需要重做时走卡片上的「重生成」——那是明确的主动意图，不受此限制。
    */
-  const todo = picked.filter((i) => !i.done)
-  const skippedDone = picked.length - todo.length
+  const todo = picked.filter((i) => !i.done && !inflightById.value.has(i.id))
+  const skippedDone = picked.filter((i) => i.done).length
+  const skippedInflight = picked.filter(
+    (i) => !i.done && inflightById.value.has(i.id),
+  ).length
   if (!todo.length) {
-    message.info(`勾选的 ${picked.length} 个资产均已生成，无需重复生成；如需重做请用卡片上的「重生成」`)
+    if (skippedInflight && !skippedDone) {
+      message.info(`勾选的 ${skippedInflight} 个资产正在生成中，请等待完成后再操作`)
+    } else {
+      message.info(`勾选的 ${picked.length} 个资产均已生成，无需重复生成；如需重做请用卡片上的「重生成」`)
+    }
     return
   }
   batchCrafting.value = true

@@ -1077,7 +1077,22 @@ def _filter_already_generated(db: Session, shots: list, target: str,
         .all()
     )
     done = {r[0] for r in rows if r[0]}
-    if not done:
+    # 在途任务同样要跳过（2026-11-21 修复）：旧实现只看「已成功的产物」，
+    # 任务还在 queued/running 时判重查不到任何产物 → 重复点击「批量生成」
+    # 会为同一镜头反复建任务。实测：第 2 集 6 个镜头在途，再点一次批量生成
+    # 又建了 6 个重复任务（17 个任务 / 11 个镜头），白白排队消耗算力。
+    inflight_rows = (
+        db.query(Job.shot_id)
+        .filter(
+            Job.shot_id.in_(shot_ids),
+            Job.job_type == job_type,
+            Job.status.in_(("queued", "running", "chained_wait", "submission_unknown")),
+        )
+        .distinct()
+        .all()
+    )
+    inflight = {r[0] for r in inflight_rows if r[0]}
+    if not done and not inflight:
         return shots, []
     ok, skipped = [], []
     for s in shots:
@@ -1085,6 +1100,13 @@ def _filter_already_generated(db: Session, shots: list, target: str,
             skipped.append({
                 "shot_id": s.id,
                 "reason": "already_generated",
+                "workflow_id": wf_id,
+                "workflow_version": wf_version,
+            })
+        elif s.id in inflight:
+            skipped.append({
+                "shot_id": s.id,
+                "reason": "already_inflight",
                 "workflow_id": wf_id,
                 "workflow_version": wf_version,
             })
@@ -1128,7 +1150,26 @@ def _filter_entity_generated(db: Session, entities: list, plan_type: str,
         if src is not None and src.status == "succeeded" and src.workflow_id == wf_id:
             done.add(e.id)
 
-    if not done:
+    # 在途任务同样跳过：实体资产无 shot_id，归属靠 job.params 里的 owner key。
+    # 与 _filter_already_generated 同理，避免重复点击批量生成反复建任务。
+    _owner_key = {"character": "__character_id__", "scene": "__scene_id__",
+                  "prop": "__prop_id__"}[plan_type]
+    entity_ids = [e.id for e in entities]
+    inflight: set[str] = set()
+    for job in (
+        db.query(Job)
+        .filter(
+            Job.project_id == (entities[0].project_id if entities else None),
+            Job.job_type == f"generate_{plan_type}",
+            Job.status.in_(("queued", "running", "chained_wait", "submission_unknown")),
+        )
+        .all()
+    ):
+        owner = (job.params or {}).get(_owner_key)
+        if owner and owner in entity_ids:
+            inflight.add(owner)
+
+    if not done and not inflight:
         return entities, []
     ok, skipped = [], []
     for e in entities:
@@ -1136,6 +1177,13 @@ def _filter_entity_generated(db: Session, entities: list, plan_type: str,
             skipped.append({
                 "entity_id": e.id,
                 "reason": "already_generated",
+                "workflow_id": wf_id,
+                "workflow_version": wf_version,
+            })
+        elif e.id in inflight:
+            skipped.append({
+                "entity_id": e.id,
+                "reason": "already_inflight",
                 "workflow_id": wf_id,
                 "workflow_version": wf_version,
             })

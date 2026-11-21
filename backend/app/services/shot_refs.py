@@ -14,19 +14,26 @@ from app.models import Character, Prop, Scene, Shot
 
 
 def collect_shot_characters(db: Session, shot: Shot) -> list[str]:
-    """收集镜头实际出场角色名（去重保序）：主说话角色 + 对白分段说话人。"""
-    names: list[str] = []
-    if shot.character_id:
-        ch = db.get(Character, shot.character_id)
-        if ch is not None and ch.name:
-            names.append(ch.name)
-    for seg in shot.dialogue_segments or []:
-        if not isinstance(seg, dict):
-            continue
-        spk = seg.get("speaker") or seg.get("speaker_id")
-        if spk and spk not in names:
-            names.append(spk)
-    return names
+    """收集镜头实际出场角色名（去重保序）。
+
+    **委托给 shot_subject_characters（唯一口径）**，不再自己实现一份。
+
+    2026-11-21 修复：本函数原本是独立的第二实现，只认
+    ``character_id`` + ``dialogue_segments`` 说话人，与权威函数
+    ``shot_subject_characters`` 的两份定义逐渐分叉。加了「结构化动作字段」
+    这个来源之后，分叉直接变成了用户可见的 bug：
+
+        提示词头部注入的是「参考资产：@江屿 @海岸沙滩·夕阳」——缺林晚
+
+    因为 ``inject_asset_refs`` 走的是本函数，而资产定义（槽位绑定）走的是
+    ``shot_subject_characters``。于是出现「提示词里两个角色、参考图只有
+    一个槽位」的矛盾现象：槽位算对了，提示词没跟上，模型只能拿一张定妆图
+    去画两个人，画面里就出现两个江屿。
+
+    保留本函数名是因为 5 处调用方（regen_workspace / regeneration /
+    build_shot_asset_manifest / inject_asset_refs）都用它，改名会扩大改动面。
+    """
+    return [c.name for c in shot_subject_characters(db, shot) if c.name]
 
 
 def shot_subject_characters(db: Session, shot: Shot) -> list[Character]:
@@ -36,14 +43,33 @@ def shot_subject_characters(db: Session, shot: Shot) -> list[Character]:
     （prompt_compiler.audit_reference_slots）必须同时使用它，否则会出现
     「注入器把配角放进 ref_character_N → 门禁判 identity_reference_leak → 整单 409」。
 
-    构成（三者并集）：
+    构成（四者并集）：
     1. ``shot.character_id`` —— 解析阶段标注的主角色
     2. ``dialogue_segments`` 的说话人 —— 有台词就必然在画面里
     3. 提示词里显式 ``@引用`` 的角色 —— 作者显式点名要求一致性
+    4. **结构化动作字段里出现的角色名** —— ``beats[].action/start_pose/end_pose``
+       与 ``start_state`` / ``end_state`` 的 pose/position/holding 文本
 
-    刻意**不**包含「名字出现在 dialogue 正文」这种子串匹配：台词里被谈论的人
-    不等于在画面里（「妈妈，我能把麦子驮到河对岸吗」中的妈妈若按子串匹配会
-    凭空占一个身份槽）。有台词的角色由第 2 条覆盖，不需要宽松匹配兜底。
+    第 4 条是 2026-11-21 补的，修的是一个系统性漏角色事故：
+
+    解析 schema 每个 shot 只有 ``character_id``（**主说话角色名，单值**），没有
+    「本镜出场角色」数组。于是双人镜里第二个人物只出现在自由文本中——
+    实测「海风与夏日」第 2 集第 3 镜：
+
+        character_id = 江屿
+        beats[0].action = 江屿双腿弯曲…落在干沙上
+        beats[1].action = 林晚在江屿右侧并排坐下…     ← 林晚只在 beats 里
+        dialogue_segments = []                        ← 无对白，第 2 条失效
+        image_prompt 里没有 @林晚                      ← 第 3 条失效
+
+    三个来源全部落空 → 主体角色只算出江屿 → 只绑 ``ref_identity`` 一个槽位
+    → 生成出来的分镜图里出现「两个江屿」而不是江屿+林晚。前端详情页
+    也正好显示 ``ref_character_2`` 为空「未绑定」。
+
+    为什么用结构化字段而不是全文本子串匹配：``beats``/``state`` 是解析阶段
+    专门标注「谁做了什么」的字段，比在整段提示词里搜名字精确得多，不会把
+    「禁止出现林晚」这类负向约束误判成出场。项目内角色名精确匹配（非子串），
+    且只在已存在的角色集合里比对，不凭空造角色。
     """
     from app.services.ref_inject import extract_refs
 
@@ -83,7 +109,61 @@ def shot_subject_characters(db: Session, shot: Shot) -> list[Character]:
         if project_id:
             query = query.filter(Character.project_id == project_id)
         _add(query.first())
+    # 结构化动作/状态字段里点名的角色（多角色镜的主要来源）
+    for ch in _characters_from_structured_fields(db, shot, project_id):
+        _add(ch)
     return ordered
+
+
+def _shot_action_texts(shot: Shot) -> list[str]:
+    """收集镜头里所有「描述谁做了什么」的结构化文本片段。
+
+    只取动作/姿态/位置/持物类字段，不取 dialogue 正文——
+    台词里被谈论的人不等于在画面里。
+    """
+    texts: list[str] = []
+    for beat in (shot.beats or []):
+        if not isinstance(beat, dict):
+            continue
+        for key in ("action", "start_pose", "end_pose"):
+            val = beat.get(key)
+            if isinstance(val, str) and val:
+                texts.append(val)
+    for state in (shot.start_state, shot.end_state):
+        if not isinstance(state, dict):
+            continue
+        for key in ("pose", "position", "holding"):
+            val = state.get(key)
+            if isinstance(val, str) and val:
+                texts.append(val)
+    return texts
+
+
+def _characters_from_structured_fields(
+    db: Session, shot: Shot, project_id: str | None
+) -> list[Character]:
+    """从 beats / start_state / end_state 的动作文本里解析出场角色。
+
+    精确名匹配（角色名整体出现），按「文本中首次出现位置」排序，
+    让主角色（character_id）之后的人物保持剧本叙述顺序，槽位分配稳定。
+    """
+    texts = _shot_action_texts(shot)
+    if not texts:
+        return []
+    query = db.query(Character)
+    if project_id:
+        query = query.filter(Character.project_id == project_id)
+    chars = [c for c in query.all() if c.name]
+    if not chars:
+        return []
+    blob = "\n".join(texts)
+    hits: list[tuple[int, Character]] = []
+    for ch in chars:
+        pos = blob.find(ch.name)
+        if pos >= 0:
+            hits.append((pos, ch))
+    hits.sort(key=lambda x: x[0])
+    return [ch for _pos, ch in hits]
 
 
 def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:

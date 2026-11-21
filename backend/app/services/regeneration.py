@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models import Asset, Job, JobInputRef, Workflow, ids
+from app.models import Asset, Job, JobInputRef, Shot, Workflow, ids
 from app.services import errors
 
 MODE_INHERIT_PROMPT_ONLY = "inherit_prompt_only"
@@ -34,12 +34,32 @@ FRAME_CONSTRAINT_SLOTS = ("first_frame", "end_frame", "ref_prev_frame")
 ROLE_BY_SLOT = {
     "ref_identity": "character",
     "ref_character_2": "character",
+    "ref_character_3": "character",
+    "ref_character_4": "character",
+    "ref_character_5": "character",
+    "ref_character_6": "character",
     "ref_scene": "scene",
     "ref_prop": "prop",
     "ref_image": "keyframe",
     "ref_prev_frame": "prev_frame",
     "first_frame": "first_frame",
     "end_frame": "end_frame",
+}
+
+# 槽位展示顺序：与详情页参考图列表一致（主角色 → 次角色 → 场景 → 道具 → 帧约束）
+_SLOT_ORDER = {
+    "ref_identity": 0,
+    "ref_character_2": 1,
+    "ref_character_3": 2,
+    "ref_character_4": 3,
+    "ref_character_5": 4,
+    "ref_character_6": 5,
+    "ref_scene": 6,
+    "ref_prop": 7,
+    "ref_image": 8,
+    "ref_prev_frame": 9,
+    "first_frame": 10,
+    "end_frame": 11,
 }
 
 
@@ -199,6 +219,75 @@ def _refs_from_snapshot(db: Session, snapshot: dict, media_params: dict | None =
     return refs
 
 
+def _refs_from_current_plan(db: Session, shot_id: str, plan_type: str) -> list[dict]:
+    """从**当前**资产定义（AssetPlanDependency）取参考图槽位。
+
+    为什么需要这个（2026-11-21 修复）：
+
+    详情页的参考图列表原本只从「原始生成任务快照」反查（`_refs_from_records` /
+    `_refs_from_snapshot`）。但快照是**历史快照**——图片是用旧代码生成的时候，
+    快照里只有当时注入的槽位。实测事故：
+
+        sht_d766f85afbc6 的分镜图由 job_0a97b6dc1dae 生成
+        该任务快照 __media__ = {ref_identity: 江屿, ref_scene: 海岸沙滩·夕阳}
+        → 详情页只显示 2 个槽位，ref_character_2 显示「未绑定」
+
+    而此时资产定义（重建后）已经正确算出 3 个槽位（含 ref_character_2=林晚）。
+    用户看到「提示词里两个角色、参考图只有一个槽位」，指的就是这个现象：
+    **不是槽位算错了，是详情页读的是过期快照。**
+
+    这里把「当前定义」作为权威来源，快照仅作为兜底（定义缺失的历史数据）。
+    """
+    if not shot_id:
+        return []
+    from app.models import AssetPlan, AssetPlanDependency
+
+    plan = (
+        db.query(AssetPlan)
+        .filter(
+            AssetPlan.owner_id == shot_id,
+            AssetPlan.plan_type == plan_type,
+        )
+        .first()
+    )
+    if plan is None:
+        return []
+    deps = (
+        db.query(AssetPlanDependency)
+        .filter(AssetPlanDependency.plan_id == plan.id)
+        .all()
+    )
+    if not deps:
+        return []
+    refs: list[dict] = []
+    for dep in deps:
+        # 只取参考图类槽位，跳过 ref_prop 等非角色/场景槽位由调用方按需保留
+        if not dep.slot or not dep.slot.startswith("ref_"):
+            continue
+        path, asset_id, version = None, None, None
+        try:
+            from app.api.v1.asset_plans import _resolve_dep_path
+            path, asset_id, version = _resolve_dep_path(db, dep)
+        except Exception:  # 解析失败时退回定义里的占位路径
+            path = dep.ref_path
+        asset = db.get(Asset, asset_id) if asset_id else None
+        refs.append({
+            "slot_param": dep.slot,
+            "input_key": None,
+            "asset_id": asset_id,
+            "asset_version": version,
+            "asset_type": asset.asset_type if asset is not None else None,
+            "role": _slot_role(dep.slot),
+            "required": dep.slot in ("ref_identity", "ref_scene"),
+            "file_path": path,
+            "semantic": _slot_semantic(dep.slot),
+            "enabled": bool(path),
+            "source": "current_plan",
+        })
+    refs.sort(key=lambda r: _SLOT_ORDER.get(r["slot_param"], 99))
+    return refs
+
+
 def build_base_config(db: Session, asset: Asset) -> dict:
     """从指定基础版本反查原始生成配置。
 
@@ -228,6 +317,25 @@ def build_base_config(db: Session, asset: Asset) -> dict:
     if not refs:
         refs = _refs_from_snapshot(db, snapshot, params.get("__media__"))
 
+    # 当前定义优先（2026-11-21）：历史任务快照只反映「当时」注入了什么槽位，
+    # 代码升级后主体角色算法变了，快照就会与当前定义不一致——详情页因此显示
+    # 「提示词两个角色、参考图只有一个槽位」。以定义为准合并：定义里有的槽位
+    # 覆盖快照，定义里没有的槽位（历史遗留）保留，避免丢失旧数据。
+    _plan_type = None
+    _shot_id = job.shot_id if job is not None else None
+    _job_type = job.job_type if job is not None else None
+    if _shot_id:
+        if _job_type == "generate_keyframe":
+            _plan_type = "keyframe"
+        elif _job_type == "generate_clip":
+            _plan_type = "clip"
+    if _plan_type and _shot_id:
+        _current = _refs_from_current_plan(db, _shot_id, _plan_type)
+        if _current:
+            _cur_slots = {r["slot_param"] for r in _current}
+            refs = _current + [r for r in refs if r["slot_param"] not in _cur_slots]
+            refs.sort(key=lambda r: _SLOT_ORDER.get(r["slot_param"], 99))
+
     slot_index = {s["param"]: s for s in slots}
     for ref in refs:
         slot = slot_index.get(ref["slot_param"])
@@ -248,6 +356,34 @@ def build_base_config(db: Session, asset: Asset) -> dict:
                 r["asset_name"] = _name_map[aid]
     prompt = params.get("prompt") or ""
     negative = params.get("negative") or ""
+
+    # 提示词头部的「参考资产」按当前口径重算（2026-11-21 修复）。
+    #
+    # 快照里的 prompt 是**生成时**的文本。当时的 collect_shot_characters 只认
+    # character_id + 对白说话人，双人镜里第二个人物（只出现在 beats 动作描述里）
+    # 根本没被算出来，于是快照 prompt 头部写的是：
+    #     参考资产：@江屿 @海岸沙滩·夕阳      ← 缺林晚
+    # 而槽位绑定用的是修复后的 shot_subject_characters，能算出两个角色。
+    # 两者不一致就出现用户看到的「提示词里两个角色、参考图只有一个槽位」：
+    # 模型只拿到一张定妆图去画两个人，画面里于是出现两个江屿。
+    #
+    # 这里用当前 inject_asset_refs 重算头部（幂等：已有 @ 引用不重复注入），
+    # 让详情页展示的提示词与真正提交生成时用的文本保持同一口径。
+    if prompt and _shot_id and _plan_type == "keyframe":
+        try:
+            from app.services.shot_refs import inject_asset_refs
+            _shot_obj = db.get(Shot, _shot_id)
+            if _shot_obj is not None:
+                # 快照 prompt 可能已带旧的「参考资产」行，先剥离再按当前口径重建，
+                # 否则旧行残留会导致新角色加不进去。
+                _body = prompt
+                _head, _sep, _rest = _body.partition("\n")
+                if _head.startswith("参考资产："):
+                    _body = _rest
+                prompt = inject_asset_refs(db, _shot_obj, _body)
+        except Exception:  # 注入失败不阻断配置读取，保留原快照文本
+            pass
+
     model_params = {
         k: v
         for k, v in params.items()

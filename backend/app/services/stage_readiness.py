@@ -142,6 +142,23 @@ def _ordered_shots(db: Session, project_id: str) -> list[tuple[Shot, str]]:
     return [(shot, title or "") for shot, title in rows]
 
 
+def _episode_global_seq(shots: list[tuple[Shot, str]]) -> dict[str, int]:
+    """镜头 → 集内全局镜号（1..N）。
+
+    Shot.seq 是「场景内序号」，每个场景都从 1 重新开始。同一集有多个场景时，
+    直接用 seq 拼展示名会得到重复的「第 2 集 第 1 镜」（实测事故：海岸沙滩 与
+    海岸沙滩·夕阳 各有 seq 1~4，阻断清单出现 4 组重复项，用户无法判断缺哪一镜）。
+    这里按「场景 seq 升序 + 场景内镜头 seq 升序」累加，与前端
+    StoryboardImagesView 的 shotGlobalSeq 同一口径。
+    """
+    out: dict[str, int] = {}
+    counter: dict[int, int] = {}
+    for shot, _title in shots:  # 已按 episode, scene.seq, shot.seq 排好序
+        counter[shot.episode] = counter.get(shot.episode, 0) + 1
+        out[shot.id] = counter[shot.episode]
+    return out
+
+
 def _valid_asset_by_shot(
     db: Session, shot_ids: list[str], asset_type: str
 ) -> dict[str, Asset]:
@@ -228,8 +245,9 @@ def check_stage_readiness(db: Session, project_id: str, stage: str) -> StageRead
 
     blockers: list[StageBlocker] = []
     done = 0
+    global_seq = _episode_global_seq(shots)
     for shot, scene_title in shots:
-        name = f"第 {shot.episode} 集 第 {shot.seq} 镜"
+        name = f"第 {shot.episode} 集 第 {global_seq.get(shot.id, shot.seq)} 镜"
         asset = valid_assets.get(shot.id)
         if asset is not None:
             if media_file_exists(asset.file_path):

@@ -405,11 +405,53 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
         kf_plans[shot.id] = kf_plan
         stats["keyframe"] += 1
 
-        if char_plan:
-            # 单角色只占 ref_identity 一个槽位：此前同一角色同时绑定 ref_identity 与
-            # ref_character_2，注入时同一路径只占一个槽位（_inject_dependency_slots
-            # 按 used_paths 去重），ref_character_2 实际从未生效，徒增误导性绑定记录
-            _bind_dep(db, kf_plan, "ref_identity", char_plan.asset_key, char_plan)
+        # 角色槽位：按「本镜主体角色」权威口径绑定，支持多角色。
+        #
+        # 缺陷（2026-11-21 修复）：这里原先只读 `shot.character_id` 一个角色，
+        # 于是「提示词里 @ 了两个人、参考图只给一个槽位」成为系统性现象。
+        # 实测 prj_257406918e63：26 个镜头里 8 个提示词 @ 了两个角色
+        # （如 sht_fa80f06453ca 的「@苏晚 … @陆屿」），但 AssetPlanDependency
+        # 全部只有 ref_identity + ref_scene 两条 —— 陆屿从头到尾没有参考图，
+        # 生成出来的分镜图第二个人物长相无法保证。
+        #
+        # 而同一份数据的实时解析器 `resolve_shot_references` 却能正确算出
+        # ref_identity + ref_character_2 两个槽位 —— 两条链路口径不一致：
+        # 解析器用 shot_refs.shot_subject_characters（character_id + 对白说话人
+        # + 提示词 @引用 三者并集），依赖绑定只用 character_id。
+        #
+        # 现在统一到同一权威口径，槽位分配与解析器完全一致：
+        #   主角色（character_id 命中者优先）→ ref_identity
+        #   其余角色按出现顺序          → ref_character_2/3/4/5/6
+        # 同一角色只占一个槽位（不再重复绑 ref_identity 与 ref_character_2）。
+        from app.services.shot_refs import shot_subject_characters
+
+        subjects = shot_subject_characters(db, shot)
+        primary_id = next(
+            (c.id for c in subjects if c.id == shot.character_id),
+            subjects[0].id if subjects else None,
+        )
+        char_slot_seq = 0
+        for subj in subjects:
+            subj_plan = char_plans.get(subj.id)
+            if subj_plan is None:
+                # 该角色还没有定妆图定义（解析阶段未建 plan），跳过并留痕
+                logger.warning(
+                    "分镜图缺少角色依赖定义 shot=%s character=%s(%s)",
+                    shot.id, subj.name, subj.id,
+                )
+                continue
+            if subj.id == primary_id:
+                slot = "ref_identity"
+            else:
+                char_slot_seq += 1
+                slot = f"ref_character_{char_slot_seq + 1}"
+                if slot not in _KEYFRAME_ALLOWED_SLOTS:
+                    logger.warning(
+                        "分镜图角色槽位超限 shot=%s character=%s slot=%s",
+                        shot.id, subj.name, slot,
+                    )
+                    continue
+            _bind_dep(db, kf_plan, slot, subj_plan.asset_key, subj_plan)
             stats["deps"] += 1
         if scene_plan:
             _bind_dep(db, kf_plan, "ref_scene", scene_plan.asset_key, scene_plan)
@@ -436,8 +478,21 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
         stats["clip"] += 1
         _bind_dep(db, clip_plan, "ref_image", kf_plan.asset_key, kf_plan)
         stats["deps"] += 1
-        if char_plan:
-            _bind_dep(db, clip_plan, "ref_identity", char_plan.asset_key, char_plan)
+        # 视频侧同样按权威口径绑定全部主体角色（不只是 character_id）：
+        # 分镜图给了两个角色参考，视频若只给一个，第二个人物会在视频里「变脸」。
+        clip_slot_seq = 0
+        for subj in subjects:
+            subj_plan = char_plans.get(subj.id)
+            if subj_plan is None:
+                continue
+            if subj.id == primary_id:
+                slot = "ref_identity"
+            else:
+                clip_slot_seq += 1
+                slot = f"ref_character_{clip_slot_seq + 1}"
+                if slot not in _CLIP_ALLOWED_SLOTS:
+                    continue
+            _bind_dep(db, clip_plan, slot, subj_plan.asset_key, subj_plan)
             stats["deps"] += 1
 
         # ref_prev_frame 指向的是上一镜“末帧”而非上一镜分镜图，
