@@ -265,6 +265,9 @@ async function uploadRefImage(file: File) {
                   <div v-else class="rf-empty">未绑定</div>
                 </div>
                 <div class="rf-meta">
+                  <!-- 图号 = 模型实际收到的顺序 = 提示词里的 <Picture N>。
+                       不显示用户就无法把页面槽位与提示词编号对照（实测遗漏后无从判断哪张是 Picture 1）。 -->
+                  <span v-if="b.image_no != null" class="rf-no">图{{ b.image_no }}</span>
                   <span class="rf-slot">{{ b.slot_id }}</span>
                 </div>
                 <div class="rf-actions">
@@ -472,11 +475,27 @@ async function uploadRefImage(file: File) {
 .rf-meta {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+/* 图号是用户对照提示词 <Picture N> 的唯一锚点：字号、字重、颜色三个维度都要压过槽位名，
+   否则槽位名（长英文键名）在视觉上更抢眼，图号被当成装饰忽略。 */
+.rf-no {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
 }
 .rf-slot {
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--text-primary);
+  font-weight: 400;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .rf-required {
   color: var(--state-error);

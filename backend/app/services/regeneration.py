@@ -413,7 +413,7 @@ def build_base_config(db: Session, asset: Asset) -> dict:
     }
 
 
-def build_clip_refs_from_keyframe(db: Session, shot, keyframe: Asset) -> list[dict]:
+def build_clip_refs_from_keyframe(db: Session, shot, keyframe: Asset | None = None) -> list[dict]:
     """尚未生成分镜视频时，按视频生成的真实槽位口径构造参考图绑定。
 
     视频任务实际注入的是：上一镜尾帧（ref_prev_frame）+ 分镜图（ref_image）
@@ -443,19 +443,22 @@ def build_clip_refs_from_keyframe(db: Session, shot, keyframe: Asset) -> list[di
             "asset_name": frame.get("asset_name") or "上一镜尾帧（串联首帧）",
             "source": "keyframe_fallback",
         })
-    refs.append({
-        "slot_param": "ref_image",
-        "asset_id": keyframe.id,
-        "asset_version": keyframe.version,
-        "asset_type": keyframe.asset_type,
-        "role": "keyframe",
-        "required": True,
-        "file_path": keyframe.file_path,
-        "semantic": "reference",
-        "enabled": True,
-        "asset_name": keyframe.name or "本镜分镜图",
-        "source": "keyframe_fallback",
-    })
+    # 分镜图可能尚未生成（该镜头从未出过任何产物）：此时只保留尾帧/角色/道具槽位，
+    # 不能因为缺分镜图就让整个工作区打不开。
+    if keyframe is not None:
+        refs.append({
+            "slot_param": "ref_image",
+            "asset_id": keyframe.id,
+            "asset_version": keyframe.version,
+            "asset_type": keyframe.asset_type,
+            "role": "keyframe",
+            "required": True,
+            "file_path": keyframe.file_path,
+            "semantic": "reference",
+            "enabled": True,
+            "asset_name": keyframe.name or "本镜分镜图",
+            "source": "keyframe_fallback",
+        })
     if scene is None:
         return refs
     char_slots = ["ref_identity"] + [f"ref_character_{i}" for i in range(2, 7)]

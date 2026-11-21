@@ -662,6 +662,23 @@ async def upload_workflow(
     )
     stored_caps = {**(caps_dict or {}), **normalized_caps}
 
+    # 参考图槽位三方一致性（2026-11-21）：capabilities 声明的 input_key 必须真实
+    # 存在于 definition 节点上。漂移的后果是静默的——注入落到不存在的节点、
+    # 或两个槽位抢同一张图，提示词 <Picture N> 与模型收到的图序必然错位，
+    # 任务照样成功，只是画出来的人和帧全错位。上传即拒绝，不等出图才发现。
+    from app.services.workflow.slot_alignment import verify_reference_alignment
+
+    _slot_issues = verify_reference_alignment(definition, stored_caps)
+    _slot_errors = [i for i in _slot_issues if i["level"] == "error"]
+    if _slot_errors:
+        raise errors.AppError(
+            "workflow_slot_mismatch",
+            "参考图槽位声明与工作流节点不一致："
+            + "；".join(i["message"] for i in _slot_errors),
+            422,
+            issues=_slot_issues,
+        )
+
     derived_model_type = _classify_by_capabilities(workflow_type, normalized_caps)
     allowed_model_types = [
         key for key, _label, wf_type in _CLASSIFICATION_GROUPS if wf_type == workflow_type
@@ -740,17 +757,26 @@ def validate_workflow(workflow_id: str, db: Session = Depends(get_db)) -> dict:
     if wf is None:
         raise errors.AppError("workflow_not_found", "工作流不存在", 404)
     result = validate_definition(wf.definition, trigger=wf.trigger)
-    wf.validation_status = "static_validated" if result["valid"] else "invalid"
+    # 参考图槽位：声明 vs 工作流节点键名（与上传同源校验，供设置页就地体检）
+    from app.services.workflow.slot_alignment import verify_reference_alignment
+
+    _slot_issues = verify_reference_alignment(wf.definition, wf.capabilities)
+    wf.validation_status = "static_validated" if result["valid"] and not any(
+        i["level"] == "error" for i in _slot_issues
+    ) else "invalid"
     if wf.current_version_id:
         row = db.get(WorkflowVersion, wf.current_version_id)
         if row is not None:
             row.validation_status = wf.validation_status
     db.commit()
     return {
-        "valid": result["valid"],
-        "issues": issue_messages(result),
-        "errors": result["errors"],
-        "warnings": result["warnings"],
+        "valid": result["valid"] and not any(i["level"] == "error" for i in _slot_issues),
+        "issues": issue_messages(result) + [
+            f"[{i['code']}] {i['message']}" for i in _slot_issues
+        ],
+        "errors": result["errors"] + [i for i in _slot_issues if i["level"] == "error"],
+        "warnings": result["warnings"] + [i for i in _slot_issues if i["level"] == "warning"],
+        "slot_alignment": _slot_issues,
         "schema_summary": {
             "params": len((wf.parsed_schema or {}).get("params") or {}),
             "outputs": [o.get("key") if isinstance(o, dict) else o

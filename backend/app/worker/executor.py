@@ -201,16 +201,11 @@ def _shot_ref_audios(db: Session, shot: Shot) -> dict:
 
 def _resolve_tts_workflow(db: Session, seg):
     """片段音频应对应的 TTS 工作流：优先 preset 模式的 tts 工作流（与生成时路由一致）。"""
-    rows = (
-        db.query(Workflow)
-        .filter(Workflow.workflow_type == "tts")
-        .order_by(Workflow.created_at)
-        .all()
-    )
-    for wf in rows:
-        caps = wf.capabilities or {}
-        if caps.get("voice_mode") == "preset" and caps.get("voice_values"):
-            return wf
+    from app.services import tts_workflow as tts_wf_service
+    wf = tts_wf_service.resolve_preset_workflow(db)
+    if wf is not None:
+        return wf
+    rows = tts_wf_service.list_tts_workflows(db)
     return rows[0] if rows else None
 
 
@@ -1684,7 +1679,108 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             wf_definition, _slot_remap = compact_reference_slots(wf_definition)
             _prompt_key = "prompt"
             _remap_info = None
-            if _slot_remap and isinstance(params.get(_prompt_key), str):
+            # clip 任务的图序以**执行期实际 media_files** 为准（2026-11-21）。
+            #
+            # 提交时算出的图序在两种情况下会过期，且两种都会让提示词与模型收到的图
+            # 整体错位一位：
+            #   · 提交时上一镜还没出尾帧 → 执行期 chained / last_frame_asset_id 补上；
+            #   · independent 模式反而会 pop 掉 ref_prev_frame → 尾帧消失。
+            # 现有 remap_picture_refs 只会「删行」，不会「插入并整体平移」，
+            # 所以这里用与页面/提交完全相同的 reference_layout 口径按实况重算。
+            _relayout_done = False
+            _clip_shot = (
+                db.get(Shot, job.shot_id)
+                if job.job_type == "generate_clip" and job.shot_id
+                else None
+            )
+            if (
+                _clip_shot is not None
+                and isinstance(params.get(_prompt_key), str)
+            ):
+                from app.services.reference_layout import (
+                    compressed_numbers,
+                    rebuild_prompt,
+                )
+                from app.services.ref_inject import workflow_ref_syntax
+                from app.services.workflow.capabilities import declared_reference_slots
+
+                _decl = declared_reference_slots(wf_record.capabilities)
+                _live_slots = [
+                    s for s in media_files
+                    if s and (s.startswith("ref_") or s.startswith("first_frame"))
+                ]
+                _nums = compressed_numbers(_live_slots, _decl)
+                if _nums:
+                    # 槽位 → 资产名：media 里的路径可能用 / 或 \（历史数据混用），
+                    # 直接当 SQL 条件会匹配不到 → 职责块退化成「@角色」，模型拿不到
+                    # 角色名。这里在本项目资产里按归一化路径比对。
+                    import os as _os2
+
+                    _want = {
+                        _os2.path.basename(str(media_files.get(s) or "").replace("\\", "/")): s
+                        for s in _nums
+                        if media_files.get(s)
+                    }
+                    _names: dict[str, str] = {}
+                    if _want:
+                        # 先本项目，再全库兜底：正常情况下参考图资产必属本项目，
+                        # 但历史数据里存在跨项目引用，查不到就退化成「@角色」，
+                        # 模型拿不到角色名会自由发挥长相。
+                        def _collect(q) -> None:
+                            for _a in q:
+                                _bn = _os2.path.basename(
+                                    str(_a.file_path or "").replace("\\", "/")
+                                )
+                                _slot = _want.get(_bn)
+                                if _slot and _a.name and _slot not in _names:
+                                    _names[_slot] = _a.name
+
+                        _collect(
+                            db.query(Asset)
+                            .filter(Asset.project_id == job.project_id)
+                            .order_by(Asset.version.desc())
+                        )
+                        _missing = [s for s in _nums if s not in _names]
+                        if _missing:
+                            _collect(db.query(Asset).order_by(Asset.version.desc()))
+                    _before = params[_prompt_key]
+                    params[_prompt_key] = rebuild_prompt(
+                        _before, _nums, _names, _decl, workflow_ref_syntax(_decl)
+                    )
+                    _relayout_done = True
+                    # 执行期重算后必须**实时回写**详情页数据源（2026-11-21）。
+                    #
+                    # 提交时算的图序在执行期可能已经变了（串行链式补上上一镜尾帧、
+                    # 或并行模式 pop 掉尾帧），此时提示词与槽位都按实况重算过。
+                    # 若只改内存里的 params 而不回写，用户点开视频详情看到的仍是
+                    # 提交时那份 —— 与实际提交给 ComfyUI 的不是同一份，
+                    # 「槽位对不上提示词」的观感就是这么来的。
+                    from app.services.submission_persist import persist_submission
+
+                    _persist = persist_submission(
+                        db,
+                        shot=_clip_shot,
+                        project_id=job.project_id,
+                        target="clip",
+                        prompt=params[_prompt_key],
+                        media=dict(media_files),
+                        declared_slots=_decl,
+                        workflow_id=job.workflow_id,
+                        workflow_version=job.workflow_version,
+                        negative_prompt=params.get("negative"),
+                        parameters={
+                            k: v for k, v in params.items()
+                            if not str(k).startswith("__") and k not in ("prompt", "negative")
+                        },
+                    )
+                    if params[_prompt_key] != _before or _persist.get("references"):
+                        _write_event(db, job, "job.picture_relayout", {
+                            "slots": dict(_nums),
+                            "persisted": _persist,
+                            "note": "执行期实际注入槽位与提交时不同，已按实况重算图序并回写详情页",
+                        })
+                        db.commit()
+            if not _relayout_done and _slot_remap and isinstance(params.get(_prompt_key), str):
                 _new_prompt, _dropped, _removed_lines = remap_picture_refs(
                     params[_prompt_key], _slot_remap
                 )

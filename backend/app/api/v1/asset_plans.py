@@ -352,11 +352,33 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
             _injected = _inject_dependency_slots(db, plan, params, _wf_slots)
             # P0 错位修复：按实际注入槽位重写提示词图片引用编号并统一为工作流语法
             # （提示词中的 <Picture N> 由 LLM 按文本顺序书写，与槽位注入顺序无关）
+            #
+            # 分镜视频（clip）走 reference_layout 的唯一口径：图序 = 实际注入槽位
+            # 压缩后的连续编号，并补齐角色定妆图的职责描述。模板里写死的
+            # 「Picture 1=上一镜尾帧、Picture 2=分镜图」在尾帧缺失时会把第 1 张
+            # 指向一张不存在的图，而两个角色定妆图在提示词里完全没有说明。
             if _injected and params.get("prompt"):
-                from app.services.ref_inject import rewrite_picture_refs
-                params["prompt"] = rewrite_picture_refs(
-                    db, project_id, params["prompt"],
-                    params.get("__media__") or {}, _wf_slots)
+                if plan_type == "clip":
+                    from app.services.reference_layout import compressed_numbers, rebuild_prompt
+                    from app.services.ref_inject import workflow_ref_syntax
+
+                    _nums = compressed_numbers(list(_injected.keys()), _wf_slots)
+                    _names: dict[str, str] = {}
+                    for _b in params.get("__binding_snapshot__") or []:
+                        _aid = _b.get("asset_id")
+                        if _b.get("slot") in _injected and _aid:
+                            _asset = db.get(Asset, _aid)
+                            if _asset is not None and _asset.name:
+                                _names[_b["slot"]] = _asset.name
+                    params["prompt"] = rebuild_prompt(
+                        params["prompt"], _nums, _names, _wf_slots,
+                        workflow_ref_syntax(_wf_slots),
+                    )
+                else:
+                    from app.services.ref_inject import rewrite_picture_refs
+                    params["prompt"] = rewrite_picture_refs(
+                        db, project_id, params["prompt"],
+                        params.get("__media__") or {}, _wf_slots)
             job = _create_job(db, project_id, shot.id, target, wf, params)
             jobs.append(job)
         # 生成方式标记：chained 仅首任务 queued，其余 chained_wait 等待前一任务成功后释放

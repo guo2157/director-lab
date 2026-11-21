@@ -1264,6 +1264,30 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
 
     # 镜间尾帧依赖（P0）：非首镜使用前序镜头实际尾帧，缺失时按声明决定拦截或记录
     prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
+    # clip 图序最终重建（2026-11-21）：到这一步 __media__ 才是最终形态
+    # （build_media_params 的 @引用 + 上面注入的 ref_prev_frame 都在了）。
+    # 此前用的是 rewrite_picture_refs，它按工作流静态编号换算、且不会补角色定妆图
+    # 的职责描述，结果就是「提示词写 Picture 1=上一镜尾帧 / Picture 2=分镜图，
+    # 而两个角色定妆图占了第 3/4 张却一个字都没提」。
+    # 这里改用与详情页、执行器同源的 reference_layout 口径重算一遍。
+    if target == "clip" and params.get("prompt"):
+        from app.services import reference_layout as _rl
+        from app.services.ref_inject import workflow_ref_syntax as _wfs
+
+        _slots = declared_reference_slots(wf.capabilities)
+        _media = params.get("__media__") or {}
+        _nums = _rl.compressed_numbers(list(_media.keys()), _slots)
+        if _nums:
+            from app.services.submission_persist import _slot_names
+
+            _names = _slot_names(db, scene.project_id, _media)
+            # rebuild_prompt 以单个换行结尾；任务参数历史上不带尾换行。
+            # 这里统一剥掉，保证 shot.video_prompt 与 job.params["prompt"]
+            # 在**字节层面**完全一致（否则详情页与下发文本差一个 \n，
+            # 提示词指纹也会不同，排查时容易误判成「不是同一份」）。
+            params["prompt"] = _rl.rebuild_prompt(
+                params["prompt"], _nums, _names, _slots, _wfs(_slots)
+            ).rstrip("\n")
     job = _create_job(db, scene.project_id, shot.id, target, wf, params,
                       generation_mode=payload.get("generation_mode"),
                       request_key=payload.get("idempotency_key"))
@@ -1276,6 +1300,31 @@ def generate_shot(shot_id: str, payload: dict, db: Session = Depends(get_db)) ->
         # 无论是否注入成功都记录判定依据，便于事后追溯串图与缺帧问题
         _snap = dict(job.input_snapshot or {})
         _snap["prev_frame"] = prev_frame_info
+        job.input_snapshot = _snap
+        # 详情页数据源回写（2026-11-21）：首次生成（待生成 → 生成中）此前**完全
+        # 没有**回写 shot.video_prompt 与 StoryboardRegenConfig，导致详情页显示的是
+        # 解析阶段的原始文本与实时推导的槽位，与本次实际下发的提示词/参考图不一致。
+        # 用本次冻结快照的同一份数据回写，页面看到的 == 实际生成的。
+        from app.services.submission_persist import persist_submission
+
+        _persist = persist_submission(
+            db,
+            shot=shot,
+            project_id=scene.project_id,
+            target=target,
+            prompt=params.get("prompt") or "",
+            media=params.get("__media__") or {},
+            declared_slots=declared_reference_slots(wf.capabilities),
+            workflow_id=wf.id,
+            workflow_version=wf.version,
+            negative_prompt=params.get("negative"),
+            parameters={
+                k: v for k, v in params.items()
+                if not str(k).startswith("__") and k not in ("prompt", "negative")
+            },
+        )
+        _snap = dict(job.input_snapshot or {})
+        _snap["submission_persist"] = _persist
         job.input_snapshot = _snap
     db.commit()
     return _job_out(job)

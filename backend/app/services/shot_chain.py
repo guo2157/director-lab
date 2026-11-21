@@ -70,6 +70,20 @@ def last_frame_asset_name(db: Session, shot: Shot) -> str:
     return f"sht_{shot_global_index(db, shot)}_lastframe"
 
 
+def _normalize_path(path: str | None) -> str:
+    """把历史数据里的 Windows 反斜杠路径转成当前平台可用路径。
+
+    真实故障（2026-11-21）：库里 `asset.file_path` 大量是
+    `ast_frames\\sht_1_lastframe.png`，在 Linux 上 `os.path.exists()` 恒为 False，
+    于是 `resolve_prev_frame()` 永远返回 None —— 串行链式批量出视频时
+    「上一镜尾帧 → 下一镜首帧」这条链**从来没接上过**，而任务照样成功，
+    只是模型拿不到连续性参考。这种缺陷只能靠对账发现。
+    """
+    if not path:
+        return ""
+    return str(path).replace("\\", "/")
+
+
 def resolve_prev_frame(db: Session, shot: Shot) -> dict | None:
     """解析当前镜头可用的上一镜实际尾帧。
 
@@ -82,10 +96,11 @@ def resolve_prev_frame(db: Session, shot: Shot) -> dict | None:
     asset = db.get(Asset, prev.last_frame_asset_id)
     if asset is None or asset.validity != "current" or not asset.file_path:
         return None
-    if not os.path.exists(asset.file_path):
+    path = _normalize_path(asset.file_path)
+    if not os.path.exists(path):
         return None
     return {
-        "file_path": asset.file_path,
+        "file_path": path,
         "asset_id": asset.id,
         "version": asset.version,
         "asset_name": asset.name,

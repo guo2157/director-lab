@@ -169,7 +169,12 @@ def test_get_workspace_derived(client, tmp_path):
     assert {x["slot_id"] for x in data["references"]} == {"ref_identity", "ref_character_2"}
     for ref in data["references"]:
         assert ref["node_id"] is not None
-        assert ref["image_no"] in (3, 4)
+        # 图序 = 实际注入槽位压缩后的连续编号（2026-11-21 修复）。
+        # 此前断言 (3, 4) 是工作流**静态**编号：ref_identity 静态第 3、
+        # ref_character_2 静态第 4。但本镜没有上一镜尾帧 → ref_prev_frame 空
+        # → 执行器压缩后这两张实际是模型收到的第 1、2 张。
+        # 页面显示静态编号就会与提示词里的 <Picture 1> 对不上。
+        assert ref["image_no"] in (1, 2)
 
 
 # ---------- 3. PUT 保存与版本递增 ----------
@@ -193,7 +198,10 @@ def test_put_workspace_saves_and_version_increments(client, tmp_path):
     d1 = r1.json()
     assert d1["source"] == "saved"
     assert d1["history_compat"]["saved_version"] == 1
-    assert d1["final_prompt"] == "用户手写提示词"
+    # 详情页的提示词会补上【参考图职责】块（图序与槽位一一对应），
+    # 用户正文必须原样保留在末尾
+    assert "用户手写提示词" in d1["final_prompt"]
+    assert "【参考图职责】" in d1["final_prompt"]
 
     r2 = client.put(url, json=payload)
     assert r2.status_code == 200
@@ -203,7 +211,8 @@ def test_put_workspace_saves_and_version_increments(client, tmp_path):
     assert d3["source"] == "saved"
     assert d3["history_compat"]["saved_version"] == 2
     assert len(d3["references"]) == 2
-    assert d3["final_prompt"] == "用户手写提示词"
+    assert "用户手写提示词" in d3["final_prompt"]
+    assert "【参考图职责】" in d3["final_prompt"]
 
 
 # ---------- 4. 校验门禁 ----------
@@ -401,3 +410,56 @@ def test_workspace_parameters_snapshot_kept(client, tmp_path):
     assert params.get("height") == 1312
     assert params.get("length") == 192
     assert "__media__" not in params
+
+
+# ---------- 8. 从未生成过产物的镜头（待生成 → 视频生成中） ----------
+
+def _seed_no_assets(client):
+    """建项目/场景/镜头，但一张图、一个任务都没有。
+
+    对应分镜看板的真实流程：用户要先打开待生成镜头的详情，调好提示词与参考图
+    再提交。此时既没有成片也没有分镜图，接口不能 404——否则整条链路断掉。
+    """
+    resp = client.post("/api/projects", json={"name": "待生成镜头", "aspect_ratio": "9:16"})
+    assert resp.status_code in (200, 201), resp.text
+    pid = resp.json()["id"]
+    scn = client.post("/api/scenes", json={"project_id": pid, "title": "草地", "episode": 1}).json()
+    shot = client.post("/api/shots", json={
+        "scene_id": scn["id"], "episode": 1, "shot_kind": "visual", "duration": 5,
+    }).json()
+    import app.core.database as db_mod
+    db = db_mod.SessionLocal()
+    try:
+        wf = Workflow(
+            id="wf_h3_noasset", name="wf_video_h3_ref2va_std_5s", workflow_type="video",
+            definition=H3_DEF, capabilities=H3_CAPS, version=7, is_builtin=True,
+        )
+        db.add(wf)
+        db.commit()
+    finally:
+        db.close()
+    return pid, shot["id"]
+
+
+def test_workspace_opens_for_shot_without_any_asset(client):
+    """零产物镜头也必须能打开工作区，否则待生成镜头无法调整提示词与参考图。"""
+    _, shot_id = _seed_no_assets(client)
+    r = client.get("/api/shots/{}/regenerate/workspace".format(shot_id), params={"target": "clip"})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["history_compat"]["fallback_from"] == "none"
+    # 没有可复用的快照，必须如实标记不完整，不能把空参数当可信值
+    assert data["snapshot_complete"] is False
+    assert "base_snapshot_missing" in data["incomplete_reasons"]
+
+
+def test_no_asset_workspace_prompt_has_no_dangling_picture_refs(client):
+    """一张参考图都没有时，提示词里不得残留指向不存在图片的 <Picture N>。"""
+    _, shot_id = _seed_no_assets(client)
+    data = client.get("/api/shots/{}/regenerate/workspace".format(shot_id),
+                      params={"target": "clip"}).json()
+    enabled = [r for r in data["references"] if r.get("enabled", True)]
+    tags = sorted({int(m) for m in __import__("re").findall(r"<Picture\s*(\d+)>", data["final_prompt"] or "")})
+    assert tags == list(range(1, len(enabled) + 1)), (
+        "参考图 {} 张，但提示词引用了 {}".format(len(enabled), tags)
+    )

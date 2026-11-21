@@ -89,6 +89,14 @@ export function useShotDetail(deps: ShotDetailDeps) {
   const bindings = ref<WorkspaceReference[]>([])
   const slots = ref<WorkspaceSlot[]>([])
   const chainFrameStatus = ref<'ready' | 'missing' | 'not_applicable' | null>(null)
+  /**
+   * 本次打开镜头时的工作区最终提示词（后端按**实际注入槽位**重建过 <Picture N> 与职责块）。
+   *
+   * 详情页的提示词与参考图必须同源：`shot.video_prompt` 是上次落库的旧版本，
+   * 若拿它当编辑框初始值、而参考图取 workspace 的实时结果，就会出现
+   * 「提示词写 3 张图、页面只列 2 个槽位」这类错位（实测 26 镜里 16 镜如此）。
+   */
+  const wsFinalPrompt = ref('')
 
   // --- 生成 ---
   const generating = ref(false)
@@ -134,7 +142,12 @@ export function useShotDetail(deps: ShotDetailDeps) {
     refBindingsLoading.value = true
     try {
       const ws = await fetchRegenerateWorkspace(shotId, 'clip')
-      bindings.value = ws.references ?? []
+      // 参考图按下发顺序（image_no）排列：页面顺序 = 模型收到的顺序 = <Picture N> 的顺序。
+      // 后端返回顺序是槽位声明序，与压缩编号不总相同，这里显式排序。
+      bindings.value = [...(ws.references ?? [])].sort(
+        (a, b) => (a.image_no ?? 99) - (b.image_no ?? 99),
+      )
+      wsFinalPrompt.value = ws.final_prompt || ''
       chainFrameStatus.value = ws.chain_frame?.status ?? null
       slots.value = (ws.available_slots ?? []).map((s) => ({
         param: s.param,
@@ -154,12 +167,16 @@ export function useShotDetail(deps: ShotDetailDeps) {
 
   /** 打开/切换镜头：重置提示词并拉取参考图绑定 */
   async function open(target: Shot) {
-    videoPrompt.value = target.video_prompt || buildH3VideoPrompt(target)
     // 负向提示词无独立存储字段，每次打开从系统默认模板起
     negativePrompt.value = DEFAULT_NEGATIVE_PROMPT
+    await Promise.all([loadNegativeSupported(target), loadRefBindings(target.id)])
+    // 提示词优先级：workspace 实时重建结果 > 落库值 > 按 H3 规范现场生成。
+    // 必须等 loadRefBindings 完成——提示词里的 <Picture N> 由后端按**实际注入槽位**
+    // 重建，先读 shot.video_prompt 会拿到旧编号，与下面渲染的参考图对不上。
+    videoPrompt.value =
+      wsFinalPrompt.value || target.video_prompt || buildH3VideoPrompt(target)
     // 以实际展示的内容作为比对基准：自动填充的默认提示词不算用户改动
     originVideoPrompt.value = videoPrompt.value
-    await Promise.all([loadNegativeSupported(target), loadRefBindings(target.id)])
   }
 
   const unboundSlots = computed(() => {

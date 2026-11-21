@@ -868,11 +868,20 @@ def validate_workspace(
     prompt = final_prompt or ""
     references_in_prompt = {int(m.group(1)) for m in re.finditer(r"<Picture\s*(\d+)>", prompt)}
     references_in_prompt |= {int(m.group(1)) for m in re.finditer(r"<image(\d+)>", prompt)}
-    available_numbers = {
-        nodes[r["slot_id"]].get("image_index")
-        for r in enabled
-        if r.get("slot_id") in nodes and nodes[r["slot_id"]].get("image_index") is not None
-    }
+    # 图序 = 实际注入后的压缩序号（与页面展示、执行器 compaction 同一口径）。
+    # 不能用 nodes 的静态 image_index：上一镜没有尾帧时 ref_image_0 被剔除，
+    # 静态第 2 张会压缩成模型实际收到的第 1 张，静态口径会把正确的 Picture 1 判成缺失。
+    from app.services.reference_layout import compressed_numbers
+
+    _decl = [
+        {"param": name, "input_key": node.get("input_key")}
+        for name, node in nodes.items()
+    ]
+    _slot_numbers = compressed_numbers(
+        [str(r["slot_id"]) for r in enabled if r.get("slot_id")], _decl
+    )
+    _number_to_slot = {n: slot for slot, n in _slot_numbers.items()}
+    available_numbers = set(_slot_numbers.values())
     for num in sorted(references_in_prompt):
         if num not in available_numbers:
             errors.append({
@@ -884,14 +893,11 @@ def validate_workspace(
             checks.append({
                 "code": "PROMPT_REF_OK",
                 "image_no": num,
+                "slot": _number_to_slot.get(num),
                 "message": f"Image {num} 引用正确",
             })
     for num in sorted(available_numbers - references_in_prompt):
-        slot = next(
-            (r["slot_id"] for r in enabled
-             if r.get("slot_id") in nodes and nodes[r["slot_id"]].get("image_index") == num),
-            "",
-        )
+        slot = _number_to_slot.get(num, "")
         warnings.append({
             "code": "REF_NOT_REFERENCED",
             "image_no": num,
@@ -1218,7 +1224,12 @@ def build_workspace(
         _active = [
             str(r["slot_id"])
             for r in references
-            if r.get("enabled", True) and r.get("image_url") and r.get("slot_id")
+            if r.get("enabled", True)
+            and r.get("slot_id")
+            # 有图 = 有 image_url 或至少绑定了 asset_id。
+            # 只看 image_url 会让「前端只传 asset_id」的保存结果算不出编号，
+            # 详情页 image_no 全变 None、提示词 tags 退回 ['1']（实测）。
+            and (r.get("image_url") or r.get("asset_id"))
         ]
         _numbers = rl.compressed_numbers(_active, _slots)
         _names = {
@@ -1228,10 +1239,18 @@ def build_workspace(
         }
         for _ref in references:
             _ref["image_no"] = _numbers.get(_ref.get("slot_id"))
-        if _numbers:
-            final_prompt = rl.rebuild_prompt(
-                final_prompt, _numbers, _names, _slots, _reference_syntax(nodes)
+            # input_key 同步归一：执行器会把未注入槽位删掉并重排键名，
+            # 静态键名（分镜图写死 ref_image_1）与实际下发（ref_image_0）差一位，
+            # 页面按它显示就会和提示词 <Picture N> 对不上。归一后同口径。
+            _ref["input_key"] = rl.final_input_key(
+                _ref.get("input_key"), _ref.get("image_no")
             )
+        # 即使一张参考图都没有（待生成镜头、角色尚未定妆）也必须重建：
+        # 正文里遗留的 <Picture N> 会指向模型根本没收到的图，是「提示词与槽位不一致」
+        # 最隐蔽的一种——槽位区是空的，提示词却说有两张图。
+        final_prompt = rl.rebuild_prompt(
+            final_prompt, _numbers, _names, _slots, _reference_syntax(nodes)
+        )
 
     validation = validate_workspace(
         db,

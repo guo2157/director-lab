@@ -103,6 +103,15 @@ def _current_asset(db: Session, shot_id: str, asset_type: str) -> Asset | None:
     )
 
 
+def _err_code(exc: HTTPException) -> str | None:
+    """从 HTTPException.detail 里取业务错误码（detail 可能是 dict 也可能是字符串）。"""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        code = detail.get("code")
+        return str(code) if code else None
+    return None
+
+
 def _resolve_base_asset(db: Session, shot: Shot, target: str, base_asset_id: str | None) -> Asset:
     if base_asset_id:
         asset = db.get(Asset, base_asset_id)
@@ -740,9 +749,34 @@ def get_regenerate_workspace(
         # 那次任务的参考图绑定，正文换用该镜头的分镜视频提示词。
         if target != "clip" or (exc.detail or {}).get("code") != "asset_not_found":
             raise
-        base_asset = _resolve_base_asset(db, shot, "keyframe", None)
-        fallback_from = "keyframe"
-    base_config = regen.build_base_config(db, base_asset)
+        try:
+            base_asset = _resolve_base_asset(db, shot, "keyframe", None)
+        except HTTPException as exc2:
+            if _err_code(exc2) != "asset_not_found":
+                raise
+            # 该镜头从未生成过任何产物（分镜图也没有）：没有基础快照可复用。
+            # 但工作区必须能打开——分镜看板的「待生成 → 视频生成中」流程要求
+            # 用户先在这里调提示词和参考图再提交，打不开就等于整条链路断掉。
+            base_asset = None
+            fallback_from = "none"
+        else:
+            fallback_from = "keyframe"
+    if base_asset is not None:
+        base_config = regen.build_base_config(db, base_asset)
+    else:
+        base_config = {
+            "base": None,
+            "refs": [],
+            "workflow": {},
+            "prompt": {
+                "rendered": shot.video_prompt or "",
+                "editable": shot.video_prompt or "",
+            },
+            "negative_prompt": {},
+            "model_params": {},
+            "snapshot_complete": False,
+            "incomplete_reasons": ["base_snapshot_missing"],
+        }
     if fallback_from:
         base_config = dict(base_config)
         _video_prompt = shot.video_prompt or ""
@@ -754,8 +788,11 @@ def get_regenerate_workspace(
         # 参考图按视频生成的真实口径重建：分镜图本体 + 角色定妆图 + 道具锚定图。
         # 直接沿用分镜图任务的参考清单会漏掉分镜图本身，并混入视频不使用的场景图。
         base_config["refs"] = regen.build_clip_refs_from_keyframe(db, shot, base_asset)
-        base_config["snapshot_complete"] = True
-        base_config["incomplete_reasons"] = []
+        # 只有真的复用了分镜图快照才算「完整」；从未生成过任何产物时没有快照可复用，
+        # 必须保留 incomplete 标记，否则页面会把空的画幅/模型参数当成可信值。
+        if fallback_from == "keyframe":
+            base_config["snapshot_complete"] = True
+            base_config["incomplete_reasons"] = []
         base_config["locked"] = {**base_config.get("locked", {}), "refs": False, "params": False}
         # 基础快照来自图片工作流，直接沿用会让 ref_image 落到图片槽位（显示为未映射）；
         # 改用能接收分镜图的视频工作流，与真实出视频时的选择口径一致
@@ -793,7 +830,8 @@ def get_regenerate_workspace(
         "saved_version": (saved or {}).get("version"),
         "base_snapshot_complete": bool(base_config.get("snapshot_complete")),
         "incomplete_reasons": base_config.get("incomplete_reasons") or [],
-        "base_asset_id": base_asset.id,
+        # 该镜头从未出过任何产物时没有基础资产，此处为 None（页面按 snapshot_complete=false 提示）
+        "base_asset_id": base_asset.id if base_asset is not None else None,
         # keyframe 表示该镜头尚无分镜视频，参考图与正文来自分镜图快照
         "fallback_from": fallback_from,
     }
@@ -1101,6 +1139,24 @@ def post_regenerate_workspace_generate(
     else:
         _assert_reference_slots(db, shot, target, params)
     # 保存本份配置为工作台草稿，便于下次继续编辑（不影响本次已冻结的快照）
+    #
+    # 关键（2026-11-21）：保存的 references 必须来自**本次实际注入的 __media__**，
+    # 不能直接用前端 payload。前端只传 `{slot_id, asset_id}`，没有 image_url，
+    # 详情页读回时既算不出压缩编号（image_no 全 None）、也拿不到图片地址，
+    # 于是提示词 tags 退回 ['1']、槽位与提示词对不上（实测 e2e 阶段 C）。
+    from app.services.submission_persist import build_references as _build_refs
+    from app.services.workflow.capabilities import declared_reference_slots
+
+    _decl_slots = declared_reference_slots(workflow.capabilities) if workflow else []
+    _persisted_refs = _build_refs(
+        db,
+        project_id=project_id,
+        media=params.get("__media__") or {},
+        declared_slots=_decl_slots,
+    )
+    payload = dict(payload)
+    if _persisted_refs:
+        payload["references"] = _persisted_refs
     saved_row = _ws_upsert_config(
         db,
         shot=shot,

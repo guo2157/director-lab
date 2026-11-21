@@ -47,6 +47,11 @@ _DUTY_HEAD_RE = re.compile(r"^【\s*<Picture\s*\d+>\s*[:：]")
 _PREV_PICKUP_RE = re.compile(r"承接上一镜头尾帧\s*<Picture\s*\d+>|上一镜头尾帧\s*<Picture\s*\d+>")
 # 已重建过的职责块行：- <Picture 1>（当前镜头分镜图）：…
 _DUTY_LINE_RE = re.compile(r"^-\s*<(?:Picture|image)\s*(\d+)>\s*[（(]([^）)]*)[）)]")
+# 上一镜尾帧当时缺失、被降级过的承接措辞（尾帧后到时要还原）
+_PREV_DEGRADED = "按剧情与分镜图推断"
+# H3 三段式提示词的正文容器（`to_h3_clip_prompt()` 产出）。
+# 职责块必须插在这一行**之后**：模型只读它之后的画面描述。
+_H3_CONTAINER = "integrated_multimodal_description"
 
 # 槽位 → (语义类型, 中文标签)
 _SLOT_KIND: dict[str, tuple[str, str]] = {
@@ -108,6 +113,29 @@ def compressed_numbers(active_slots: Iterable[str], reference_slots: list | None
     return {slot: i for i, (_n, slot) in enumerate(ordered, start=1)}
 
 
+def final_input_key(input_key: str | None, image_no: int | None) -> str | None:
+    """把静态声明的 input_key 归一为「压缩后」的实际键名，与 image_no 严格对应。
+
+    两个语法各自保持：
+    - ``ref_images.ref_image_N``（H3，0-based）→ ``ref_image_{image_no-1}``
+    - ``images.image_N``（Qwen-Image，1-based）→ ``image_{image_no}``
+
+    为什么必须归一：执行器 `compact_reference_slots()` 会删掉未注入的槽位并把
+    剩下的键重排成 0..N-1。页面若继续展示静态键名（如分镜图写死
+    ``ref_image_1``，而它实际被压缩到 ``ref_image_0``），用户按页面的槽位号
+    去对照提示词里的 ``<Picture N>`` 必然错一位。归一后三者（页面槽位、
+    input_key、提示词编号）用同一套数字。
+    """
+    if image_no is None:
+        return input_key
+    key = str(input_key or "")
+    if _REFIMG_RE.match(key):
+        return f"ref_images.ref_image_{int(image_no) - 1}"
+    if key.startswith("images.image_"):
+        return f"images.image_{int(image_no)}"
+    return input_key
+
+
 def build_duty_block(
     numbers: dict[str, int],
     names: dict[str, str],
@@ -138,8 +166,8 @@ def build_duty_block(
             name = names.get(slot) or "角色"
             char_names.append(name)
             lines.append(
-                f"- {t}（角色 @{name} 的定妆图）：保持其面部特征、发型、服装、体型与配饰一致，"
-                "不得替换为其他角色。"
+                f"- {t}（角色 @{name} 的定妆图）：正文中 @{name} 即指这张图。"
+                "保持其面部特征、发型、服装、体型与配饰一致，不得替换为其他角色。"
             )
         elif kind == "prop":
             name = names.get(slot) or "道具"
@@ -227,10 +255,17 @@ def rebuild_prompt(
     lines = prompt.split("\n")
     out: list[str] = []
     duty_inserted = False
+    # 旧格式职责行识别（历史真实数据里存在两种写法，必须都吃掉）：
+    #   ① `- Picture 1：上一镜头尾帧，…`      ← 无尖括号，逗号分隔
+    #   ② `- Picture 2：当前镜头分镜图，是…`
+    # 不吃掉它们就会与新建的【参考图职责】块并存，同一张图出现两套互相矛盾的职责描述。
+    _legacy_duty_re = re.compile(r"^[-*]?\s*(?:Picture|图片|图)\s*\d+\s*[:：]")
     for line in lines:
         stripped = line.strip()
         # 1. 旧的职责标题行整行丢弃（会统一重建）
         if _DUTY_HEAD_RE.match(stripped):
+            continue
+        if _legacy_duty_re.match(stripped):
             continue
         # 已存在的【参考图职责】块整段丢弃，避免重复与过期编号
         if stripped.startswith("【参考图职责】"):
@@ -242,14 +277,27 @@ def rebuild_prompt(
         if stripped.startswith("本镜没有可用的上一镜尾帧"):
             continue
 
-        # 2. 跨镜承接短语先按尾帧存在与否改写（避免后续把它当普通引用删句）
+        # 2. 跨镜承接短语按尾帧存在与否改写（避免后续把它当普通引用删句）。
+        #
+        # 这里插入的编号是**新编号**，而第 3 步的重映射把文本里的编号当**旧编号**解释，
+        # 两者混在一起就会互相踩：尾帧后到时新插入的「<Picture 1>」会被当成旧的
+        # 分镜图编号再映射一次，变成「<Picture 2>」（实测）。
+        # 因此改写期间先用占位符，等第 3 步重映射跑完再还原成最终编号。
+        _PREV_TOKEN = "\x00PREVFRAME\x00"
+        if numbers:
+            _prev_slots = [s for s in numbers if slot_kind(s)[0] == "prev_frame"]
+            if _prev_slots:
+                line = line.replace(
+                    _PREV_DEGRADED, f"承接上一镜头尾帧 {_PREV_TOKEN}"
+                )
+
         def _pickup(m: re.Match) -> str:
             prev_slot = next(
                 (s for s in numbers if slot_kind(s)[0] == "prev_frame"), None
             )
             if prev_slot is None:
-                return "按剧情与分镜图推断"
-            return f"承接上一镜头尾帧 {tag(numbers[prev_slot], syntax)}"
+                return _PREV_DEGRADED
+            return f"承接上一镜头尾帧 {_PREV_TOKEN}"
 
         line = _PREV_PICKUP_RE.sub(_pickup, line)
 
@@ -284,12 +332,31 @@ def rebuild_prompt(
             if not line.strip():
                 continue
 
+        # 承接短语的占位符在第 3 步重映射之后才落成最终编号（见第 2 步注释）
+        if _PREV_TOKEN in line:
+            _prev_slots = [s for s in numbers if slot_kind(s)[0] == "prev_frame"]
+            if _prev_slots:
+                line = line.replace(
+                    _PREV_TOKEN, tag(numbers[_prev_slots[0]], syntax)
+                )
+            else:
+                line = line.replace(f"承接上一镜头尾帧 {_PREV_TOKEN}", _PREV_DEGRADED)
+                line = line.replace(_PREV_TOKEN, "")
+
         # 4. 写死数量的措辞
         line = line.replace("两张参考图中的同一人物", "上述参考图中的同一人物")
 
         out.append(line)
-        # 在「任务：」抬头之后插入职责块（只插一次）
-        if not duty_inserted and stripped.startswith("任务："):
+        # 职责块插入位置：必须落在 H3 的正文容器**之内**。
+        #
+        # H3 工作流只从 `integrated_multimodal_description:` 之后读画面描述，
+        # 这一行之前的内容模型看不见。早期版本把块插在「任务：」抬头后，
+        # 对以 `integrated_multimodal_description:` 开头的三段式提示词，
+        # 抬头根本不存在 → 块被插到最顶部 → 职责描述对模型完全无效（实测真实
+        # job_51e101cedb80 就是这种格式）。两个锚点按优先级匹配。
+        if not duty_inserted and (
+            stripped.startswith(_H3_CONTAINER) or stripped.startswith("任务：")
+        ):
             out.append("")
             out.extend(build_duty_block(numbers, names, syntax, prev_missing=prev_missing))
             duty_inserted = True
@@ -301,4 +368,31 @@ def rebuild_prompt(
     # 压缩多余空行（保留段落结构：最多一个空行）
     text = "\n".join(out)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    if duty_inserted:
+        # 职责块前后空行固定为「块前 1 个、块后 1 个」。
+        # 重建时旧块被剥掉、新块重新插入，原文本有没有空行会让空行数漂移，
+        # 破坏幂等（实测第一遍 0 个、第二遍 1 个）。这里统一收口。
+        ls = text.split("\n")
+        start = next(
+            (i for i, l in enumerate(ls) if l.startswith("【参考图职责】")), None
+        )
+        if start is not None:
+            end = start
+            while end + 1 < len(ls) and (
+                ls[end + 1].startswith("- <")
+                or ls[end + 1].startswith("角色站位固定")
+                or ls[end + 1].startswith("本镜没有可用")
+            ):
+                end += 1
+            head = ls[:start]
+            while head and not head[-1].strip():
+                head.pop()
+            tail = ls[end + 1:]
+            while tail and not tail[0].strip():
+                tail.pop(0)
+            body = ls[start:end + 1]
+            rebuilt = head + [""] + body
+            if tail:
+                rebuilt += [""] + tail
+            text = "\n".join(rebuilt)
     return text.strip() + "\n" if text.strip() else ""

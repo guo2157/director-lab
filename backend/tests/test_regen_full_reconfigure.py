@@ -101,7 +101,13 @@ def test_full_reconfigure_switches_workflow_and_records_params(client: TestClien
     db = db_mod.SessionLocal()
     try:
         row = db.get(Job, job["id"])
-        assert (row.params or {}).get("width") == 768
+        # 只传 width 不传 height 时，画布参数**故意**被剔除：
+        # 「图片画布由执行器按当前项目画幅重算」，避免 16:9 项目继续沿用
+        # 历史 768×1344 竖图画布（见 regeneration.py 的 pop width/height 分支）。
+        # 旧断言要求 width==768，与这一设计矛盾，属过期断言。
+        assert "width" not in (row.params or {})
+        assert "height" not in (row.params or {})
+        assert (row.params or {}).get("prompt") == "换工作流后的新提示词"
         assert (row.input_snapshot or {}).get("workflow_version") == 5
     finally:
         db.close()
