@@ -46,6 +46,29 @@ def _workflow_frame_size(definition: dict | None) -> tuple[int, int] | None:
     return None
 
 
+# 图片工作流画布：按项目画幅推导，像素量约 1.8MP，宽高均为 16 的倍数。
+# 分镜图与场景基准图跟随项目画幅，保证与 H3 视频输出画幅一致；
+# 角色定妆图固定 9:16 全身像、道具锚定图固定 1:1，避免主体被拉宽留白。
+_IMAGE_CANVAS_BY_RATIO = {
+    "9:16": (1024, 1792),
+    "16:9": (1792, 1024),
+    "1:1": (1344, 1344),
+}
+
+
+def _image_canvas_size(
+    aspect_ratio: str | None, entity_type: str | None = None
+) -> tuple[int, int]:
+    """图片任务画布尺寸：实体资产按类型固定，分镜图/场景基准图跟随项目画幅。"""
+    if entity_type in ("character", "asset"):
+        return _IMAGE_CANVAS_BY_RATIO["9:16"]
+    if entity_type == "prop":
+        return _IMAGE_CANVAS_BY_RATIO["1:1"]
+    return _IMAGE_CANVAS_BY_RATIO.get(
+        aspect_ratio or "", _IMAGE_CANVAS_BY_RATIO["9:16"]
+    )
+
+
 def _group_audio_inputs(rows: list[dict], max_inputs: int = 3) -> dict:
     """把镜头音频片段按说话人分组为 H3 参考音频槽位（纯函数，便于单测）。
 
@@ -1132,6 +1155,26 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             _entity_asset_type = "prop"
             _entity_obj = db.get(Prop, _peid)
             _entity_asset_name = getattr(_entity_obj, "name", None) if _entity_obj else None
+        # 图片任务画布注入：分镜图/场景基准图按项目画幅出图，角色/道具按固定画幅。
+        # 重生成链路已在建任务时剔除历史画布参数，这里只要齐全就注入；
+        # 显式同时提供 width/height 时尊重调用方（WORKFLOW.md §5.2）。
+        if job.job_type == "generate_keyframe" and not (
+            isinstance(params.get("width"), int) and isinstance(params.get("height"), int)
+        ):
+            _project_img = db.get(Project, job.project_id)
+            _canvas_type = _entity_asset_type
+            if _canvas_type is None and not job.shot_id:
+                # 非分镜的资产图（如角色+道具结合图）保持 9:16，不跟随项目画幅
+                _canvas_type = "asset"
+            params["width"], params["height"] = _image_canvas_size(
+                getattr(_project_img, "aspect_ratio", None), _canvas_type
+            )
+            _snap_img = dict(job.input_snapshot or {})
+            _snap_img["injected_params"] = {
+                k: params[k] for k in ("width", "height") if k in params
+            }
+            job.input_snapshot = _snap_img
+            db.commit()
         seed = params.get("seed")
         if seed is None:
             seed = random.randint(0, 2**31 - 1)  # random 策略：本 job 内所有种子共用

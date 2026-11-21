@@ -315,6 +315,15 @@ def post_regenerate(shot_id: str, payload: dict, db: Session = Depends(get_db)) 
 
     # 组装配送参数：媒体参数严格来自快照，确保提交内容与快照一致
     params = dict(snapshot.get("model_params") or {})
+    if target == "keyframe" and not (
+        isinstance(payload.get("params"), dict)
+        and "width" in payload["params"]
+        and "height" in payload["params"]
+    ):
+        # 图片画布由执行器按当前项目画幅重算：剔除基础版本快照里的历史尺寸，
+        # 避免 16:9 项目继续沿用旧的 768×1344 竖图画布。
+        params.pop("width", None)
+        params.pop("height", None)
     params["prompt"] = snapshot["prompt"]["rendered"]
     if snapshot["negative_prompt"]["rendered"]:
         params["negative"] = snapshot["negative_prompt"]["rendered"]
@@ -1014,6 +1023,10 @@ def post_regenerate_workspace_generate(
             consistency=consistency,
         )
     params = dict(snapshot.get("model_params") or {})
+    if target == "keyframe" and not ("width" in parameters and "height" in parameters):
+        # 同上：未显式指定画幅时由执行器按项目画幅重算，不继承历史任务尺寸。
+        params.pop("width", None)
+        params.pop("height", None)
     params["prompt"] = snapshot["prompt"]["rendered"]
     if snapshot["negative_prompt"]["rendered"]:
         params["negative"] = snapshot["negative_prompt"]["rendered"]

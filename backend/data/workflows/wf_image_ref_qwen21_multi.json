@@ -204,7 +204,7 @@
   "5": {
     "class_type": "EmptyLatentImage",
     "_meta": {
-      "title": "画布 (9:16 固定画幅)"
+      "title": "画布, $width, $height"
     },
     "inputs": {
       "width": 1024,
