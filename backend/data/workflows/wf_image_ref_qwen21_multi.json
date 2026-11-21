@@ -207,8 +207,8 @@
       "title": "画布 (9:16 固定画幅)"
     },
     "inputs": {
-      "width": 768,
-      "height": 1344,
+      "width": 1024,
+      "height": 1792,
       "batch_size": 1
     }
   },
