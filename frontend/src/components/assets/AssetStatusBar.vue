@@ -53,16 +53,16 @@ const nextTitle = () => {
 
 <template>
   <StageCard label="执行进度">
-    <span class="nums" :class="{ 'is-done': allDone }">
+    <span class="stage-nums" :class="{ 'is-done': allDone }">
       <b>{{ done }}</b><span class="sep">/</span>{{ total }}
       <span class="pct">{{ percent() }}%</span>
     </span>
     <n-progress
-      class="bar"
+      class="stage-bar"
       type="line"
       :percentage="percent()"
-      :height="4"
-      :border-radius="2"
+      :height="6"
+      :border-radius="3"
       :show-indicator="false"
       :color="allDone ? 'var(--state-success)' : 'var(--brand-primary)'"
       rail-color="var(--border-subtle)"
@@ -90,33 +90,9 @@ const nextTitle = () => {
 </template>
 
 <style scoped>
-.nums {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 2px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.nums b {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.nums.is-done b {
-  color: var(--state-success);
-}
-.sep {
-  color: var(--text-tertiary);
-}
-.pct {
-  margin-left: var(--sp-2);
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-.bar {
-  width: 84px;
-  flex: none;
-}
+/* 进度数字与进度条的样式已收进 global.css 的 .stage-nums / .stage-bar：
+ * 三个页面的「执行进度」卡共用同一份口径，页面内不再各写一套。
+ * 曾在这里写 .nums / .bar（13px + 84px 固定条），与分镜图页的 12px + flex:1
+ * 不一致 —— 同一套 StageCard、同一个「执行进度」标签，数字与条长却各不相同。
+ */
 </style>

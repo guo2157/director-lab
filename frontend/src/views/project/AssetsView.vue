@@ -656,12 +656,28 @@ async function handleBatchCraft() {
     message.warning('请先勾选要生成的资产')
     return
   }
+  /**
+   * 幂等：已生成过的资产直接跳过，不重新提交。
+   *
+   * 旧实现无脑逐个提交，用户点「全选」→「批量生成」时，
+   * 已生成好的定妆图/基准图/锚定图被全部重做，覆盖掉人工挑过的结果，
+   * 还白烧 GPU。后端单实体接口（/characters/{id}/generate 等）只查在途任务、
+   * 不查已生成，所以必须在提交前用 `done` 过滤。
+   *
+   * 需要重做时走卡片上的「重生成」——那是明确的主动意图，不受此限制。
+   */
+  const todo = picked.filter((i) => !i.done)
+  const skippedDone = picked.length - todo.length
+  if (!todo.length) {
+    message.info(`勾选的 ${picked.length} 个资产均已生成，无需重复生成；如需重做请用卡片上的「重生成」`)
+    return
+  }
   batchCrafting.value = true
   const submittedItems: CraftItem[] = []
   const jobIds: string[] = []
   const failed: string[] = []
   try {
-    for (const it of picked) {
+    for (const it of todo) {
       try {
         const res =
           it.kind === 'character'
@@ -678,7 +694,11 @@ async function handleBatchCraft() {
     }
     if (submittedItems.length) {
       trackSubmitted(submittedItems, jobIds)
-      message.success(`已提交 ${submittedItems.length} 个图生成任务，进度见上方工具栏`)
+      message.success(
+        skippedDone
+          ? `已提交 ${submittedItems.length} 个图生成任务（跳过 ${skippedDone} 个已生成的），进度见上方工具栏`
+          : `已提交 ${submittedItems.length} 个图生成任务，进度见上方工具栏`,
+      )
       // 提交后立即建基线并开始轮询，全部结束后统一提示
       await assetProgress.start({ notifyOnComplete: true })
     }

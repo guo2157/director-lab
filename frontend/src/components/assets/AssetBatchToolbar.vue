@@ -131,9 +131,11 @@ watch(someChecked, (v) => {
   font-size: 13px;
   color: var(--text-primary);
 }
+/* 失败项：红色文字 + 「重试失败项」次按钮成组出现，
+   与主按钮之间由 StageCard 的 actions gap 隔开。 */
 .failed {
   font-size: 12px;
-  color: var(--state-danger);
+  color: var(--danger-text);
 }
 .batch-nums {
   font-family: var(--font-mono);

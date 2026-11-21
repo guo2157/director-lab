@@ -281,6 +281,7 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
         _TARGET_WF_TYPE, _check_keyframe_ready, _create_job, _match_workflow,
         _match_workflow_exact, _apply_chain_mode,
         _filter_already_generated, _workflow_binds_param,
+        _filter_entity_generated,
     )
     # 批量出视频方式（仅 clip）：independent 独立并行 / chained 链式串行（与项目级批量接口一致）
     chain_mode = payload.get("chain_mode") if plan_type == "clip" else None
@@ -353,10 +354,27 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
                 wf = _plain_wf
         model = ENTITY_PLAN_MODEL[plan_type]
         owner_key = {"character": "__character_id__", "scene": "__scene_id__", "prop": "__prop_id__"}[plan_type]
+        # 幂等过滤（P0）：已由同一工作流生成过当前有效定妆图/基准图/锚定图的实体跳过。
+        # 旧实现只对分镜视频判重，实体资产完全没有判重 —— 资产库点「全选」→
+        # 「批量生成」，已生成好的定妆图被全部重做，覆盖掉人工挑过的结果。
+        # 需要重做时走卡片上的「重生成」，不受此处限制。
+        _entities = [db.get(model, p.owner_id) for p in plans if p.owner_id]
+        _entities = [e for e in _entities if e is not None]
+        _, _already_entities = _filter_entity_generated(
+            db, _entities, plan_type, wf.id, wf.version)
+        _already_entity_ids = {d["entity_id"] for d in _already_entities}
         for plan in plans:
             entity = db.get(model, plan.owner_id) if plan.owner_id else None
             if entity is None:
                 skipped.append({"plan_id": plan.id, "reason": "owner_not_found"})
+                continue
+            if entity.id in _already_entity_ids:
+                skipped.append({
+                    "plan_id": plan.id,
+                    "entity_id": entity.id,
+                    "reason": "already_generated",
+                    "workflow_id": wf.id,
+                })
                 continue
             params = {owner_key: entity.id}
             if plan.prompt:

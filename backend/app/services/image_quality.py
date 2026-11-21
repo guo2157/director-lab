@@ -87,8 +87,14 @@ def _detect_border(gray) -> str | None:
         b_std = (sum((v - b_mean) ** 2 for v in b_vals) / len(b_vals)) ** 0.5
         i_mean = sum(i_vals) / len(i_vals)
         extreme = sum(1 for v in b_vals if v <= _BAND_EXTREME_DARK or v >= _BAND_EXTREME_LIGHT) / len(b_vals)
-        if extreme >= _BAND_EXTREME_RATIO:
-            return f"{name}存在纯黑/纯白边条（极端像素占比 {extreme:.1%}），疑似边框或拼贴"
+        # 极端条带还必须与内侧存在明显亮度跃变才算边框：
+        # 纯白/纯黑背景的定妆图（角色、道具）整条边缘本就是同一种背景色，
+        # 白色会连续向内延伸，与内侧均值差接近 0，属正常留白而非拼贴边框。
+        if extreme >= _BAND_EXTREME_RATIO and abs(b_mean - i_mean) >= _BAND_CONTRAST_MIN:
+            return (
+                f"{name}存在纯黑/纯白边条（极端像素占比 {extreme:.1%}，"
+                f"与内侧均值差 {abs(b_mean - i_mean):.1f}），疑似边框或拼贴"
+            )
         # 均匀条带只有在自身接近纯黑/纯白时才算边框：
         # 浅灰均匀条带（如 240 留白）与内侧有内容形成对比属正常构图，不是边框或裁切
         band_solid = b_mean <= _BAND_SOLID_DARK_MAX or b_mean >= _BAND_SOLID_LIGHT_MIN

@@ -58,13 +58,25 @@ withDefaults(
   min-width: 0;
 }
 
-/* 左侧标签列：固定宽度，两张卡靠它对齐成同一套系统 */
+/* 左侧标签列：固定宽度，两张卡靠它对齐成同一套系统。
+ *
+ * 宽度 60px → 68px（2026-11-21 实测 1440×900）：
+ * 五个标签里「批量出视频」是 5 个字，在 12px + 0.06em 字距下实测 64px，
+ * 比 60px 的固定列宽还宽 4px。于是分镜看板的两张卡标签列一个 60px、
+ * 一个 64px —— 同一个页面里两张卡的内容左边缘差 4px，对齐轴当场失效。
+ * 68px 让四个标签（执行进度 / 批量生成 / 批量出图 / 批量出视频）都落在
+ * 同一列宽内，且留 4px 余量。
+ */
 .stage-label {
-  flex: 0 0 60px;
+  flex: 0 0 68px;
+  /* 12px/400 在深色底上可读，但字重太轻，和旁边的数值、控件混在同一视觉层级，
+     读起来像脚注而不是分区标签。提到 500，并收掉 0.06em 的宽字距
+     （宽字距是「eyebrow 小标」语汇，这里已是固定列，不需要再靠字距拉开）。 */
   font-size: 12px;
+  font-weight: 500;
   line-height: 24px;
-  letter-spacing: 0.06em;
-  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
   white-space: nowrap;
 }
 
@@ -93,7 +105,7 @@ withDefaults(
   gap: var(--sp-2) var(--sp-3);
   flex-wrap: wrap;
   margin-top: var(--sp-2);
-  padding-left: calc(60px + var(--sp-4));
+  padding-left: calc(68px + var(--sp-4));
   font-size: 12px;
   line-height: 19px;
   color: var(--text-secondary);

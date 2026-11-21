@@ -208,11 +208,8 @@ const progressPercent = computed(() => {
   return Math.round((keyframeShots.value.length / total) * 100)
 })
 
-/** 顶部进度数字：已出图 / 全部镜头（百分比）。状态句已删除——
- *  「正在生成 N 张」「已全部生成完成」这类叙述与数字、进度条、卡片状态标签重复。 */
-const progressNums = computed(
-  () => `${keyframeShots.value.length}/${allShots.value.length}（${progressPercent.value}%）`,
-)
+/** 顶部进度数字已改为模板内直接绑定（与资产库同构：已完成数加粗 + 分母/百分比次级色），
+ *  不再需要拼接字符串的 computed。 */
 
 function inflightTextOf(shot: Shot): string {
   const job = inflightByShot.value.get(shot.id)
@@ -352,10 +349,22 @@ async function submitByPlans(picked: Shot[]) {
       return
     }
     const gen = await generateFromPlans(projectId.value, { plan_type: 'keyframe', plan_ids: planIds })
-    message.success(`已按定义提交 ${gen.count} 个分镜图任务，正在生成（进度见顶部进度条）`)
-    if (gen.skipped?.length) {
-      const reasons = [...new Set(gen.skipped.map((s) => s.reason))].join('、')
-      message.info(`另有 ${gen.skipped.length} 条定义被跳过：${reasons}`)
+    // already_generated 单独提示：用户点了「全选」时最需要知道的就是
+    // 「哪些没被重做、为什么」——原始 reason 代码（already_generated）不可读
+    const doneCount = (gen.skipped ?? []).filter((s: any) => s.reason === 'already_generated').length
+    const otherSkipped = (gen.skipped ?? []).filter((s: any) => s.reason !== 'already_generated')
+    if (gen.count > 0) {
+      message.success(
+        doneCount
+          ? `已提交 ${gen.count} 个分镜图任务，跳过 ${doneCount} 个已生成的`
+          : `已提交 ${gen.count} 个分镜图任务，正在生成（进度见顶部进度条）`,
+      )
+    } else if (doneCount) {
+      message.info(`${doneCount} 个分镜图已生成过，无需重做；如需重画请在镜头卡片上点「重新生成」`)
+    }
+    if (otherSkipped.length) {
+      const reasons = [...new Set(otherSkipped.map((s: any) => s.reason))].join('、')
+      message.info(`另有 ${otherSkipped.length} 条定义被跳过：${reasons}`)
     }
     await trackAfterSubmit()
   } catch (e: any) {
@@ -484,9 +493,13 @@ function onFirstGenerate(shot: Shot, prompt: string) {
         @click="activeEpisode = ep"
       >第 {{ ep }} 集</button>
       <span v-if="allEpisodes.length" class="gen-sep" aria-hidden="true" />
-      <span class="gen-nums">{{ progressNums }}</span>
+      <!-- 进度数字与资产库同构：已完成数加粗突出，分母与百分比次级色 -->
+      <span class="stage-nums" :class="{ 'is-done': progressPercent === 100 }">
+        <b>{{ keyframeShots.length }}</b><span class="sep">/</span>{{ allShots.length }}
+        <span class="pct">{{ progressPercent }}%</span>
+      </span>
       <n-progress
-        class="gen-bar"
+        class="stage-bar"
         type="line"
         :percentage="progressPercent"
         :height="6"
@@ -653,15 +666,9 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   background: var(--border-subtle);
   flex: none;
 }
-.gen-bar {
-  flex: 1;
-  min-width: 120px;
-}
-.gen-nums {
-  font-size: 12px;
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
-}
+/* 进度数字（.stage-nums）与进度条（.stage-bar）的样式已收进 global.css，
+ * 三页「执行进度」卡共用同一份口径。这里曾写 .gen-bar { flex: 1 } 与
+ * .gen-nums { font-size: 12px }，与资产库的 4px 条 / 13px 数字不一致。 */
 .gen-sub {
   display: flex;
   align-items: center;

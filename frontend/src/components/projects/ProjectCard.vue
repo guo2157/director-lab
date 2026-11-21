@@ -135,6 +135,7 @@ function onCardKey(e: KeyboardEvent) {
 <template>
   <article
     class="project-card"
+    :class="{ 'is-landscape': project.aspect_ratio === '16:9', 'is-square': project.aspect_ratio === '1:1' }"
     role="button"
     tabindex="0"
     :aria-label="`打开作品 ${project.name}`"
@@ -308,11 +309,30 @@ function onCardKey(e: KeyboardEvent) {
   background: linear-gradient(160deg, var(--bg-elevated) 0%, var(--bg-sunken) 100%);
 }
 /* 按项目画幅覆盖容器比例；占位态与有图态共用同一套，避免混排时高矮不齐 */
-.cover.cover-16-9 {
-  aspect-ratio: 16 / 9;
-}
-.cover.cover-1-1 {
-  aspect-ratio: 1 / 1;
+/* 已废弃（2026-11-21）：容器不再跟随画幅，统一 3:4。
+ * 原因见下方「画幅比例」注释 —— 16:9 容器与 9:16 并排时封面高度差 240px，
+ * 导致文字/进度条基线错开约 100px，横向扫读失效。
+ * 保留空规则会让人误以为画幅仍影响容器，直接删除。 */
+
+/* 画幅比例：**所有卡片封面容器统一 3:4**，不再按项目画幅改变容器比例。
+ *
+ * 为什么放弃「容器跟随画幅」（2026-11-21 第二次修正）：
+ * 早先 16:9 项目用 `aspect-ratio: 16/9` 的封面容器，结果与 9:16 卡片并排时
+ * 封面高度差 240px（176 vs 417），同行卡片被 stretch 拉成等高后，
+ * 横屏卡的信息区下方空出一大片，且两张卡的标题/进度条基线错开约 100px，
+ * 横向扫读时完全对不上。
+ *
+ * 现在的做法：容器统一 3:4（视觉重量一致、文字与进度条天然对齐），
+ * 横屏/方形图用 object-fit: contain 居中完整显示，不裁切。
+ * 卡片左上角的「16:9 横屏」角标继续如实标注项目画幅。
+ */
+/* 横屏 / 方形项目：图完整显示（contain），居中，上下留出渐变底。
+   不再用 cover 裁切 —— 16:9 图塞进 3:4 容器若用 cover 会左右各裁掉约 25%，
+   实测人物头部被切、只剩躯干，等于把封面图废掉。 */
+.project-card.is-landscape .cover-img,
+.project-card.is-square .cover-img {
+  object-fit: contain;
+  object-position: center center;
 }
 
 /* 网格底纹：24px 细线，给「空封面」一点材质，而不是一块死黑。

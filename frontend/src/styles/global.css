@@ -380,6 +380,54 @@ body {
   font-size: 13px;
 }
 
+/* ===== 阶段卡（执行进度 / 批量操作）内的进度数字与进度条 =====
+ *
+ * 三个页面（资产库 / 分镜图 / 分镜看板）顶部各有一张「执行进度」卡，
+ * 都走 StageCard 同一个容器，但内容样式此前各写一套，实测漂移如下：
+ *
+ *   页面        进度条高度   flex 基准          数字字号
+ *   资产库        4px       1 1 auto          13px（<b> 15px/600）
+ *   分镜图        6px       1                 13px（<b> 15px/600）
+ *   分镜看板      6px       1 1 160px         13px（<b> 15px/600）
+ *
+ * 4px 与 6px 在同一屏里肉眼可分；`1 1 160px` 让看板的条在窄屏上比另两页
+ * 更早换行。这里收成唯一口径，页面里不再重复定义。
+ */
+.stage-nums {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  /* 数字列宽度固定，避免「5/10」变「12/25」时进度条左右跳动 */
+  flex: none;
+}
+.stage-nums b {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+/* 全部完成：只让已完成数变绿，不整行变色（分母与百分比保持次级色） */
+.stage-nums.is-done b {
+  color: var(--state-success);
+}
+.stage-nums .sep {
+  color: var(--text-tertiary);
+}
+.stage-nums .pct {
+  margin-left: var(--sp-2);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+/* 进度条吃掉剩余宽度：三页统一 `1 1 auto` + 120px 下限。
+   下限保证窄屏上条仍有可读长度，而不是缩成一条看不清的短线。 */
+.stage-bar {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+
 /* ===== 可访问性基线 ===== */
 :focus-visible {
   outline: 2px solid var(--brand-hover);

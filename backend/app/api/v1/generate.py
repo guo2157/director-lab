@@ -1025,27 +1025,52 @@ def _filter_inflight(db: Session, shots: list, target: str) -> tuple[list, list]
     return ok, skipped
 
 
+def _already_generated_message(target: str, count: int) -> str:
+    """已生成跳过时的用户提示：分镜图与分镜视频的重做入口不同，文案必须分开。
+
+    旧实现两处都写死「生成过视频…请在分镜视频详情页重新生成」，
+    但 keyframe 也走这个分支后，批量出图时会提示用户去「分镜视频详情页」重做，
+    指向错误的页面。
+    """
+    if target == "clip":
+        return (f"选中镜头均已由该工作流生成过分镜视频（{count} 个），"
+                f"如需重做请在分镜视频详情页重新生成")
+    return (f"选中镜头均已由该工作流生成过分镜图（{count} 个），"
+            f"如需重画请在镜头卡片上点「重新生成」")
+
+
 def _filter_already_generated(db: Session, shots: list, target: str,
                              wf_id: str | None, wf_version: int | None) -> tuple[list, list]:
-    """批量生成幂等过滤（仅分镜视频 clip）：跳过已由同一工作流生成过当前有效视频的镜头。
+    """批量生成幂等过滤：跳过已由同一工作流生成过当前有效产物的镜头。
 
-    判定口径：镜头存在 validity=current 的 clip 资产，其来源任务 succeeded，
-    且该任务的 workflow_id 与本次批量使用的工作流一致。
-    目的：重复点击批量出视频不会对已产出的镜头再次创建任务、重复消耗 ComfyUI。
-    重新生成走详情页的 regenerate-clip / regenerate 接口，不受此处限制。
+    判定口径：镜头存在 validity=current 的对应资产（keyframe/clip），其来源任务
+    succeeded，且该任务的 workflow_id 与本次批量使用的工作流一致。
+    目的：重复点击批量出图/出视频不会对已产出的镜头再次创建任务、重复消耗 GPU。
+    重新生成走详情页的 regenerate 接口，不受此处限制。
+
+    ## 为什么 keyframe 也要过滤（2026-11-21 修复）
+
+    旧实现开头是 `if target != "clip": return shots, []` —— 只对分镜视频幂等，
+    分镜图完全不判重。实测用户操作：分镜图页 26 镜已全部生成 → 点「全选」
+    → 点「批量生成」，26 张图被**全部重新渲染**，既浪费 GPU 又覆盖掉已确认的图。
+    资产库的角色定妆图 / 场景基准图 / 道具锚定图同理（见 _filter_entity_generated）。
+
+    注意：`target` 与 Asset.asset_type 的对应关系是 1:1（keyframe/clip），
+    分镜视频仍额外要求工作流一致——换工作流重做是合法的主动行为。
     """
-    if target != "clip" or not wf_id or not shots:
+    if target not in ("keyframe", "clip") or not wf_id or not shots:
         return shots, []
     shot_ids = [s.id for s in shots]
+    job_type = "generate_clip" if target == "clip" else "generate_keyframe"
     rows = (
         db.query(Job.shot_id)
         .join(Asset, Asset.source_job_id == Job.id)
         .filter(
             Job.shot_id.in_(shot_ids),
-            Job.job_type == "generate_clip",
+            Job.job_type == job_type,
             Job.status == "succeeded",
             Job.workflow_id == wf_id,
-            Asset.asset_type == "clip",
+            Asset.asset_type == target,
             Asset.validity == "current",
         )
         .distinct()
@@ -1065,6 +1090,57 @@ def _filter_already_generated(db: Session, shots: list, target: str,
             })
         else:
             ok.append(s)
+    return ok, skipped
+
+
+def _filter_entity_generated(db: Session, entities: list, plan_type: str,
+                             wf_id: str | None, wf_version: int | None) -> tuple[list, list]:
+    """实体资产批量生成幂等过滤：角色定妆图 / 场景基准图 / 道具锚定图。
+
+    实体资产没有 shot_id，归属通过 job.params 里的 owner key 关联，
+    产物指针写在实体表上（portrait_asset_id / baseline_asset_id / anchor_asset_id）。
+
+    判定口径：实体已有指向 current 有效资产的指针，且该资产来源任务 succeeded、
+    工作流与本次一致 → 跳过。重新生成走卡片上的「重生成」，不受此限制。
+
+    实测问题：资产库点「全选」→「批量生成角色定妆图」，已生成好的定妆图被
+    全部重做，覆盖掉人工挑过的结果。
+    """
+    if not entities or not wf_id:
+        return entities, []
+    pointer_attr = {
+        "character": "portrait_asset_id",
+        "scene": "baseline_asset_id",
+        "prop": "anchor_asset_id",
+    }.get(plan_type)
+    if pointer_attr is None:
+        return entities, []
+
+    done: set[str] = set()
+    for e in entities:
+        asset_id = getattr(e, pointer_attr, None)
+        if not asset_id:
+            continue
+        asset = db.get(Asset, asset_id)
+        if asset is None or asset.validity != "current":
+            continue
+        src = db.get(Job, asset.source_job_id) if asset.source_job_id else None
+        if src is not None and src.status == "succeeded" and src.workflow_id == wf_id:
+            done.add(e.id)
+
+    if not done:
+        return entities, []
+    ok, skipped = [], []
+    for e in entities:
+        if e.id in done:
+            skipped.append({
+                "entity_id": e.id,
+                "reason": "already_generated",
+                "workflow_id": wf_id,
+                "workflow_version": wf_version,
+            })
+        else:
+            ok.append(e)
     return ok, skipped
 
 
@@ -1452,7 +1528,7 @@ def generate_scene_shots(scene_id: str, payload: dict, db: Session = Depends(get
     if not shots:
         raise errors.AppError(
             "already_generated",
-            f"选中镜头均已由该工作流生成过视频（{len(already_done)} 个），如需重做请在分镜视频详情页重新生成",
+            _already_generated_message(target, len(already_done)),
             409,
         )
     # @引用注入（D-16，P0 修复）：与单镜生成/项目批量生成行为一致，
@@ -1561,7 +1637,7 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
     if not shots:
         raise errors.AppError(
             "already_generated",
-            f"选中镜头均已由该工作流生成过视频（{len(already_done)} 个），如需重做请在分镜视频详情页重新生成",
+            _already_generated_message(target, len(already_done)),
             409,
         )
     jobs = []
