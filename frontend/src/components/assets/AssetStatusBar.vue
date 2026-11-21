@@ -58,7 +58,7 @@ const nextTitle = () => {
       <span class="pct">{{ percent() }}%</span>
     </span>
     <n-progress
-      class="stage-bar"
+      class="stage-progress"
       type="line"
       :percentage="percent()"
       :height="6"
@@ -90,7 +90,7 @@ const nextTitle = () => {
 </template>
 
 <style scoped>
-/* 进度数字与进度条的样式已收进 global.css 的 .stage-nums / .stage-bar：
+/* 进度数字与进度条的样式已收进 global.css 的 .stage-nums / .stage-progress：
  * 三个页面的「执行进度」卡共用同一份口径，页面内不再各写一套。
  * 曾在这里写 .nums / .bar（13px + 84px 固定条），与分镜图页的 12px + flex:1
  * 不一致 —— 同一套 StageCard、同一个「执行进度」标签，数字与条长却各不相同。

@@ -499,7 +499,7 @@ function onFirstGenerate(shot: Shot, prompt: string) {
         <span class="pct">{{ progressPercent }}%</span>
       </span>
       <n-progress
-        class="stage-bar"
+        class="stage-progress"
         type="line"
         :percentage="progressPercent"
         :height="6"
@@ -666,7 +666,7 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   background: var(--border-subtle);
   flex: none;
 }
-/* 进度数字（.stage-nums）与进度条（.stage-bar）的样式已收进 global.css，
+/* 进度数字（.stage-nums）与进度条（.stage-progress）的样式已收进 global.css，
  * 三页「执行进度」卡共用同一份口径。这里曾写 .gen-bar { flex: 1 } 与
  * .gen-nums { font-size: 12px }，与资产库的 4px 条 / 13px 数字不一致。 */
 .gen-sub {

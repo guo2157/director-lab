@@ -1,26 +1,28 @@
 <script setup lang="ts">
 /**
- * 四步流程条：初始剧本 → 校验补充 → 保存版本 → 开始分析。纯展示。
+ * 剧本页三步流程条：剧本编辑 → 内容校验 → 版本已存。纯展示。
  *
  * 视觉要点（对齐 pixmax 语汇）：
- * 1. 步骤之间必须有连接线 —— 否则四段文字只是一排并列标签，读不出「流程」。
+ * 1. 步骤之间必须有连接线 —— 否则三段文字只是一排并列标签，读不出「流程」。
  * 2. 三档状态靠「形状 + 颜色」双编码，不能只靠颜色深浅：
  *      已完成 = 实心浅底 + 对勾
  *      当前   = 品牌胶囊 + 发光描边 + 序号
  *      未到达 = 透明底 + 虚线描边 + 序号
  * 3. 所有档位共用同一套 padding/border 宽度，切换时不发生位移。
+ *
+ * 状态去重（2026-11-21）：本组件曾额外渲染「已锁稿」徽标，加上页头的
+ * 「版本已保存」、右侧的禁用按钮「已锁稿」，同一件事在一屏里说了 4 遍。
+ * 现在职责单一：**本组件只回答「流程走到第几步」**，保存/锁稿状态统一由
+ * 页头状态点 + 右侧按钮文案表达。
+ * 因此不再需要 savedVersion / locked 两个 props。
  */
 import { NIcon } from 'naive-ui'
 import { Checkmark } from '@vicons/ionicons5'
-type SaveVersion = { version: number } | null
 
 defineProps<{
   steps: ReadonlyArray<{ key: string; label: string }>
   /** 当前阶段下标；之前的视为已完成 */
   index: number
-  savedVersion: SaveVersion
-  /** 解析已确认 → 剧本锁稿，阶段条上以「已锁稿」代替版本号 */
-  locked?: boolean
 }>()
 </script>
 
@@ -37,9 +39,6 @@ defineProps<{
           <template v-else>{{ i + 1 }}</template>
         </span>
         <span class="stage-label">{{ s.label }}</span>
-        <!-- 单版本模式：不显示 v1/v2 —— 项目只有一份剧本，版本号是纯噪音。
-             解析后锁稿状态改由「已锁稿」表达，比版本数字有用。 -->
-        <span v-if="s.key === 'saved' && savedVersion && locked" class="stage-extra">已锁稿</span>
       </div>
       <!-- 连接线：只在「已经走到」的段位点亮，未到达的段位保持中性，让进度方向一眼可读 -->
       <span
@@ -127,11 +126,9 @@ defineProps<{
   transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
-.stage-extra {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
+/* .stage-extra 已删除（2026-11-21）：它只服务于「已锁稿」徽标，
+   而该徽标与页头状态、右侧按钮文案三处重复，已移除。
+   保留空规则会让后来者以为还有额外状态位。 */
 
 /* 连接线：走完的段位用品牌渐变，未走的用中性描边色 */
 .stage-link {

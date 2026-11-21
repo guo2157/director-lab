@@ -433,8 +433,15 @@ body {
   color: var(--text-tertiary);
 }
 /* 进度条吃掉剩余宽度：三页统一 `1 1 auto` + 120px 下限。
-   下限保证窄屏上条仍有可读长度，而不是缩成一条看不清的短线。 */
-.stage-bar {
+   下限保证窄屏上条仍有可读长度，而不是缩成一条看不清的短线。
+ *
+ * 命名注意：这里叫 .stage-progress，不能叫 .stage-bar ——
+ * ScriptStageBar.vue（剧本页的三步流程条）已经用了 .stage-bar 作为容器类名，
+ * 而那是全局作用域里的同名类。曾用 .stage-bar 导致全局的
+ * `flex: 1 1 auto` 覆盖掉步骤条的 `flex-shrink: 0`，
+ * 把本该 42px 高的步骤条撑成 379px，正文编辑器被压到只剩 295px。
+ * 全局类名必须带语义前缀，避免与页面/组件类撞名。 */
+.stage-progress {
   flex: 1 1 auto;
   min-width: 120px;
 }

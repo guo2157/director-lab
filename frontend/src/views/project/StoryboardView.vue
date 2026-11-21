@@ -665,7 +665,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         :show-indicator="false"
         :color="clipProgress.data.value?.all_done ? 'var(--state-success)' : 'var(--brand-primary)'"
         rail-color="var(--border-subtle)"
-        class="stage-bar"
+        class="stage-progress"
       />
 
       <template #meta>
@@ -947,7 +947,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   background: var(--border-subtle);
   flex: none;
 }
-/* 进度数字（.stage-nums）与进度条（.stage-bar）的样式已收进 global.css，
+/* 进度数字（.stage-nums）与进度条（.stage-progress）的样式已收进 global.css，
    三页「执行进度」卡共用同一份口径。这里曾写 `.gen-bar { flex: 1 1 160px }`
    与 `.gen-nums` 一整套，与资产库的 4px 条 / 分镜图的 `flex: 1` 都不一致。 */
 .gen-state { color: var(--text-secondary); }

@@ -258,6 +258,28 @@ const { data: projectData } = useQuery({
 })
 const scriptLocked = computed(() => !!projectData.value?.current_parse_version_id)
 
+/**
+ * 页头状态：只回答「当前正文和已存版本是否一致」。
+ *
+ * 三种情况：
+ *   只读   —— 已解析完成并锁稿，正文不可编辑（此时「脏没脏」无意义）
+ *   已保存 —— 正文与最近一次保存的版本一致
+ *   未保存 —— 正文有改动，或还没保存过
+ *
+ * 措辞刻意不用「已锁稿」：右侧操作区已有一枚「已锁稿」徽标说明锁稿这件事，
+ * 页头再说一遍就是同一个状态两处重复。这里说的是**这份正文的可编辑性**
+ * （只读），与「锁稿」这个流程动作区分开。
+ *
+ * 也不再复用 stage === 'saved' 的文案「版本已保存」：那句话和步骤条第 3 步的
+ * 「版本已存」完全同义，一屏两遍。职责划分：
+ *   页头说「能不能改 / 脏没脏」/ 步骤条说「走到第几步」/ 按钮说「能做什么」。
+ */
+const dirtyState = computed<{ text: string; cls: string }>(() => {
+  if (scriptLocked.value) return { text: '只读', cls: 'is-locked' }
+  if (stage.value === 'saved') return { text: '已保存', cls: 'is-done' }
+  return { text: '未保存', cls: '' }
+})
+
 /* ---------- 加载当前剧本 ---------- */
 const { data: scriptData } = useQuery({
   queryKey: computed(() => ['currentScript', projectId.value]),
@@ -304,8 +326,12 @@ watch(
           <span class="step-title">
             <span class="step-title-no">01</span>
             <span class="step-title-text">剧本</span>
-            <span class="step-title-state" :class="{ 'is-done': stage === 'saved' }">
-              {{ stage === 'saved' ? '版本已保存' : '编辑中' }}
+            <!-- 状态点回答「当前正文与已存版本是否一致」——这是页头独有的信息。
+                 改前这里写「版本已保存 / 编辑中」，而步骤条第 3 步同样写着
+                 「版本已存」、右侧按钮又写「保存版本/已锁稿」，同一件事三处重复。
+                 现在：页头说「脏没脏」，步骤条说「走到第几步」，按钮说「能做什么」。 -->
+            <span class="step-title-state" :class="dirtyState.cls">
+              {{ dirtyState.text }}
             </span>
           </span>
         </div>
@@ -324,16 +350,28 @@ watch(
         >
           {{ normalizing ? '校验中…' : normalizeResult ? '查看校验结果' : '校验补充' }}
         </NButton>
+        <!-- 保存版本：锁稿后不再是「可点但被禁用」的按钮，而是一个纯状态标签。
+             改前锁稿后这里渲染成禁用按钮「已锁稿」—— 一个永远点不了的按钮占着
+             操作位，既挤占横向空间（实测该按钮 64px），又让用户误以为还有操作可做。
+             状态不是操作，不该长成按钮的样子。 -->
+        <span
+          v-if="scriptLocked"
+          class="locked-badge"
+          title="剧本已解析完成并锁稿，如需修改请到解析页「重新解析」"
+        >
+          已锁稿
+        </span>
         <NButton
+          v-else
           size="small"
           :type="stage === 'saved' ? 'default' : 'primary'"
           :loading="saving"
-          :disabled="!textValid || saving || scriptLocked"
-          :title="scriptLocked ? '剧本已解析完成并锁稿，如需修改请到解析页「重新解析」' : (!textValid ? '剧本正文为空或超出字数上限，无法保存版本' : undefined)"
-          :aria-label="scriptLocked ? '保存版本（不可用：剧本已锁稿）' : (!textValid ? '保存版本（不可用：剧本正文为空或超出上限）' : '保存版本')"
+          :disabled="!textValid || saving"
+          :title="!textValid ? '剧本正文为空或超出字数上限，无法保存版本' : undefined"
+          :aria-label="!textValid ? '保存版本（不可用：剧本正文为空或超出上限）' : '保存版本'"
           @click="saveVersionMut()"
         >
-          {{ saving ? '保存中…' : scriptLocked ? '已锁稿' : (savedVersion ? '重新保存' : '保存版本') }}
+          {{ saving ? '保存中…' : savedVersion ? '重新保存' : '保存版本' }}
         </NButton>
         <!-- 去解析：保存后本页唯一的前进出口，主按钮位随之让给它 -->
         <NButton v-if="stage === 'saved'" size="small" type="primary" @click="goParse()">
@@ -343,10 +381,9 @@ watch(
     </header>
 
     <!-- 三步流程指示：剧本编辑 → 内容校验 → 版本已存。
-         不再传 hint：原 hint 三句里「编辑后建议先校验」「校验已完成，下一步保存」
-         「版本已保存，可以进入解析」都在复述右侧按钮已经说的事（按钮文案本身就是
-         下一步动作），且第三句是恒真陈述——保存完成后永远显示，不携带变化信息。 -->
-    <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" :locked="scriptLocked" />
+         只回答「流程走到第几步」；保存/锁稿状态由页头状态点与右侧按钮表达，
+         不再往这里塞「已锁稿」徽标（同一件事曾在一屏说 4 遍）。 -->
+    <ScriptStageBar :steps="steps" :index="stageIndex" />
 
     <div v-if="showStylePanel" class="style-drawer">
       <StyleConfigPanel :project-id="projectId" />
@@ -444,8 +481,39 @@ watch(
 .step-title-state.is-done::before {
   background: var(--state-success);
 }
+/* 锁稿：中性色 + 实心点。锁稿是「只读」约束而非「完成」，不用成功绿 */
+.step-title-state.is-locked {
+  color: var(--text-secondary);
+}
+.step-title-state.is-locked::before {
+  background: var(--text-secondary);
+}
 
 .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* 锁稿状态徽标：与状态标签同一套语汇（胶囊 + 圆点），
+   但用中性色而非成功色 —— 锁稿是「只读」约束，不是「完成」的庆祝。
+   改前它是一个禁用按钮，占操作位且永远点不了。 */
+.locked-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: var(--neutral-soft);
+  border: 1px solid var(--neutral-line);
+  white-space: nowrap;
+}
+.locked-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
 
 .style-drawer {
   flex-shrink: 0;
