@@ -392,20 +392,31 @@ body {
  *
  * 4px 与 6px 在同一屏里肉眼可分；`1 1 160px` 让看板的条在窄屏上比另两页
  * 更早换行。这里收成唯一口径，页面里不再重复定义。
+ *
+ * 2026-11-21 用户反馈「字体稍大点加粗」后统一提档，并在视觉复核后再调一次：
+ *   分母 / 百分比  13px → 14px
+ *   已完成数       15px → 16px（字重 600 不变，靠字号拉开）
+ *
+ * 这里刻意**不再往上加**：标签已提到 14px/600 + 主色白，若数值也继续加大，
+ * 两者又会回到「谁都不突出」的状态。当前层级是
+ *   标签 14px/600/主色  ← 卡头
+ *   主数值 16px/600      ← 本卡最重要的一个数（已完成数）
+ *   分母与百分比 14/13px/次级色 ← 上下文
+ * 三级各差一档，且靠颜色 + 字重双重区分，而不是挤在 1–2px 的字号差里。
  */
 .stage-nums {
   display: inline-flex;
   align-items: baseline;
   gap: 2px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
   white-space: nowrap;
   /* 数字列宽度固定，避免「5/10」变「12/25」时进度条左右跳动 */
   flex: none;
 }
 .stage-nums b {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -418,7 +429,7 @@ body {
 }
 .stage-nums .pct {
   margin-left: var(--sp-2);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-tertiary);
 }
 /* 进度条吃掉剩余宽度：三页统一 `1 1 auto` + 120px 下限。
@@ -426,6 +437,60 @@ body {
 .stage-bar {
   flex: 1 1 auto;
   min-width: 120px;
+}
+
+/* 「已选 X / Y」计数：三个批量卡（资产库 / 分镜图 / 分镜看板）共用。
+ *
+ * 收进全局的原因与 .stage-nums 相同 —— 同一句话此前在三个组件里各写一份，
+ * 其中分镜看板那份干脆缺失，落到 body 的 14px，比另两页大 2px。
+ *
+ * 2026-11-21 提档：外层 12px → 13px，数字 13px → 14px 等宽主色。
+ * 与标签（13px/600）、进度数值（14/16px）同一字号档位，不再靠 1px 差分层。
+ */
+.stage-sel {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.stage-sel b {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ===== 禁用按钮：可辨认，而不是「糊成一团」 =====
+ *
+ * 问题（2026-11-21 实测）：Naive UI 的 disabled 默认只把整体 opacity 压到 0.38。
+ * 主按钮是「品牌青底 + --text-on-brand 深墨字」（对比 9.68:1），压到 0.38 后
+ * 底色和文字一起褪成半透明，实测对比度掉到约 1.4:1 ——
+ * 三个页面的「批量生成（0）」「批量出图（0）」「批量出视频（0）」在未勾选时
+ * 几乎看不出按钮上写的是什么，用户只能靠位置猜。
+ *
+ * 处理：禁用态改为「中性面 + 中性描边 + --text-disabled 文字」，opacity 拉回 1。
+ * 「不可点」由配色（去饱和）与 cursor: not-allowed 表达，而不是靠整体透明度
+ * 把内容一起抹掉 —— 禁用控件的首要职责是让人看清它是什么、为什么点不了。
+ *
+ * 为什么用 CSS 而不是主题变量：Naive UI 的 Button 禁用色按 type 派生
+ * （colorDisabledPrimary / textColorDisabledPrimary / ...），在 Button 覆盖对象里
+ * 写通用键对 type="primary" 无效，写派生键又过不了 TS 类型。CSS 一次覆盖全部类型。
+ *
+ * 对比度：--text-disabled 在 --bg-elevated 上约 3.2:1。WCAG 对禁用控件豁免
+ * 对比度要求，但 3.2:1 足以辨认文字内容。
+ */
+.n-button.n-button--disabled,
+.n-button.n-button--disabled:hover,
+.n-button.n-button--disabled:focus,
+.n-button.n-button--disabled:active {
+  opacity: 1 !important;
+  background-color: var(--bg-elevated) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-disabled) !important;
+  cursor: not-allowed;
+}
+/* Naive UI 把文字放在内层 __content 里，颜色需要同时打到内层 */
+.n-button.n-button--disabled .n-button__content {
+  color: var(--text-disabled) !important;
 }
 
 /* ===== 可访问性基线 ===== */

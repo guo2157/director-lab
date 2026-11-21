@@ -746,7 +746,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         :disabled="!allShots.length"
         @update:checked="toggleSelectAllShots"
       >全选</n-checkbox>
-      <span class="sel-count">已选 <b>{{ selectedShotIds.length }}</b> / {{ allShots.length }}</span>
+      <span class="stage-sel">已选 <b>{{ selectedShotIds.length }}</b> / {{ allShots.length }}</span>
 
       <template #actions>
         <n-button
@@ -956,20 +956,8 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 .gen-state.fail { color: var(--state-danger); }
 .gate-text { color: var(--danger-text, var(--state-danger)); }
 
-/* 已选计数：与资产库 AssetBatchToolbar、分镜图 BatchToolbar 统一口径
-   （外层 12px 次级色 + 数字 13px 等宽主色）。
-   此前本页没有这条规则，`.sel-count` 落到 body 的 14px，比另两页大 2px ——
-   三个页面同一个「已选 X / Y」，只有看板这行明显偏大。 */
-.sel-count {
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.sel-count b {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-primary);
-}
+/* 「已选 X / Y」用全局 .stage-sel（三页共用一份口径）。
+   此前本页没有这条规则，`.sel-count` 落到 body 的 14px，比另两页大 2px。 */
 /* 工作流选择器槽位：给最小宽度，避免 loading spinner 或错误态把槽位塌缩成 12px。
    实测后端 /workflows/candidates 失败时，选择器渲染成 n-spin，无 min-width 时
    整个槽位只有 12px，卡二看起来像「标签与内容错位」。 */

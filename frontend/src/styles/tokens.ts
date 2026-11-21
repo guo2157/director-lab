@@ -93,7 +93,25 @@ export function buildThemeOverrides(): GlobalThemeOverrides {
       borderPrimary: '1px solid transparent',
       borderHoverPrimary: '1px solid transparent',
       borderPressedPrimary: '1px solid transparent',
-      borderFocusPrimary: '1px solid transparent'
+      borderFocusPrimary: '1px solid transparent',
+
+      /* 禁用态（2026-11-21 修）：Naive UI 的 disabled 默认只把整体 opacity 压到
+       * 0.38，于是「品牌青底 + --text-on-brand 深墨字」的对比度被等比缩到约
+       * 1.4:1 —— 实测分镜图/资产库/分镜看板的批量按钮在未勾选时几乎看不出
+       * 上面写的是什么（截图里就是一团半透明青色 + 隐约黑字）。
+       *
+       * 这里只把 opacity 拉回 1；底色与文字的禁用配色交给 global.css 的
+       * `.n-button--disabled` 规则。
+       *
+       * 为什么不在这里写 colorDisabled / textColorDisabled：
+       * Naive UI 的 Button 主题是**按 type 派生**的 —— primary 类型实际读取的是
+       * colorDisabledPrimary / textColorDisabledPrimary / borderDisabledPrimary
+       * （见 naive-ui/es/button/styles/light.mjs）。在 Button 覆盖对象里写通用键
+       * 只会改默认类型的回退值，对 type="primary" 完全无效（实测改完仍是
+       * 品牌青底 + 纯黑字）。而写 *DisabledPrimary 这类派生键又不被
+       * ExtractThemeOverrides<ButtonTheme> 接受（TS2353）。
+       * 走 CSS 类既绕开类型限制，也能一次覆盖 primary / warning / default 全部类型。 */
+      opacityDisabled: '1',
     },
     Input: {
       border: `1px solid ${token('--border-strong')}`,

@@ -73,7 +73,7 @@ watch(
     >
       全选
     </n-checkbox>
-    <span class="sel-count">已选 <b>{{ selected }}</b> / {{ total }}</span>
+    <span class="stage-sel">已选 <b>{{ selected }}</b> / {{ total }}</span>
 
     <template #actions>
       <n-button
@@ -95,16 +95,7 @@ watch(
   max-width: 260px;
   flex: 0 1 210px;
 }
-.sel-count {
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.sel-count b {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-primary);
-}
+/* 「已选 X / Y」用全局 .stage-sel（三页共用一份口径）。 */
 
 @media (max-width: 768px) {
   .wf-pick {

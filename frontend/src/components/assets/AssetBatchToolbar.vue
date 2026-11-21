@@ -79,7 +79,7 @@ watch(someChecked, (v) => {
     >
       全选
     </n-checkbox>
-    <span class="sel-count">已选 <b>{{ selected }}</b> / {{ total }}</span>
+    <span class="stage-sel">已选 <b>{{ selected }}</b> / {{ total }}</span>
 
     <template #actions>
       <span v-if="failedCount" class="failed">
@@ -121,20 +121,11 @@ watch(someChecked, (v) => {
   max-width: 260px;
   flex: 0 1 210px;
 }
-.sel-count {
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.sel-count b {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-primary);
-}
+/* 「已选 X / Y」用全局 .stage-sel（三页共用一份口径）。 */
 /* 失败项：红色文字 + 「重试失败项」次按钮成组出现，
    与主按钮之间由 StageCard 的 actions gap 隔开。 */
 .failed {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--danger-text);
 }
 .batch-nums {
