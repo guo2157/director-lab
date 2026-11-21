@@ -648,13 +648,16 @@ def validate_prompt_consistency(prompt: str, refs: list[dict], slots: list[dict]
     if syntax is None:
         # 工作流未声明图片引用语法（纯文生图），无编号可校验
         return {"valid": True, "errors": errors, "warnings": warnings, "checks": checks}
-    # 启用参考图：槽位 → 图片编号（1-based，与工作流 input_key 严格对应）
+    # 启用参考图：槽位 → 图片编号（1-based）。
+    # 必须用「实际注入后压缩序号」，不能用工作流静态 image_N：没注入的槽位会在
+    # 执行器里被剔除并重新连续编号，静态序号会把 Picture 1 指到尾帧这种不存在的图。
+    from app.services.reference_layout import compressed_numbers
+
     enabled_refs = [r for r in refs if r.get("enabled", True)]
-    slot_to_index: dict[str, int] = {}
-    for ref in enabled_refs:
-        idx = slot_image_index(ref.get("slot_param") or "", raw_slots)
-        if idx is not None:
-            slot_to_index[ref["slot_param"]] = idx
+    slot_to_index: dict[str, int] = compressed_numbers(
+        [str(r.get("slot_param")) for r in enabled_refs if r.get("slot_param")],
+        raw_slots,
+    )
     # 提取提示词中的图片引用编号（按工作流语法）
     if syntax == "image":
         pattern = re.compile(r"<image(\d+)>")

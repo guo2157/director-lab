@@ -28,7 +28,24 @@ ENTITY_PLAN_MODEL = {"character": Character, "scene": Scene, "prop": Prop}
 
 
 # 可注入的参考槽位（ref_prev_frame/first_frame/end_frame 由执行器按镜头实际产物回填）
-_REF_SLOTS = ("ref_identity", "ref_character_2", "ref_scene", "ref_prop", "ref_image")
+# 可注入的参考图槽位白名单。
+#
+# 2026-11-21 修复：这里原本硬编码 ("ref_identity", "ref_character_2", "ref_scene",
+# "ref_prop", "ref_image")，**漏了 ref_character_3~6**。而 _KEYFRAME_ALLOWED_SLOTS
+# 与 _CLIP_ALLOWED_SLOTS 都允许最多 6 个角色槽位，asset_plan 也真的会把第 3、4 个
+# 角色绑到 ref_character_3/4。结果定义里绑好了，注入阶段却被这个白名单静默过滤掉：
+# 三人同框的镜头，第三个人拿不到参考图，画出来就换脸。
+#
+# 改为前缀匹配，槽位数量完全由工作流能力声明决定，不再写死上限。
+_REF_SLOT_PREFIXES = (
+    "ref_identity", "ref_character", "ref_char",
+    "ref_scene", "ref_prop", "ref_image",
+)
+
+
+def _is_injectable_slot(slot: str) -> bool:
+    """槽位是否属于可注入的参考图槽（支持 ref_character_2..N 任意数量）。"""
+    return bool(slot) and slot.startswith(_REF_SLOT_PREFIXES)
 
 
 def _find_plain_image_workflow(db: Session):
@@ -136,7 +153,7 @@ def _inject_dependency_slots(db: Session, plan: AssetPlan, params: dict,
     injected: dict[str, str] = {}
     bindings: list[dict] = []
     for dep in deps:
-        if dep.slot not in _REF_SLOTS:
+        if not _is_injectable_slot(dep.slot):
             continue
         if declared is not None and dep.slot not in declared:
             continue

@@ -1201,6 +1201,37 @@ def build_workspace(
         # 系统槽位（上一镜尾帧/本镜分镜图）以当前生效产物为准，
         # 已保存配置与任务快照里的旧绑定都不可信
         references = refresh_system_references(db, shot, references, nodes)
+        # 图序统一为「实际注入后压缩序号」（2026-11-21 修复）。
+        #
+        # 工作流声明里 ref_prev_frame/ref_image/ref_identity… 的静态序号是 1..9，
+        # 但没注入的槽位会在执行器里被压缩掉：上一镜视频还没生成时没有尾帧，
+        # 分镜图就从「第 2 张」变成模型实际收到的「第 1 张」。
+        # 页面若照静态序号显示，提示词里的 <Picture 1>（上一镜尾帧）指向一张
+        # 根本不存在的图，而两个角色定妆图（静态第 3/4 张）在提示词里没有任何描述。
+        # 这里把编号与职责块一起按真实注入结果重建，页面与生成时口径一致。
+        from app.services import reference_layout as rl
+
+        _slots = [
+            {"param": name, "input_key": node.get("input_key")}
+            for name, node in nodes.items()
+        ]
+        _active = [
+            str(r["slot_id"])
+            for r in references
+            if r.get("enabled", True) and r.get("image_url") and r.get("slot_id")
+        ]
+        _numbers = rl.compressed_numbers(_active, _slots)
+        _names = {
+            str(r["slot_id"]): str(r.get("asset_name") or r.get("slot_id"))
+            for r in references
+            if r.get("slot_id")
+        }
+        for _ref in references:
+            _ref["image_no"] = _numbers.get(_ref.get("slot_id"))
+        if _numbers:
+            final_prompt = rl.rebuild_prompt(
+                final_prompt, _numbers, _names, _slots, _reference_syntax(nodes)
+            )
 
     validation = validate_workspace(
         db,

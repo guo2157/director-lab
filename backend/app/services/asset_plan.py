@@ -266,8 +266,28 @@ _KEYFRAME_ALLOWED_SLOTS = ("ref_identity", "ref_character_2", "ref_scene", "ref_
 _CLIP_ALLOWED_SLOTS = ("ref_image", "ref_identity", "ref_character_2", "ref_prop", "ref_prev_frame", "ref_character_3", "ref_character_4", "ref_character_5", "ref_character_6")
 
 
-def _prune_deps(db: Session, plan: AssetPlan, allowed: tuple) -> int:
-    """清理不再有效的槽位依赖（如早期错误绑定的 ref_prev_frame），返回删除条数。"""
+def _prune_deps(db: Session, plan: AssetPlan, allowed: tuple,
+                active_slots: set[str] | None = None) -> int:
+    """清理不再有效的槽位依赖，返回删除条数。
+
+    两类清理：
+    1. 槽位名不在 allowed 白名单里（如早期错误绑定的 ref_prev_frame）
+    2. ``active_slots`` 给出时，槽位名虽合法但本次已不再需要
+       （角色不再出场 / 场景变更 / 道具移除）
+
+    第 2 类是 2026-11-21 补的，修一个会直接导致 409 的缺陷：
+
+        镜头原本 beats 里有三个人（江屿/林晚/苏晚），依赖绑了
+        ref_identity + ref_character_2 + ref_character_3。
+        后来剧本改成两人（苏晚戏份删除）→ 主体角色只剩两人，
+        但 _prune_deps 只按「槽位名是否合法」判断，ref_character_3
+        名字完全合法因此被保留 → 注入时把苏晚的定妆图塞进身份槽
+        → 门禁 audit_reference_slots 判 identity_reference_leak
+        → 整单 409「角色苏晚不是本镜主体角色」。
+
+    结论：槽位名的合法性不等于该槽位当前仍然需要。必须按「本次实际
+    绑定到的槽位集合」清理，否则删角色/删道具/换场景都会留下幽灵依赖。
+    """
     stale = (
         db.query(AssetPlanDependency)
         .filter(AssetPlanDependency.plan_id == plan.id)
@@ -276,6 +296,10 @@ def _prune_deps(db: Session, plan: AssetPlan, allowed: tuple) -> int:
     removed = 0
     for dep in stale:
         if dep.slot not in allowed:
+            db.delete(dep)
+            removed += 1
+            continue
+        if active_slots is not None and dep.slot not in active_slots:
             db.delete(dep)
             removed += 1
     if removed:
@@ -431,6 +455,7 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
             subjects[0].id if subjects else None,
         )
         char_slot_seq = 0
+        bound_slots: set[str] = set()
         for subj in subjects:
             subj_plan = char_plans.get(subj.id)
             if subj_plan is None:
@@ -452,9 +477,11 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
                     )
                     continue
             _bind_dep(db, kf_plan, slot, subj_plan.asset_key, subj_plan)
+            bound_slots.add(slot)
             stats["deps"] += 1
         if scene_plan:
             _bind_dep(db, kf_plan, "ref_scene", scene_plan.asset_key, scene_plan)
+            bound_slots.add("ref_scene")
             stats["deps"] += 1
         # 道具参考：仅当镜头提示词显式 @道具名 时绑定（ref_prop 单槽位，取首个匹配）
         if prop_by_name and shot.image_prompt:
@@ -463,9 +490,12 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
                 _prop_plan = prop_by_name.get(_ref_name)
                 if _prop_plan is not None:
                     _bind_dep(db, kf_plan, "ref_prop", _prop_plan.asset_key, _prop_plan)
+                    bound_slots.add("ref_prop")
                     stats["deps"] += 1
                     break
-        _prune_deps(db, kf_plan, _KEYFRAME_ALLOWED_SLOTS)
+        # 传 bound_slots：删角色/删道具/换场景后，旧槽位必须一并清理，
+        # 否则残留的身份槽会在生成时触发 identity_reference_leak → 409。
+        _prune_deps(db, kf_plan, _KEYFRAME_ALLOWED_SLOTS, bound_slots)
 
         clip_key = make_asset_key("clip", char.name if char else scene.title,
                                   f"{project.id}|{shot.id}", seq=idx)
@@ -477,6 +507,7 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
                                  char.name if char else scene.title, episode=shot.episode, seq=idx)
         stats["clip"] += 1
         _bind_dep(db, clip_plan, "ref_image", kf_plan.asset_key, kf_plan)
+        clip_bound: set[str] = {"ref_image"}
         stats["deps"] += 1
         # 视频侧同样按权威口径绑定全部主体角色（不只是 character_id）：
         # 分镜图给了两个角色参考，视频若只给一个，第二个人物会在视频里「变脸」。
@@ -493,11 +524,13 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
                 if slot not in _CLIP_ALLOWED_SLOTS:
                     continue
             _bind_dep(db, clip_plan, slot, subj_plan.asset_key, subj_plan)
+            clip_bound.add(slot)
             stats["deps"] += 1
 
         # ref_prev_frame 指向的是上一镜“末帧”而非上一镜分镜图，
         # 由执行器按 shot.last_frame_asset_id 回填，此处不做错误绑定。
-        _prune_deps(db, clip_plan, _CLIP_ALLOWED_SLOTS)
+        # 但我要把它从清理范围里排除（执行器回填后才会存在，本轮 bound 里没有）。
+        _prune_deps(db, clip_plan, _CLIP_ALLOWED_SLOTS, clip_bound | {"ref_prev_frame"})
         prev_kf_key[shot.episode] = kf_plan.asset_key
 
     # 清理孤儿定义：镜头被新解析结果替换后，其定义与依赖不再有效
