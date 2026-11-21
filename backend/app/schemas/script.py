@@ -1,7 +1,7 @@
 """剧本与任务接口的数据结构：API.md §5 剧本与分镜、§任务 契约。"""
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 # --- 剧本版本 ---
@@ -170,6 +170,19 @@ class ExportOut(BaseModel):
 
 
 # --- 任务 ---
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """数据库里存的是 naive UTC（SQLite DateTime + func.now()）。
+
+    直接序列化会得到 ``2026-11-20T13:16:34`` 这种没有时区后缀的字符串，
+    浏览器 ``new Date(...)`` 会按**本地时区**解释它 —— 在 CST(+8) 下
+    等于凭空多出 8 小时（实测「刚点开始解析就显示已耗时 08:00:26」）。
+    因此对外一律补上 UTC 时区标记，让前端按真实绝对时间计算耗时。
+    """
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
 class JobOut(BaseModel):
     id: str
     project_id: str
@@ -190,6 +203,14 @@ class JobOut(BaseModel):
     seq: int | None = None
     # 生成进度百分比（0-100）：running 任务从最近 job.progress 事件（value/max）计算，其余状态为 None
     progress: int | None = None
+    # 绝对推进量（如 LLM 流式输出的已接收字符数）：总量未知时用它证明任务在推进
+    progress_chars: int | None = None
     created_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
+
+    @field_serializer("created_at", "started_at", "finished_at")
+    def _ser_utc(self, dt: datetime | None) -> str | None:
+        """所有任务时间统一输出为带时区的 ISO8601（UTC），前端不再猜时区。"""
+        v = _as_utc(dt)
+        return v.isoformat() if v is not None else None

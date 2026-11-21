@@ -251,7 +251,7 @@ class _InputTooLongClient:
         self.calls: list[dict] = []
 
     def chat_stream(self, system_prompt, user_prompt, *, json_mode=True,
-                    on_delta=None, max_tokens=None):
+                    on_delta=None, max_tokens=None, should_cancel=None, cancel_token=None):
         self.calls.append({"prompt": user_prompt, "max_tokens": max_tokens})
         self.last_metadata = _Meta()
         raise LLMError(
@@ -284,7 +284,7 @@ def test_call_with_retry_still_retries_provider_error():
             self.calls = 0
 
         def chat_stream(self, system_prompt, user_prompt, *, json_mode=True,
-                        on_delta=None, max_tokens=None):
+                        on_delta=None, max_tokens=None, should_cancel=None, cancel_token=None):
             self.calls += 1
             self.last_metadata = _Meta()
             raise LLMError(ERR_PROVIDER_ERROR, "HTTP 500: internal error")

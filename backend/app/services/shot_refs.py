@@ -29,6 +29,63 @@ def collect_shot_characters(db: Session, shot: Shot) -> list[str]:
     return names
 
 
+def shot_subject_characters(db: Session, shot: Shot) -> list[Character]:
+    """本镜「主体角色」权威定义（去重保序）。
+
+    这是**唯一**的判定口径，注入器（reference_resolver）与生成前硬门禁
+    （prompt_compiler.audit_reference_slots）必须同时使用它，否则会出现
+    「注入器把配角放进 ref_character_N → 门禁判 identity_reference_leak → 整单 409」。
+
+    构成（三者并集）：
+    1. ``shot.character_id`` —— 解析阶段标注的主角色
+    2. ``dialogue_segments`` 的说话人 —— 有台词就必然在画面里
+    3. 提示词里显式 ``@引用`` 的角色 —— 作者显式点名要求一致性
+
+    刻意**不**包含「名字出现在 dialogue 正文」这种子串匹配：台词里被谈论的人
+    不等于在画面里（「妈妈，我能把麦子驮到河对岸吗」中的妈妈若按子串匹配会
+    凭空占一个身份槽）。有台词的角色由第 2 条覆盖，不需要宽松匹配兜底。
+    """
+    from app.services.ref_inject import extract_refs
+
+    ordered: list[Character] = []
+    seen: set[str] = set()
+
+    def _add(ch: Character | None) -> None:
+        if ch is not None and ch.id not in seen:
+            seen.add(ch.id)
+            ordered.append(ch)
+
+    if shot.character_id:
+        _add(db.get(Character, shot.character_id))
+    scene = db.get(Scene, shot.scene_id)
+    project_id = scene.project_id if scene is not None else None
+    for seg in (shot.dialogue_segments or []):
+        if not isinstance(seg, dict):
+            continue
+        speaker_id = seg.get("speaker_id") or seg.get("character_id")
+        if speaker_id:
+            _add(db.get(Character, speaker_id))
+            continue
+        name = seg.get("speaker")
+        if name:
+            query = db.query(Character).filter(Character.name == name)
+            if project_id:
+                query = query.filter(Character.project_id == project_id)
+            _add(query.first())
+    # 提示词显式 @引用（含分镜图与视频提示词：两者可能由不同阶段渲染）
+    mentioned: list[str] = []
+    for text in (shot.image_prompt or "", shot.video_prompt or ""):
+        for name in extract_refs(text):
+            if name not in mentioned:
+                mentioned.append(name)
+    for name in mentioned:
+        query = db.query(Character).filter(Character.name == name)
+        if project_id:
+            query = query.filter(Character.project_id == project_id)
+        _add(query.first())
+    return ordered
+
+
 def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:
     """生成镜头资产清单：出场角色名列表 + 场景标题 + 道具名（显式 @引用 或提示词正文提及）。
 

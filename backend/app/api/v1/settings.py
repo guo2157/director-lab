@@ -102,6 +102,8 @@ def _settings_to_dict(s) -> dict:
         "llm_parse_retry_limit": s.llm_parse_retry_limit,
         "llm_parse_concurrency": s.llm_parse_concurrency,
         "agent_first_batch_auto": s.agent_first_batch_auto,
+        "script_evaluation_enabled": s.script_evaluation_enabled,
+        "worker_shutdown_grace_seconds": s.worker_shutdown_grace_seconds,
         "render_concurrency": s.render_concurrency,
         "worker_poll_interval_seconds": s.worker_poll_interval_seconds,
         "job_max_attempts": s.job_max_attempts,
@@ -128,6 +130,8 @@ def update_settings_api(payload: dict) -> dict:
         "llm_max_tokens", "llm_disable_thinking", "max_episodes_per_batch",
         "llm_parse_max_tokens", "llm_parse_hard_max_tokens",
         "llm_parse_retry_limit", "llm_parse_concurrency", "agent_first_batch_auto",
+        "script_evaluation_enabled",
+        "worker_shutdown_grace_seconds",
         "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
     ]
     for key in updatable:

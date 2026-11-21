@@ -128,6 +128,8 @@ def call_with_retry(
     on_attempt: Callable[[AttemptRecord], None] | None = None,
     validate: Callable[[str], Any] | None = None,
     use_chat_json: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
+    cancel_token: str | None = None,
 ) -> Any:
     """按错误类型重试地调用 LLM，返回**已通过完整性校验**的结果。
 
@@ -178,10 +180,17 @@ def call_with_retry(
                     value = client.chat_json(system_prompt, prompt)
                 content = ""
             elif stream:
-                content = client.chat_stream(
-                    system_prompt, prompt, json_mode=json_mode,
-                    on_delta=on_delta, max_tokens=current_max_tokens,
-                )
+                # 只在有值时才带上 cancel_token：测试替身的 chat_stream 大多
+                # 只声明了 should_cancel，无条件传关键字会让它们全部 TypeError。
+                _stream_kwargs = {
+                    "json_mode": json_mode,
+                    "on_delta": on_delta,
+                    "max_tokens": current_max_tokens,
+                    "should_cancel": should_cancel,
+                }
+                if cancel_token:
+                    _stream_kwargs["cancel_token"] = cancel_token
+                content = client.chat_stream(system_prompt, prompt, **_stream_kwargs)
                 value = validate(content) if validate is not None else content
             else:
                 content = client.chat(
@@ -246,6 +255,11 @@ def call_with_retry(
             # 输入超上下文属于配置类错误：重试、退避、加 token、改提示词都不可能
             # 让它通过，只会把一次明确失败拖成 N 次无谓请求。
             if exc.code == ERR_INPUT_TOO_LONG:
+                raise
+
+            # 取消是用户意图，绝不能重试：否则点「停止解析」后会再发一次请求，
+            # 用户看到的是「停了但还在烧 token」。
+            if exc.code == "llm_cancelled":
                 raise
 
             # ---- 按错误码决定重试方式 ----

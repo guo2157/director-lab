@@ -42,6 +42,8 @@ export interface Job {
   seq?: number
   /** 生成进度百分比（0-100）：running 任务从最近 job.progress 事件计算，其余状态为空 */
   progress?: number | null
+  /** 绝对推进量（已接收字符数）：总量未知时用它证明任务在推进 */
+  progress_chars?: number | null
   created_at: string
   updated_at: string
   /** 任务真正开始执行的时间（后端返回）；耗时计算以此为准，缺失时回退 created_at */

@@ -23,6 +23,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.integrations.llm import LLMClient, LLMError
 from app.integrations.llm_response import (
+    ERR_OUTPUT_TRUNCATED,
     ERR_SCHEMA_MISMATCH,
     validate_parse_payload,
 )
@@ -38,11 +39,13 @@ from app.services.script_parse import (
 )
 from app.services.prompt_store import get_prompt
 from app.services import style_config
+from app.services import job_cancel
 from app.services.script_chunker import (
     EpisodeChunk,
     fallback_split,
     slice_range,
     split_episodes,
+    split_text_by_blocks,
 )
 
 
@@ -191,7 +194,12 @@ def execute_script_agent_job(job_id: str) -> dict:
         )
         for _prev in _done:
             _pp = _prev.params or {}
-            if not params.get("retry") and _pp.get("script_version_id") == sv.id and int(_pp.get("episode_start") or 1) == episode_start:
+            # params.force 来自「重新解析」按钮：必须真正重跑，不能复用旧结果。
+            # 只判断 params.retry 是不够的 —— 那条路径是任务失败后重试，
+            # 用户点「重新解析」时上一个任务往往是 succeeded 的。
+            if (not params.get("retry") and not params.get("force")
+                    and _pp.get("script_version_id") == sv.id
+                    and int(_pp.get("episode_start") or 1) == episode_start):
                 job.status = "succeeded"
                 job.result = dict(_prev.result or {})
                 job.result["idempotent_reuse"] = True
@@ -216,6 +224,18 @@ def execute_script_agent_job(job_id: str) -> dict:
         # 会被当成可退避重试的供应商错误，白白重试 N 次后仍然失败。
         # allow_segmented=True：整本超预算但单集放得下时，走分段大纲而不是失败。
         precheck = precheck_input_budget(text, settings=settings, allow_segmented=True)
+        # 取消检查点：LLM 调用是同步阻塞的（单次实测可达 24 分钟），
+        # 数据库里的 status 改成 cancelled 线程是感知不到的。所以取消走
+        # 进程内信号，并在每个可能长时间停留的位置轮询。
+        def _check_cancel(stage: str) -> None:
+            if job_cancel.is_cancelled(job_id):
+                _write_event(db, job, "agent.cancelled", {"stage": stage})
+                db.commit()
+                raise job_cancel.JobCancelled(job_id)
+
+        def _is_cancelled() -> bool:
+            return job_cancel.is_cancelled(job_id)
+
         _write_event(db, job, "agent.input_precheck", {
             "ok": precheck["ok"],
             "code": precheck["code"],
@@ -229,6 +249,15 @@ def execute_script_agent_job(job_id: str) -> dict:
             _fail_job(db, job, precheck["code"], precheck["message"])
             return {"ok": False, "reason": precheck["code"]}
         db.commit()
+        # 阶段事件：解析前 40 秒只有空输出框，用户无法判断是否在跑。
+        # 这些阶段由后端真实上报（不是前端按 JSON 猜），前端只负责展示。
+        _write_event(db, job, "agent.stage", {
+            "stage": "outline",
+            "label": "正在分析剧本结构、估算集数",
+            "chars": len(text),
+        })
+        db.commit()
+        _check_cancel("outline")
         try:
             outline_data = analyze_script_outline(
                 text,
@@ -247,28 +276,55 @@ def execute_script_agent_job(job_id: str) -> dict:
             "outline_mode": precheck["outline_mode"],
         })
         db.commit()
+        _check_cancel("outline_done")
 
         # ---- 2. 软闸口评估（失败不阻断）：流式输出评估过程 ----
+        # 默认关闭（script_evaluation_enabled=False）：实测单集任务里该阶段固定耗时 84s
+        # 且每次都因字段校验不通过而 eval_skipped，零产出却占整个任务 32% 的时间。
+        # 解析页的职责是拆解剧本供下游制作，评估报告没有下游消费方。
         evaluation = None
-        try:
-            from app.services.script_evaluation import evaluate_script
-
-            def _on_eval_delta(delta_text: str) -> None:
-                _write_event(db, job, "agent.llm_delta", {"delta": delta_text, "phase": "evaluation"})
-                db.commit()
-
-            evaluation = evaluate_script(
-                text, outline_data, settings_map,
-                on_delta=_on_eval_delta, settings=settings,
-            )
-            _write_event(db, job, "agent.eval_info", {
-                "score": evaluation.get("score"),
-                "issues_count": len(evaluation.get("issues") or []),
+        _eval_on = bool(getattr(settings, "script_evaluation_enabled", False))
+        if not _eval_on:
+            _write_event(db, job, "agent.eval_skipped", {
+                "reason": "script_evaluation_enabled=false（评估阶段默认关闭）",
             })
             db.commit()
-        except Exception as e:  # noqa: BLE001
-            _write_event(db, job, "agent.eval_skipped", {"reason": str(e)[:200]})
-            db.commit()
+        else:
+            try:
+                from app.services.script_evaluation import evaluate_script
+
+                _write_event(db, job, "agent.stage", {
+                    "stage": "evaluation",
+                    "label": "正在评估剧本质量（评分与问题清单）",
+                    "estimated_episodes": outline_data.get("estimated_episodes"),
+                })
+                db.commit()
+
+                def _on_eval_delta(delta_text: str) -> None:
+                    # 评估阶段同样是长流式调用：用户点停止后必须尽快退出，
+                    # 否则会继续把评估跑完才响应取消。
+                    if _is_cancelled():
+                        raise job_cancel.JobCancelled(job_id)
+                    _write_event(db, job, "agent.llm_delta", {"delta": delta_text, "phase": "evaluation"})
+                    db.commit()
+
+                evaluation = evaluate_script(
+                    text, outline_data, settings_map,
+                    on_delta=_on_eval_delta, settings=settings,
+                    should_cancel=_is_cancelled,
+                    cancel_token=job_id,
+                )
+                _write_event(db, job, "agent.eval_info", {
+                    "score": evaluation.get("score"),
+                    "issues_count": len(evaluation.get("issues") or []),
+                })
+                db.commit()
+            except job_cancel.JobCancelled:
+                # 取消不能被「评估失败不阻断」的兜底吞掉，否则任务会继续往下解析。
+                raise
+            except Exception as e:  # noqa: BLE001
+                _write_event(db, job, "agent.eval_skipped", {"reason": str(e)[:200]})
+                db.commit()
 
         # ---- 3. 口径确定：优先已锁定口径，否则用 LLM 大纲集数 ----
         pv = _find_or_create_parse_version(db, job.project_id, sv.id, script_hash)
@@ -339,16 +395,32 @@ def execute_script_agent_job(job_id: str) -> dict:
                 for bs, be in batches
             ],
         })
+        _write_event(db, job, "agent.stage", {
+            "stage": "parsing",
+            "label": f"正在拆解第 {episode_start}–{episode_start + episode_count - 1} 集（共 {len(batches)} 批）",
+            "batches": [f"{bs}-{be}" for bs, be in batches],
+        })
         db.commit()
+        # 关键检查点：进入 LLM 解析前必须再确认一次取消。
+        # 少了这一道，用户在评估阶段点停止后仍会白启一批 LLM 调用
+        # （实测取消后多跑了 chunking + stage + 一轮解析请求才退出）。
+        _check_cancel("before_parsing")
         client = LLMClient()
         style_settings = (project.settings if project is not None else {}) or {}
         style_snap = style_config.style_snapshot(style_settings, project_id=job.project_id)
         _upsert_records(db, job.project_id, episode_start, episode_count, "running", parse_version_id=pv.id)
         db.commit()
 
-        from app.integrations.llm import parse_llm_json
+        from app.integrations.llm import parse_llm_json, response_meta_for
         delta_q: "queue.Queue[str]" = queue.Queue()
         _writer_stop = threading.Event()
+        # 进度计数：由 _on_delta 累加（纯内存、无锁竞争），_delta_writer 统一写库。
+        # 用列表而不是 int，是为了在闭包里原地修改而不触发 nonlocal。
+        _chars_seen = [0]
+
+        def _bump_progress(n: int) -> None:
+            """记录已接收字符数。真正的落库交给 _delta_writer（SQLite 单写者）。"""
+            _chars_seen[0] += n
 
         def _delta_writer() -> None:
             """串行事件写入线程：SQLite 单写者；多批 delta 聚合节流（≥1s 或 ≥240 字符）后落库。"""
@@ -356,6 +428,7 @@ def execute_script_agent_job(job_id: str) -> dict:
             wdb: Session = SessionLocal()
             buf: list[str] = []
             last_flush = _time.monotonic()
+            last_progress = _time.monotonic()
             try:
                 while True:
                     stopped = _writer_stop.is_set()
@@ -374,6 +447,15 @@ def execute_script_agent_job(job_id: str) -> dict:
                             wj = wdb.get(Job, job_id)
                             if wj is not None:
                                 _write_event(wdb, wj, "agent.llm_delta", {"delta": delta})
+                                # 进度事件与 delta 同事务落库：前端据此显示真实推进，
+                                # 而不是只有「已耗时」在涨、看不出有没有往前走。
+                                if now - last_progress >= 2.0:
+                                    last_progress = now
+                                    _write_event(wdb, wj, "job.progress", {
+                                        "value": _chars_seen[0],
+                                        "max": 0,
+                                        "chars": _chars_seen[0],
+                                    })
                                 wdb.commit()
                         except Exception:
                             wdb.rollback()
@@ -383,34 +465,147 @@ def execute_script_agent_job(job_id: str) -> dict:
             finally:
                 wdb.close()
 
-        def _parse_batch(b_start: int, b_end: int) -> dict:
-            """单批次 LLM 解析（工作线程内执行，不触碰数据库）。
+        # 输出侧分段预算：0/负数表示关闭（回到整批一次调用）
+        _seg_budget = int(getattr(settings, "llm_parse_segment_chars", 0) or 0)
+        # 失败批次的尝试记录也必须留下：此前只有成功批次才写 agent.parse_attempts，
+        # 一旦整批失败，真实 max_tokens / finish_reason / usage 全部丢失，
+        # 复盘时只剩一句「max_tokens=0」无从定位。
+        attempts_by_range: dict[str, list[dict]] = {}
+        _LIST_KEYS = ("characters", "props", "prop_events", "scenes", "episodes")
 
-            重试策略统一由 ``llm_retry.call_with_retry`` 承担：按错误码决定
-            放大 token / 修复提示 / 退避，不再一律当截断处理。
-            每次尝试的元数据经 ``attempts`` 返回，供主线程写事件。
+        def _merge_payloads(payloads: list[dict]) -> dict:
+            """把同一批多个分段（或递归二分）的解析结果按段顺序合并成一份。
+
+            合并必须去重：多段各报一次同名角色会让 ``validate_parse_payload``
+            以「角色名重复」直接判失败。这不是模型的问题，是分段带来的重复。
+            去重口径与下游 ``normalize_parse_output`` 跨批合并保持一致：
+            - 角色 / 道具：按 ``normalize_entity_name`` 归一化后的名字；
+            - 场景：按 ``normalize_scene_name(title, time_note)``，同名场景
+              **拼接 shots**（同一场戏被段边界切开时不能丢镜头）；
+            - 集：按集号，取首个出现的；
+            - 道具事件：按（道具, 集, 场景, 镜号, 类型）唯一。
             """
-            b_count = b_end - b_start + 1
+            merged_payload: dict = {"project_analysis": {}}
+            for key in _LIST_KEYS:
+                merged_payload[key] = []
+            seen_char: dict[str, dict] = {}
+            seen_prop: dict[str, dict] = {}
+            scene_index: dict[str, dict] = {}
+            seen_ep: set[int] = set()
+            seen_prop_ev: set[tuple] = set()
+            for p in payloads or []:
+                if not isinstance(p, dict):
+                    continue
+                if not merged_payload["project_analysis"]:
+                    merged_payload["project_analysis"] = p.get("project_analysis") or {}
+                for c in p.get("characters") or []:
+                    if not isinstance(c, dict):
+                        continue
+                    name = (c.get("name") or "").strip()
+                    if not name:
+                        continue
+                    key = normalize_entity_name(name) or name
+                    cur = seen_char.get(key)
+                    if cur is None:
+                        cur = dict(c)
+                        seen_char[key] = cur
+                        merged_payload["characters"].append(cur)
+                        continue
+                    for f in ("description", "traits", "appearance"):
+                        if not str(cur.get(f) or "").strip() and str(c.get(f) or "").strip():
+                            cur[f] = c.get(f)
+                for pr in p.get("props") or []:
+                    if not isinstance(pr, dict):
+                        continue
+                    name = (pr.get("name") or "").strip()
+                    if not name:
+                        continue
+                    key = normalize_entity_name(name) or name
+                    if key not in seen_prop:
+                        seen_prop[key] = dict(pr)
+                        merged_payload["props"].append(seen_prop[key])
+                for ev in p.get("prop_events") or []:
+                    if not isinstance(ev, dict):
+                        continue
+                    ev_key = (
+                        (ev.get("prop") or "").strip(), ev.get("episode"),
+                        (ev.get("scene_title") or "").strip(),
+                        ev.get("shot_seq"), (ev.get("event_type") or "").strip(),
+                    )
+                    if ev_key in seen_prop_ev:
+                        continue
+                    seen_prop_ev.add(ev_key)
+                    merged_payload["prop_events"].append(ev)
+                for sc in p.get("scenes") or []:
+                    if not isinstance(sc, dict):
+                        continue
+                    key = normalize_scene_name(
+                        sc.get("title") or "", sc.get("time_note")) or ""
+                    if not key:
+                        merged_payload["scenes"].append(sc)
+                        continue
+                    cur = scene_index.get(key)
+                    if cur is None:
+                        scene_index[key] = sc
+                        merged_payload["scenes"].append(sc)
+                        continue
+                    cur["shots"] = (cur.get("shots") or []) + (sc.get("shots") or [])
+                    if not str(cur.get("description") or "").strip():
+                        cur["description"] = sc.get("description")
+                for ep in p.get("episodes") or []:
+                    if not isinstance(ep, dict):
+                        continue
+                    try:
+                        no = int(ep.get("episode") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if no in seen_ep:
+                        continue
+                    seen_ep.add(no)
+                    merged_payload["episodes"].append(ep)
+            return merged_payload
 
-            # 只发送本批集正文；切片缺失时退回全文，避免发出空正文让模型凭空编造
-            episode_text = slice_range(chunks, b_start, b_end) or text
-            user_prompt = (
+        def _segment_prompt(b_start: int, b_end: int, seg_text: str,
+                            seg_idx: int, seg_total: int) -> str:
+            b_count = b_end - b_start + 1
+            head = (
                 style_config.parse_context_block(style_settings)
                 + _build_global_context(preamble, char_map, outline_episodes, b_start, b_end)
                 + f"请解析以下剧本，仅解析第 {b_start} 集到第 {b_end} 集，"
-                + f"共 {b_count} 集。范围外的集不要输出。\n\n"
-                + f"第 {b_start}–{b_end} 集剧本：\n{episode_text}"
+                + f"共 {b_count} 集。范围外的集不要输出。\n"
             )
+            if seg_total <= 1:
+                # 不分段时与既有实现逐字符一致：prompt 措辞属于外部可见契约，
+                # 改动会让「仅发送本集正文」的既有断言失效。
+                return head + f"\n第 {b_start}–{b_end} 集剧本：\n{seg_text}"
+            head += (
+                f"本次只提供该范围内第 {seg_idx}/{seg_total} 段正文。"
+                "只输出本段出现的场景与镜头；不要补写本段之外的剧情；"
+                "本段首尾台词或动作可能不完整，仍要完整输出该场景。\n"
+            )
+            return head + f"\n第 {b_start}–{b_end} 集剧本（第 {seg_idx}/{seg_total} 段）：\n{seg_text}"
+
+        def _run_segment(b_start: int, b_end: int, seg_text: str, seg_idx: int,
+                         seg_total: int, depth: int, sink: list[dict], *,
+                         strict: bool) -> dict:
+            """解析一个正文分段；仍被判截断时对半再分（最多两层）。"""
+            prompt = _segment_prompt(b_start, b_end, seg_text, seg_idx, seg_total)
+
+            def _record(rec) -> None:
+                rec_dict = rec.to_dict()
+                rec_dict["segment"] = f"{seg_idx}/{seg_total}"
+                rec_dict["depth"] = depth
+                rec_dict["strict"] = strict
+                sink.append(rec_dict)
 
             def _on_delta(delta_text: str) -> None:
                 delta_q.put(delta_text)
+                # 真实进度：按已接收字符数推进，而不是凭猜。
+                # 没有它，长任务只能看到「已耗时」一直涨、没有任何推进感，
+                # 用户无法判断是「在跑」还是「卡死」。
+                _bump_progress(len(delta_text))
 
-            attempts: list[dict] = []
-
-            def _record(rec) -> None:
-                attempts.append(rec.to_dict())
-
-            def _parse_and_validate(text: str) -> dict:
+            def _validate(text: str) -> dict:
                 """JSON 解析 + 业务校验都放在重试循环内部。
 
                 只做 JSON 解析是不够的：模型可以吐出完全合法的 JSON，
@@ -418,27 +613,120 @@ def execute_script_agent_job(job_id: str) -> dict:
                 这种情况必须在**重试循环内**判失败，才能追加 schema 约束提示
                 再问一次；放到循环外就变成了「解析成功但结果不可用」，
                 最后仍然落库，违反「不完整输出不能保存」。
+                分段模式只要求本段有内容（整句校验在合并后统一做）。
                 """
-                data = parse_llm_json(text)
-                problems = validate_parse_payload(data)
-                if problems:
+                # meta 必须带上本次调用的真实 finish_reason / usage / max_tokens：
+                # 缺了它，截断错误会写成「max_tokens=0」，重试策略也失去放大依据。
+                data = parse_llm_json(text, meta=response_meta_for(client, text))
+                if strict:
+                    problems = validate_parse_payload(data)
+                    if problems:
+                        raise LLMError(
+                            ERR_SCHEMA_MISMATCH,
+                            "解析结果业务校验未通过: " + "；".join(problems[:8]),
+                        )
+                    return data
+                if not isinstance(data, dict):
+                    raise LLMError(ERR_SCHEMA_MISMATCH, "该分段顶层不是 JSON 对象")
+                if not (data.get("scenes") or data.get("episodes")):
                     raise LLMError(
                         ERR_SCHEMA_MISMATCH,
-                        "解析结果业务校验未通过: " + "；".join(problems[:8]),
+                        "该分段未解析出任何场景或集，需重试本段",
                     )
                 return data
 
-            raw = call_with_retry(
-                client,
-                system_prompt=get_prompt("parse_system"),
-                user_prompt=user_prompt,
-                json_mode=True,
-                stream=True,
-                on_delta=_on_delta,
-                on_attempt=_record,
-                validate=_parse_and_validate,
-            )
-            return {"start": b_start, "end": b_end, "raw": raw, "attempts": attempts}
+            try:
+                return call_with_retry(
+                    client,
+                    system_prompt=get_prompt("parse_system"),
+                    user_prompt=prompt,
+                    json_mode=True,
+                    stream=True,
+                    on_delta=_on_delta,
+                    on_attempt=_record,
+                    validate=_validate,
+                    should_cancel=_is_cancelled,
+                    # 首轮就用解析专用预算（llm_parse_max_tokens，默认 65536），
+                    # 不要从 llm_max_tokens（32768）起步。
+                    #
+                    # 原因（实测）：网关的 completion 上限是**间歇性**的——同一
+                    # max_tokens 重复请求，有时 8109 正常收尾，有时硬停在 16000 且
+                    # JSON 未闭合。从 32768 起步时首轮实测撞上限，白跑 77s，然后
+                    # 重试放大到 65536 才成功（又 76s）。单集任务里这 77s 是纯浪费。
+                    # 解析是已知的大输出场景，首轮直接给足预算，把「撞上限→重试」
+                    # 这条路径从常态变成例外。
+                    initial_max_tokens=int(
+                        getattr(settings, "llm_parse_max_tokens", 65536) or 65536
+                    ),
+                    # cancel_token 让 chat_stream 在取消时直接 close 响应：
+                    # should_cancel 只在下一条 SSE 行到达时才被检查，
+                    # 供应商几十秒不吐字时线程会一直阻塞在 socket read 上。
+                    cancel_token=job_id,
+                )
+            except LLMError as exc:
+                # 取消不进入任何自救逻辑：既不能二分重试，也不能被当成截断。
+                if exc.code == "llm_cancelled":
+                    raise job_cancel.JobCancelled(job_id)
+                # 供应商输出硬上限无法靠放大 max_tokens 突破：把这段正文对半再分，
+                # 每半独立输出一份更小的 JSON。深度上限 2，避免无限递归。
+                # 只要还能切出多于一段就二分：固定字符阈值会让「段本身不长、
+                # 但输出仍顶到网关上限」的情况无法自救。depth 上限足以防止
+                # 无限递归，切不动时 halves 只有一段，自然走下面 raise。
+                if exc.code == ERR_OUTPUT_TRUNCATED and depth < 2:
+                    halves = split_text_by_blocks(seg_text, max(1, len(seg_text) // 2))
+                    if len(halves) > 1:
+                        parts = [
+                            _run_segment(b_start, b_end, half, seg_idx,
+                                         seg_total, depth + 1, sink, strict=False)
+                            for half in halves
+                        ]
+                        return _merge_payloads(parts)
+                raise
+
+        def _parse_batch(b_start: int, b_end: int) -> dict:
+            """单批次 LLM 解析（工作线程内执行，不触碰数据库）。
+
+            重试策略统一由 ``llm_retry.call_with_retry`` 承担：按错误码决定
+            放大 token / 修复提示 / 退避，不再一律当截断处理。
+
+            输出侧分段：部分网关的 completion 有硬上限（实测恒 16000 token 且
+            finish_reason 谎报 stop），单次输出超长 JSON 必然中途截断。正文超过
+            ``llm_parse_segment_chars`` 时按场次/段落边界分段解析，再合并为
+            一份结果；合并后仍走完整的业务校验。
+            """
+            # 只发送本批集正文；切片缺失时退回全文，避免发出空正文让模型凭空编造
+            episode_text = slice_range(chunks, b_start, b_end) or text
+            segs = [episode_text]
+            if _seg_budget > 0 and len(episode_text) > _seg_budget:
+                segs = split_text_by_blocks(episode_text, _seg_budget)
+            seg_total = len(segs)
+            sink: list[dict] = []
+            try:
+                if seg_total <= 1:
+                    raw = _run_segment(b_start, b_end, episode_text, 1, 1, 0, sink,
+                                       strict=True)
+                else:
+                    # 各段 LLM 调用彼此独立（各段正文不重叠），在工作线程内
+                    # 串行执行。batch 级已有 ThreadPoolExecutor 并行扇出，段内
+                    # 再复用同一池做嵌套并行会导致死锁——所有 worker 都在等子任务。
+                    parts = [
+                        _run_segment(b_start, b_end, seg, idx + 1,
+                                     seg_total, 0, sink, strict=False)
+                        for idx, seg in enumerate(segs)
+                    ]
+                    raw = _merge_payloads(parts)
+                    problems = validate_parse_payload(raw)
+                    if problems:
+                        raise LLMError(
+                            ERR_SCHEMA_MISMATCH,
+                            "分段合并后业务校验未通过: " + "；".join(problems[:8]),
+                        )
+                return {
+                    "start": b_start, "end": b_end, "raw": raw,
+                    "attempts": sink, "segments": seg_total,
+                }
+            finally:
+                attempts_by_range[f"{b_start}-{b_end}"] = list(sink)
 
         writer_thread = threading.Thread(target=_delta_writer, daemon=True)
         writer_thread.start()
@@ -455,6 +743,9 @@ def execute_script_agent_job(job_id: str) -> dict:
                     rng = fut_map[fut]
                     try:
                         batch_results.append(fut.result())
+                    except job_cancel.JobCancelled:
+                        # 任一分支被取消即整体取消：继续等其余批次只会白烧 token。
+                        raise
                     except LLMError as e:
                         batch_errors.append((rng, e))
         finally:
@@ -464,6 +755,17 @@ def execute_script_agent_job(job_id: str) -> dict:
         if batch_errors:
             # 单集独立失败：成功集保留，仅标记失败集为 failed
             for (bs, be), e in batch_errors:
+                # 失败批次同样要留下每次尝试的元数据：只有成功批写事件时，
+                # 整批失败的任务在库里只剩一句「max_tokens=0」，无法判断到底
+                # 是预算不足、供应商静默截断，还是思考链吃光了 token。
+                atts = attempts_by_range.get(f"{bs}-{be}")
+                if atts:
+                    _write_event(db, job, "agent.parse_attempts", {
+                        "range": f"{bs}-{be}",
+                        "attempts": atts,
+                        "failed": True,
+                        "error_code": e.code,
+                    })
                 _upsert_records(db, job.project_id, bs, be - bs + 1, "failed",
                                 error_msg=e.message[:2000], parse_version_id=pv.id)
                 failed_ranges.append(f"{bs}-{be}")
@@ -657,6 +959,22 @@ def execute_script_agent_job(job_id: str) -> dict:
         ).delete(synchronize_session=False)
         db.commit()
         return {"ok": True, "parse_version_id": pv.id, "shots": shot_total, "has_more": has_more}
+    except job_cancel.JobCancelled as e:
+        # 用户主动停止：终态必须是 cancelled，且**不落任何解析结果**。
+        # 旧实现没有这条分支，取消后线程跑完会写 succeeded 并把半成品
+        # 落进 ParseVersion —— 用户以为停了，数据却已经被改写。
+        db.rollback()
+        try:
+            job = db.get(Job, job_id)
+            if job is not None:
+                job.status = "cancelled"
+                job.finished_at = _now()
+                job.result = {"cancelled": True, "reason": e.reason}
+                _write_event(db, job, "agent.cancelled", {"reason": e.reason})
+                db.commit()
+        except Exception:
+            db.rollback()
+        return {"ok": False, "reason": "cancelled"}
     except Exception as e:  # noqa: BLE001
         db.rollback()
         try:
@@ -667,4 +985,6 @@ def execute_script_agent_job(job_id: str) -> dict:
             pass
         return {"ok": False, "reason": f"executor_exception:{e}"}
     finally:
+        # 无论成功/失败/取消都要清理取消登记，否则同 id 复跑会被误判为已取消。
+        job_cancel.clear(job_id)
         db.close()

@@ -13,9 +13,10 @@
 - 输出非 JSON / 结构非法 → llm_invalid_output（配置类，提示调整提示词）
 """
 import json
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -32,6 +33,16 @@ from app.integrations.llm_response import (
     parse_json_safely,
     validate_llm_response,
 )
+
+
+def _is_cancel_exc(exc: BaseException) -> bool:
+    """判断异常是否为「取消」信号。
+
+    按类名判断而不是 isinstance：``app.integrations.llm`` 在依赖链上位于
+    ``app.services.job_cancel`` 之下（services 导入 integrations），
+    模块级导入会形成循环。取消是稀疏事件，一次类名比较的开销无关紧要。
+    """
+    return type(exc).__name__ == "JobCancelled"
 
 
 def _raise_from_validation(result: ValidationResult, message: str | None = None,
@@ -294,7 +305,9 @@ class LLMClient:
             )
 
     def chat_stream(self, system_prompt: str, user_prompt: str, *, json_mode: bool = True,
-                    on_delta=None, max_tokens: int | None = None) -> str:
+                    on_delta=None, max_tokens: int | None = None,
+                    should_cancel: "Callable[[], bool] | None" = None,
+                    cancel_token: str | None = None) -> str:
         """流式对话调用：SSE 增量接收，on_delta(text) 逐块回调，返回完整正文。
 
         收集纪律（本次修复重点）：
@@ -335,10 +348,38 @@ class LLMClient:
         idle_timeout = float(getattr(_settings, "llm_stream_idle_timeout_seconds", 60.0) or 60.0)
         last_content_at = time.monotonic()
         stream_timeout = httpx.Timeout(self.timeout, read=idle_timeout)
+        # ---- 取消看门狗 ----
+        # 只在 SSE 行到达时检查 should_cancel 是不够的：网关「连接不断、不发数据」
+        # 时 iter_lines 会永久阻塞在 socket read（实测卡死 30 分钟以上），
+        # 检查点根本没有机会执行，整个单线程 worker 队列被饿死。
+        # 这里另起一个守护线程，发现取消就强制 close response，
+        # 让阻塞中的 read 立刻抛错退出。
+        _watch_stop = threading.Event()
+        _watch_resp: list = []  # 在进入流上下文后填入 resp 引用
+
+        def _cancel_watchdog() -> None:
+            while not _watch_stop.wait(0.4):
+                if should_cancel is None:
+                    continue
+                try:
+                    if should_cancel() and _watch_resp:
+                        _watch_resp[0].close()
+                        return
+                except Exception:  # noqa: BLE001
+                    return
+
+        if should_cancel is not None:
+            threading.Thread(
+                target=_cancel_watchdog, daemon=True,
+                name="dlab-cancel-watch",
+            ).start()
         try:
             with httpx.Client(timeout=stream_timeout, trust_env=False) as client:
                 with client.stream("POST", f"{self.base_url}/chat/completions",
                                    json=payload, headers=headers) as resp:
+                    # 交给 watch dog：取消时直接 close 这个响应对象，
+                    # 让阻塞中的 socket read 立刻抛错退出（跨进程唯一可靠的打断方式）。
+                    _watch_resp.append(resp)
                     request_id = resp.headers.get("x-request-id")
                     if resp.status_code >= 400:
                         body = resp.read().decode(errors="replace")[:300]
@@ -353,74 +394,146 @@ class LLMClient:
                             validate_llm_response(meta),
                             f"语言模型接口 HTTP {resp.status_code}: {body}",
                         )
-                    for line in resp.iter_lines():
-                        if time.monotonic() - last_content_at > idle_timeout:
-                            raise LLMError(
-                                "llm_timeout",
-                                f"语言模型流式响应空闲超过 {idle_timeout:.0f} 秒"
-                                f"（已接收 {sum(len(p) for p in parts)} 字符正文），"
-                                "判定为响应超时",
-                            )
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if not data:
-                            continue
-                        if data == "[DONE]":
-                            stream_completed = True
-                            break
+                    # 登记「立即掐断」回调：should_cancel 只在下一条 SSE 行到达时
+                    # 才被检查，供应商不发数据时线程会一直阻塞在 socket read 上
+                    # （实测网关有「连接不断但不吐字」的情况，最长等满空闲超时）。
+                    # 取消到达时直接 close 响应，读取立刻抛错返回 —— LLM 侧连接
+                    # 与 token 消耗同时释放，这就是需求要求的「停止解析释放 LLM 资源」。
+                    _abort_hook = None
+                    if cancel_token:
                         try:
-                            chunk = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-                        # usage 可能出现在独立的末尾 chunk（choices 为空）
-                        chunk_usage = chunk.get("usage")
-                        if isinstance(chunk_usage, dict) and chunk_usage:
-                            last_usage = {
-                                "prompt_tokens": chunk_usage.get("prompt_tokens"),
-                                "completion_tokens": chunk_usage.get("completion_tokens"),
-                                "total_tokens": chunk_usage.get("total_tokens"),
-                                "reasoning_tokens": (
-                                    chunk_usage.get("reasoning_tokens")
-                                    or (chunk_usage.get("completion_tokens_details") or {})
-                                    .get("reasoning_tokens")
-                                ),
-                            }
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            # 纯 usage chunk / 心跳：不退出，继续消费
-                            continue
-                        try:
-                            choice0 = choices[0]
-                        except (KeyError, IndexError, TypeError):
-                            continue
-                        delta_obj = choice0.get("delta") or {}
-                        # content 与 reasoning 分别收集，互不覆盖
-                        delta = delta_obj.get("content") or ""
-                        reasoning = delta_obj.get("reasoning_content") or ""
-                        if reasoning:
-                            reasoning_parts.append(reasoning)
-                            last_content_at = time.monotonic()
-                        # 记录最后一个非空 finish_reason
-                        fr = choice0.get("finish_reason")
-                        if fr:
-                            last_finish_reason = str(fr)
-                        if delta:
-                            parts.append(delta)
-                            last_content_at = time.monotonic()
-                            if on_delta is not None:
+                            from app.services import job_cancel as _jc
+
+                            def _abort_hook():  # noqa: E306 - 闭包内定义，便于成对注销
                                 try:
-                                    on_delta(delta)
+                                    resp.close()
                                 except Exception:  # noqa: BLE001
                                     pass
+
+                            _jc.register_abort(cancel_token, _abort_hook)
+                        except Exception:  # noqa: BLE001
+                            _abort_hook = None
+                    try:
+                        for line in resp.iter_lines():
+                            # 协作式取消检查点：每个 SSE 行都查一次（纯内存查找，开销可忽略）。
+                            # 这里是唯一能真正打断 LLM 长任务的位置——httpx 的
+                            # iter_lines 会一直阻塞到供应商发下一行，而一次解析调用
+                            # 实测可达 24 分钟。不在这里查，用户点「停止解析」后
+                            # 线程仍会跑完全程并覆盖终态。
+                            if should_cancel is not None and should_cancel():
+                                raise LLMError(
+                                    "llm_cancelled",
+                                    f"解析已取消（已接收 {sum(len(p) for p in parts)} 字符正文）",
+                                )
+                            if time.monotonic() - last_content_at > idle_timeout:
+                                raise LLMError(
+                                    "llm_timeout",
+                                    f"语言模型流式响应空闲超过 {idle_timeout:.0f} 秒"
+                                    f"（已接收 {sum(len(p) for p in parts)} 字符正文），"
+                                    "判定为响应超时",
+                                )
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if not data:
+                                continue
+                            if data == "[DONE]":
+                                stream_completed = True
+                                break
+                            try:
+                                chunk = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            # usage 可能出现在独立的末尾 chunk（choices 为空）
+                            chunk_usage = chunk.get("usage")
+                            if isinstance(chunk_usage, dict) and chunk_usage:
+                                last_usage = {
+                                    "prompt_tokens": chunk_usage.get("prompt_tokens"),
+                                    "completion_tokens": chunk_usage.get("completion_tokens"),
+                                    "total_tokens": chunk_usage.get("total_tokens"),
+                                    "reasoning_tokens": (
+                                        chunk_usage.get("reasoning_tokens")
+                                        or (chunk_usage.get("completion_tokens_details") or {})
+                                        .get("reasoning_tokens")
+                                    ),
+                                }
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                # 纯 usage chunk / 心跳：不退出，继续消费
+                                continue
+                            try:
+                                choice0 = choices[0]
+                            except (KeyError, IndexError, TypeError):
+                                continue
+                            delta_obj = choice0.get("delta") or {}
+                            # content 与 reasoning 分别收集，互不覆盖
+                            delta = delta_obj.get("content") or ""
+                            reasoning = delta_obj.get("reasoning_content") or ""
+                            if reasoning:
+                                reasoning_parts.append(reasoning)
+                                last_content_at = time.monotonic()
+                                # 推理模型的思考阶段只发 reasoning_content，不发 content。
+                                # 若只在这里等 content 才检查取消，用户点「停止」后要等
+                                # 模型把整段思考吐完（实测 17 秒）才能退出。
+                                # 思考 token 往往占大头，这里才是主要检查点。
+                                if should_cancel is not None and should_cancel():
+                                    raise LLMError(
+                                        "llm_cancelled",
+                                        "解析已取消（思考阶段）",
+                                    )
+                            # 记录最后一个非空 finish_reason
+                            fr = choice0.get("finish_reason")
+                            if fr:
+                                last_finish_reason = str(fr)
+                            if delta:
+                                parts.append(delta)
+                                last_content_at = time.monotonic()
+                                if on_delta is not None:
+                                    try:
+                                        on_delta(delta)
+                                    except Exception as exc:  # noqa: BLE001
+                                        # 取消信号绝不能被吞掉：on_delta 里抛 JobCancelled
+                                        # 是打断长任务最直接的手段（评估阶段没有流内检查点）。
+                                        # 旧实现一律 pass，实测导致点「停止」后评估仍跑完
+                                        # 整段（42 秒)才退出。
+                                        if _is_cancel_exc(exc):
+                                            raise
+                                        pass
+                    finally:
+                        # 成对注销：不清掉的话，下一个请求会被这次的同名回调误关
+                        if cancel_token and _abort_hook is not None:
+                            try:
+                                from app.services import job_cancel as _jc2
+
+                                _jc2.unregister_abort(cancel_token, _abort_hook)
+                            except Exception:  # noqa: BLE001
+                                pass
         except LLMError:
             raise
         except httpx.TimeoutException as e:
+            # 被 abort 回调关闭的连接在部分平台会表现为超时：先判取消，
+            # 否则「用户点停止」会被误记成 llm_timeout 并进入退避重试。
+            if should_cancel is not None and should_cancel():
+                raise LLMError("llm_cancelled", "解析已取消（连接已中断）") from e
             raise LLMError("llm_timeout", f"语言模型请求超时: {type(e).__name__}") from e
         except httpx.ConnectError as e:
+            if should_cancel is not None and should_cancel():
+                raise LLMError("llm_cancelled", "解析已取消（连接已中断）") from e
             raise LLMError("llm_unreachable", f"语言模型连接失败: {type(e).__name__}") from e
         except httpx.HTTPError as e:
+            # resp.close() 触发的读取中断走这里（httpx.ReadError 等）：
+            # 取消必须是 llm_cancelled，不能变成可退避重试的 llm_unreachable。
+            if should_cancel is not None and should_cancel():
+                raise LLMError("llm_cancelled", "解析已取消（连接已中断）") from e
             raise LLMError("llm_unreachable", f"语言模型网络错误: {type(e).__name__}") from e
+        except Exception as e:  # noqa: BLE001
+            # 部分平台关闭流会抛 RuntimeError/StreamClosed 等非 httpx 异常
+            if should_cancel is not None and should_cancel():
+                raise LLMError("llm_cancelled", "解析已取消（连接已中断）") from e
+            raise
+        finally:
+            # 停掉看门狗，否则每个请求留一个空转线程（0.4s 轮询）
+            _watch_stop.set()
 
         content = "".join(parts)
         reasoning = "".join(reasoning_parts) if reasoning_parts else None
@@ -493,18 +606,46 @@ def is_truncated_json_output(message: str, content: str | None = None) -> bool:
     return is_likely_truncated_json(message, content)
 
 
-def parse_llm_json(content: str) -> dict:
+def response_meta_for(client, content: str) -> LLMResponseMeta:
+    """用客户端最近一次调用的元数据构造 LLMResponseMeta。
+
+    为什么需要：``parse_llm_json(content)`` 只拿正文，构造出的 meta 里
+    max_tokens=0、finish_reason=None。于是截断错误信息里写的是
+    「max_tokens=0」，而 ``call_with_retry`` 判定是否「供应商静默截断」也
+    只能靠这份 meta —— 元数据丢了，重试策略就失去了判据。
+    """
+    m = getattr(client, "last_metadata", None)
+    return LLMResponseMeta(
+        content=content,
+        finish_reason=getattr(m, "finish_reason", None),
+        usage={
+            "completion_tokens": getattr(m, "completion_tokens", None),
+            "reasoning_tokens": getattr(m, "reasoning_tokens", None),
+            "prompt_tokens": getattr(m, "prompt_tokens", None),
+        },
+        model=getattr(m, "model", None) or getattr(client, "model", "") or "",
+        max_tokens=int(
+            getattr(m, "max_tokens", 0) or getattr(client, "max_tokens", 0) or 0
+        ),
+    )
+
+
+def parse_llm_json(content: str, *, meta: LLMResponseMeta | None = None) -> dict:
     """解析 LLM 返回的 JSON 文本（委托 llm_response.parse_json_safely）。
 
     空内容返回 ``llm_empty_content``（而非笼统的 llm_invalid_output）；
     ``Expecting value`` 不再被判为截断；markdown 代码块、前后夹文本、
     真正的截断各有独立处理分支。
 
+    ``meta``：调用方应传入 ``response_meta_for(client, content)``，
+    否则截断判定缺 finish_reason / usage / max_tokens，重试记录与错误信息
+    都会退化成 max_tokens=0 这类无法定位的数字。
+
     注意：**截断不补齐**。补齐后的 JSON 虽然语法合法，但会缺字段
     （例如只写了一半的 appearance），一旦落库就是残缺数据。这里宁可抛
     ``llm_output_truncated`` 让上层放大 max_tokens 重试。
     """
-    meta = LLMResponseMeta(content=content)
+    meta = meta or LLMResponseMeta(content=content)
     obj, result = parse_json_safely(content, expect=dict, meta=meta)
     if obj is None:
         raise LLMError(result.error_code or ERR_INVALID_OUTPUT,

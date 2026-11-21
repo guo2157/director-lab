@@ -216,8 +216,8 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 26. 单集节奏：保住开场钩子、冲突升级、情绪释放、结尾悬念四节拍。
 
 ════ 七、提示词字段 ════
-27. image_prompt 必须按结构化分段模板输出（PROMPTS.md §5.1），固定分段依次为：任务（任务类型，如多参考图人物一致性生成）、参考图职责（只描述实际注入的参考图：出场角色定妆图在前、所属场景基准图在后，逐行对应；不描述道具参考图，道具写进目标画面的画面描述）、美术风格（项目主视觉风格原文，全图统一，不改写）、目标画面（主体、动作、构图、景别、光线、质感，一段连续描述）、必须保持（跨图一致性 3-6 项，聚焦身份与外观）、允许变化（可省略）、禁止（人物畸形、换脸、无关元素、水印等，逐项）、输出（产物形态与清晰度）。禁止输出无分段的自由文本。
-28. video_prompt 必须按状态衔接结构模板输出（PROMPTS.md §5.2），固定分段依次为：任务（生成方式 T2VA/I2VA/Ref2VA 与镜号）、参考图职责（按连线顺序以 <Picture N> 语法引用：非首镜为 <Picture 1> 上一镜头尾帧、<Picture 2> 当前镜头分镜图；每集首镜无上一镜头尾帧，仅引用 <Picture 1>）、美术风格（项目主视觉风格原文）、身份约束、开场状态（六项枚举，与 start_state 同源）、剧情与动作（本镜剧情一句话、人物动作按 beats 逐拍、镜头运动与 camera_movement 一致、画面衔接说明）、目标状态（六项枚举，与 end_state 同源）、必须保持（3-6 项）、允许变化（可省略）、禁止、对白与声音、输出（时长按 duration、画幅与质量要求）。其中「对白与声音」段只写播报内容：台词逐句写成 `<d>[Chinese] 台词原文</d>`，环境声与音乐另起一句；禁止出现“台词：”“对白：”“第1段”等标签，`</d>` 之外禁止出现“语气温和”“语气轻快”等表演提示，情绪只写进 dialogue_segments.emotion 与画面表情描述，否则 H3 会把提示词当台词念出来。禁止输出无分段的自由文本。
+27. **不要输出 image_prompt 与 video_prompt**。这两项由系统按模板从你给出的结构化事实渲染，你只需把事实写准写全（尤其是 beats 的动作与姿态、start_state/end_state 六项、shot_purpose 一句话剧情、emotion、景别/角度/运镜）。多写一遍提示词只会拖长输出、导致 JSON 被截断，且模板渲染结果比自由发挥更稳定。
+28. 因此你的输出质量取决于事实精度：shot_purpose 要能让人只看这一句就知道画面在演什么；beats 的 action 必须是可拍摄的具体动作；start_state/end_state 的六项（pose/position/expression/holding/costume/injury）必须齐全且能衔接下一镜。
 
 ════ 八、@引用规则 ════
 29. 提示词中引用角色、场景、道具一律写成 @名称，名称必须与本 JSON 中 name 或 title 完全一致，包括中间间隔号。
@@ -585,6 +585,61 @@ def _assemble_video_prompt(sh: dict, is_first: bool = False) -> str:
     )
 
 
+def _assemble_image_prompt(sh: dict) -> str:
+    """image_prompt 为空时按分镜图分段模板拼装（系统侧兜底）。
+
+    为什么需要：两段式改造后 LLM 不再产出 image_prompt，改由代码渲染。
+    但下游有 6 处依赖该字段（prompt_qc 质检、shot_refs 资产引用注入、
+    reference_resolver 参考图解析、asset_plan 道具绑定、prop_lifecycle
+    道具生命周期、regeneration 重生成上下文），字段为空会让这些链路全部失效。
+    因此在落库前就用结构化事实渲染出一份可用的提示词。
+
+    模板从 workspace/prompts/image_prompt.md 读取（缺失回退内置默认），
+    变量由代码运行时注入，与 video_prompt 的兜底机制保持对称。
+    """
+    def _state_lines(state) -> str:
+        if not state:
+            return "（未提供，按分镜图与剧情推断）"
+        if isinstance(state, dict):
+            return "；".join(f"{k}：{v}" for k, v in state.items() if str(v or "").strip())
+        return str(state)
+
+    beats = sh.get("beats") or []
+    beat_desc = "；".join(
+        f"第{i + 1}拍 {b.get('action') or ''}"
+        f"（{b.get('start_pose') or ''} → {b.get('end_pose') or ''}，约{b.get('duration') or 2}秒）"
+        for i, b in enumerate(beats) if isinstance(b, dict)
+    ) or "（无节拍，按剧情自然表演）"
+    template = get_prompt("image_prompt")
+    return template.format(
+        episode=sh.get("episode") or 1,
+        seq=sh.get("seq") or 1,
+        shot_purpose=sh.get("shot_purpose") or "（按剧情）",
+        beats=beat_desc,
+        emotion=sh.get("emotion") or "neutral",
+        shot_type=sh.get("shot_type") or "中景",
+        camera_angle=sh.get("camera_angle") or "平视",
+        camera_movement=sh.get("camera_movement") or "固定机位",
+        start_state=_state_lines(sh.get("start_state")),
+        end_state=_state_lines(sh.get("end_state")),
+        character_id=sh.get("character_id") or sh.get("speaker") or "无（空镜）",
+        props="、".join(sh.get("props") or []) or "无",
+    )
+
+
+_register_default("image_prompt", """任务：生成第 {episode}-{seq} 镜的单帧分镜图
+
+【本镜剧情】{shot_purpose}
+【人物动作】{beats}
+【出场角色】{character_id}；涉及道具：{props}
+【画面情绪】{emotion}——用表情、眼神与姿态外化，不用抽象情绪词。
+【镜头语言】景别 {shot_type}；角度 {camera_angle}；运动 {camera_movement}。
+【开场状态】{start_state}
+【目标状态】{end_state}
+
+必须保持：人物面部特征、发型、服装与配饰与参考图一致；场景空间结构、建筑布局与光线方向与基准图一致；道具形状、颜色与材质一致。
+禁止：人物畸形、多余肢体、换脸、服装跳变、未绑定人物与道具、文字与字幕、水印与 Logo、拼贴与分屏。""")
+
 # --- 候选解析确认后的级联落库（API.md §5 parse-version confirm / PROMPTS.md §3 集级合并规则） ---
 def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, episode_count: int,
                        current_scene_ids: list | None = None) -> dict:
@@ -792,6 +847,11 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             _shot_props = sh.get("props")
             if _shot_props is not None and not isinstance(_shot_props, list):
                 _shot_props = None
+            # 分镜图提示词兜底：两段式改造后 LLM 不再产出 image_prompt，
+            # 由模板按结构化事实渲染。下游 6 处依赖该字段（prompt_qc /
+            # shot_refs / reference_resolver / asset_plan 道具绑定 /
+            # prop_lifecycle / regeneration），为空会让这些链路全部失效。
+            _image_prompt = sh.get("image_prompt") or _assemble_image_prompt(sh)
             # 视频提示词对白标签统一：解析阶段 LLM 可能仍写「台词：第N段“…”」，
             # 落库前用与生成阶段同一套规范化逻辑收敛为 (Sx) <d>[Chinese] 台词</d>，
             # 避免只能等到提交生成时才被改写、页面上看到的仍是旧写法。
@@ -812,7 +872,7 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                 dialogue=sh.get("dialogue"),
                 dialogue_segments=segments,
                 shot_kind=sh.get("shot_kind") or "visual",
-                image_prompt=sh.get("image_prompt"),
+                image_prompt=_image_prompt,
                 video_prompt=_video_prompt,
                 shot_type=sh.get("shot_type"), camera_angle=sh.get("camera_angle"),
                 camera_movement=sh.get("camera_movement"), transition=sh.get("transition"),

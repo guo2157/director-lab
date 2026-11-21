@@ -143,17 +143,18 @@ def test_build_media_params_slot_filter(client: TestClient):
     # 声明两个槽位 → 全部注入
     media = ref_inject.build_media_params(db, pid, "@教室 里的 @林晓", ["ref_identity", "ref_scene"])
     assert media == {"ref_identity": "/tmp/p1.png", "ref_scene": "/tmp/p2.png"}
-    # 仅声明 ref_identity → 场景引用无可用槽位，按新语义返回 422（不静默丢参考）
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException) as ei:
-        ref_inject.build_media_params(db, pid, "@教室 里的 @林晓", ["ref_identity"])
-    assert ei.value.status_code == 422
+    # 仅声明 ref_identity → 场景引用无可用槽位，降级为纯文字描述（不注入、不报错）。
+    # 语义来源 ref_inject.py 模块注释：工作流未声明某类槽位时该类 @引用降级为文字描述，
+    # 是否降级由 capabilities 声明决定；只有「声明了槽位却装不下」才 422。
+    media = ref_inject.build_media_params(db, pid, "@教室 里的 @林晓", ["ref_identity"])
+    assert media == {"ref_identity": "/tmp/p1.png"}
     # 仅角色引用 → 正常注入
     media = ref_inject.build_media_params(db, pid, "@林晓", ["ref_identity"])
     assert media == {"ref_identity": "/tmp/p1.png"}
-    # 无槽位声明（None）→ 全部注入
+    # 无槽位声明（None）→ 视为「不声明任何槽位」，不回退内置默认槽位表。
+    # 原因：默认表把 ref_scene 当通用槽位，会给 H3 Ref2VA 注入它不存在的输入参数。
     media = ref_inject.build_media_params(db, pid, "@林晓", None)
-    assert media == {"ref_identity": "/tmp/p1.png"}
+    assert media == {}
     db.close()
 
 
@@ -198,8 +199,7 @@ def test_resolve_refs_prop(client: TestClient):
 
 
 def test_build_media_params_prop_slot(client: TestClient):
-    """道具引用注入 ref_prop 槽位；工作流未声明 ref_prop 时 422。"""
-    from fastapi import HTTPException
+    """道具引用注入 ref_prop 槽位；工作流未声明 ref_prop 时降级为文字描述。"""
     from app.core.database import SessionLocal
     from app.models import Asset, Prop, ids
     from app.services import ref_inject
@@ -215,11 +215,10 @@ def test_build_media_params_prop_slot(client: TestClient):
     # 声明 ref_prop → 注入
     media = ref_inject.build_media_params(db, pid, "手持 @古剑", ["ref_prop"])
     assert media == {"ref_prop": "/tmp/prop.png"}
-    # 未声明 ref_prop → 422（不静默丢参考）
-    with pytest.raises(HTTPException) as ei:
-        ref_inject.build_media_params(db, pid, "手持 @古剑", ["ref_identity"])
-    assert ei.value.status_code == 422
-    # 无槽位声明（None）→ 注入
+    # 未声明 ref_prop → 降级为文字描述（不注入、不报错，与模块注释语义一致）
+    media = ref_inject.build_media_params(db, pid, "手持 @古剑", ["ref_identity"])
+    assert media == {}
+    # 无槽位声明（None）→ 不声明任何槽位，不注入
     media = ref_inject.build_media_params(db, pid, "手持 @古剑", None)
-    assert media == {"ref_prop": "/tmp/prop.png"}
+    assert media == {}
     db.close()

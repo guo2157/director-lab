@@ -159,7 +159,7 @@ def _sample_episodes_for_evaluation(script_text: str) -> tuple[str, list[int]]:
 
 
 def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delta=None,
-                    *, settings=None) -> dict:
+                    *, settings=None, should_cancel=None, cancel_token=None) -> dict:
     """调用语言模型评估剧本质量，返回结构化评估报告。
     on_delta 不为 None 时使用流式调用，增量文本经回调实时推送（供前端展示评估过程）。
 
@@ -210,6 +210,11 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
         stream=on_delta is not None,
         on_delta=on_delta,
         use_chat_json=on_delta is None,
+        # 取消信号必须透传到流循环：评估是长流式调用，只靠 on_delta 抛异常
+        # 不够，因为推理模型的思考阶段不发 content、不回调 on_delta。
+        should_cancel=should_cancel,
+        # cancel_token：让 chat_stream 在取消时直接 close 响应，释放连接
+        cancel_token=cancel_token,
     )
 
     # 流式路径（on_delta 非 None）下 call_with_retry 的 use_chat_json=False，

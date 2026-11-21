@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.models import EpisodeParseRecord, Job, ParseVersion, Project, ScriptEstimate, ScriptVersion
+from app.models import EpisodeParseRecord, Job, JobEvent, ParseVersion, Project, ScriptEstimate, ScriptVersion
 from app.models import ids
 from app.schemas.script import (
     EpisodeParseStatusItem, EstimateConfirm, EstimateConfirmOut, EstimateCreate, EstimateOut,
@@ -63,8 +63,30 @@ def _activate_if_draft(db: Session, p: Project) -> None:
 @router.post("/{project_id}/script-versions", status_code=201)
 def create_script_version(project_id: str, payload: ScriptVersionCreate,
                           db: Session = Depends(get_db)) -> ScriptVersionOut:
-    """保存剧本（单版本覆盖）：每项目仅保留一条当前版本，保存时覆盖文本、版本号+1。"""
+    """保存剧本（单版本覆盖）：每项目仅保留一条当前版本，保存时覆盖文本、版本号+1。
+
+    解析完成即锁稿：一旦该项目存在 ``current`` 的 ParseVersion（即已确认的解析结果），
+    剧本正文不再允许覆盖。
+
+    为什么必须锁：解析结果（场景/角色/道具/分镜）是由某个确定的剧本正文推导出来的。
+    正文一改，已落库的资产就与正文不一致，而资产库、分镜图、合成导出全部建立在这份
+    解析结果上 —— 允许改文等于让下游静默失真。用户真要改，走「重新解析」重跑一遍，
+    让资产跟着正文一起更新。
+
+    注意锁的判定用 ParseVersion 而不是 ScriptVersion：只要解析过就锁，
+    哪怕解析失败（有失败集记录）也锁 —— 此时用户该做的是重新解析，不是偷改正文。
+    """
     p = _get_project(db, project_id)
+    # 已确认的解析版本存在 → 剧本已锁稿
+    locked = (
+        db.query(ParseVersion)
+        .filter(ParseVersion.project_id == project_id, ParseVersion.status == "current")
+        .first()
+    )
+    if locked is not None:
+        raise errors.invalid_state_transition(
+            "剧本已解析完成，不可再保存修改。如需调整剧情，请在解析页点「重新解析」"
+        )
     sv = (
         db.query(ScriptVersion)
         .filter(ScriptVersion.project_id == project_id)
@@ -342,10 +364,42 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
     episode_start = int(payload.get("episode_start") or 1)
     if episode_start < 1:
         raise errors.invalid_request("episode_start 不得小于 1")
+    force = bool(payload.get("force"))
+    # ---- 重新解析的前置动作：先终止本项目在途的解析任务 ----
+    # 需求：「如果是解析中的状态先终止解析然后重新解析」。
+    # 为什么必须在后端做：前端虽然会先调 cancel 再发起，但用户连点、多标签页、
+    # 刷新后重提都能绕过前端；而 worker 是单线程串行，残留的 queued 任务会在
+    # 新任务之后再跑一遍，白白多烧一轮 LLM token，解析页还会显示成
+    # 「排队中」让用户以为按钮没生效。
+    # 只清理 script_agent/parse，不碰其他类型任务。
+    if force:
+        from app.services import job_cancel
+
+        stale = (
+            db.query(Job)
+            .filter(
+                Job.project_id == project_id,
+                Job.job_type.in_(("script_agent", "parse")),
+                Job.status.in_(("queued", "running")),
+            )
+            .all()
+        )
+        for j in stale:
+            was_running = j.status == "running"
+            j.status = "cancelled"
+            j.finished_at = _now()
+            db.add(JobEvent(job_id=j.id, event_type="job.cancelled",
+                            payload={"reason": "superseded_by_reparse"},
+                            created_at=_now()))
+            if was_running:
+                # 线程正阻塞在 socket read 上，必须置信号 + 掐断连接
+                job_cancel.request(j.id)
+        if stale:
+            db.commit()
     # 幂等拦截（2026-10-28）：剧本未变化（同 script_version_id）且同 episode_start 已有成功的
     # script_agent 任务时，直接复用已有结果，不创建新任务、不重复调用 LLM。
     # 剧本 hash 变化会生成新 script_version_id，自然走重新分析；force=true 可强制重析。
-    if not payload.get("force"):
+    if not force:
         existing = (
             db.query(Job)
             .filter(
@@ -372,6 +426,12 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
             "episode_start": episode_start,
             # 建任务时的预检结论：full=整本送大纲，segmented=按集分窗口
             "outline_mode": _pre["outline_mode"],
+            # force 必须落进 params：执行器内部还有一层幂等防御（同版本同
+            # episode_start 已成功则复用旧结果），它读的是 params 而不是
+            # 请求体。只在上面的 API 检查里跳过复用是不够的 —— 实测
+            # 「重新解析」2 秒就 succeeded 并带回 idempotent_reuse=True，
+            # 用户拿到的还是上次那份旧结果。
+            "force": bool(payload.get("force")),
         },
         status="queued", created_at=_now(),
     )
@@ -383,14 +443,32 @@ def create_script_agent(project_id: str, payload: dict, db: Session = Depends(ge
 
 @router.get("/{project_id}/script-agent/status")
 def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> dict:
-    """Agent 分析状态：最近一个 script_agent 任务 + 集级记录 + 口径信息。"""
+    """Agent 分析状态：最近一个 script_agent 任务 + 集级记录 + 口径信息。
+
+    任务选取顺序：**活跃任务优先**（running/queued），其次才是最近结束的任务。
+
+    为什么不能只按 created_at 取最新：连续点两次「开始解析」会留下
+    一个 running + 一个 queued；queued 的 created_at 更晚，按时间排序会返回它，
+    前端于是把正在跑的任务显示成「任务排队中」，耗时、阶段、实时输出全部指向
+    一个还没开始的任务 —— 实测就是这个表现（running 任务在库里正常输出，
+    页面却显示排队中、耗时停在别的任务上）。
+    """
     _get_project(db, project_id)
+    base = db.query(Job).filter(
+        Job.project_id == project_id, Job.job_type == "script_agent"
+    )
+    # 1. 正在执行的任务最优先（用户最需要看到它）
     job = (
-        db.query(Job)
-        .filter(Job.project_id == project_id, Job.job_type == "script_agent")
-        .order_by(Job.created_at.desc())
+        base.filter(Job.status == "running")
+        .order_by(Job.started_at.desc())
         .first()
     )
+    # 2. 其次排队中（最老的排队任务才是下一个要跑的）
+    if job is None:
+        job = base.filter(Job.status == "queued").order_by(Job.created_at.asc()).first()
+    # 3. 都没有则取最近结束的任务（展示成功/失败结果）
+    if job is None:
+        job = base.order_by(Job.created_at.desc()).first()
     records = (
         db.query(EpisodeParseRecord)
         .filter(EpisodeParseRecord.project_id == project_id,
@@ -405,6 +483,21 @@ def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> d
         .order_by(ParseVersion.version.desc())
         .first()
     )
+    # 防御性纠正：任务已不在运行，但集级记录仍是 running —— 这是中断残留。
+    # 取消（cancelled）、worker 被 SIGKILL、进程重启都会留下这种孤儿记录，
+    # 前端据此把该集渲染成「进行中」，于是出现「待解析 0/1 集完成」却
+    # 显示第 1 集「进行中」的矛盾界面（截图实测）。
+    # 没有活跃任务时，running 记录一律纠正为 failed（中断），并落库，
+    # 避免每次请求都做同样的判断。
+    _job_active = job is not None and job.status in ("running", "queued")
+    if not _job_active:
+        _orphans = [r for r in records if r.status == "running"]
+        for _r in _orphans:
+            _r.status = "failed"
+            if not _r.error_msg:
+                _r.error_msg = "任务已中断（被取消或执行进程退出），本集未完成解析"
+        if _orphans:
+            db.commit()
     out = {
         "job": {
             "id": job.id, "status": job.status,
@@ -605,6 +698,18 @@ def confirm_parse_version(project_id: str, parse_version_id: str, payload: Parse
                 episode_count=int(target_result.get("episode_count") or 1),
                 current_scene_ids=current_scene_ids,
             )
+    else:
+        # 没有任何「已成功且属于本版本」的解析结果可应用时，绝不能把版本置为 current。
+        #
+        # 实测事故：前端在任务还在 running 时（job.result 仍为 None）就触发了确认，
+        # 这里 parse_jobs 过滤 status=="succeeded" 得到空列表，apply_parse_result 一次都没执行，
+        # 但下面照样把 pv.status 写成 current —— 结果解析版本显示「已完成」，
+        # 场景/角色/道具三张表全是 0，分镜却是 26 条（另一条链路的残留），
+        # 页面出现「解析成功但没有场景/角色」的自相矛盾状态。
+        # 明确报错，让调用方等任务真正结束再确认。
+        raise errors.parse_version_conflict(
+            "该解析版本还没有可应用的成功结果（解析任务可能仍在执行），请等待任务结束后重试"
+        )
     # 旧版本标记 superseded
     old_id = p.current_parse_version_id
     if old_id:

@@ -6,6 +6,7 @@ import { NButton, useMessage } from 'naive-ui'
 import {
   createScriptVersion,
   getCurrentScript,
+  getProject,
   normalizeScript,
   type ScriptNormalizeResult,
 } from '@/api/projects'
@@ -244,6 +245,19 @@ function goParse() {
   void router.push(`/project/${projectId.value}/parse`)
 }
 
+/* ---------- 剧本锁稿判定 ----------
+ * 解析确认后（project.current_parse_version_id 非空）剧本正文不可再改：
+ * 场景/角色/道具/分镜全部由这份正文推导，改文会让已落库资产静默失真。
+ * 后端 POST /script-versions 已加同样的守卫，这里只是让按钮状态与后端一致，
+ * 避免用户点了才吃 409。
+ */
+const { data: projectData } = useQuery({
+  queryKey: computed(() => ['project', projectId.value]),
+  queryFn: () => getProject(projectId.value),
+  enabled: computed(() => !!projectId.value),
+})
+const scriptLocked = computed(() => !!projectData.value?.current_parse_version_id)
+
 /* ---------- 加载当前剧本 ---------- */
 const { data: scriptData } = useQuery({
   queryKey: computed(() => ['currentScript', projectId.value]),
@@ -314,12 +328,12 @@ watch(
           size="small"
           :type="stage === 'saved' ? 'default' : 'primary'"
           :loading="saving"
-          :disabled="!textValid || saving"
-          :title="!textValid ? '剧本正文为空或超出字数上限，无法保存版本' : undefined"
-          :aria-label="!textValid ? '保存版本（不可用：剧本正文为空或超出上限）' : '保存版本'"
+          :disabled="!textValid || saving || scriptLocked"
+          :title="scriptLocked ? '剧本已解析完成并锁稿，如需修改请到解析页「重新解析」' : (!textValid ? '剧本正文为空或超出字数上限，无法保存版本' : undefined)"
+          :aria-label="scriptLocked ? '保存版本（不可用：剧本已锁稿）' : (!textValid ? '保存版本（不可用：剧本正文为空或超出上限）' : '保存版本')"
           @click="saveVersionMut()"
         >
-          {{ saving ? '保存中…' : savedVersion ? '重新保存' : '保存版本' }}
+          {{ saving ? '保存中…' : scriptLocked ? '已锁稿' : (savedVersion ? '重新保存' : '保存版本') }}
         </NButton>
         <!-- 去解析：保存后本页唯一的前进出口，主按钮位随之让给它 -->
         <NButton v-if="stage === 'saved'" size="small" type="primary" @click="goParse()">
@@ -332,7 +346,7 @@ watch(
          不再传 hint：原 hint 三句里「编辑后建议先校验」「校验已完成，下一步保存」
          「版本已保存，可以进入解析」都在复述右侧按钮已经说的事（按钮文案本身就是
          下一步动作），且第三句是恒真陈述——保存完成后永远显示，不携带变化信息。 -->
-    <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" />
+    <ScriptStageBar :steps="steps" :index="stageIndex" :saved-version="savedVersion" :locked="scriptLocked" />
 
     <div v-if="showStylePanel" class="style-drawer">
       <StyleConfigPanel :project-id="projectId" />
@@ -352,6 +366,7 @@ watch(
         <ScriptEditor
           v-if="viewMode !== 'read'"
           v-model="text"
+          :readonly="scriptLocked"
           placeholder="粘贴或输入 Markdown 剧本原文，也可以只写一个标题或一句话，点『校验补充』由 AI 整理为标准剧本格式…"
         />
 

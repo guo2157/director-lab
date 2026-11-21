@@ -183,7 +183,13 @@ export function useProjectFlow(projectId: ComputedRef<string>, routeName: Comput
     const out = {} as Record<StepKey, FlowStep>
     for (const def of STEP_DEFS) {
       // 前置步骤未完成 → 锁定。按定义顺序遍历，前置项必然已计算。
-      const locked = def.requires ? out[def.requires].status !== 'done' : false
+      // 解析特殊处理：继续解析 / 重新解析时它的展示态是 running，但库里
+      // 已有上一次的产出，不能让资产库及之后重新变锁（否则解析期间无法离开本页）。
+      const locked = def.requires
+        ? def.requires === 'parse'
+          ? !parseDone.value
+          : out[def.requires].status !== 'done'
+        : false
       let status: StepStatus
       if (locked) {
         status = 'locked'
@@ -191,15 +197,21 @@ export function useProjectFlow(projectId: ComputedRef<string>, routeName: Comput
         // 保存是同步操作，不存在「进行中」
         status = scriptSaved.value ? 'done' : 'todo'
       } else if (def.key === 'parse') {
-        if (parseDone.value) status = 'done'
-        else if (parseRunning.value) status = 'running'
+        // 运行中优先于已完成：继续解析剩余集 / 重新解析时，库里还留着上一次
+        // 成功的镜头（shot_total > 0 会让 parseDone 恒为真）。若先判 done，
+        // 左栏显示「已完成」勾，而页头同时显示「解析中」，两处口径打架。
+        if (parseRunning.value) status = 'running'
+        else if (parseDone.value) status = 'done'
         else if (parseFailed.value) status = 'failed'
         else status = 'todo'
       } else {
         const inStep = (def.stages as readonly string[]).includes(currentStage.value)
         const maxIdx = Math.max(...def.stages.map((s) => stageIndex(s)))
+        // 解析任务在跑时，current_stage 可能已被首批产出推进到 characters，
+        // 但资产库/分镜图此刻并没有人在做 —— 只有解析在进行。
+        // 不压掉会出现左栏「解析 进行中」+「资产库 进行中」两个绿点并存。
         if (currentStage.value === 'done' || currentStageIndex.value > maxIdx) status = 'done'
-        else if (inStep) status = 'running'
+        else if (inStep && !parseRunning.value) status = 'running'
         else status = 'todo'
       }
       out[def.key] = {

@@ -51,7 +51,7 @@ class FakeClient:
         return item
 
     def chat_stream(self, system_prompt, user_prompt, *, json_mode=True,
-                    on_delta=None, max_tokens=None):
+                    on_delta=None, max_tokens=None, should_cancel=None, cancel_token=None):
         return self._next(user_prompt, max_tokens)
 
     def chat(self, system_prompt, user_prompt, *, json_mode=True, max_tokens=None):

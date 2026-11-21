@@ -18,6 +18,7 @@ from app.core.database import get_db
 from app.models import Asset, Character, Job, Project, Prop, Scene, Shot, Workflow
 from app.models.asset_plan import AssetPlan, AssetPlanDependency
 from app.services import errors
+from app.services.workflow.capabilities import declared_reference_slots
 
 router = APIRouter(prefix="/api/projects", tags=["asset-plans"])
 

@@ -144,12 +144,14 @@ export function confirmEstimate(
 export function parseScript(projectId: string, payload: ParsePayload) {
   return post<{ job_id: string; status: string }>(`/projects/${projectId}/parse`, payload)
 }
-/** 剧本一体化分析（Agent）：评估+解析合并，集数由 Agent 决定，无需用户确认集数 */
-export function runScriptAgent(projectId: string, scriptVersionId: string, text: string, episodeStart?: number) {
-  return post<{ job_id: string; status: string }>(`/projects/${projectId}/script-agent`, {
+/** 剧本一体化分析（Agent）：评估+解析合并，集数由 Agent 决定，无需用户确认集数。
+ *  force=true 跳过后端幂等复用（「重新解析」必须用它，否则拿回的还是旧结果）。 */
+export function runScriptAgent(projectId: string, scriptVersionId: string, text: string, episodeStart?: number, force?: boolean) {
+  return post<{ job_id: string; status: string; idempotent_reuse?: boolean }>(`/projects/${projectId}/script-agent`, {
     script_version_id: scriptVersionId,
     text,
     ...(episodeStart && episodeStart > 1 ? { episode_start: episodeStart } : {}),
+    ...(force ? { force: true } : {}),
   })
 }
 /** Agent 分析状态查询（job + 口径 + 集级记录） */

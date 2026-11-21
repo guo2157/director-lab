@@ -129,7 +129,7 @@ class FakeLLMClient:
                                 max_tokens=max_tokens)
 
     def chat_stream(self, system_prompt, user_prompt, *, json_mode=True,
-                    on_delta=None, max_tokens=None):
+                    on_delta=None, max_tokens=None, should_cancel=None, cancel_token=None):
         self._meta(len(user_prompt))
         if "请解析以下剧本" in user_prompt:
             FakeLLMClient.all_parse_prompts.append(user_prompt)
@@ -169,6 +169,10 @@ class _Settings:
     llm_cjk_token_factor = 1.2
     llm_other_token_factor = 0.3
     parse_shot_ratio_warn = 0.5
+    # 本文件专门覆盖评估阶段（抽样范围、eval 事件、report 字段），
+    # 必须显式开启。生产默认值是 False（评估固定耗时 84s 且每次字段校验失败，
+    # 见 config.script_evaluation_enabled 注释），关闭后这里就测不到评估链路了。
+    script_evaluation_enabled = True
 
 
 @pytest.fixture()

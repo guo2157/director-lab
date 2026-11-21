@@ -828,45 +828,55 @@ def compile_asset_image(db: Session, asset_type: str, entity_id: str, *,
 
 # ── 分镜图编译 ───────────────────────────────────────────────
 def _shot_characters(db: Session, shot: Shot) -> list[Character]:
-    """镜头出场角色：主角 + 对白分段说话人（兼容 speaker_id 与 speaker 名字两种存法）。
+    """镜头出场角色 —— 委托给 shot_refs.shot_subject_characters（唯一口径）。
+
+    历史上这里和注入器、门禁各写了一份，三份定义逐渐分叉：本函数只认
+    「主角 + 对白说话人」，注入器额外认「名字出现在 dialogue 正文」，
+    门禁又只认前者，于是注入器放进去的配角被门禁判成换脸泄漏、整单 409。
+    现在统一为一份实现：character_id + 对白说话人 + 提示词显式 @引用。
 
     多参考图工作流（4 个角色槽）依赖这里拿到全部出场角色，
     否则对白里出现第二个角色时，媒体注入了它、提示词却没绑定它。
     """
-    ordered: list[Character] = []
-    seen_ids: set[str] = set()
-
-    def _add(ch: Character | None) -> None:
-        if ch is not None and ch.id not in seen_ids:
-            seen_ids.add(ch.id)
-            ordered.append(ch)
-
-    if shot.character_id:
-        _add(db.get(Character, shot.character_id))
-    scene = db.get(Scene, shot.scene_id)
-    project_id = scene.project_id if scene is not None else None
-    for seg in (shot.dialogue_segments or []):
-        if not isinstance(seg, dict):
-            continue
-        speaker_id = seg.get("speaker_id") or seg.get("character_id")
-        if speaker_id:
-            _add(db.get(Character, speaker_id))
-            continue
-        name = seg.get("speaker")
-        if name:
-            query = db.query(Character).filter(Character.name == name)
-            if project_id:
-                query = query.filter(Character.project_id == project_id)
-            _add(query.first())
-    return ordered
+    from app.services.shot_refs import shot_subject_characters
+    return shot_subject_characters(db, shot)
 
 
 def _shot_props(db: Session, shot: Shot, project_id: str) -> list[Prop]:
+    """本镜涉及的道具：优先用结构化字段 shot.props，提示词 @引用仅作兜底。
+
+    为什么不能只靠提示词正则（改造前行为）：解析阶段 LLM 在 image_prompt 里
+    写 @道具名，这里用 extract_refs 反向提取。两段式改造后 LLM 不再产出
+    image_prompt（由 STORYBOARD_TEMPLATE 渲染），正则就提取不到任何道具，
+    道具参考图会静默全部丢失。
+
+    Shot.props 是解析阶段就落库的结构化字段（实测库中为 ["帆布包"] 这种形态），
+    是道具关系的权威来源；提示词正则只在结构化字段为空时兜底，兼容历史数据。
+    """
     from app.services.ref_inject import extract_refs
-    try:
-        names = set(extract_refs(shot.image_prompt or ""))
-    except Exception:  # noqa: BLE001
-        names = set()
+
+    names: list[str] = []
+    raw = getattr(shot, "props", None)
+    if isinstance(raw, list):
+        names = [str(x).strip() for x in raw if str(x or "").strip()]
+    elif isinstance(raw, str) and raw.strip():
+        # 历史数据可能是 JSON 字符串或逗号分隔
+        import json as _json
+        try:
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list):
+                names = [str(x).strip() for x in parsed if str(x or "").strip()]
+            elif isinstance(parsed, str):
+                names = [parsed.strip()]
+        except (ValueError, TypeError):
+            names = [x.strip() for x in raw.split(",") if x.strip()]
+
+    if not names:
+        # 兜底：结构化字段为空时按提示词 @引用提取（历史数据兼容）
+        try:
+            names = extract_refs(shot.image_prompt or "")
+        except Exception:  # noqa: BLE001
+            names = []
     if not names or not project_id:
         return []
     rows = db.query(Prop).filter(Prop.project_id == project_id).all()
@@ -950,7 +960,11 @@ def audit_reference_slots(db: Session, shot: Shot, media: dict | None) -> list[d
                 assets[key] = asset
     chars = db.query(Character).filter(Character.project_id == project_id).all()
     portrait_owner = {c.portrait_asset_id: c for c in chars if c.portrait_asset_id}
-    subject_ids = {c.id for c in _shot_characters(db, shot)}
+    # 主体角色集合必须与注入器同一口径，否则注入器放入的身份槽会被本门禁判泄漏
+    # （实测：配角只在提示词里被 @引用、或只在 dialogue_segments 说话，两边定义
+    # 不一致就会整单 409）。权威定义见 shot_refs.shot_subject_characters。
+    from app.services.shot_refs import shot_subject_characters
+    subject_ids = {c.id for c in shot_subject_characters(db, shot)}
     from app.services.ref_inject import is_character_slot
 
     for slot, path in media.items():

@@ -259,8 +259,26 @@ def _compilation_blocked(compiled, http: int = 422) -> list:
 
 
 def _apply_compiled_media(compiled, params: dict) -> dict:
-    """只合并编译出的参考图槽位，不改写用户已确认的提示词。"""
+    """只合并编译出的参考图槽位，不改写用户已确认的提示词。
+
+    但**空提示词必须用编译结果填充**：调用方用
+    ``params.setdefault("prompt", shot.image_prompt or "")`` 建初始值，
+    当 ``image_prompt`` 为空时 prompt 键已存在且为空串，于是
+    ``_compile_shot_prompt`` 里 ``if "prompt" not in out`` 为 False，
+    走进本函数——若这里也只合并槽位，最终下发的 prompt 就是空串，
+    工作流收到空提示词。
+
+    实测（sht_045190812cb5）：image_prompt=None 时 params['prompt'] 长度 0，
+    编译出的 STORYBOARD_TEMPLATE 全文（含「硬性要求」分段）被整段丢弃。
+    这在「LLM 只产出结构化事实、提示词由模板渲染」的两段式改造后是必现路径，
+    不是边缘情况，因此在这里补上填充逻辑。
+    """
     out = dict(params)
+    if not str(out.get("prompt") or "").strip():
+        # 仅在提示词为空时填充；已有内容（用户手改 / 重新生成时的自定义提示词）不覆盖
+        compiled_text = (getattr(compiled, "positive_prompt", "") or "").strip()
+        if compiled_text:
+            out["prompt"] = compiled_text
     if compiled.reference_slots:
         media = dict(out.get("__media__") or {})
         for slot in compiled.reference_slots:

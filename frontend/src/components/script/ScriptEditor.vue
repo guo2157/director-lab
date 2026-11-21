@@ -7,8 +7,10 @@ withDefaults(
   defineProps<{
     modelValue: string
     placeholder?: string
+    /** 只读：剧本解析确认后锁稿，正文不可再改（改文会让已落库资产失真） */
+    readonly?: boolean
   }>(),
-  { placeholder: '' },
+  { placeholder: '', readonly: false },
 )
 
 const emit = defineEmits<{ 'update:modelValue': [string] }>()
@@ -23,6 +25,8 @@ const emit = defineEmits<{ 'update:modelValue': [string] }>()
           :value="modelValue"
           aria-label="Markdown 剧本正文"
           :placeholder="placeholder"
+          :readonly="readonly"
+          :aria-readonly="readonly ? 'true' : undefined"
           spellcheck="false"
           @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
         ></textarea>

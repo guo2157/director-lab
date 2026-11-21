@@ -231,3 +231,57 @@ def fallback_split(
             )
         )
     return chunks[:total]
+
+
+def split_text_by_blocks(text: str, budget_chars: int) -> list[str]:
+    """按场次/段落边界把正文切成若干段，每段字符数尽量不超过 ``budget_chars``。
+
+    背景：部分 OpenAI 兼容网关存在 completion 硬上限（实测某端点恒为
+    ``completion_tokens=16000`` 且 ``finish_reason`` 谎报 ``stop``），单次输出
+    超长 JSON 必然在中途被截断，放大 ``max_tokens`` 无效。唯一可靠的解法是把
+    一次输出拆成多次：本函数负责在**不切断句子**的前提下切分输入正文。
+
+    切分规则：
+    - 先按 ``_blocks()`` 的场次标题 / 空行段落边界贪心打包；
+    - 单块自身就超过预算时（例如整场戏很长），退回按行强制切分；
+    - 结果丢弃纯空白段，保证每段都含有可解析正文。
+
+    返回至少一段；空输入返回只含空串的单元素列表，由调用方决定是否发请求。
+    """
+    source = text or ""
+    budget = max(1, int(budget_chars or 0))
+    if not source:
+        return [""]
+    if len(source) <= budget:
+        return [source]
+
+    bounds = _blocks(source)
+    segs: list[str] = []
+    cur_start, cur_end = bounds[0]
+    for bs, be in bounds[1:]:
+        # 合并后仍在预算内则继续吞并，保证段数尽量少（段越多上下文越碎）
+        if be - cur_start <= budget:
+            cur_end = be
+            continue
+        segs.append(source[cur_start:cur_end])
+        cur_start, cur_end = bs, be
+    segs.append(source[cur_start:cur_end])
+
+    out: list[str] = []
+    for seg in segs:
+        if len(seg) <= budget:
+            out.append(seg)
+            continue
+        buf = ""
+        for line in seg.splitlines(keepends=True):
+            if buf and len(buf) + len(line) > budget:
+                out.append(buf)
+                buf = ""
+            while len(line) > budget:
+                out.append(line[:budget])
+                line = line[budget:]
+            buf += line
+        if buf:
+            out.append(buf)
+    cleaned = [s for s in out if s.strip()]
+    return cleaned or [source]

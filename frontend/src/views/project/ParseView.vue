@@ -14,7 +14,7 @@ import {
   runScriptAgent,
 } from '@/api/projects'
 import { listCharacters, listProps, listScenes } from '@/api/script'
-import { getJob, listJobs } from '@/api/jobs'
+import { cancelJob, getJob, listJobs } from '@/api/jobs'
 import type { Job } from '@/types/job'
 import type { EpisodeParseStatusItem, Scene, Shot } from '@/types/script'
 
@@ -123,20 +123,31 @@ const parseJobRunning = computed(
  * - 起点 priority：started_at（任务真正开始执行）> created_at（排队也计入，但至少不会归零）
  * - 终点：finished_at 存在即冻结，否则取当前时间
  * 这样刷新页面、重新渲染都不会重置计时，任务结束后也不会继续跳。
+ *
+ * 时区：后端历史数据里有不带时区后缀的 naive UTC 串（如 2026-11-20T13:16:34）。
+ * `new Date()` 会把它当**本地时间**解释，在 CST 下凭空多出 8 小时
+ * （实测「刚点开始解析就显示 08:00:26」）。这里对无时区串显式按 UTC 解析，
+ * 与后端新增的 +00:00 序列化双保险。
  */
+function parseServerTime(raw: string | null | undefined): number {
+  if (!raw) return 0
+  // 无时区标记（无 Z、无 ±hh:mm）→ 视为 UTC，避免被当成本地时间
+  const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)
+  const ms = new Date(hasTz ? raw : raw + 'Z').getTime()
+  return Number.isNaN(ms) ? 0 : ms
+}
 const nowTick = ref(Date.now())
 const analysisStartedMs = computed(() => {
   const j = parseJob.value
-  const raw = j?.started_at || j?.created_at
-  const ms = raw ? new Date(raw).getTime() : 0
-  return Number.isNaN(ms) ? 0 : ms
+  const ms = parseServerTime(j?.started_at || j?.created_at)
+  return ms
 })
 const parseElapsed = computed(() => {
   const start = analysisStartedMs.value
   if (!start) return 0
   const fin = parseJob.value?.finished_at
-  const end = fin ? new Date(fin).getTime() : nowTick.value
-  if (Number.isNaN(end)) return 0
+  const end = fin ? parseServerTime(fin) : nowTick.value
+  if (!end) return 0
   return Math.max(0, Math.floor((end - start) / 1000))
 })
 /** HH:mm:ss（超过 1 小时）或 mm:ss，需求指定格式 */
@@ -180,6 +191,8 @@ watch(() => parseJobRunning.value, (running) => { if (running) ensureElapsedTime
 onUnmounted(() => { if (elapsedTimerId) clearInterval(elapsedTimerId) })
 /* ---------- LLM 流式输出（SSE agent.llm_delta 事件） ---------- */
 const llmStreamText = ref('')
+/** 后端上报的真实阶段（agent.stage 事件）。前端不再按 JSON 猜阶段。 */
+const agentStage = ref<{ stage: string; label: string } | null>(null)
 const llmStreamBoxRef = ref<HTMLElement | null>(null)
 let llmEventSource: EventSource | null = null
 let llmLastSeq = 0
@@ -206,13 +219,16 @@ function closeLlmStream() {
 }
 
 async function openLlmStream(jobId: string) {
-  // 1. 先回放历史：llm-stream 接口返回已累积文本与最新 seq
+  // 1. 先回放历史：llm-stream 接口返回已累积文本、最新 seq 与最近一次阶段
   try {
     const res = await fetch(`/api/jobs/${jobId}/llm-stream`)
     if (res.ok) {
       const data = await res.json()
       llmStreamText.value = data.text || ''
       llmLastSeq = data.last_seq || 0
+      if (data.stage?.label) {
+        agentStage.value = { stage: String(data.stage.stage || ''), label: String(data.stage.label) }
+      }
     }
   } catch { /* 回放失败不阻断增量订阅 */ }
   // 2. 从最新 seq 订阅 SSE 增量
@@ -230,6 +246,9 @@ function connectLlmSse(jobId: string) {
         if (data.seq) llmLastSeq = data.seq
         if (data.event_type === 'agent.llm_delta' && data.id === jobId && data.delta) {
           appendLlmDelta(data.delta)
+        } else if (data.event_type === 'agent.stage' && data.id === jobId && data.label) {
+          // 后端真实阶段：解析开始后前几十秒没有 token，靠它告诉用户"在做什么"
+          agentStage.value = { stage: String(data.stage || ''), label: String(data.label) }
         }
       } catch { /* 忽略非 JSON 消息 */ }
     }
@@ -363,6 +382,65 @@ const { mutate: doContinueAgent, isPending: continuing } = useMutation({
   onError: (e) => message.error(errMsg(e)),
 })
 const candidateReady = computed(() => parseJob.value?.status === 'succeeded')
+
+/* ---------- 停止解析 ----------
+ * 后端 POST /jobs/{id}/cancel 对 script_agent 已改为协作式取消：
+ * 置进程内信号，解析线程在下一个 SSE 行检查点退出，终态写 cancelled 且不落结果。
+ * 前端只需把 job id 发过去，然后立即把本地 running 态清掉——
+ * 不能等轮询：LLM 线程可能正卡在 socket read，最长要等到下一行数据才退出。
+ */
+const { mutate: doStopParse, isPending: stopping } = useMutation({
+  mutationFn: () => {
+    if (!parseJobId.value) throw new Error('没有正在进行的解析任务')
+    return cancelJob(parseJobId.value)
+  },
+  onSuccess: () => {
+    message.success('已停止解析，模型调用已中断')
+    parseJobId.value = null
+    candidateVersionId.value = null
+    void queryClient.invalidateQueries({ queryKey: ['parse-status', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
+  },
+  onError: (e) => message.error(errMsg(e)),
+})
+
+/* ---------- 重新解析 ----------
+ * 与「开始解析」的区别：force=true 跳过后端幂等复用。
+ * 不加 force 时后端发现「同 script_version_id 同 episode_start 已有成功任务」
+ * 会直接复用旧结果并返回 idempotent_reuse —— 用户点「重新解析」拿到的还是
+ * 上一次那份有问题的结果，按钮等于没生效。
+ *
+ * 解析中点击时**先终止再重解析**（需求明确要求）：
+ * 旧实现里按钮在 running 时被 v-if 隐藏，用户必须先点「停止解析」、等任务
+ * 真的退出、再点「重新解析」，三步操作中间还要赌取消是否生效。更糟的是
+ * 直接重发会在队列里堆一个新任务，而 worker 是单线程串行 —— 旧任务还在跑
+ * 就烧着 token，新任务干等，用户看到的是「点了没反应」。
+ * 所以这里把「取消 + 重新发起」合成一个原子动作：取消必须**等到后端确认**
+ * （cancel 接口返回 204）再发新任务，否则新任务可能被刚写入的 cancelled
+ * 状态影响，或与旧任务的清理竞争。
+ */
+const { mutate: doReparse, isPending: reparsing } = useMutation({
+  mutationFn: async () => {
+    const vid = scriptVersionId.value
+    if (!vid) throw new Error('尚未保存剧本版本')
+    // 解析中：先终止当前任务（等后端确认），再重新发起
+    const runningJobId = parseJobRunning.value ? parseJobId.value : null
+    if (runningJobId) {
+      await cancelJob(runningJobId)
+      // 本地立刻清态：cancel 已确认，running 轮询下一次会读到 cancelled
+      parseJobId.value = null
+    }
+    return runScriptAgent(projectId.value, vid, scriptText.value, 1, true)
+  },
+  onSuccess: (res) => {
+    parseJobId.value = res.job_id
+    candidateVersionId.value = null
+    void queryClient.invalidateQueries({ queryKey: ['parse-status', projectId.value] })
+    void queryClient.invalidateQueries({ queryKey: ['script-agent-status', projectId.value] })
+    message.success('已重新发起解析，旧结果将在新结果确认后被替换')
+  },
+  onError: (e) => message.error(errMsg(e)),
+})
 
 /* ---------- 刷新恢复 ---------- */
 
@@ -794,17 +872,34 @@ const { data: agentStatusData } = useQuery({
   queryKey: computed(() => ['script-agent-status', projectId.value]),
   queryFn: () => getScriptAgentStatus(projectId.value),
   enabled: computed(() => !!projectId.value),
-  refetchInterval: computed(() => (parseJobId.value ? false : 5000)),
+  // 始终轮询：后端可能还有另一个 running 任务（连点两次会留下 running + queued）。
+  // 不能因为「已持有 jobId」就停掉轮询，否则永远不会发现真正的 running 任务。
+  refetchInterval: 4000,
 })
 watch(
   () => agentStatusData.value,
   (s) => {
-    if (!s?.job || parseJobId.value) return
-    // 活跃任务必须接管（刷新后继续显示实时输出与耗时）；
-    // 失败任务也要接管，否则刷新后看不到「执行失败 + 耗时」；
-    // 已成功不接管——成功后按需求收起执行过程，只展示解析结果。
-    if (['queued', 'running', 'failed', 'lost'].includes(s.job.status)) {
-      parseJobId.value = s.job.id
+    if (!s?.job) return
+    const incoming = s.job as { id: string; status: string }
+    const active = ['queued', 'running']
+    // 后端权威：优先接管 running 任务。
+    // 旧实现只在 parseJobId 为空时接管一次，之后永不更正 ——
+    // 连点两次「开始解析」会锁在最新那个 queued 任务上，
+    // 而真正在跑的是更早创建的 running 任务，页面于是永久显示
+    // 「任务排队中」+ 已耗时停在排队任务上（实测就是这个表现）。
+    if (active.includes(incoming.status)) {
+      if (parseJobId.value !== incoming.id) {
+        // running 一定优先于本地持有的 queued
+        const curStatus = parseJob.value?.status
+        if (incoming.status === 'running' || curStatus !== 'running') {
+          parseJobId.value = incoming.id
+        }
+      }
+      return
+    }
+    // 已结束任务只在本地还没有任务时接管（用于刷新后展示失败/成功结果）
+    if (!parseJobId.value && ['failed', 'lost', 'succeeded'].includes(incoming.status)) {
+      parseJobId.value = incoming.id
     }
   },
   { immediate: true },
@@ -826,6 +921,10 @@ watch(
 const confirmTarget = computed<string | null>(() => {
   const scope = agentStatusData.value?.scope
   if (!scope?.parse_version_id || scope.parse_version_status !== 'candidate') return null
+  // 任务仍在跑时绝不确认：此时后端 job.result 还是空的，
+  // apply_parse_result 拿不到场景/角色/道具，却会把版本置成 current，
+  // 结果页面显示「解析完成」但场景/角色/道具全是 0（实测发生过）。
+  if (parseJobRunning.value) return null
   // 分批解析中途不确认：半成品不能定成当前版本
   if (agentHasMore.value) return null
   if (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded < statusTotalEpisodes.value) {
@@ -863,6 +962,8 @@ const analysisStage = computed(() => {
   const st = parseJob.value?.status
   if (st === 'queued') return '任务排队中，等待分析引擎接管'
   if (parseJobRunning.value) {
+    // 后端上报的阶段优先（大纲/评估/拆解），其次才是本地可观测事实
+    if (agentStage.value?.label) return agentStage.value.label
     return llmStreamText.value ? 'AI 正在输出分析内容' : llmPlaceholder.value
   }
   if (st === 'succeeded') return `已解析 ${statusSummary.value.succeeded}/${statusTotalEpisodes.value} 集`
@@ -878,14 +979,15 @@ const analysisFootLabel = computed(() => {
 
 /**
  * 页头「开始解析」的可见条件：
- * - 没有任何集级记录 → 首次解析，必须能独立发起；
- * - 有记录但还有集未成功、且没有任务在跑 → 允许重新发起（幂等复用见后端 script-agent）。
- * 全部成功时按钮消失（由「去资产库 →」承担出口）；有失败时由「重试失败集」承担。
+ * - **从未成功过任何集**才叫「开始」：无集级记录，或有记录但 0 集成功（全失败/全中断）；
+ * - 一旦有成功集，剩余工作由「继续分析」承担 —— 两者同时出现语义重复，
+ *   用户不知道该点哪个（截图实测：0/1 集完成时两个按钮并排，其中一个是废动作）。
+ * - 有任务在跑时不显示（由「停止解析」承担）。
  */
 const canStartParse = computed(() => {
   if (!hasScript.value || parseJobRunning.value) return false
   if (statusTotalEpisodes.value === 0) return true
-  return statusSummary.value.succeeded < statusTotalEpisodes.value
+  return statusSummary.value.succeeded === 0
 })
 
 /** 页头步骤状态：与左栏 02 解析保持同一口径，但只用文字 + 色点，不重复整条进度条。
@@ -900,78 +1002,44 @@ const parseHeaderState = computed<{ label: string; tone: string }>(() => {
   if (!hasScript.value) return { label: '待保存剧本', tone: 'idle' }
   return { label: '待解析', tone: 'idle' }
 })
-/** 从 JSON 文本片段中按 key 统计数组元素数量 */
-function countJsonArrayItems(prefix: string, text: string): number {
-  const idx = text.indexOf(prefix)
-  if (idx < 0) return 0
-  const after = text.slice(idx + prefix.length)
-  let depth = 0
-  let started = false
-  let count = 0
-  for (let i = 0; i < after.length; i++) {
-    const c = after[i]
-    if (c === '{') { depth++; started = true }
-    else if (c === '}') { depth--; if (depth <= 0 && started) break }
-    else if (c === '[') { depth++; started = true }
-    else if (c === ']') { depth--; if (depth <= 0 && started) break }
-    // 统计顶层对象的出现次数（每个顶层对象以 "{ 开头）
-    if (started && depth === 1 && c === '{' && (i === 0 || after[i-1] !== '\\')) {
-      let j = i + 1
-      while (j < after.length && after[j] !== '"' && after[j] !== '}') j++
-      if (after[j] === '"') count++
-    }
-  }
-  // 修正：用简单的正则匹配闭合对象计数更可靠
-  const section = after.slice(0, 50000)
-  // 统计独立顶层对象的名称（如 "name": "xxx" 模式）
-  const nameMatches = section.match(/"name"\s*:\s*"/g)
-  return nameMatches ? nameMatches.length : 0
-}
-
-/** 将 LLM 输出的 JSON 流转换为人性化进度描述 */
-const readableStreamText = computed(() => {
+/**
+ * 流式输出区展示文本。
+ *
+ * 旧实现把 JSON 流"翻译"成一串伪进度（实测渲染出
+ * `📺 正在分析第 1、1、1、1、1、1 集`），成因是用正则扫全文所有
+ * `"episode": N` —— 而每个分镜都会带一次 `"episode": 1`，同一集被打印六遍。
+ * 那不是进度，是统计方式错了。
+ *
+ * 现在的原则：**只展示真实存在的东西**。
+ * - 后端 `agent.stage` 事件上报当前阶段（大纲/评估/拆解），唯一可信的阶段来源；
+ * - 输出区直接呈现模型真实输出的字符流，不做任何"翻译"；
+ * - 已接收字符数与已识别集号（去重后）来自流本身，可核验。
+ */
+const streamCharCount = computed(() => llmStreamText.value.length)
+/**
+ * 真实推进量：后端 job.progress 事件记录的已接收字符数（绝对值，不是百分比）。
+ * 剧本解析没有可靠的「总字数」预期，编一个百分比只会误导；
+ * 显示持续增长的字符数才能证明任务在往前走。
+ */
+const progressChars = computed(() => {
+  const fromJob = parseJob.value?.progress_chars
+  return Math.max(fromJob ?? 0, streamCharCount.value)
+})
+/** 流中已出现的集号（去重排序）——去重是关键，否则同一集会被每个分镜重复计数 */
+const streamEpisodeNos = computed<number[]>(() => {
   const raw = llmStreamText.value
-  if (!raw) return ''
-  // 检测是否像 JSON 输出（json_mode 下的 LLM 流）
-  if (!raw.trimStart().startsWith('{') && !raw.includes('"characters"') && !raw.includes('"scenes"')) {
-    return raw // 不是 JSON 流，直接展示原文
+  if (!raw) return []
+  const set = new Set<number>()
+  for (const m of raw.matchAll(/"episode"\s*:\s*(\d+)/g)) {
+    const n = Number(m[1])
+    if (Number.isFinite(n) && n > 0) set.add(n)
   }
-  const lines: string[] = []
-  // 提取 episode 信息
-  const epMatch = raw.match(/"episode"\s*:\s*(\d+)/g)
-  if (epMatch) {
-    const nums = epMatch.map(m => m.match(/\d+/)?.[0] ?? '').filter(Boolean)
-    if (nums.length) lines.push(`📺 正在分析第 ${nums.join('、')} 集`)
-  }
-  // 统计角色数量
-  const charCount = countJsonArrayItems('"characters"', raw)
-  if (charCount > 0) lines.push(`👤 已识别 ${charCount} 个角色`)
-  // 统计场景数量
-  const sceneCount = countJsonArrayItems('"scenes"', raw)
-  if (sceneCount > 0) lines.push(`🎬 已识别 ${sceneCount} 个场景`)
-  // 统计分镜数量
-  const shotCount = countJsonArrayItems('"shots"', raw)
-  if (shotCount > 0) lines.push(`🎞️ 已拆解 ${shotCount} 个分镜`)
-  // 统计道具数量
-  const propCount = countJsonArrayItems('"props"', raw)
-  if (propCount > 0) lines.push(`🪑 已识别 ${propCount} 个道具`)
-  // 评估相关
-  if (raw.includes('"score"')) {
-    const scoreMatch = raw.match(/"score"\s*:\s*([\d.]+)/)
-    if (scoreMatch) lines.push(`📊 剧本评分 ${scoreMatch[1]}`)
-  }
-  // 剧集梗概
-  const titleMatches = raw.match(/"title"\s*:\s*"([^"]+)"/g)
-  if (titleMatches && titleMatches.length > 0) {
-    const titles = titleMatches.map(m => m.match(/"([^"]+)"$/)?.[1] ?? '').filter(Boolean)
-    if (titles.length) lines.push(`📖 剧集：${titles.join('、')}`)
-  }
-  return lines.length > 0 ? lines.join('\n') : 'AI 正在输出分析内容…'
+  return [...set].sort((a, b) => a - b)
 })
 
-/** 输出区内容：有真实流式文本就展示，否则给与状态相符的说明（不伪造进度） */
+/** 输出区内容：有真实流式文本就展示原文，否则给与状态相符的说明（不伪造进度） */
 const analysisBodyText = computed(() => {
-  if (llmStreamText.value) return readableStreamText.value
+  if (llmStreamText.value) return llmStreamText.value
   if (parseJobRunning.value) return llmPlaceholder.value
   if (parseJob.value?.status === 'succeeded') return '分析已完成。下方可查看解析结果与集数状态。'
   if (parseJob.value?.status === 'failed') return '本次分析未产出结果。请查看失败原因后重试。'
@@ -1067,9 +1135,29 @@ async function copyRawReport() {
           解析原文
         </NButton>
         <NButton quaternary @click="router.push(`/project/${projectId}/script`)">返回剧本</NButton>
-        <!-- 继续分析：只处理「已有记录但还有集未完成」的情况 -->
+        <!--
+          停止解析：解析中常驻可见（写操作不进 ⋯ 菜单）。
+          后端已改为协作式取消，点下即置进程内信号，线程在下一个 SSE 行退出；
+          不依赖轮询，因此点击后立刻清本地 running 态，不等后端回执。
+        -->
         <NButton
-          v-if="pendingEpisodes.length && !parseJobRunning"
+          v-if="parseJobRunning"
+          type="error"
+          ghost
+          :loading="stopping"
+          :disabled="!parseJobId"
+          @click="doStopParse()"
+        >
+          停止解析
+        </NButton>
+        <!--
+          继续分析：真正的「接着上次往下做」——必须**已有成功解析的集**才有意义。
+          没有成功集时它和「开始解析」做的是同一件事（都从第 1 集起），
+          两个按钮并排出现只会让用户不知道该点哪个（截图实测：0/1 集完成时
+          两个按钮同时在场）。
+        -->
+        <NButton
+          v-if="pendingEpisodes.length && statusSummary.succeeded > 0 && !parseJobRunning"
           :loading="continuing"
           @click="doContinueAgent()"
         >
@@ -1090,6 +1178,21 @@ async function copyRawReport() {
           @click="handleStartParse()"
         >
           开始解析
+        </NButton>
+        <!--
+          重新解析：始终常驻可见（有剧本、有集数记录时）。
+          解析中也必须能点 —— 需求要求「如果是解析中的状态先终止解析然后重新解析」，
+          因此这里不能用 v-if 把它藏起来（旧实现只在 !parseJobRunning 时显示，
+          用户必须先手动点「停止解析」再点本按钮，两步且要赌取消是否生效）。
+          按钮内部会先 await cancelJob 再发起 force 重解析，见 doReparse。
+        -->
+        <NButton
+          v-if="hasScript && statusTotalEpisodes > 0"
+          :loading="reparsing"
+          :disabled="reparsing"
+          @click="doReparse()"
+        >
+          {{ parseJobRunning ? '重新解析（将先终止当前任务）' : '重新解析' }}
         </NButton>
         <!-- 无剧本版本时的唯一出路：直接给去剧本页的入口，不让用户卡在死页 -->
         <NButton
@@ -1118,8 +1221,11 @@ async function copyRawReport() {
 
           <div class="ac-meta">
             <span class="ac-stage">{{ analysisStage }}</span>
-            <span v-if="statusTotalEpisodes" class="ac-progress">
-              {{ statusSummary.succeeded }}/{{ statusTotalEpisodes }} 集
+            <span v-if="streamEpisodeNos.length" class="ac-progress">
+              已涉及第 {{ streamEpisodeNos.join('、') }} 集
+            </span>
+            <span v-if="progressChars" class="ac-progress">
+              已接收 {{ (progressChars / 1000).toFixed(1) }}k 字符
             </span>
             <span class="ac-elapsed" :title="`任务开始时间：${parseJob?.started_at || parseJob?.created_at || '—'}`">
               已耗时 {{ elapsedText }}
@@ -1128,7 +1234,10 @@ async function copyRawReport() {
 
           <div class="ac-divider" />
 
-          <div class="ac-body-label">Agent 实时输出</div>
+          <div class="ac-body-label">
+            Agent 实时输出
+            <span v-if="parseJobRunning && !llmStreamText" class="ac-waiting">等待首个 token…</span>
+          </div>
           <div ref="llmStreamBoxRef" class="ac-body">{{ analysisBodyText }}</div>
 
           <div class="ac-divider" />
@@ -1364,8 +1473,14 @@ async function copyRawReport() {
         </section>
 
         <!-- 空态：说清「现在什么情况」，动作由页头那唯一一个主按钮承担 ——
-             同屏两个同名主按钮会让用户犹豫点哪个（PageHeader 的约定是每页一个主操作）。 -->
-        <div v-else class="parse-empty">
+             同屏两个同名主按钮会让用户犹豫点哪个（PageHeader 的约定是每页一个主操作）。
+
+             v-else-if="!parseJobRunning"：任务运行中**不渲染**这张卡。
+             旧实现无条件渲染，于是同一屏出现「正在分析」+「解析尚未产出结果」
+             两句互相否定的文案，用户以为任务已经失败了。运行中的状态由上方
+             AI Agent 卡独家承载，这里只在「没有任务在跑」时补充说明。
+             文案也只指向本页真实渲染出来的区块（分集面板在运行中并不渲染）。 -->
+        <div v-else-if="!parseJobRunning" class="parse-empty">
           <p class="pe-title">
             {{ !hasScript ? '还没有可解析的剧本' : statusTotalEpisodes === 0 ? '剧本已就绪，等待解析' : '解析尚未产出结果' }}
           </p>
@@ -1375,7 +1490,7 @@ async function copyRawReport() {
                 ? '解析以已保存的剧本版本为准。先到剧本页写入正文并保存版本，再回到这里开始解析。'
                 : statusTotalEpisodes === 0
                   ? '解析会把已保存的剧本拆成场景、角色、道具与分镜。集数由 Agent 自行判断，无需先选集。'
-                  : `已提交 ${statusTotalEpisodes} 集，其中 ${statusSummary.succeeded} 集完成、${statusSummary.pending + statusSummary.running} 集未完成。失败原因见上方分集面板。`
+                  : `已提交 ${statusTotalEpisodes} 集，其中 ${statusSummary.succeeded} 集完成、${statusSummary.failed} 集失败。${statusSummary.failed > 0 ? '失败原因见上方分集面板中该集的错误说明。' : '任务已结束，点「开始解析」可重新发起。'}`
             }}
           </p>
         </div>
@@ -1437,7 +1552,7 @@ async function copyRawReport() {
   font-family: var(--font-mono);
 }
 .parse-page {
-  --parse-col-max: 960px;
+  --parse-col-max: 1080px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -1551,9 +1666,10 @@ async function copyRawReport() {
 
 .parse-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .parse-body { display: flex; flex: 1; min-height: 0; min-width: 0; }
-.content-pane { flex: 1; min-width: 0; padding: 24px 20px 40px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+.content-pane { flex: 1; min-width: 0; padding: 24px 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
 /* 内容列限宽居中：避免超宽屏下卡片内部左右两端（标题 / 操作按钮）被拉开过远。
-   限宽加在卡片自身而非 .content-pane 上，防止 flex:1 + margin:auto 把内容压成窄柱。 */
+   限宽加在卡片自身而非 .content-pane 上，防止 flex:1 + margin:auto 把内容压成窄柱。
+   1080 是实测取的值：1366 视口下内容列从 960 → 1080，右侧死白由 190px 降到 70px。 */
 .content-pane > * {
   width: 100%;
   max-width: var(--parse-col-max);
@@ -1620,17 +1736,31 @@ async function copyRawReport() {
   font-size: 11.5px;
   letter-spacing: 0.03em;
   color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
 }
+/* 「等待首个 token」：解析启动到首个 delta 之间有几十秒空窗，
+   没有这句提示，空输出框会被当成卡死。 */
+.ac-waiting { color: var(--brand-hover); }
 .ac-body {
-  max-height: 320px;
+  /* 输出区高度：解析输出会持续几十秒到几分钟，必须自己滚动。
+     这里用视口相对上限（而不是 flex:1）—— 卡片不是 flex 容器，
+     flex 在此不生效；上一版写 max-height:none 会让内容无限增高、
+     滚动条消失，用户看到的是「不可滚动」。 */
+  max-height: min(46vh, 460px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--sp-2) var(--sp-4) var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.75;
+  font-size: 12.5px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-secondary);
+  /* 滚动条常驻可见：内容超出时用户要知道「下面还有」 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--neutral-line) transparent;
 }
 .ac-foot {
   display: flex;

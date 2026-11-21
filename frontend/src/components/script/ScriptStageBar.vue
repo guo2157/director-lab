@@ -19,6 +19,8 @@ defineProps<{
   /** 当前阶段下标；之前的视为已完成 */
   index: number
   savedVersion: SaveVersion
+  /** 解析已确认 → 剧本锁稿，阶段条上以「已锁稿」代替版本号 */
+  locked?: boolean
 }>()
 </script>
 
@@ -35,7 +37,9 @@ defineProps<{
           <template v-else>{{ i + 1 }}</template>
         </span>
         <span class="stage-label">{{ s.label }}</span>
-        <span v-if="s.key === 'saved' && savedVersion" class="stage-extra">v{{ savedVersion.version }}</span>
+        <!-- 单版本模式：不显示 v1/v2 —— 项目只有一份剧本，版本号是纯噪音。
+             解析后锁稿状态改由「已锁稿」表达，比版本数字有用。 -->
+        <span v-if="s.key === 'saved' && savedVersion && locked" class="stage-extra">已锁稿</span>
       </div>
       <!-- 连接线：只在「已经走到」的段位点亮，未到达的段位保持中性，让进度方向一眼可读 -->
       <span

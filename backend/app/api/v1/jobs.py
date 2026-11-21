@@ -29,6 +29,7 @@ def _to_out(j: Job, db: Session | None = None) -> JobOut:
     retryable = j.status in _RETRYABLE_STATUS and (j.attempts or 0) < settings.job_max_attempts
     project_name = episode = scene_title = shot_seq = None
     progress = None
+    progress_chars = None
     if db is not None:
         project = db.get(Project, j.project_id)
         project_name = project.name if project else None
@@ -39,7 +40,9 @@ def _to_out(j: Job, db: Session | None = None) -> JobOut:
                 episode = shot.episode
                 scene = db.get(Scene, shot.scene_id)
                 scene_title = scene.title if scene else None
-        # 生成进度百分比：running 任务取最近 job.progress 事件（value/max）换算 0-100
+        # 生成进度百分比：running 任务取最近 job.progress 事件（value/max）换算 0-100。
+        # max<=0 表示「总量未知、只有绝对推进量」（如 LLM 流式输出的已接收字符数）：
+        # 此时不换算百分比，原样把已接收量放进 progress_chars，前端显示字符数推进。
         if j.status == "running":
             ev = (
                 db.query(JobEvent)
@@ -52,11 +55,14 @@ def _to_out(j: Job, db: Session | None = None) -> JobOut:
                 maxv = (ev.payload or {}).get("max")
                 if isinstance(value, (int, float)) and isinstance(maxv, (int, float)) and maxv > 0:
                     progress = max(0, min(100, round(value / maxv * 100)))
+                elif isinstance(value, (int, float)):
+                    progress_chars = int(value)
     return JobOut(
         id=j.id, project_id=j.project_id, job_type=j.job_type, status=j.status, shot_id=j.shot_id,
         project_name=project_name, episode=episode, scene_title=scene_title, shot_seq=shot_seq,
         error_code=j.error_code, error_msg=j.error_msg, retryable=retryable,
         result=j.result, attempts=j.attempts or 0, seq=j.event_seq, progress=progress,
+        progress_chars=progress_chars,
         created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at,
     )
 
@@ -156,11 +162,19 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
             db.add(JobEvent(job_id=j.id, event_type="job.interrupt_failed",
                             payload={"reason": type(e).__name__},
                             created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+    was_running = j.status == "running"
     j.status = "cancelled"
     j.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.add(JobEvent(job_id=j.id, event_type="job.cancelled", payload={},
                     created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
     db.commit()
+    # 协作式取消：仅 running 需要置进程内信号。queued 的改数据库状态就够了
+    # （调度器只捞 queued，不会再有线程接手），置信号反而会留下永不清理的登记。
+    # running 时线程正阻塞在 socket read 上，只改数据库它感知不到
+    # （实测会跑完 24 分钟并把 status 覆写回 succeeded）。
+    if was_running:
+        from app.services import job_cancel
+        job_cancel.request(j.id)
     return None
 
 
@@ -268,7 +282,11 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
 @router.get("/{job_id}/llm-stream")
 def get_llm_stream(job_id: str, db: Session = Depends(get_db)) -> dict:
     """LLM 流式输出回放：返回该任务已累积的 agent.llm_delta 文本与最新事件 seq。
-    前端中途打开解析页时先调用本接口回放历史，再从 last_seq 订阅 SSE 增量，避免重复。"""
+    前端中途打开解析页时先调用本接口回放历史，再从 last_seq 订阅 SSE 增量，避免重复。
+
+    同时返回最近一次 ``agent.stage``：刷新后没有 SSE 历史可听，只靠回放拿不到
+    「当前在做什么」，界面会退化成只有一个输出框。
+    """
     j = db.get(Job, job_id)
     if j is None:
         raise errors.job_not_found()
@@ -280,4 +298,18 @@ def get_llm_stream(job_id: str, db: Session = Depends(get_db)) -> dict:
     )
     text = "".join((ev.payload or {}).get("delta") or "" for ev in rows)
     last_seq = rows[-1].event_seq if rows else 0
-    return {"job_id": job_id, "text": text, "last_seq": last_seq, "chunk_count": len(rows)}
+    stage_ev = (
+        db.query(JobEvent)
+        .filter(JobEvent.job_id == job_id, JobEvent.event_type == "agent.stage")
+        .order_by(JobEvent.event_seq.desc())
+        .first()
+    )
+    stage = None
+    if stage_ev is not None and stage_ev.payload:
+        stage = {
+            "stage": (stage_ev.payload or {}).get("stage"),
+            "label": (stage_ev.payload or {}).get("label"),
+        }
+        last_seq = max(last_seq, stage_ev.event_seq)
+    return {"job_id": job_id, "text": text, "last_seq": last_seq,
+            "chunk_count": len(rows), "stage": stage}

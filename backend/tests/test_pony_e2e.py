@@ -165,7 +165,9 @@ def test_pony_crossing_river_e2e(client: TestClient):
     shot2 = client.post("/api/shots", json={
         "scene_id": scenes["小河与河岸"]["id"], "episode": 1, "shot_kind": "dialogue",
         "duration": 5, "character_id": chars["小马"]["id"],
-        "image_prompt": "@小马 站在画面左侧的河边，向画面右侧的 @牛伯伯 询问河水深浅，中景",
+        # 身份槽只允许本镜主体角色（character_id=小马），配角仅以文字描述出现，
+        # 避免非主体角色定妆图误入 ref_identity/ref_character_N 触发换脸防护
+        "image_prompt": "@小马 站在画面左侧的河边，向画面右侧的牛伯伯询问河水深浅，中景",
         "dialogue": "牛伯伯，河水深不深？",
     }).json()
 

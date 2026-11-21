@@ -92,7 +92,10 @@ def test_multi_character_slot_priority(client: TestClient):
     pid, names, _, _ = _mk_char_scene_assets(client, n_chars=2)
     db = SessionLocal()
     prompt = f"@{names[0]} 和 @{names[1]} 在对话"
-    media = ref_inject.build_media_params(db, pid, prompt, None)
+    # 必须显式声明工作流槽位：None 表示「工作流未声明任何槽位」，
+    # 此时一律不注入（避免给 H3 Ref2VA 注入它不存在的输入参数）。
+    media = ref_inject.build_media_params(
+        db, pid, prompt, ["ref_identity", "ref_character_2"])
     db.close()
     assert media == {
         "ref_identity": str(_TMP_DIR / "p0.png"),

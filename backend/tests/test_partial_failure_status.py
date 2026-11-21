@@ -123,7 +123,7 @@ class FakeLLMClient:
                                 max_tokens=max_tokens)
 
     def chat_stream(self, system_prompt, user_prompt, *, json_mode=True,
-                    on_delta=None, max_tokens=None):
+                    on_delta=None, max_tokens=None, should_cancel=None, cancel_token=None):
         self.last_metadata = _Meta(len(user_prompt))
         if "请解析以下剧本" not in user_prompt:
             payload = json.dumps(_outline(), ensure_ascii=False)

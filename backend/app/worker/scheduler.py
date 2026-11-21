@@ -11,6 +11,7 @@
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
@@ -375,14 +376,39 @@ def run_worker(once: bool = False) -> None:
                         print(f"[worker] 等待期对账异常: {type(_re).__name__}: {_re}")
                     finally:
                         db2.close()
-        # 优雅停止：等待在途任务完成
-        for f in in_flight:
-            try:
-                f.result()
-            except Exception as e:
-                print(f"[worker] 任务线程异常: {e}")
+        # 优雅停止：等待在途任务完成，但必须有界。
+        #
+        # 实测事故（2026-11-20）：重启 worker 时 systemd 发 SIGTERM，旧实现这里
+        # 用 ``f.result()`` 无限等待在途的 script_agent 任务。该任务正阻塞在 LLM
+        # 流式调用上（单次实测 100s+），systemd 等满 TimeoutStopSec 后发 SIGKILL。
+        # 进程被强杀 → 数据库里任务仍是 running → 下次启动 _recover_interrupted_jobs
+        # 把它重置为 queued → 整个解析从头再跑一遍。用户看到的就是「同一个任务
+        # 跑了 3 次、耗时 776s」，实际 32% 是重复劳动的浪费。
+        #
+        # 修正：收到停止信号后先给在途任务发协作式取消信号（job_cancel 会通过
+        # DB 轮询 + 掐断 socket 让 LLM 调用尽快返回），再按有界超时等待。
+        # 超时仍未结束就不再等——让进程干净退出，未完成任务由下次启动的
+        # stall 回收逻辑接管，而不是阻塞到被 SIGKILL。
+        _grace = float(getattr(settings, "worker_shutdown_grace_seconds", 20.0) or 20.0)
+        if in_flight:
+            from app.services import job_cancel
+            for jid in list(in_flight.values()):
+                try:
+                    job_cancel.request(jid)
+                except Exception:  # noqa: BLE001
+                    pass
+            print(f"[worker] 正在等待 {len(in_flight)} 个在途任务退出（上限 {_grace:.0f}s）")
+            _deadline = time.monotonic() + _grace
+            for f, jid in list(in_flight.items()):
+                _left = max(0.0, _deadline - time.monotonic())
+                try:
+                    f.result(timeout=_left)
+                except FutureTimeout:
+                    print(f"[worker] 任务 {jid} 超过 {_grace:.0f}s 未退出，放弃等待（下次启动按 stall 规则接管）")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[worker] 任务线程异常: {e}")
     finally:
-        pool.shutdown(wait=True)
+        pool.shutdown(wait=False)
     print("[worker] 停止")
 
 

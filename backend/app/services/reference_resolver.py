@@ -156,24 +156,27 @@ def resolve_shot_references(
             ))
 
     # ---- 角色槽位 ----
-    prompt_text = shot.image_prompt or ""
-    mentioned = set(extract_refs(prompt_text))
     characters = (
         db.query(Character).filter(Character.project_id == project_id).all()
     )
     char_by_name = {c.name: c for c in characters}
+    # 「本镜出场角色」必须与门禁 audit_reference_slots 用同一个定义，
+    # 否则注入器放进 ref_character_N 的配角会被门禁判为 identity_reference_leak
+    # 而整单 409（实测：小马问牛伯伯，牛伯伯的名字只出现在 dialogue 正文里，
+    # 注入器据此判定「在镜内」并占 ref_character_2，门禁按主体角色集合判定泄漏）。
+    #
+    # 权威来源 = shot_refs.shot_subject_characters（character_id + 对白说话人
+    # + 提示词显式 @引用）。刻意不含「名字出现在 dialogue 正文」的子串匹配：
+    # 台词里被谈论的人不等于在画面里，拿它去占身份槽就是拿脸部一致性做赌注。
+    from app.services.shot_refs import shot_subject_characters
+    subject_ids = {c.id for c in shot_subject_characters(db, shot)}
     selected_chars: list[tuple[Character, Asset]] = []
     used_slots = 0
     for c in characters:
         asset = _valid_asset(db, c.portrait_asset_id)
         if asset is None:
             continue
-        in_shot = (
-            shot.character_id == c.id
-            or c.name in mentioned
-            or c.name in (shot.dialogue or "")
-        )
-        if not in_shot:
+        if c.id not in subject_ids:
             continue
         selected_chars.append((c, asset))
     # 主角色占 ref_identity，其余依次占 ref_character_2/3/...
@@ -214,6 +217,11 @@ def resolve_shot_references(
     props = (
         db.query(Prop).filter(Prop.project_id == project_id).all()
     )
+    # 道具沿用提示词 @引用 提取（道具没有 character_id 这类结构化字段可依，
+    # 而 Shot.props 由 _shot_props 在编译期读取，这里保持与历史一致的 @引用 口径）。
+    mentioned: set[str] = set()
+    for text in (shot.image_prompt or "", shot.video_prompt or ""):
+        mentioned.update(extract_refs(text))
     props_to_resolve: list[tuple[Prop, PropShotState | None]] = []
     for p in props:
         st = next((s for s in states if s.prop_id == p.id), None)

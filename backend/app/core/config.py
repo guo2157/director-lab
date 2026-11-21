@@ -51,7 +51,12 @@ class Settings(BaseSettings):
     llm_disable_thinking: bool = False
     # 流式接收空闲超时（httpx read timeout 语义）：远端连续该时长不吐数据即抛 llm_timeout，
     # 避免 LLM 流式中途停摆时任务线程永久阻塞，把串行队列堵死
-    llm_stream_idle_timeout_seconds: float = 900.0
+    # 流式空闲超时：两段数据之间超过该时长即判定流已死。
+    # 曾设为 900s（15 分钟），实测网关偶发「连接不断但不发数据」，
+    # 线程会一直阻塞在 socket read 上；worker 线程池 max_workers=1，
+    # 一个卡死任务会堵死整个队列（后续所有任务停在 queued 不动）。
+    # 正常推理模型两个 chunk 间隔是秒级，120s 足够宽松。
+    llm_stream_idle_timeout_seconds: float = 120.0
     llm_max_retries: int = 2
 
     # --- 任务调度（D-18 修订 D-03：并发 = 可用 ComfyUI 实例数，单实例串行排队，多实例负载均衡并行） ---
@@ -64,6 +69,12 @@ class Settings(BaseSettings):
     llm_parse_hard_max_tokens: int = 131072
     # 单集解析默认并发数
     llm_parse_concurrency: int = 3
+    # 单段输出正文预算（字符）。部分 OpenAI 兼容网关存在 completion 硬上限
+    # （实测某端点 completion_tokens 恒为 16000 且 finish_reason 谎报 stop），
+    # 单次输出超长 JSON 必然在中途被截断，放大 max_tokens 无效。超过该预算时
+    # 按场次/段落边界把正文切成多段分别解析，再合并为一份结果。
+    # 0 或负数表示关闭输出侧分段（回到「整批一次调用」的旧行为）。
+    llm_parse_segment_chars: int = 6000
     # 单个解析任务最大自动重试次数
     llm_parse_retry_limit: int = 2
     # --- 输入预算预检（阶段 2）---
@@ -82,9 +93,22 @@ class Settings(BaseSettings):
     # script-agent 首批自动+后续半自动：true 时首次调用仅解析首批（≤max_episodes_per_batch），
     # result.has_more 提示前端『继续分析』；false 时单次调用解析全部批次范围
     agent_first_batch_auto: bool = True
+    # 剧本评估软闸口开关（默认关闭）。
+    # 实测数据：单集解析任务里评估阶段固定耗时 84s，且每次都因「评估报告缺少必需字段」
+    # 失败（agent.eval_skipped），零产出却占整个任务 32% 的时间。解析页的职责是拆解
+    # 剧本供下游制作，不是剧本评审工具；评估报告也没有任何下游消费方。
+    # 需要评审能力时把它改成 True（或由设置页开启），评估仍按软闸口语义失败不阻断。
+    script_evaluation_enabled: bool = False
+    # worker 收到停止信号后等待在途任务退出的上限（秒）。
+    # 必须小于 systemd 的 TimeoutStopSec，否则进程会被 SIGKILL ——
+    # 强杀会让 running 任务在下次启动被无脑重跑，等于白烧一遍 token。
+    worker_shutdown_grace_seconds: float = 20.0
     worker_poll_interval_seconds: float = 2.0
     # 运行期自愈阈值：LLM 类任务处于 running 且长时间无事件、且本进程无执行线程时回收
-    llm_job_stall_seconds: float = 900.0
+    # 运行期自愈阈值：running 且 started_at 早于该时长、且本进程无执行线程的
+    # LLM 任务按重试上限重新入队。需明显小于 llm_stream_idle_timeout 之外的总耗时，
+    # 否则队列会被一个卡死任务堵住十几分钟（实测发生过：任务停在 queued 不动）。
+    llm_job_stall_seconds: float = 240.0
     job_max_attempts: int = 3  # §5.7 重试上限（自动+手动累计），范围 1-10
 
     # --- 一致性双阈值（T-04：实测后校准，当前为推荐默认值） ---
@@ -166,11 +190,13 @@ _PERSISTED_FIELDS = [
     "llm_max_tokens", "llm_disable_thinking",
     "llm_stream_idle_timeout_seconds",
     "llm_parse_max_tokens", "llm_parse_hard_max_tokens",
-    "llm_parse_retry_limit", "llm_parse_concurrency",
+    "llm_parse_retry_limit", "llm_parse_concurrency", "llm_parse_segment_chars",
     "llm_context_window_tokens", "llm_input_budget_ratio",
     "llm_cjk_token_factor", "llm_other_token_factor",
     "parse_shot_ratio_warn",
     "agent_first_batch_auto", "max_episodes_per_batch",
+    "script_evaluation_enabled",
+    "worker_shutdown_grace_seconds",
     "job_max_attempts", "consistency_pass_threshold", "consistency_review_threshold",
 ]
 
