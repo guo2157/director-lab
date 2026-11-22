@@ -149,9 +149,9 @@ E2E 约束：LLM 与渲染均为替身，媒体写入临时目录，不触达外
 
 - [x] 分镜图阶段部分生成即可进入分镜看板：`done >= 1` 放行、`done == 0` 拦截；弹窗列出缺失镜头并说明「进入后暂不能生成视频」（2026-11-22 实测，6 镜仅 1 张时 ready=true、blockers=5）。
 - [x] 左侧「制作流程」栏与页内按钮的解锁口径一致（同一 `stage-readiness` 接口）：第 05 步由「已锁定」变为「未开始」可点击，第 06 步仍按分镜视频锁定。
-- [ ] 分镜板五态展示与实际任务状态一致。
-- [ ] 规划导入对话框的字段差异预览与锁定跳过提示正确。
-- [ ] 资产变更影响列表与工作流版本影响预检可读、可操作。
+- [ ] 分镜板五态展示与实际任务状态一致（2026-11-22 实测：6 张镜头卡正常渲染，含时长、画面/对白类型与「待生成视频 / 未生成」状态标签，控制台 0 错误；五种状态未逐一构造，故未勾选）。
+- [x] 规划导入对话框可打开并渲染校验预览（2026-11-22 实测）：「导入规划 JSON」打开对话框，校验后显示「校验未通过 / 错误 2 / 警告 3 / 场景覆盖 0/1 / 节拍覆盖 0/4」、逐条错误与警告、以及「规划外旧镜头（不会删除）」6 个 shot_id；未校验时「写入分镜」禁用；控制台 0 错误。字段差异与锁定跳过逻辑由 `tests/test_storyboard_plan.py` 覆盖（含 `field_changes.will_skip` 断言），未在浏览器逐一构造。
+- [ ] 资产变更影响列表与工作流版本影响预检可读、可操作（2026-11-22 实测：`/assets/impact` 渲染「资产变更影响」页，`impact-preview` 与 `workflow-impact` 均 200，无影响时显示合并空态「没有待处理的资产变更影响」，控制台 0 错误；有影响时的列表与操作未构造，故未勾选）。
 - [ ] 失败任务可重试、可取消，刷新后状态不丢。
 
 ## 5. 已知缺口
@@ -160,6 +160,6 @@ E2E 约束：LLM 与渲染均为替身，媒体写入临时目录，不触达外
 2. 续集复用既有角色/道具缺端到端用例。
 3. 数据迁移无自动化测试（本重构未新增迁移）。
 4. 真实 ComfyUI/GPU 全链路（§4）尚未执行，Phase 12 不能标记为完成。
-5. 视频 / TTS / BGM 真实链路被环境阻塞（2026-11-22 核查）：视频工作流缺 `minimax_h3_video_vae_int8_convrot`（服务器只有 `fp16`）与 `minimax_h3_ref2v_turbo_4step` LoRA；TTS 缺自定义节点 `Qwen3Loader` / `Qwen3CustomVoice`；BGM 缺 `stable-audio-open-1.0` / `t5-base`。需补齐后重跑 §4.2 / §4.3。
+5. 视频 / TTS / BGM 真实链路被环境阻塞（2026-11-22 核查，同日复验 `GET /api/workflows` 的 `runtime_status`）：仅 `wf_image_ref_qwen21_multi` / `wf_image_t2i_qwen21_turbo` 为 `ready`，其余 8 条（5 条 video、2 条 tts、1 条 bgm）全部 `missing_deps`。视频缺 `minimax_h3_video_vae_int8_convrot`（服务器只有 `fp16`）与 `minimax_h3_ref2v_turbo_4step` LoRA；TTS 缺自定义节点 `Qwen3Loader` / `Qwen3CustomVoice`；BGM 缺 `stable-audio-open-1.0` / `t5-base`。需补齐后重跑 §4.2 / §4.3。
 6. 自动生成路径不写 `asset_ref` 表（只有手动绑定接口 `POST /api/shots/{id}/assets` 写入），自动参考关系记录在 `job.input_snapshot.reference_manifest`。实测分镜图任务 manifest 含 `ref_scene`（教室）+ `ref_identity`（林晓）两槽位，属预期行为；若前端「引用资产」列表依赖 `asset_ref` 会显示为空，需按 manifest 兜底（未实施）。
 7. ~~`/api/health` 的 `worker` 字段为硬编码 `"ok"`~~（已修复，Slice 27）：worker 主循环写心跳文件，health 读心跳返回 `ok` / `stale` / `not_running` / `unknown` 并附带 `worker_last_beat`；worker 停止超过 120s 时 `status` 降为 `degraded`。已实测停 worker → `stale`/`degraded`，重启 → `ok`/`healthy`。
