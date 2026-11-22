@@ -20,10 +20,11 @@ from app.models import ids
 from app.schemas.script import (
     EpisodeParseStatusItem, EstimateConfirm, EstimateConfirmOut, EstimateCreate, EstimateOut,
     ParseCreate, ParseJobOut, ParseRetryOut, ParseStatusOut, ParseVersionConfirm, ParseVersionOut,
-    ScriptVersionCreate, ScriptVersionOut,
+    ScriptVersionCreate, ScriptVersionOut, SourceReferenceValidate,
 )
 from app.services import errors
 from app.services.script_parse import analyze_script_outline
+from app.services.source_index import build_source_index, validate_source_references
 
 router = APIRouter(prefix="/api/projects", tags=["script"])
 
@@ -129,6 +130,39 @@ def get_current_script_version(project_id: str,
         "script_version_id": sv.id,
         "version": sv.version,
     }
+
+
+def _get_owned_script_version(db: Session, project_id: str, sv_id: str) -> ScriptVersion:
+    sv = db.get(ScriptVersion, sv_id)
+    if sv is None or sv.project_id != project_id:
+        raise errors.script_version_not_found()
+    return sv
+
+
+@router.get("/{project_id}/script-versions/{script_version_id}/source-blocks")
+def get_source_blocks(project_id: str, script_version_id: str,
+                      db: Session = Depends(get_db)) -> dict:
+    _get_project(db, project_id)
+    sv = _get_owned_script_version(db, project_id, script_version_id)
+    index = build_source_index(
+        sv.content_snapshot, script_version_id=sv.id, version=sv.version,
+    )
+    return index.to_dict()
+
+
+@router.post("/{project_id}/script-versions/{script_version_id}/source-blocks/validate")
+def validate_source_block_references(
+    project_id: str, script_version_id: str, payload: SourceReferenceValidate,
+    db: Session = Depends(get_db),
+) -> dict:
+    _get_project(db, project_id)
+    sv = _get_owned_script_version(db, project_id, script_version_id)
+    index = build_source_index(
+        sv.content_snapshot, script_version_id=sv.id, version=sv.version,
+    )
+    return validate_source_references(
+        index, [reference.model_dump() for reference in payload.references],
+    )
 
 
 @router.post("/{project_id}/script-normalize", status_code=200)

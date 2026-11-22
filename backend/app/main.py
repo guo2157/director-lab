@@ -19,10 +19,12 @@ from app.api.v1 import (
     audio,
     voice_matching,
     agent,
+    analysis,
     asset_plans,
     assets,
     characters,
     compose,
+    dependencies,
     events,
     generate,
     jobs,
@@ -35,6 +37,7 @@ from app.api.v1 import (
     series,
     settings,
     shots,
+    storyboard_plan,
     tasks,
     workflows,
     workspace,
@@ -142,6 +145,9 @@ def create_app() -> FastAPI:
     app.include_router(scenes.router)
     app.include_router(shots.router)
     app.include_router(bindings.router)
+    app.include_router(dependencies.router)
+    app.include_router(analysis.router)
+    app.include_router(storyboard_plan.router)
     app.include_router(script.router)
     app.include_router(series.router)
     app.include_router(jobs.router)

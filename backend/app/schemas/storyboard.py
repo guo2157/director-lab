@@ -129,3 +129,9 @@ class ShotOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class StoryboardPlanValidate(BaseModel):
+    """分镜规划校验请求：结构由服务层逐项验证，返回问题与 dry-run 预览。"""
+
+    plan: dict

@@ -15,6 +15,25 @@ class ScriptVersionOut(BaseModel):
     content_hash: str
 
 
+class SourceReference(BaseModel):
+    source_block_id: str = Field(min_length=1, max_length=80)
+    script_version_id: str | None = None
+    script_version: int | None = Field(default=None, ge=1)
+    start: int | None = Field(default=None, ge=0)
+    end: int | None = Field(default=None, ge=0)
+    text: str | None = Field(default=None, max_length=50000)
+
+
+class SourceReferenceValidate(BaseModel):
+    references: list[SourceReference] = Field(max_length=1000)
+
+
+class AnalysisValidate(BaseModel):
+    """外部分析文档校验请求：文档结构由服务层逐项验证并返回问题列表。"""
+
+    analysis: dict
+
+
 # --- 评估 ---
 class EstimateCreate(BaseModel):
     script_version_id: str

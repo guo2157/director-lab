@@ -7,6 +7,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.core.database import make_engine
@@ -368,6 +369,62 @@ def test_storyboard_blocks_slot_capacity_exceeded(db, tmp_path):
         {"reference_slots": ["ref_identity", "ref_scene"]}))
     assert compiled.status == "needs_review"
     assert any(i["code"] == "reference_capacity_exceeded" for i in compiled.blocking_issues)
+
+
+def test_storyboard_seven_characters_reports_and_hard_blocks_slot_overflow(db, tmp_path):
+    from app.api.v1.generate import _compilation_blocked
+    from app.services.prompt_compiler import compile_storyboard_image
+    from app.services.reference_resolver import resolve_shot_references
+
+    project = _project(db, tmp_path)
+    scene = _scene(db, project, tmp_path)
+    characters = [
+        _character(db, project, tmp_path, name=f"角色{index}")
+        for index in range(1, 8)
+    ]
+    shot = _shot(db, scene, characters[0])
+    shot.dialogue_segments = [
+        {"speaker_id": character.id, "text": "到场"}
+        for character in characters[1:]
+    ]
+    db.commit()
+    workflow = _workflow({"reference_slots": [
+        "ref_identity",
+        *(f"ref_character_{index}" for index in range(2, 7)),
+        "ref_scene",
+    ]})
+
+    manifest = resolve_shot_references(db, shot.id, project.id)
+    character_slots = [slot for slot in manifest.slots if slot.asset_type == "character"]
+    assert [slot.slot for slot in character_slots] == [
+        "ref_identity",
+        *(f"ref_character_{index}" for index in range(2, 7)),
+    ]
+    overflow = [fallback for fallback in manifest.fallbacks if fallback.kind == "character"]
+    assert len(overflow) == 1
+    assert overflow[0].reason == "slot_limit"
+    assert overflow[0].used == "skip"
+    assert {slot.asset_id for slot in character_slots} | {
+        character.portrait_asset_id for character in characters
+        if character.id == overflow[0].entity_id
+    } == {character.portrait_asset_id for character in characters}
+
+    compiled = compile_storyboard_image(db, shot.id, workflow=workflow)
+    assert compiled.status == "needs_review"
+    capacity_issues = [
+        issue for issue in compiled.blocking_issues
+        if issue["code"] == "reference_capacity_exceeded"
+    ]
+    assert len(capacity_issues) == 1
+    assert capacity_issues[0]["capacity"] == 6
+
+    with pytest.raises(HTTPException) as exc_info:
+        _compilation_blocked(compiled, 409)
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "prompt_validation_failed"
+    assert "reference_capacity_exceeded" in {
+        issue["code"] for issue in exc_info.value.detail["blocking_issues"]
+    }
 
 
 # ---------- 视频连续性与校验 ----------
