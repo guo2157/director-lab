@@ -91,10 +91,13 @@ def _workflow(client: TestClient, name: str, wf_type: str, definition: dict) -> 
 
 
 @pytest.fixture()
-def mock_render(monkeypatch):
+def mock_render(monkeypatch, tmp_path):
+    """mock 渲染必须落在临时 media_dir，禁止写真实 backend/data/media。"""
     import app.worker.executor as ex_mod
     from app.core.config import Settings
-    monkeypatch.setattr(ex_mod, "get_settings", lambda: Settings(render_mock=True))
+    monkeypatch.setattr(
+        ex_mod, "get_settings", lambda: Settings(render_mock=True, media_dir=tmp_path / "media")
+    )
 
 
 def test_clip_blocked_without_keyframe(client: TestClient, mock_render):

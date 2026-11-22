@@ -25,7 +25,7 @@ from app.models.enums import (
 )
 from app.models.narrative import Character
 from app.models.production import Asset, Job, Workflow
-from app.services import audio_plan, tts_params
+from app.services import audio_plan, tts_params, tts_workflow
 from app.services.errors import biz_error, character_not_found
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
@@ -156,16 +156,10 @@ def regenerate_segment(segment_id: str, payload: dict | None = None, db: Session
     # SFX 当前无已部署 Provider，明确拒绝并引导使用素材库（replace 接口）
     workflow_id = None
     if job_type == "generate_audio":
-        _rows = db.execute(
-            select(Workflow).where(Workflow.workflow_type == "tts").order_by(Workflow.created_at)
-        ).scalars().all()
-        for _w in _rows:
-            _caps = (_w.capabilities or {}) if isinstance(_w.capabilities, dict) else {}
-            if _caps.get("voice_mode") == "preset" and _caps.get("voice_values"):
-                workflow_id = _w.id
-                break
-        if workflow_id is None:
+        _wf = tts_workflow.resolve_preset_workflow(db)
+        if _wf is None:
             raise biz_error(code="no_matching_workflow", http=422, message="无可用 TTS 工作流，请先在设置中导入")
+        workflow_id = _wf.id
     elif job_type == "generate_bgm":
         _bgm = db.execute(
             select(Workflow).where(Workflow.workflow_type == "bgm").order_by(Workflow.created_at)
@@ -281,27 +275,19 @@ def review_asset(asset_id: str, payload: dict, db: Session = Depends(get_db)) ->
 
 @router.get("/speakers")
 def list_speakers(project_id: str | None = None, db: Session = Depends(get_db)) -> dict:
-    """列出当前 TTS workflow 支持的 speaker（读取 workflow meta voice_values）。
+    """列出当前 preset TTS workflow 支持的 speaker。
 
-    P1 修复：
+    speaker 与元数据解析统一委托 services/tts_workflow（唯一权威）：
+    capabilities 旧字段 → parsed_schema 枚举 → VoiceLibrary 音色库。
+    历史实现直接读 `caps["voice_values"]`，meta.json 退场后该键不再落库，
+    导致 /speakers 恒为空列表（试听报"无可用 TTS 工作流"的根因之一）。
+
     - 支持传入 project_id，用于按项目级配置屏蔽被禁用的 speaker
       （Project.settings.audio_config.disabled_speakers）；不传则返回全局可用列表
-    - language / description 不再返回硬编码占位（原来的 ['Chinese'] 与『待人工试听确认』），
-      改为读取 workflow capabilities 的 voice_languages / voice_descriptions；缺失则返回空值，
-      前端按空值降级展示，避免把未验证信息当成事实
+    - language / description / display_name 均来自真实数据，缺失返回空值，
+      前端按空值降级展示，不伪造
     """
-    from app.models.production import Workflow
-    # P1 修复：固定取 voice_mode=preset 的 custom_voice workflow。
-    # 旧逻辑按 created_at 取第一条 tts workflow，可能取到 voice_clone（无 voice_values，返回空列表）。
-    wfs = db.execute(
-        select(Workflow).where(Workflow.workflow_type == "tts").order_by(Workflow.created_at)
-    ).scalars().all()
-    wf = None
-    for w in wfs:
-        caps = (w.capabilities or {}) if isinstance(w.capabilities, dict) else {}
-        if caps.get("voice_mode") == "preset" and caps.get("voice_values"):
-            wf = w
-            break
+    wf = tts_workflow.resolve_preset_workflow(db)
     # 项目级 speaker 禁用列表（真实存在才过滤，不做默认放行的伪字段）
     disabled: set[str] = set()
     if project_id:
@@ -312,24 +298,11 @@ def list_speakers(project_id: str | None = None, db: Session = Depends(get_db)) 
         cfg = ((project.settings or {}).get("audio_config") or {})
         disabled = {str(x) for x in (cfg.get("disabled_speakers") or [])}
     speakers: list[dict] = []
-    if wf is not None:
-        caps = (wf.capabilities or {}) if isinstance(wf.capabilities, dict) else {}
-        langs = caps.get("voice_languages") or {}
-        descs = caps.get("voice_descriptions") or {}
-        genders = caps.get("voice_genders") or {}
-        default_langs = caps.get("languages") or []
-        for name in caps.get("voice_values", []):
-            lang = langs.get(name) or default_langs or []
-            if isinstance(lang, str):
-                lang = [lang]
-            speakers.append({
-                "speaker": name,
-                "display_name": caps.get("voice_display_names", {}).get(name) or name,
-                "language": list(lang),
-                "description": descs.get(name) or "",
-                "gender": genders.get(name) or "",
-                "enabled": name not in disabled,
-            })
+    for entry in tts_workflow.speaker_entries(db, wf):
+        speakers.append({
+            **entry,
+            "enabled": entry["speaker"] not in disabled,
+        })
     return {"workflow_id": wf.id if wf else None, "speakers": speakers}
 
 
@@ -547,26 +520,31 @@ def preview_voice(voice_profile_id: str, payload: dict | None = None, db: Sessio
                 "signature": preview_signature,
             }
     # 试听任务必须绑定 TTS 工作流：执行器对 workflow_id 为空的任务直接以
-    # no_matching_workflow 失败。匹配口径与 /speakers 一致，优先 voice_mode=preset
-    # 的 custom_voice 工作流，保证 vp.voice_id 一定是该工作流支持的 speaker。
-    from app.models.production import Workflow
-    wf = None
-    _wf_id = (payload or {}).get("workflow_id")
-    if _wf_id:
-        wf = db.get(Workflow, _wf_id)
-    if wf is None:
-        _rows = db.execute(
-            select(Workflow).where(Workflow.workflow_type == "tts").order_by(Workflow.created_at)
-        ).scalars().all()
-        for _w in _rows:
-            _caps = (_w.capabilities or {}) if isinstance(_w.capabilities, dict) else {}
-            if _caps.get("voice_mode") == "preset" and _caps.get("voice_values"):
-                wf = _w
-                break
+    # no_matching_workflow 失败。匹配口径与 /speakers 一致（同一权威服务），
+    # 优先 voice_mode=preset 的 custom_voice 工作流，保证 vp.voice_id 一定是该工作流支持的 speaker。
+    wf = tts_workflow.resolve_tts_workflow(db, (payload or {}).get("workflow_id"))
     if wf is None:
         raise biz_error(
             code="no_matching_workflow", http=422, message="无可用 TTS 工作流，请先在设置中导入"
         )
+    # 去重：同一音色已有在途试听任务时复用，避免「试听 + 重新生成」连点堆出多条排队任务
+    # （单并发 worker 上每条都是一次真实合成，堆积后按钮会长时间停留在"合成中"）
+    _inflight = db.execute(
+        select(Job).where(
+            Job.job_type == "generate_audio",
+            Job.status.in_(("queued", "running")),
+        )
+    ).scalars().all()
+    for _j in _inflight:
+        _snap = _j.input_snapshot or {}
+        if _snap.get("voice_preview") and _snap.get("voice_profile_id") == vp.id:
+            return {
+                "cached": False,
+                "reused": True,
+                "job_id": _j.id,
+                "voice_profile_id": vp.id,
+                "signature": preview_signature,
+            }
     job = Job(
         id=ids.job_id(),
         project_id=vp.project_id,
@@ -587,6 +565,9 @@ def preview_voice(voice_profile_id: str, payload: dict | None = None, db: Sessio
             "preview_signature": preview_signature,
             "preview_text": text,
         },
+        # 试听只合成一句话（~0.5 分钟级），必须插到长视频/关键帧队列前面，
+        # 否则用户在单并发 worker 上要等几分钟才能听到声音（表现为按钮一直转圈）
+        priority=50,
         created_at=_now_naive(),
     )
     db.add(job)

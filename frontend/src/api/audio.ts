@@ -91,6 +91,8 @@ export interface VoicePreviewResult {
   /** 未命中时返回 */
   job_id?: string
   signature?: string
+  /** 该音色已有在途试听任务被复用（未新建任务） */
+  reused?: boolean
 }
 
 /**

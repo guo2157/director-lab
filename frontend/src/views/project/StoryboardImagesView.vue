@@ -6,6 +6,7 @@ import { NButton, NIcon, NProgress, useMessage } from 'naive-ui'
 import { ArrowForwardOutline } from '@vicons/ionicons5'
 import { listScenes, listSceneShots } from '@/api/script'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
+import { cancelProjectJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { replaceAsset } from '@/api/assets'
 import { getProject } from '@/api/projects'
@@ -23,6 +24,7 @@ import BatchToolbar from '@/components/storyboard-images/BatchToolbar.vue'
 import ShotDetailDialog from '@/components/storyboard-images/ShotDetailDialog.vue'
 import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
 import { useStageTransition } from '@/composables/useStageTransition'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -222,6 +224,40 @@ function inflightTextOf(shot: Shot): string {
 /** 提交生成任务后：立即建立轮询基线，全部结束后统一提示 */
 async function trackAfterSubmit() {
   await keyframeProgress.start({ notifyOnComplete: true })
+}
+
+/**
+ * 批量取消在途出图任务（2026-11-21）：
+ * 任务中心页面已下线，逐条取消的 UI 不复存在；批量出图跑错工作流 / 选错镜头时
+ * 用户没有任何「停下来」的入口，只能等整批跑完白烧显卡。这里提供按 stage 批量取消。
+ */
+const cancellingInflight = ref(false)
+const confirmDialog = useConfirmDialog()
+function handleCancelInflight() {
+  const n = keyframeProgress.data.value?.inflight_count ?? 0
+  if (!n) return
+  confirmDialog({
+    title: '取消进行中的出图任务',
+    message: `将取消当前批次 ${n} 个还在排队 / 运行中的分镜图任务（正在渲染的会同时中断 ComfyUI）。已生成完成的图片不受影响。`,
+    impact: [`在途出图任务 ${n} 个`],
+    confirmText: '取消这些任务',
+    cancelText: '继续生成',
+    onConfirm: async () => {
+      cancellingInflight.value = true
+      try {
+        const res = await cancelProjectJobs(projectId.value, { target: 'keyframe' })
+        message.success(
+          `已取消 ${res.jobs} 个出图任务${res.interrupted ? `（中断渲染 ${res.interrupted} 个）` : ''}`,
+        )
+        refreshAll()
+        await keyframeProgress.refresh()
+      } catch (e: any) {
+        message.error(`取消失败: ${e?.message ?? e}`)
+      } finally {
+        cancellingInflight.value = false
+      }
+    },
+  })
 }
 
 /** 失败镜头重试：仅重提当前失败的镜头 */
@@ -548,17 +584,6 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       </span>
       <span v-if="keyframeProgress.error.value" class="gen-state fail">{{ keyframeProgress.error.value }}</span>
 
-      <template #meta>
-        <!-- 正在生成的镜头明细：场景 + 镜号 + 百分比 -->
-        <div v-if="keyframeProgress.data.value?.inflight?.length" class="gen-inflight">
-          <span v-for="job in keyframeProgress.data.value.inflight" :key="job.job_id" class="gen-inflight-item">
-            <span class="gen-inflight-name">{{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}</span>
-            <span class="gen-inflight-state" :class="job.status">
-              {{ job.status === 'running' ? (job.progress != null ? `生成中 ${job.progress}%` : '生成中') : job.status === 'queued' ? '排队中' : '提交确认中' }}
-            </span>
-          </span>
-        </div>
-      </template>
 
       <template #actions>
         <n-button size="small" quaternary :loading="keyframeProgress.loading.value" @click="keyframeProgress.refresh()">
@@ -585,10 +610,12 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       :all-selected="allSelected"
       :batch-loading="batchMutation.isPending.value"
       :inflight-count="keyframeProgress.data.value?.inflight_count ?? 0"
+      :cancel-loading="cancellingInflight"
       :workflow-id="generateWorkflowId"
       @update:workflow-id="(v: string | undefined) => (generateWorkflowId = v)"
       @toggle-all="toggleSelectAll"
       @generate="handleBatchGenerate"
+      @cancel-inflight="handleCancelInflight"
     />
 
     <ErrorRetry
@@ -722,33 +749,6 @@ function onFirstGenerate(shot: Shot, prompt: string) {
   align-items: center;
   gap: var(--sp-2);
   color: var(--danger);
-}
-.gen-inflight {
-  display: flex;
-  gap: var(--sp-1);
-  flex-wrap: wrap;
-}
-.gen-inflight-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px var(--sp-2);
-  font-size: 11px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-}
-.gen-inflight-name {
-  color: var(--text-primary);
-}
-.gen-inflight-state {
-  color: var(--text-secondary);
-}
-.gen-inflight-state.running {
-  color: var(--brand-primary);
-}
-.gen-inflight-state.queued {
-  color: var(--accent-amber);
 }
 
 /* ===== 场景分组 + 镜头网格 ===== */

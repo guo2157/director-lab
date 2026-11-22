@@ -152,23 +152,32 @@ def preview_system_voice(
                 "text": text,
                 "signature": signature,
             }
-    # 定位 preset TTS workflow（与 /api/audio/speakers 口径一致）
-    from app.models.production import Workflow
-    wfs = db.execute(
-        select(Workflow).where(Workflow.workflow_type == "tts").order_by(Workflow.created_at)
-    ).scalars().all()
-    wf = None
-    for w in wfs:
-        caps = (w.capabilities or {}) if isinstance(w.capabilities, dict) else {}
-        if caps.get("voice_mode") == "preset" and caps.get("voice_values"):
-            wf = w
-            break
+    # 定位 preset TTS workflow（与 /api/audio/speakers 同一权威服务）
+    from app.services import tts_workflow as tts_wf_service
+    wf = tts_wf_service.resolve_preset_workflow(db)
     if wf is None:
         raise biz_error(code="no_matching_workflow", http=422, message="无可用 TTS 工作流，请先在设置中导入")
-    caps = wf.capabilities or {}
-    if v.speaker_id not in (caps.get("voice_values") or []):
+    supported = tts_wf_service.workflow_speakers(db, wf)
+    if v.speaker_id not in supported:
         raise biz_error(code="speaker_not_in_workflow", http=422,
                         message=f"speaker {v.speaker_id} 不在当前 TTS workflow 支持列表中")
+    # 去重：同一系统音色已有在途试听任务时复用，避免连点堆出多条排队任务
+    _inflight = db.execute(
+        select(Job).where(
+            Job.job_type == "generate_audio",
+            Job.status.in_(("queued", "running")),
+        )
+    ).scalars().all()
+    for _j in _inflight:
+        _snap = _j.input_snapshot or {}
+        if _snap.get("voice_preview") and _snap.get("system_voice_code") == v.voice_code:
+            return {
+                "cached": False,
+                "reused": True,
+                "job_id": _j.id,
+                "voice_code": v.voice_code,
+                "signature": signature,
+            }
     job = Job(
         id=ids.job_id(),
         project_id=preview_project_id,
@@ -188,6 +197,7 @@ def preview_system_voice(
             "preview_signature": signature,
             "preview_text": text,
         },
+        priority=50,  # 与角色试听一致：短任务插队，避免排在长生成任务后面
         created_at=_naive_now(),
     )
     db.add(job)

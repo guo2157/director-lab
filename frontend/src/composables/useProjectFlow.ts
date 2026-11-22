@@ -176,7 +176,9 @@ export function useProjectFlow(projectId: ComputedRef<string>, routeName: Comput
     if ((project.value?.shot_total ?? 0) > 0) return true
     const total = totalEpisodes.value
     if (total <= 0) return false
-    return succeededEpisodes.value >= total && episodes.value.size >= total
+    // 集级记录全成功 ≠ 已落库：实体写入是随后的独立步骤，其间左侧栏会过早点亮
+    // 「已完成」并解锁分镜图（用户点进去空白）。因此必须同时确认库里已有镜头。
+    return succeededEpisodes.value >= total && episodes.value.size >= total && (project.value?.shot_total ?? 0) > 0
   })
 
   const steps = computed<Record<StepKey, FlowStep>>(() => {

@@ -436,11 +436,15 @@ def _compile_shot_prompt(db: Session, shot: Shot, wf: Workflow, params: dict,
         snapshot = compiled.to_dict()
         snapshot["deferred_blocking_issues"] = soft
         return out, snapshot
-    if "prompt" not in out:
+    # keyframe 提示词统一走编译结果（v2 模板含 ref_duty_block/action_moment/aspect_desc），
+    # 不再因「params 里已有 prompt」（来自解析期 image_prompt）而跳过编译。
+    # clip 暂保持「有则保留」策略（视频提示词可能被人工精修）。
+    if task == "keyframe":
+        out = apply_to_params(compiled, out)
+    elif "prompt" not in out:
         out = apply_to_params(compiled, out)
     else:
-        if task == "clip":
-            out["prompt"] = to_h3_clip_prompt(shot, out.get("prompt") or "")
+        out["prompt"] = to_h3_clip_prompt(shot, out.get("prompt") or "")
         out = _apply_compiled_media(compiled, out)
     out = _finalize_negative(compiled, wf, out)
     snapshot = compiled.to_dict()

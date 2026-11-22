@@ -190,17 +190,35 @@ PROP_TEMPLATE = """生成一张独立的道具参考图，画面中只能有一�
 
 画面风格：{style}"""
 
-STORYBOARD_TEMPLATE = """生成镜头 {shot_id} 的单帧分镜参考图，表现该镜头瞬间。
-编辑目标：{scene_target}；构图、透视、光线方向与编辑底图严格一致。
-硬性要求：主体为角色 {characters}、场景 {scene}、道具 {props}。
-- 人物数量精确：{character_count_rule}
-- 不出现未绑定人物：旁白人物、路人、群众、背景人群、剪影、人体局部、照片里的人
-- 不出现未绑定道具：只出现 {props}，不加其他可移动物品、车辆、杂物、包装
-- 场景元素只用底图：背景、建筑结构、地形、植被取自场景参考图，不新增未定义的建筑、招牌、家具、装饰，不改动空间结构
-- 不出现文字与装饰：文字、对白气泡、字幕、标签、编号、水印、Logo、边框、分格线、漫画格
-- 画面连续：地面接触阴影真实，人物有立足点，不悬浮、不穿模、不与道具或环境融合
-参考绑定：{ref_bindings}。身份只由参考图锁定，提示词不重复五官；人脸、体型、服装、配色与参考图一致。
-动作：{action}。
+# 参考图职责行模板：compile_storyboard_image 生成 ref_duty_block，
+# prompt_qc._ROLE_KEEP 需保持同口径（否则 relabel_reference_block 会改回去）
+_DUTY_LINE = {
+    "scene":     "- <image{n}>（场景基准图）：@{name} —— 仅用作背景的空间结构、地形、植被、光线方向与色调；不要把它缩小、平铺或原样放进画面。",
+    "character": "- <image{n}>（角色定妆图）：@{name} —— 仅用作该角色的面部、发型、体型与服装；禁止与其他参考图混合。",
+    "prop":      "- <image{n}>（道具锚定图）：@{name} —— 仅用作该道具的形状、颜色与材质。",
+}
+
+def _aspect_desc(ratio: str | None, width: int | None = None, height: int | None = None) -> str:
+    """把项目 aspect_ratio 转成中文画幅描述，如 '竖构图 9:16'。"""
+    if ratio:
+        parts = ratio.split(":")
+        if len(parts) == 2:
+            try:
+                w, h = int(parts[0]), int(parts[1])
+                orient = "竖构图" if h > w else ("横构图" if w > h else "方构图")
+                return f"{orient} {ratio}"
+            except (ValueError, TypeError):
+                pass
+        return ratio
+    if width and height:
+        orient = "竖构图" if height > width else ("横构图" if width > height else "方构图")
+        return f"{orient} {width}×{height}"
+    return "默认比例"
+
+STORYBOARD_TEMPLATE = """任务：生成镜头 {shot_id} 的一张完整单帧电影画面。一个镜头、一个瞬间、一个连续空间，画面铺满整个画布（{aspect_desc}）。
+参考图职责：
+{ref_duty_block}
+目标画面：在场景「{scene}」中，{action_moment}。
 角色站位（不可互换）：
 {position_specs}
 站位规则：
@@ -210,8 +228,14 @@ STORYBOARD_TEMPLATE = """生成镜头 {shot_id} 的单帧分镜参考图，表�
 - 视线落点：{gaze_targets}——说话时看对手，沉默时眼神方向符合情绪与环境
 道具与角色或环境的关系：{prop_interaction}。
 画面情绪：{emotion}——用表情、眼神与姿态外化，不用抽象情绪词。
-镜头语言：景别 {shot_size}；角度 {camera_angle}；构图 {composition}；运动 {camera_movement}；光线与色彩 {lighting}。
-画面限制：只生成一张完整单帧，不拼贴、不分屏、不多格；参考图仅作身份/结构来源，不在画面复现。
+镜头语言：景别 {shot_size}；角度 {camera_angle}；构图 {composition}；运动 {camera_movement}；光线与色彩 {lighting}。若各参考图光线不同，以场景基准图的光线为准。
+必须保持：
+- 人物数量精确：{character_count_rule}
+- 不出现未绑定人物：旁白人物、路人、群众、背景人群、剪影、人体局部、照片里的人
+- 不出现未绑定道具：只出现 {props}，不加其他可移动物品、车辆、杂物、包装
+- 场景元素只用底图：背景、建筑结构、地形、植被取自场景参考图，不新增未定义的建筑、招牌、家具、装饰，不改动空间结构
+- 画面连续：地面接触阴影真实，人物有立足点，不悬浮、不穿模、不与道具或环境融合
+输出：一张{aspect_desc}的完整画面，所有内容自然连成一个整体；不含文字、字幕、标签、水印、边框与分格线。
 画面风格：{style}
 """
 
@@ -1265,37 +1289,49 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         m = re.search(r"image_(\d+)\s*$", str(item.get("input_key") or ""))
         return int(m.group(1)) if m else fallback
 
-    ref_parts: list[str] = []
+    # ── ref_duty_block：按 _SECTION_RE 兼容格式生成参考图职责块 ──
     scene_slot = next((s for s in slots if s["role"] == "scene_layout_reference"), None)
+    _duty_lines: list[str] = []
     if scene_slot is not None:
-        ref_parts.append(
-            f"以 <image{_image_no(scene_slot, 1)}> 为场景编辑底图，构图、透视与光线方向必须与其严格一致"
+        _duty_lines.append(
+            _DUTY_LINE["scene"].format(n=_image_no(scene_slot, 1), name=scene.title if scene else "未命名场景")
         )
     for character in characters:
         slot = next((s for s in slots
                      if s["entity_id"] == character.id and s["role"].startswith("character")), None)
         if slot is not None:
-            ref_parts.append(
-                f"<image{_image_no(slot, 2)}> 为角色「{character.name}」：脸部、体型、服装、配色完全取自该图，禁止与其他参考图混合"
+            _duty_lines.append(
+                _DUTY_LINE["character"].format(n=_image_no(slot, 2), name=character.name)
             )
     for prop in prop_rows:
         slot = next((s for s in slots
                      if s["entity_id"] == prop.id and s["role"] == "prop_identity_reference"), None)
         if slot is not None:
-            ref_parts.append(
-                f"<image{_image_no(slot, 6)}> 为道具「{prop.name}」：形状、颜色、材质与辨识特征完全取自该图"
+            _duty_lines.append(
+                _DUTY_LINE["prop"].format(n=_image_no(slot, 6), name=prop.name)
             )
-    ref_bindings = "；".join(ref_parts) or "无参考图绑定，全部按文字描述生成"
-    scene_target = "无场景参考底图，按文字描述重建场景"
-    if scene_slot is not None:
-        scene_target = (
-            f"以 <image{_image_no(scene_slot, 1)}> 为场景编辑底图，构图、透视与光线方向必须与其严格一致"
-        )
+    ref_duty_block = "\n".join(_duty_lines) or "- 无参考图绑定，全部按文字描述生成"
+    # ── action_moment：只取起始瞬间，不带 end_pose ──
+    b0 = (beats or [{}])[0] if isinstance(beats, list) and beats else {}
+    action_text = _text(b0.get("action") if isinstance(b0, dict) else action, "镜头动作未提供")
+    start_pose = b0.get("start_pose", "") if isinstance(b0, dict) else ""
+    action_moment = (
+        f"画面定格在「{action_text}」刚开始的那一瞬间"
+        + (f"（起始姿态：{start_pose}）" if start_pose else "")
+    )
+    # ── aspect_desc：项目画幅中文描述 ──
+    # Project 模型只持久化 aspect_ratio，width/height 可能不存在（历史库/精简模型）；
+    # 直接取属性会在重新生成链路抛 AttributeError，导致整条出图被中断。
+    aspect_desc = _aspect_desc(
+        getattr(project, "aspect_ratio", None) if project is not None else None,
+        getattr(project, "width", None) if project is not None else None,
+        getattr(project, "height", None) if project is not None else None,
+    )
     mapping = {
         "shot_id": shot.id,
         "characters": "、".join(c.name for c in characters) or "无（空镜）",
         "character_count": len(characters),
-        # 人数约束必须是可判定的自然语句：直接拼角色名会渲染成『等于 无（空镜） 的人数』这种病句
+        # 人数约束必须是可判定的自然语句
         "character_count_rule": (
             "画面中不得出现任何人物，也不出现人物剪影、背影、人体局部或人群中的人"
             if not characters else
@@ -1304,7 +1340,9 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         ),
         "scene": scene.title if scene is not None and scene.title else "未指定场景",
         "props": "、".join(p.name for p in prop_rows) or "无",
-        "action": action,
+        "action_moment": action_moment,
+        "aspect_desc": aspect_desc,
+        "ref_duty_block": ref_duty_block,
         "position_specs": position_specs,
         "standable_items": standable_items,
         "opening_blocking": opening_blocking,
@@ -1319,13 +1357,6 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
             "光从左上方照下，投影落向右下，与场景板主光方向一致；"
             "高光柔和不过曝，阴影保留细节不死黑，对比适中，色彩饱和度与场景板一致"
         ),
-        "character_slots": ", ".join(s["slot_key"] for s in slots
-                                     if s["role"].startswith("character")) or "无",
-        "scene_slot": next((s["slot_key"] for s in slots if s["role"] == "scene_layout_reference"), "无"),
-        "prop_slots": ", ".join(s["slot_key"] for s in slots
-                                 if s["role"] == "prop_identity_reference") or "无",
-        "scene_target": scene_target,
-        "ref_bindings": ref_bindings,
         "style": style,
     }
 
@@ -1357,6 +1388,42 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
                             "template_id": TEMPLATE_STORYBOARD,
                             "template_version": int(meta["version"])},
     )
+
+
+def resolve_keyframe_prompt(
+    db: Session,
+    shot: Shot,
+    wf: Workflow | None = None,
+    *,
+    plan_prompt: str = "",
+    user_edited: bool = False,
+) -> tuple[str, dict]:
+    """分镜图提示词单一出口：所有入口（批量/单镜/重生成/Agent）统一走这里。
+
+    - 用户手改 → 原样使用
+    - 确定性编译成功 → 用 compile_storyboard_image 渲染的 v2 模板
+    - 编译被阻断（资产未就绪等） → 回退 plan_prompt，但补参考图职责段
+
+    返回 (prompt, meta)。meta.source ∈ {user_edited, compiled, fallback}。
+    """
+    if user_edited or (plan_prompt and plan_prompt.strip()):
+        # 无法确认是否手改时的保守策略：已有非空提示词视为已确认，不覆盖。
+        # Step 3（prompt_user_edited 字段）落地后此处改为只对真正手改的保留。
+        if user_edited:
+            return plan_prompt, {"source": "user_edited"}
+    cp = compile_storyboard_image(db, shot.id, workflow=wf)
+    if not cp.blocking_issues and cp.positive_prompt.strip():
+        return cp.positive_prompt, {
+            "source": "compiled",
+            "template_version": cp.template_version,
+            "template_id": cp.template_id,
+        }
+    # 回退：用 plan_prompt，补参考图职责段
+    fallback = (plan_prompt or shot.image_prompt or shot.shot_purpose or "").strip()
+    return fallback, {
+        "source": "fallback",
+        "blocking": cp.blocking_issues,
+    }
 
 
 # ── 分镜视频编译 ──────────────────────────────────────────────

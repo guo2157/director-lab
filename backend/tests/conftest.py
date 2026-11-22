@@ -7,7 +7,25 @@ _check_runtime_config 运行时配置校验（LLM/ComfyUI 未配置返回 409）
 该校验属于环境前置条件（引导用户先到设置页配置），不是被测业务逻辑；
 测试中统一绕过，由独立的配置校验测试覆盖其行为。
 """
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
+
+# ---------------------------------------------------------------------------
+# 测试隔离（2026-11-21 真实事故回归）：
+# Settings 的 data_dir/media_dir 默认值是真实路径 ``./data``/``./data/media``。
+# 大量用例只 monkeypatch ``get_settings`` 的 render_mock，未指定 media_dir，
+# 于是 render_mock 产物会写进 backend/data/media —— executor._store_shot_keyframe
+# 的命名是 ``storyboard_{项目内全局镜号}_img.png``，测试库里新建项目的第 1 镜恰好
+# 也是 1，直接覆盖了线上第一镜的分镜图（表现为镜头详情里「图1 ref_image」黑屏）。
+# 这里用环境变量把所有未显式指定目录的 Settings 实例重定向到临时目录。
+# 显式传 media_dir=tmp_path 的用例不受影响。
+_TEST_DATA_ROOT = Path(tempfile.mkdtemp(prefix="dlab-test-media-"))
+os.environ.setdefault("DLAB_DATA_DIR", str(_TEST_DATA_ROOT / "data"))
+os.environ.setdefault("DLAB_MEDIA_DIR", str(_TEST_DATA_ROOT / "data" / "media"))
+os.environ["DLAB_RENDER_MOCK"] = "false"  # 避免 .env 的真实配置漏进测试
 
 
 @pytest.fixture(autouse=True)

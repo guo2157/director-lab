@@ -151,35 +151,111 @@ def _ref_line(label: str, key: str, name: str) -> str:
     return f"{label} {key}（{name}）"
 
 
+_BODY_TITLE_RE = re.compile(
+    r"^\s*(任务|参考图职责|美术风格|目标画面|必须保持|允许变化|禁止|输出|单帧硬约束)\s*[:：]"
+)
+_BODY_STOP_RE = re.compile(r"单帧硬约束|禁止：|必须保持：|【目标状态】|目标状态|【允许变化】|输出：")
+_BODY_TAG_RE = re.compile(r"【[^】]*】")
+
+
+def _picture_body(shot: Shot) -> str:
+    """把镜头压成「一个瞬间」的一句话画面描述。
+
+    拼贴/分格的直接诱因就在这里：上游 shot.image_prompt 是给人读的多段模板正文
+    （【本镜剧情】/【本镜动作】/【目标状态】/单帧硬约束/禁止：… 长负面清单），
+    整段拼进生图提示词会让图像模型把并列的多段信息理解成多个画面。
+
+    因此这里只用结构化事实渲染单一瞬间：首拍的**起始**动作 + 开场站位；
+    不再下发 beats.end_pose、第N拍、目标状态，也不下发任何负面清单。
+    """
+    beats = getattr(shot, "beats", None) or []
+    first = next((b for b in beats if isinstance(b, dict)), None)
+    parts: list[str] = []
+    if isinstance(first, dict):
+        action = str(first.get("action") or "").strip()
+        pose = str(first.get("start_pose") or "").strip()
+        if action:
+            seg = f"{action}刚开始的那一瞬间，画面定格在此刻"
+            if pose:
+                seg += f"，姿态为{pose}"
+            parts.append(seg)
+    _raw_state = getattr(shot, "start_state", None)
+    state = _raw_state if isinstance(_raw_state, dict) else None
+    if isinstance(state, dict):
+        pos = str(state.get("position") or "").strip()
+        if pos:
+            parts.append(f"站位：{pos}")
+    if parts:
+        return "；".join(parts)
+    # 兜底：优先用一句话镜头目的，其次从上游正文里只截取最靠前的画面描述
+    purpose = str(getattr(shot, "shot_purpose", None) or "").strip()
+    if purpose and "\n" not in purpose and len(purpose) <= 120:
+        return purpose
+    kept: list[str] = []
+    for line in str(getattr(shot, "image_prompt", None) or "").split("\n"):
+        s = _BODY_TAG_RE.sub("", line).strip()
+        if not s:
+            continue
+        if _BODY_STOP_RE.search(s) or _BODY_TITLE_RE.match(s):
+            break
+        kept.append(s)
+        if len("；".join(kept)) >= 120:
+            break
+    text = "；".join(kept)[:200]
+    return text or "按本镜剧情呈现单一瞬间的画面"
+
+
 def _keyframe_prompt(shot: Shot, char_key: str | None, char_name: str | None,
                      scene_key: str, scene_title: str) -> str:
-    # 引用统一用 @名称 书写，生成环节的 @引用解析才能携带对应参考图；
-    # 槽位顺序由引用类型分组决定（角色 ref_identity→ref_character_2，场景 ref_scene，
-    # 道具 ref_prop），与文本先后无关，此处先场景后角色仅为可读性。
-    refs = [f"参考场景 @{scene_title}"] if scene_title else []
+    """生成分镜图提示词：包含任务/参考图职责/目标画面/必须保持/输出五个 _SECTION_RE 标准段。
+    「参考图职责」段使用 <imageN> 占位，由 relabel_reference_block 按真实槽位重建；
+    任务段正向定性为单帧完整画面，输出段用肯定句排除拼贴分格。
+    """
+    episode = shot.episode or 1
+    seq = shot.seq or 1
+    body = _picture_body(shot)
+    # 任务段：正向定性为一张完整单帧电影画面
+    lines = [
+        f"任务：生成第 {episode} 集第 {seq} 镜的一张完整单帧电影画面。"
+        f"一个镜头、一个瞬间、一个连续空间，画面铺满整个画布。",
+    ]
+    # 参考图职责段（<imageN> 占位，由 relabel_reference_block 按真实槽位重建）
+    ref_lines = ["参考图职责："]
+    if scene_title:
+        ref_lines.append(
+            f"- <image1>（场景基准图）：@{scene_title} —— "
+            f"仅用作背景的空间结构、地形、植被、光线方向与色调；"
+            f"不要把它缩小、平铺或原样放进画面。"
+        )
     if char_name:
-        refs.append(f"参考角色 @{char_name}")
-    head = "；".join(refs)
-    # 角色身份绑定与隔离规则（P1）：明确每个 @角色 的身份参考来源与禁止特征继承，
-    # 降低多角色分镜中第二角色继承第一角色面部/服装特征的概率
-    identity_rules: list[str] = []
+        ref_lines.append(
+            f"- <image2>（角色定妆图）：@{char_name} —— "
+            f"仅用作该角色的面部、发型、体型与服装。"
+        )
+    lines.extend(ref_lines)
+    # 目标画面段
+    if body:
+        lines.append(f"目标画面：在 @{scene_title} 的场景中，{body}")
+    # 必须保持段
+    keep_items: list[str] = []
     if char_name:
-        identity_rules.append(
-            f"角色身份绑定：@{char_name} 的定妆图是其唯一身份参考依据，"
-            f"画面中该角色必须严格保持定妆图中的面部、毛色/发型、体型与服装特征，"
-            "不得继承或混入其他角色的外观特征"
+        keep_items.append(
+            f"画面中只有 {char_name} 一个人物；面部、发型、体型、服装"
+            f"与 @{char_name} 的定妆图严格一致"
         )
     if scene_title:
-        identity_rules.append(
-            f"场景一致性：@{scene_title} 的基准图是环境唯一参考依据，"
-            "画面中的空间结构、建筑布局与光线氛围须与基准图保持一致"
+        keep_items.append(
+            f"场景的空间结构、光线方向与色调与 @{scene_title} 的基准图一致。"
+            f"若各参考图光线不同，以场景基准图的光线为准"
         )
-    rules = "\n".join(identity_rules)
-    # Shot 模型没有 description 字段（原写法会抛 AttributeError，image_prompt 一为空就整条链路中断）。
-    # 兜底改用 shot_purpose：它是镜头目的描述，比空串更有信息量；仍为空时留空，不虚构画面内容。
-    body = shot.image_prompt or shot.shot_purpose or ""
-    parts = [p for p in (head, rules, f"画面内容：{body}" if body else "") if p]
-    return "\n".join(parts)
+    if keep_items:
+        lines.append("必须保持：" + "；".join(keep_items) + "。")
+    # 输出段：正向肯定句优先，短排除项只做兜底（负向词不指望生效）
+    lines.append(
+        "输出：一张完整画面，所有内容自然连成一个整体，画面只铺满一次画布；"
+        "同一个人物在画面中只出现一次，不出现分格线、边框与文字。"
+    )
+    return "\n".join(lines)
 
 
 def _clip_prompt(shot: Shot, kf_key: str, char_key: str | None, char_name: str | None,

@@ -2,8 +2,8 @@
 
 - 创建返回 201，初始 status=draft
 - 详情含派生字段 shot_total/shot_done/current_stage
-- 删除为软删除；存在进行中任务返回 409
-- 硬删除（purge）彻底清理关联数据与媒体文件，不可恢复；存在进行中任务返回 409
+- 删除为软删除；存在进行中任务默认返回 409，带 force=true 时自动取消在途任务再删除
+- 硬删除（purge）彻底清理关联数据与媒体文件，不可恢复；存在进行中任务默认 409，force=true 时先取消再删
 - 归档仅 active 可调用；取消归档仅 archived 可调用；其余 409 invalid_state_transition
 """
 from datetime import datetime, timezone
@@ -141,15 +141,23 @@ def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depend
 
 
 @router.delete("/{project_id}", status_code=204)
-def delete_project(project_id: str, db: Session = Depends(get_db)) -> Response:
+def delete_project(
+    project_id: str,
+    force: bool = Query(default=False, description="true 时自动取消在途任务后再软删除"),
+    db: Session = Depends(get_db),
+) -> Response:
     p = _get_project(db, project_id)
     running = (
         db.query(Job)
-        .filter(Job.project_id == project_id, Job.status.in_(["queued", "running", "submission_unknown"]))
+        .filter(Job.project_id == project_id, Job.status.in_(["queued", "running", "submission_unknown", "chained_wait"]))
         .count()
     )
     if running > 0:
-        raise errors.invalid_state_transition("存在进行中的任务，禁止删除项目")
+        if not force:
+            raise errors.invalid_state_transition("存在进行中的任务，禁止删除项目")
+        from app.services.project_purge import cancel_project_active_work
+
+        cancel_project_active_work(db, project_id, reason="project_soft_delete")
     p.deleted_at = datetime.now(timezone.utc)
     db.commit()
     return Response(status_code=204)
@@ -172,23 +180,38 @@ def purge_project_preview(project_id: str, db: Session = Depends(get_db)) -> dic
 
 
 @router.delete("/{project_id}/purge")
-def purge_project(project_id: str, db: Session = Depends(get_db)) -> dict:
+def purge_project(
+    project_id: str,
+    force: bool = Query(default=False, description="true 时自动取消在途任务后再彻底删除"),
+    db: Session = Depends(get_db),
+) -> dict:
     """硬删除项目：彻底清理全部关联数据与媒体文件，不可恢复。
 
     与 DELETE /{project_id}（软删除，仅写 deleted_at）的本质区别：
     本接口真正删除数据库行与磁盘文件。
-    存在 queued / running / submission_unknown / chained_wait 任务时返回 409。
+    存在 queued / running / submission_unknown / chained_wait 任务时：
+    - force=false（默认）返回 409，由前端提示用户；
+    - force=true 先取消全部在途任务（Job + 编排层 Task + AgentTask，
+      running 的生成任务同时 /interrupt 远端），再执行删除。
     数据库事务提交成功后才删除媒体文件，避免回滚后文件已丢失。
     """
-    from app.services.project_purge import count_project_data, find_blocking_jobs, remove_media_files
+    from app.services.project_purge import (
+        cancel_project_active_work,
+        count_project_data,
+        find_blocking_jobs,
+        remove_media_files,
+    )
     from app.services.project_purge import purge_project as _purge
 
     p = _get_project(db, project_id)
     blocking = find_blocking_jobs(db, project_id)
+    cancelled: dict | None = None
     if blocking > 0:
-        raise errors.invalid_state_transition(
-            f"存在进行中的任务（{blocking} 个），禁止删除项目"
-        )
+        if not force:
+            raise errors.invalid_state_transition(
+                f"存在进行中的任务（{blocking} 个），禁止删除项目"
+            )
+        cancelled = cancel_project_active_work(db, project_id, reason="project_purge")
 
     preview = count_project_data(db, project_id)
     try:
@@ -209,6 +232,7 @@ def purge_project(project_id: str, db: Session = Depends(get_db)) -> dict:
         "deleted": result["deleted"],
         "preview": preview,
         "media": media_stats,
+        "cancelled": cancelled or {"jobs": 0, "running": 0, "interrupted": 0, "tasks": 0, "agent_tasks": 0},
     }
 
 

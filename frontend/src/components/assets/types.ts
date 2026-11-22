@@ -31,11 +31,3 @@ export const ASSET_UNIT_LABELS: Record<AssetKind, string> = {
   prop: '锚定图',
 }
 
-/** 本批任务进度（工具栏内联展示） */
-export interface BatchProgressView {
-  total: number
-  done: number
-  running: number
-  failed: number
-  percent: number
-}

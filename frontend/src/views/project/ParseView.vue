@@ -861,13 +861,82 @@ const emotionMap: Record<string, string> = {
 }
 const emotionLabel = (e: string) => emotionMap[e] ?? e
 
-/** 分组目录：数量为真实解析条数 */
+/**
+ * 落库完成判据：实体表（场景/分镜）已写入，且没有「已成功但未落库」的集。
+ *
+ * 集级记录 succeeded 只说明**模型产出了结果**，实体写入是随后的独立步骤——
+ * 两者之间有窗口期（实测 prj_a9058216747f：记录 12:40:41 succeeded、实体 12:40:42
+ * 落库、版本 12:40:56 才确认）。只看记录就会让页面在实体还没落库时宣布
+ * 「解析完成」，用户点「去分镜图」看到空白 —— 正是本 bug 的成因。
+ */
+const parsePersisted = computed<boolean>(() => {
+  if (statusTotalEpisodes.value === 0) return false
+  const scope = agentStatusData.value?.scope
+  if (scope) {
+    if ((scope.pending_persist_episodes?.length ?? 0) > 0) return false
+    const db = scope.persisted
+    return (db?.shots ?? 0) > 0 && (db?.scenes ?? 0) > 0
+  }
+  return false
+})
+/** 是否需要在解析收尾阶段轮询实体表：任务在跑，或已成功但还没落库 */
+const needsPersistPoll = computed<boolean>(
+  () =>
+    parseJobRunning.value ||
+    (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded > 0 && !parsePersisted.value),
+)
+
+/* ---------- 分组展示行：落库前用解析产出、落库后切实体表（单一来源） ---------- */
+interface ResultSceneRow { id: string; seq: number; title: string; desc: string; episodes: number[]; shotCount: number }
+interface ResultPeopleRow { id: string; name: string; desc: string }
+const sceneRows = computed<ResultSceneRow[]>(() => {
+  if (parsePersisted.value) {
+    return scenes.value.map((sc) => ({
+      id: sc.id,
+      seq: sc.seq,
+      title: sc.title,
+      desc: (sc as any).description ?? sc.summary ?? '',
+      episodes: sc.episodes ?? [],
+      shotCount: sc.shot_count ?? 0,
+    }))
+  }
+  const r = effectiveParseResult.value
+  return ((r?.scenes as any[] | undefined) ?? []).map((sc: any, i: number) => ({
+    id: `preview-scene-${i}`,
+    seq: Number(sc?.seq ?? i + 1),
+    title: String(sc?.title ?? '未命名场景'),
+    desc: String(sc?.description ?? ''),
+    episodes: [Number(sc?.episode ?? 0)].filter((n) => n > 0),
+    shotCount: (sc?.shots as any[] | undefined)?.length ?? 0,
+  }))
+})
+const characterRows = computed<ResultPeopleRow[]>(() => {
+  if (parsePersisted.value) {
+    return characters.value.map((c) => ({ id: c.id, name: c.name, desc: c.description ?? '' }))
+  }
+  const r = effectiveParseResult.value
+  return ((r?.characters as any[] | undefined) ?? [])
+    .map((c: any, i: number) => ({ id: `preview-char-${i}`, name: String(c?.name ?? ''), desc: String(c?.description ?? '') }))
+    .filter((c) => c.name)
+})
+const propRows = computed<ResultPeopleRow[]>(() => {
+  if (parsePersisted.value) {
+    return props.value.map((p) => ({ id: p.id, name: p.name, desc: p.description ?? '' }))
+  }
+  const r = effectiveParseResult.value
+  return ((r?.props as any[] | undefined) ?? [])
+    .map((p: any, i: number) => ({ id: `preview-prop-${i}`, name: String(p?.name ?? ''), desc: String(p?.description ?? '') }))
+    .filter((p) => p.name)
+})
+
+/** 分组目录：数量为真实解析条数。落库前五类全部来自解析产出（同源，避免「分镜 11 但场景 0」同屏矛盾），
+ *  落库后场景/角色/道具切到实体表，分镜/台词沿用解析明细。 */
 const resultGroups = computed<
   Array<{ key: ResultGroupKey; label: string; count: number }>
 >(() => [
-  { key: 'scene', label: '场景', count: scenes.value.length },
-  { key: 'character', label: '角色', count: characters.value.length },
-  { key: 'prop', label: '道具', count: props.value.length },
+  { key: 'scene', label: '场景', count: sceneRows.value.length },
+  { key: 'character', label: '角色', count: characterRows.value.length },
+  { key: 'prop', label: '道具', count: propRows.value.length },
   { key: 'shot', label: '分镜', count: parseShots.value.length },
   { key: 'dialogue', label: '台词', count: dialogueRows.value.length },
 ])
@@ -930,6 +999,9 @@ const { data: scenesData } = useQuery({
   queryKey: computed(() => ['scenes', projectId.value]),
   queryFn: () => listScenes(projectId.value, { page_size: 100 }),
   enabled: computed(() => !!projectId.value),
+  // 解析收尾阶段轮询：实体落库后自动刷新，不再只依赖本页确认回调（另一会话/Agent
+  // 确认时本页永远停在 0，正是「场景/角色/道具全 0」的直接原因）
+  refetchInterval: () => (needsPersistPoll.value ? 2000 : false),
 })
 /** 场景（全部集，未过滤）：totalShots 与 hasResults 的口径 */
 const allScenes = computed<SceneWithShots[]>(
@@ -953,6 +1025,7 @@ const { data: charactersData } = useQuery({
   queryKey: computed(() => ['characters', projectId.value]),
   queryFn: () => listCharacters(projectId.value, { page_size: 100 }),
   enabled: computed(() => !!projectId.value),
+  refetchInterval: () => (needsPersistPoll.value ? 2000 : false),
 })
 /** 角色是项目级资产（Character 表无 episode 字段），跨集共用同一批角色，
  *  因此不按集过滤 —— 按集过滤会让用户误以为「第 2 集没有角色」。 */
@@ -961,6 +1034,7 @@ const { data: propsData } = useQuery({
   queryKey: computed(() => ['props', projectId.value]),
   queryFn: () => listProps(projectId.value!),
   enabled: computed(() => !!projectId.value),
+  refetchInterval: () => (needsPersistPoll.value ? 2000 : false),
 })
 /** 道具同为项目级资产（Prop 表无 episode 字段），不按集过滤 */
 const props = computed(() => propsData.value?.items ?? [])
@@ -980,6 +1054,7 @@ const resultState = computed<{ label: string; tone: string }>(() => {
       ? { label: '部分成功', tone: 'warning' }
       : { label: '解析失败', tone: 'failed' }
   }
+  if (parseAllSucceeded.value && !parsePersisted.value) return { label: '正在写入结果', tone: 'running' }
   if (parseAllSucceeded.value) return { label: '解析完成', tone: 'succeeded' }
   if (statusTotalEpisodes.value > 0) return { label: '待解析', tone: 'pending' }
   return { label: '暂无结果', tone: 'pending' }
@@ -1153,7 +1228,8 @@ const parseHeaderState = computed<{ label: string; tone: string }>(() => {
   if (parseJobRunning.value) return { label: '解析中', tone: 'running' }
   if (failedEpisodes.value.length) return { label: `${failedEpisodes.value.length} 集失败`, tone: 'failed' }
   if (statusTotalEpisodes.value > 0 && statusSummary.value.succeeded === statusTotalEpisodes.value) {
-    return { label: '已完成', tone: 'done' }
+    // 结果已产出但尚未落库：不能宣称「已完成」，否则用户点去分镜图看到空白
+    return parsePersisted.value ? { label: '已完成', tone: 'done' } : { label: '正在写入结果', tone: 'running' }
   }
   if (!hasScript.value) return { label: '待保存剧本', tone: 'idle' }
   return { label: '待解析', tone: 'idle' }
@@ -1514,13 +1590,21 @@ async function copyRawReport() {
               <button type="button" class="result-scope-clear" title="查看全部集" @click="activeEpisode = null">×</button>
             </span>
             <span class="result-spacer" />
-            <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/storyboard-images`)">
+            <NButton
+              size="tiny"
+              quaternary
+              :disabled="!parsePersisted"
+              :title="parsePersisted ? '前往分镜图' : '解析结果正在写入，写入完成后可用'"
+              @click="router.push(`/project/${projectId}/storyboard-images`)"
+            >
               去分镜图 →
             </NButton>
             <NButton
               v-if="parseAllSucceeded"
               size="small"
               type="primary"
+              :disabled="!parsePersisted"
+              :title="parsePersisted ? '前往资产库' : '解析结果正在写入，写入完成后可用'"
               @click="router.push(`/project/${projectId}/assets`)"
             >
               去资产库 →
@@ -1559,35 +1643,35 @@ async function copyRawReport() {
 
             <div class="group-pane" role="region" :aria-label="activeGroupLabel">
               <template v-if="activeGroup === 'scene'">
-                <ol v-if="scenes.length" class="result-scenes is-tall">
-                  <li v-for="sc in scenes" :key="sc.id">
+                <ol v-if="sceneRows.length" class="result-scenes is-tall">
+                  <li v-for="sc in sceneRows" :key="sc.id">
                     <span class="rs-seq">#{{ sc.seq }}</span>
                     <span class="rs-body">
                       <span class="rs-title" :title="sc.title">{{ sc.title }}</span>
-                      <span v-if="sc.summary" class="rs-desc" :title="sc.summary">{{ sc.summary }}</span>
+                      <span v-if="sc.desc" class="rs-desc" :title="sc.desc">{{ sc.desc }}</span>
                     </span>
                     <span v-if="sc.episodes?.length" class="rs-ep">第 {{ sc.episodes.join('、') }} 集</span>
-                    <span class="rs-count">{{ sc.shot_count ?? 0 }} 镜</span>
+                    <span class="rs-count">{{ sc.shotCount }} 镜</span>
                   </li>
                 </ol>
                 <p v-else class="pane-empty">未解析出场景</p>
               </template>
 
               <template v-else-if="activeGroup === 'character'">
-                <ul v-if="characters.length" class="result-people is-tall">
-                  <li v-for="c in characters" :key="c.id">
+                <ul v-if="characterRows.length" class="result-people is-tall">
+                  <li v-for="c in characterRows" :key="c.id">
                     <span class="rp-name">{{ c.name }}</span>
-                    <span v-if="c.description" class="rp-desc" :title="c.description">{{ c.description }}</span>
+                    <span v-if="c.desc" class="rp-desc" :title="c.desc">{{ c.desc }}</span>
                   </li>
                 </ul>
                 <p v-else class="pane-empty">未解析出角色</p>
               </template>
 
               <template v-else-if="activeGroup === 'prop'">
-                <ul v-if="props.length" class="result-people is-tall">
-                  <li v-for="pr in props" :key="pr.id">
+                <ul v-if="propRows.length" class="result-people is-tall">
+                  <li v-for="pr in propRows" :key="pr.id">
                     <span class="rp-name">{{ pr.name }}</span>
-                    <span v-if="pr.description" class="rp-desc" :title="pr.description">{{ pr.description }}</span>
+                    <span v-if="pr.desc" class="rp-desc" :title="pr.desc">{{ pr.desc }}</span>
                   </li>
                 </ul>
                 <p v-else class="pane-empty">未解析出道具</p>
@@ -1624,7 +1708,13 @@ async function copyRawReport() {
                   }}
                 </p>
                 <div class="pane-foot">
-                  <NButton size="tiny" quaternary @click="router.push(`/project/${projectId}/storyboard-images`)">
+                  <NButton
+                    size="tiny"
+                    quaternary
+                    :disabled="!parsePersisted"
+                    :title="parsePersisted ? '前往分镜图' : '解析结果正在写入，写入完成后可用'"
+                    @click="router.push(`/project/${projectId}/storyboard-images`)"
+                  >
                     去分镜图查看全部 →
                   </NButton>
                 </div>

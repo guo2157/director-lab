@@ -109,7 +109,8 @@ const { mutate: mutateArchive } = useMutation({
   onError: (e) => message.error(errMsg(e)),
 })
 const { mutate: mutateDelete } = useMutation({
-  mutationFn: deleteProject,
+  mutationFn: (vars: { id: string; force?: boolean }) =>
+    deleteProject(vars.id, { force: vars.force }),
   onSuccess: () => {
     message.success('作品已删除')
     invalidateProjects()
@@ -117,11 +118,17 @@ const { mutate: mutateDelete } = useMutation({
   onError: (e) => message.error(errMsg(e)),
 })
 const { mutate: mutatePurge } = useMutation({
-  mutationFn: purgeProject,
+  mutationFn: (vars: { id: string; force?: boolean }) =>
+    purgeProject(vars.id, { force: vars.force }),
   onSuccess: (res) => {
     const rows = Object.values(res?.deleted ?? {}).reduce((a, b) => a + b, 0)
     const files = res?.media?.removed ?? 0
-    message.success(`作品已彻底删除：清理 ${rows} 条记录、${files} 个媒体文件`)
+    // 连带取消的任务数必须有回执：用户点删除时未必记得还有任务在跑
+    const cancelled = res?.cancelled?.jobs ?? 0
+    const head = cancelled
+      ? `作品已彻底删除：取消 ${cancelled} 个在途任务、清理 ${rows} 条记录、${files} 个媒体文件`
+      : `作品已彻底删除：清理 ${rows} 条记录、${files} 个媒体文件`
+    message.success(head)
     invalidateProjects()
   },
   onError: (e) => message.error(errMsg(e)),
@@ -134,55 +141,78 @@ function onCardAction(key: string, p: Project) {
   if (key === 'archive') {
     mutateArchive(p.id)
   } else if (key === 'delete') {
-    confirmDelete(p)
+    void confirmDelete(p)
   } else if (key === 'purge') {
     void confirmPurge(p)
   }
 }
-function confirmDelete(p: Project) {
+
+/** 读取影响面预览：失败返回 null（不阻断删除，后端会在 force=true 时兜住取消逻辑） */
+async function loadPreview(p: Project): Promise<PurgePreview | null> {
+  try {
+    return await getPurgePreview(p.id)
+  } catch {
+    return null
+  }
+}
+
+async function confirmDelete(p: Project) {
+  const preview = await loadPreview(p)
+  const blocking = preview?.blocking_jobs ?? 0
+  // 任务页入口已下线，「请先去任务页取消」是无法执行的指引：
+  // 这里改为如实告知 + 用户确认后由服务端自动取消在途任务再删除。
   confirmDialog({
     title: '删除作品',
-    message: `确定要删除作品「${p.name}」吗？删除后不可恢复。`,
-    impact: [`作品「${p.name}」`],
+    message: blocking
+      ? `作品「${p.name}」还有 ${blocking} 个进行中的任务。继续删除会先把这些任务自动取消，再删除作品（不可恢复）。`
+      : `确定要删除作品「${p.name}」吗？删除后不可恢复。`,
+    impact: [
+      `作品「${p.name}」`,
+      ...(blocking ? [`进行中的任务 ${blocking} 个（将被自动取消）`] : []),
+    ],
     confirmText: '删除',
     onConfirm: () => {
-      mutateDelete(p.id)
+      mutateDelete({ id: p.id, force: true })
     },
   })
 }
+
 async function confirmPurge(p: Project) {
-  let preview: PurgePreview
-  try {
-    preview = await getPurgePreview(p.id)
-  } catch (e) {
-    message.error(errMsg(e))
-    return
-  }
-  if (!preview.deletable) {
-    confirmDialog({
-      title: '暂时无法彻底删除',
-      message: `作品「${p.name}」还有 ${preview.blocking_jobs} 个进行中的任务（排队 / 运行 / 提交待确认 / 链式等待），请先到任务页取消或等待完成后再试。`,
-      impact: [`进行中的任务 ${preview.blocking_jobs} 个`],
-      confirmText: '知道了',
-      hideCancel: true,
-      danger: false,
-    })
+  const preview = await loadPreview(p)
+  if (!preview) {
+    message.error('读取删除影响面失败，请稍后重试')
     return
   }
   const c = preview.counts
+  const impact = [
+    `场景 ${c.scenes} 个、镜头 ${c.shots} 个`,
+    `资产 ${c.assets} 个（含分镜图、角色图、视频等媒体文件）`,
+    `任务记录 ${c.jobs} 条`,
+    `角色 ${c.characters} 个、道具 ${c.props} 个`,
+    `剧本版本 ${c.script_versions} 个`,
+    ...(preview.blocking_jobs
+      ? [`进行中的任务 ${preview.blocking_jobs} 个（将被自动取消）`]
+      : []),
+  ]
+  if (!preview.deletable) {
+    confirmDialog({
+      title: '作品还有任务在执行',
+      message: `作品「${p.name}」还有 ${preview.blocking_jobs} 个进行中的任务（排队 / 运行 / 提交待确认 / 链式等待）。继续将先自动取消这些任务，再彻底删除作品及其全部内容，不可恢复。`,
+      impact,
+      confirmText: '取消任务并彻底删除',
+      onConfirm: () => {
+        mutatePurge({ id: p.id, force: true })
+      },
+    })
+    return
+  }
   confirmDialog({
     title: '彻底删除作品（不可恢复）',
     message: `即将永久删除作品「${p.name}」及其全部内容，数据库记录与磁盘上的媒体文件都会被清除，此操作无法撤销。`,
-    impact: [
-      `场景 ${c.scenes} 个、镜头 ${c.shots} 个`,
-      `资产 ${c.assets} 个（含分镜图、角色图、视频等媒体文件）`,
-      `任务记录 ${c.jobs} 条`,
-      `角色 ${c.characters} 个、道具 ${c.props} 个`,
-      `剧本版本 ${c.script_versions} 个`
-    ],
+    impact,
     confirmText: '确认彻底删除',
     onConfirm: () => {
-      mutatePurge(p.id)
+      mutatePurge({ id: p.id, force: true })
     },
   })
 }

@@ -89,6 +89,90 @@ def _recent_failed_jobs(db: Session, project_id: str, job_type: str, *,
     return out
 
 
+def _not_superseded_by_success(
+    db: Session,
+    project_id: str,
+    job_type: str,
+    failed_jobs: list[Job],
+    key_of,
+) -> list[Job]:
+    """剔除「之后又重新生成成功」的失败记录。
+
+    事故（2026-11-21，用户实测「狼来了」项目）：镜 3 / 镜 4 分镜图先失败
+    （请求超时），随后重新生成成功、图已正常显示，但卡片下方仍挂着
+    「失败：请求超时: The write operation timed out」的红条。
+
+    根因：failed_recent 只按时间窗口取失败任务，完全不看同目标之后是否已成功，
+    前端再按镜头去重展示 → 成功重画也无法消掉旧失败。分镜视频进度同构，
+    资产图（角色/场景/道具）重画成功后也会留同样的幽灵红条。
+
+    判据：同一目标存在 finished_at 更晚的 succeeded 任务 → 这条失败已过期。
+    「失败 → 成功 → 再失败」时最后那条失败时间晚于成功，会保留（是真失败）。
+
+    key_of(job) 返回目标键（shot_id / (kind, entity_id)），返回 None 表示
+    无法定位目标，这类记录原样保留（宁可多提示，不可误吞真实失败）。
+    """
+    if not failed_jobs:
+        return []
+
+    latest_fail_at: dict = {}
+    earliest_fail_at: datetime | None = None
+    for job in failed_jobs:
+        if job.finished_at is None:
+            continue
+        if earliest_fail_at is None or job.finished_at < earliest_fail_at:
+            earliest_fail_at = job.finished_at
+        key = key_of(job)
+        if key is None:
+            continue
+        cur = latest_fail_at.get(key)
+        if cur is None or job.finished_at > cur:
+            latest_fail_at[key] = job.finished_at
+    if not latest_fail_at or earliest_fail_at is None:
+        return list(failed_jobs)
+
+    # 从最早一条失败开始找成功：失败 → 成功 → 再失败 时，
+    # 每个失败各自跟「同一目标的更晚成功」比较，不能只看最新那次失败的时间点。
+    successes = (
+        db.query(Job)
+        .filter(
+            Job.project_id == project_id,
+            Job.job_type == job_type,
+            Job.status == "succeeded",
+            Job.finished_at.isnot(None),
+            Job.finished_at >= earliest_fail_at,
+        )
+        .all()
+    )
+    ok_at: dict = {}
+    for job in successes:
+        key = key_of(job)
+        if key is None or key not in latest_fail_at or job.finished_at is None:
+            continue
+        cur = ok_at.get(key)
+        if cur is None or job.finished_at > cur:
+            ok_at[key] = job.finished_at
+    if not ok_at:
+        return list(failed_jobs)
+
+    out: list[Job] = []
+    for job in failed_jobs:
+        ok = ok_at.get(key_of(job))
+        if ok is not None and job.finished_at is not None and job.finished_at < ok:
+            continue
+        out.append(job)
+    return out
+
+
+def _shot_key(job: Job) -> str | None:
+    return job.shot_id or None
+
+
+def _asset_key(job: Job) -> tuple[str, str] | None:
+    kind, entity_id = _asset_job_target(job)
+    return (kind, entity_id) if kind and entity_id else None
+
+
 def generation_progress_snapshot(db: Session, project_id: str) -> dict:
     """生成进度快照（供 Agent 对话上下文复用，与 HTTP 接口同口径）。
 
@@ -207,6 +291,10 @@ def asset_generation_progress(
         kinds=tuple(groups.keys()),
         shot_level=False,
         failed_since=failed_since,
+    )
+    # 实体重画成功后不再提示旧的失败（否则资产卡会一直挂红条）
+    failed_jobs = _not_superseded_by_success(
+        db, project_id, "generate_keyframe", failed_jobs, _asset_key
     )
     failed = [
         {
@@ -356,6 +444,10 @@ def keyframe_generation_progress(
         kinds=None,
         shot_level=True,
         failed_since=failed_since,
+    )
+    # 已重新生成成功的镜头不再提示旧失败（分镜图卡片幽灵红条）
+    failed_jobs = _not_superseded_by_success(
+        db, project_id, "generate_keyframe", failed_jobs, _shot_key
     )
     failed = [
         {
@@ -581,6 +673,10 @@ def clip_generation_progress(
         kinds=None,
         shot_level=True,
         failed_since=failed_since,
+    )
+    # 分镜看板同理：视频重画成功后不再显示「视频生成失败」角标
+    failed_jobs = _not_superseded_by_success(
+        db, project_id, "generate_clip", failed_jobs, _shot_key
     )
     failed = [
         {

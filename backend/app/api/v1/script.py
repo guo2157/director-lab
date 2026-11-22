@@ -496,24 +496,40 @@ def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> d
     # 判据不能只看 pv.status：current 是「已确认过一次」，不代表「后续批次已落库」。
     # 这里用集级记录的状态做事实判断——记录里有 succeeded 的集，但该集的镜头在库里
     # 查不到，即说明存在未落库批次。宁可多提示一次，也不能静默丢数据。
+    from app.models import Character as _Character, Prop as _Prop, Scene as _Scene, Shot as _Shot
+    _scene_ids = [
+        row[0] for row in db.query(_Scene.id).filter(
+            _Scene.project_id == project_id).all()
+    ]
+    _ep_with_shots: set[int] = set()
+    if _scene_ids:
+        for row in db.query(_Shot.episode).filter(
+                _Shot.scene_id.in_(_scene_ids)).distinct().all():
+            _ep_with_shots.add(int(row[0]))
     pending_persist_episodes: list[int] = []
     if pv is not None:
-        from app.models import Scene as _Scene, Shot as _Shot
         _ok_eps = sorted({
             r.episode_no for r in records
             if r.status == "succeeded" and r.parse_version_id == pv.id
         })
         if _ok_eps:
-            _scene_ids = [
-                row[0] for row in db.query(_Scene.id).filter(
-                    _Scene.project_id == project_id).all()
-            ]
-            _ep_with_shots = set()
-            if _scene_ids:
-                for row in db.query(_Shot.episode).filter(
-                        _Shot.scene_id.in_(_scene_ids)).distinct().all():
-                    _ep_with_shots.add(int(row[0]))
             pending_persist_episodes = [ep for ep in _ok_eps if ep not in _ep_with_shots]
+    # 落库事实（实体表计数）：前端「解析完成」与「去资产库/去分镜图」
+    # 的唯一判据。集级记录 succeeded 只说明**模型产出了结果**，实体写入是
+    # 随后的独立步骤 —— 两者之间有窗口期（实测 prj_a9058216747f：12:40:41
+    # 记录 succeeded，12:40:42 才写出角色，12:40:56 才确认版本）。
+    # 只看记录就会让页面在实体还没落库时宣布完成，用户点去分镜图看到空白。
+    persisted = {
+        "scenes": len(_scene_ids),
+        "characters": db.query(_Character).filter(
+            _Character.project_id == project_id).count(),
+        "props": db.query(_Prop).filter(_Prop.project_id == project_id).count(),
+        "shots": (
+            db.query(_Shot).filter(_Shot.scene_id.in_(_scene_ids)).count()
+            if _scene_ids else 0
+        ),
+        "episodes_with_shots": sorted(_ep_with_shots),
+    }
     # 防御性纠正：任务已不在运行，但集级记录仍是 running —— 这是中断残留。
     # 取消（cancelled）、worker 被 SIGKILL、进程重启都会留下这种孤儿记录，
     # 前端据此把该集渲染成「进行中」，于是出现「待解析 0/1 集完成」却
@@ -542,6 +558,8 @@ def get_script_agent_status(project_id: str, db: Session = Depends(get_db)) -> d
             "parse_version_status": pv.status if pv else None,
             # 已解析成功但尚未落库的集：前端据此再次触发确认（见上方长注释）
             "pending_persist_episodes": pending_persist_episodes,
+            # 实体表落库计数：前端用它判定「解析完成」是否真的可进入下一步
+            "persisted": persisted,
         },
         "records": [
             {

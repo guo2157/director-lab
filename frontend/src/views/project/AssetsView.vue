@@ -30,7 +30,7 @@ import ErrorRetry from '@/components/ui/ErrorRetry.vue'
 import SkeletonList from '@/components/ui/SkeletonList.vue'
 import {
   ASSET_KIND_LABELS, ASSET_UNIT_LABELS,
-  type AssetCardItem, type AssetKind, type BatchProgressView,
+  type AssetCardItem, type AssetKind,
 } from '@/components/assets/types'
 
 const route = useRoute()
@@ -416,46 +416,6 @@ const inflightById = computed(() => {
   return map
 })
 
-/** 本次提交批次里，仍在途的任务 ID 集（与后端在途明细求交） */
-const submittedInflightIds = computed(() => {
-  const inflight = new Set((assetProgress.data.value?.inflight ?? []).map((j) => j.entity_id))
-  return submittedAssets.value.filter((s) => inflight.has(s.id)).map((s) => s.id)
-})
-
-/** 批量进度：本次提交 N 个，其中完成 M 个 / 失败 K 个 / 仍在生成中 */
-const batchProgress = computed(() => {
-  const total = submittedAssets.value.length
-  if (!total) return null
-  const doneSet = new Set<string>()
-  // 已出图判定：任一资产图字段已回写即视为完成（与齐全度同口径）
-  const byId = new Map<string, boolean>()
-  for (const c of (charsData.value?.items ?? []) as Array<{ id: string; portrait_asset_id?: string | null }>) {
-    byId.set(c.id, !!c.portrait_asset_id)
-  }
-  for (const s of (scenesData.value?.items ?? []) as Array<{ id: string; baseline_asset_id?: string | null }>) {
-    byId.set(s.id, !!s.baseline_asset_id)
-  }
-  for (const p of (propsData.value?.items ?? []) as Array<{ id: string; anchor_asset_id?: string | null }>) {
-    byId.set(p.id, !!p.anchor_asset_id)
-  }
-  for (const s of submittedAssets.value) if (byId.get(s.id)) doneSet.add(s.id)
-  const done = doneSet.size
-  const failed = assetProgress.data.value?.failed_recent ?? []
-  const failedIds = new Set(failed.filter((f) => submittedAssets.value.some((s) => s.id === f.entity_id)).map((f) => f.entity_id))
-  const running = submittedInflightIds.value.length
-  // 「已完成 + 生成中 + 失败」= total 时批次才算收尾（失败项不阻塞完成提示，但会单独提示）
-  const percent = total ? Math.round((done / total) * 100) : 0
-  return {
-    total,
-    done,
-    running,
-    failedIds,
-    failed: [...failedIds].length,
-    percent,
-    finished: running === 0 && done + failedIds.size >= total,
-  }
-})
-
 /** 卡片上的生成状态文案：排队 / 生成中 42% */
 function inflightText(job?: AssetGenerationJob): string {
   if (!job) return ''
@@ -627,12 +587,6 @@ const scopeLabel = computed(() => {
   return `${ASSET_KIND_LABELS[tab]}${ASSET_UNIT_LABELS[tab]}`
 })
 
-/** 本批进度：工具栏内联展示 */
-const batchView = computed<BatchProgressView | null>(() => {
-  const b = batchProgress.value
-  if (!b) return null
-  return { total: b.total, done: b.done, running: b.running, failed: b.failed, percent: b.percent }
-})
 /** 当前标签下失败的实体数：决定是否露出「重试」 */
 const failedInTab = computed(
   () => cardItems.value.filter((i) => i.entityId && failedEntityIds.value.has(i.entityId)).length,
@@ -783,12 +737,6 @@ async function retryFailedCraft() {
   }
 }
 
-/** 取消本次批次的展示（不取消后端任务） */
-function clearBatch() {
-  submittedAssets.value = []
-  submittedJobIds.value = []
-}
-
 // --- 加载 / 错误 / 空态 ---
 const loading = computed(
   () => assetsQuery.isLoading.value || charsLoading.value || scenesLoading.value || propsLoading.value,
@@ -872,7 +820,6 @@ onMounted(() => {
       :selected="selectedCraftIds.length"
       :batch-loading="batchCrafting"
       :inflight-count="assetProgress.inflightCount.value"
-      :batch="batchView"
       :retrying="retryingFailed"
       :failed-count="failedInTab"
       :workflow-id="assetImageWorkflowId"
@@ -880,7 +827,6 @@ onMounted(() => {
       @toggle-all="toggleAll"
       @batch-generate="handleBatchCraft"
       @retry-failed="retryFailedCraft"
-      @clear-batch="clearBatch"
     />
 
     <n-tabs

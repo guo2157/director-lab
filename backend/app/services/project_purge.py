@@ -5,7 +5,8 @@
 shot_id / job_id / task_id / session_id / plan_id 等间接挂在项目下的表。
 
 设计要点：
-- 先冻结检查：存在 queued / running / submission_unknown / chained_wait 任务时拒绝；
+- 先冻结检查：存在 queued / running / submission_unknown / chained_wait 任务时默认拒绝（409）；
+  调用方显式 force 时先 `cancel_project_active_work` 取消全部在途任务，再执行删除；
 - ID 集合全部先收集再删除，避免边删边查导致级联遗漏；
 - 删除顺序严格遵循外键依赖（子表在前、父表在后），SQLite 已开启 foreign_keys=ON；
 - 每个步骤记录删除行数，返回审计明细供前端展示；
@@ -53,7 +54,9 @@ from app.models import (
     ScriptVersion,
     SearchResult,
     SearchRun,
+    SeriesAsset,
     Shot,
+    StoryboardRegenConfig,
     Task,
     TaskEvent,
     TaskResult,
@@ -62,7 +65,8 @@ from app.models import (
 )
 
 # 视为「仍在进行」的任务状态：存在任何一个都不允许删除项目
-BLOCKING_JOB_STATUSES = ("queued", "running", "submission_unknown", "chained_wait")
+# 单一权威定义在 job_cancel_ops（与批量取消共用），此处仅转发，避免两处口径分叉
+from app.services.job_cancel_ops import BLOCKING_JOB_STATUSES  # noqa: E402
 
 
 def find_blocking_jobs(db: Session, project_id: str) -> int:
@@ -72,6 +76,85 @@ def find_blocking_jobs(db: Session, project_id: str) -> int:
         .filter(Job.project_id == project_id, Job.status.in_(BLOCKING_JOB_STATUSES))
         .count()
     )
+
+
+# 编排层任务里视为「仍在进行」的状态：不清掉的话 DAG 调度器会继续派发新阶段 → 新 Job
+ACTIVE_TASK_STATUSES = ("pending", "queued", "running")
+ACTIVE_AGENT_TASK_STATUSES = ("pending", "queued", "running")
+
+
+def cancel_project_active_work(db: Session, project_id: str, *, reason: str = "project_delete") -> dict:
+    """取消项目下所有在途工作，供 force 删除使用（删除前必须调用）。
+
+    Job 层的取消动作统一走 ``job_cancel_ops.cancel_jobs``（唯一权威实现：
+    /interrupt + 清 prompt_id + 事件 + 编排层桥接 + 跨进程信号）。
+    这里额外负责「编排层不能继续派发」这一层：
+
+    为什么还要单独取消 Task / AgentTask
+    ---------------------------------
+    只改 Job 状态不够：Job 由编排层 Task / AgentTask 派发，任务没停，
+    DAG 调度器会在下一个 tick 继续启动 pending 阶段、再派发新 Job，
+    于是「刚取消完又有新任务排队」，删除永远追不上。
+    所以三层一起置终态：Job（执行单元）→ Task（统一编排）→ AgentTask（意图任务）。
+
+    返回值供前端展示「本次取消了几个任务」，不影响删除流程。
+    """
+    from app.services.job_cancel_ops import cancel_jobs
+
+    jobs = (
+        db.query(Job)
+        .filter(Job.project_id == project_id, Job.status.in_(BLOCKING_JOB_STATUSES))
+        .all()
+    )
+    stats = cancel_jobs(db, jobs, reason=reason)
+
+    cancelled_tasks = 0
+    try:
+        from app.services import task_orchestrator
+
+        tasks = (
+            db.query(Task)
+            .filter(Task.project_id == project_id, Task.status.in_(ACTIVE_TASK_STATUSES))
+            .all()
+        )
+        for t in tasks:
+            if task_orchestrator.cancel_task(db, t, reason=reason):
+                cancelled_tasks += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    cancelled_agent_tasks = 0
+    session_ids = [
+        r[0]
+        for r in db.execute(select(AgentSession.id).where(AgentSession.project_id == project_id))
+    ]
+    if session_ids:
+        try:
+            from app.services import parent_agent
+
+            agent_tasks = (
+                db.query(AgentTask)
+                .filter(
+                    AgentTask.session_id.in_(session_ids),
+                    AgentTask.status.in_(ACTIVE_AGENT_TASK_STATUSES),
+                )
+                .all()
+            )
+            for at in agent_tasks:
+                if parent_agent.cancel_task(db, at, reason=reason):
+                    cancelled_agent_tasks += 1
+        except Exception:  # noqa: BLE001
+            pass
+
+    db.commit()
+
+    return {
+        "jobs": stats["jobs"],
+        "running": stats["running"],
+        "interrupted": stats["interrupted"],
+        "tasks": cancelled_tasks,
+        "agent_tasks": cancelled_agent_tasks,
+    }
 
 
 def count_project_data(db: Session, project_id: str) -> dict:
@@ -234,9 +317,22 @@ def purge_project(db: Session, project_id: str) -> dict:
     _delete(delete(Export).where(Export.project_id == project_id), "export")
     _delete(delete(Composition).where(Composition.project_id == project_id), "composition")
 
+    # ══ 8.5 分镜重新生成工作台配置：shot_id → shot.id 外键，必须先于镜头删除。
+    # 2026-11-21 真实事故：该表是后加的，purge 最初没覆盖它，删除镜头时报
+    # FOREIGN KEY constraint failed（狼来了无法删除，500）。project_id 直挂，按项目清即可。
+    _delete(
+        delete(StoryboardRegenConfig).where(StoryboardRegenConfig.project_id == project_id),
+        "storyboard_regen_config",
+    )
+
     # ══ 9. 任务必须早于镜头删除（job.shot_id → shot.id） ═════════
     _delete(delete(Job).where(Job.project_id == project_id), "job")
     _delete(delete(Task).where(Task.project_id == project_id), "task")
+
+    # ══ 9.5 系列共享资产关联：asset_id → asset.id 外键，必须先于资产删除。
+    # 系列资产引用属于系列侧、但被删项目的资产一旦被纳入系列，purge 资产时会 FK 失败。
+    if asset_ids:
+        _delete(delete(SeriesAsset).where(SeriesAsset.asset_id.in_(asset_ids)), "series_asset")
 
     # ══ 10. 资产计划与资产 ══════════════════════════════════════
     _delete(delete(AssetPlan).where(AssetPlan.project_id == project_id), "asset_plan")

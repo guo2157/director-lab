@@ -4,7 +4,10 @@
  *
  * 改造点（2026-11-19 v7）：本卡原先自带一条「本批 X/Y + 进度条」，
  * 与上方进度卡重复表达进度。批量进度属于「执行进度」，已归入第一张卡；
- * 本卡只保留操作与其直接反馈（失败项重试、收起）。
+ * 本卡只保留操作与其直接反馈（失败项重试）。
+ *
+ * 2026-11-21：再删除选择器下方那行「本批 X/Y · 生成中 N」与「收起本批」按钮。
+ * 本卡不再渲染 #meta 第二行，批次统计只保留在上方进度卡。
  *
  * 工作流选择器固定 `asset_image` 槽位 + `image_text_to_image` 模型类型：
  * 资产库定妆图只能是文生图模型，模型类型不需要用户选，页面上不展示该下拉，
@@ -14,7 +17,6 @@ import { computed, ref, watch } from 'vue'
 import { NButton, NCheckbox } from 'naive-ui'
 import StageCard from '@/components/ui/StageCard.vue'
 import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
-import type { BatchProgressView } from './types'
 
 const props = withDefaults(
   defineProps<{
@@ -24,7 +26,6 @@ const props = withDefaults(
     selected: number
     batchLoading?: boolean
     inflightCount?: number
-    batch?: BatchProgressView | null
     retrying?: boolean
     /** 当前标签下失败项数量 */
     failedCount?: number
@@ -35,7 +36,6 @@ const props = withDefaults(
     scopeLabel: '',
     batchLoading: false,
     inflightCount: 0,
-    batch: null,
     retrying: false,
     failedCount: 0,
     workflowId: undefined,
@@ -47,7 +47,6 @@ const emit = defineEmits<{
   'toggle-all': [boolean]
   'batch-generate': []
   'retry-failed': []
-  'clear-batch': []
 }>()
 
 const allChecked = computed(() => props.total > 0 && props.selected >= props.total)
@@ -106,12 +105,6 @@ watch(someChecked, (v) => {
       </n-button>
     </template>
 
-    <template v-if="batch" #meta>
-      <span class="batch-nums">
-        本批 {{ batch.done }}/{{ batch.total }} · 生成中 {{ batch.running }}<template v-if="batch.failed"> · 失败 {{ batch.failed }}</template>
-      </span>
-      <n-button size="tiny" quaternary @click="emit('clear-batch')">收起本批</n-button>
-    </template>
   </StageCard>
 </template>
 
@@ -127,10 +120,6 @@ watch(someChecked, (v) => {
 .failed {
   font-size: 13px;
   color: var(--danger-text);
-}
-.batch-nums {
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
 }
 
 /* 窄屏：工作流选择器不再独占整行（独占会把卡片撑到 180px），

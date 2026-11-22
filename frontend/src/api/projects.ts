@@ -30,9 +30,10 @@ export function updateProject(id: string, payload: UpdateProjectPayload) {
   return patch<Project>(`/projects/${id}`, payload)
 }
 
-/** 删除项目（有进行中任务返回 409；成功软删除 204） */
-export async function deleteProject(id: string) {
-  await del<void>(`/projects/${id}`)
+/** 删除项目（软删除）
+ *  force=true 时服务端会先取消全部在途任务再删除（前端二次确认后使用）。 */
+export async function deleteProject(id: string, opts?: { force?: boolean }) {
+  await del<void>(`/projects/${id}`, opts?.force ? { force: true } : undefined)
 }
 
 /** 硬删除影响面预览：返回将被清理的数据量与阻塞任务数 */
@@ -62,11 +63,20 @@ export interface PurgeResult {
   deleted: Record<string, number>
   preview: PurgePreview['counts']
   media: { removed: number; missing: number; skipped: number }
+  /** 本次连带取消的在途任务（force=true 且存在任务时才有意义） */
+  cancelled: {
+    jobs: number
+    running: number
+    interrupted: number
+    tasks: number
+    agent_tasks: number
+  }
 }
 
-/** 硬删除项目：彻底清理全部关联数据与媒体文件，不可恢复。存在进行中任务返回 409 */
-export async function purgeProject(id: string) {
-  return del<PurgeResult>(`/projects/${id}/purge`)
+/** 硬删除项目：彻底清理全部关联数据与媒体文件，不可恢复。
+ *  opts.force=true 时服务端先取消全部在途任务再删除（前端二次确认后使用）。 */
+export async function purgeProject(id: string, opts?: { force?: boolean }) {
+  return del<PurgeResult>(`/projects/${id}/purge`, opts?.force ? { force: true } : undefined)
 }
 
 /** 归档项目 */
@@ -158,7 +168,21 @@ export function runScriptAgent(projectId: string, scriptVersionId: string, text:
 export function getScriptAgentStatus(projectId: string) {
   return get<{
     job: { id: string; status: string; error_code: string | null; error_msg: string | null; result: Record<string, unknown> | null } | null
-    scope: { total_episodes: number | null; script_hash: string | null; parse_version_id: string | null; parse_version_status: string | null; pending_persist_episodes?: number[] }
+    scope: {
+      total_episodes: number | null
+      script_hash: string | null
+      parse_version_id: string | null
+      parse_version_status: string | null
+      pending_persist_episodes?: number[]
+      /** 实体表落库计数：判定「解析完成」是否真的可进入下一步 */
+      persisted?: {
+        scenes: number
+        characters: number
+        props: number
+        shots: number
+        episodes_with_shots: number[]
+      }
+    }
     records: Array<{ episode_no: number; status: string; asset_count: number | null; error_msg: string | null }>
   }>(`/projects/${projectId}/script-agent/status`)
 }

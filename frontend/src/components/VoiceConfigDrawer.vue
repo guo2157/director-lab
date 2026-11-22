@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, nextTick, ref, watch, onBeforeUnmount } from 'vue'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { NButton, NDrawer, NDrawerContent, NInput, NProgress, NSelect, NSpin, useMessage } from 'naive-ui'
 import {
@@ -135,6 +135,8 @@ const previewStatus = ref<'' | 'queued' | 'running' | 'succeeded' | 'failed' | '
 const previewProgress = ref(0)
 const previewError = ref('')
 const previewAudioUrl = ref('')
+/** 音频元素引用：合成完成后自动播放（点击即手势，浏览器允许） */
+const previewAudioEl = ref<HTMLAudioElement | null>(null)
 const previewing = computed(
   () => previewStatus.value === 'queued' || previewStatus.value === 'running',
 )
@@ -147,6 +149,41 @@ const PREVIEW_STATUS_TEXT: Record<string, string> = {
 }
 /** 当次结果是否来自缓存（不消耗 ComfyUI） */
 const previewFromCache = ref(false)
+/**
+ * 本次点击的是哪个按钮（listen=试听 / regen=重新生成）。
+ * 只有被点的那一个显示 loading，另一个只置灰——
+ * 两个按钮同时转圈会让用户以为组件卡死（2026-11-21 反馈）。
+ */
+const previewAction = ref<'' | 'listen' | 'regen'>('')
+/** 排队/合成已等待秒数：让"试听排队中"有可感知的进展，而不是停在 0% */
+const previewElapsed = ref(0)
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+function startElapsed() {
+  stopElapsed()
+  previewElapsed.value = 0
+  const startedAt = Date.now()
+  elapsedTimer = setInterval(() => {
+    previewElapsed.value = Math.floor((Date.now() - startedAt) / 1000)
+  }, 1000)
+}
+function stopElapsed() {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+  }
+}
+/** 排队超过 15 秒给出解释：单并发 worker 正在跑长生成任务，不是卡死 */
+const previewWaitHint = computed(() => {
+  if (!previewing.value) return ''
+  const secs = previewElapsed.value
+  if (previewStatus.value === 'queued' && secs >= 15) {
+    return `已排队 ${secs}s：工人正在执行更早的生成任务，试听会优先插队跑（约 30s 出结果）`
+  }
+  if (previewStatus.value === 'running') {
+    return `合成中 ${secs}s，通常 20–40s 完成`
+  }
+  return ''
+})
 let previewTimer: ReturnType<typeof setInterval> | null = null
 function stopPreviewPoll() {
   if (previewTimer) {
@@ -156,12 +193,15 @@ function stopPreviewPoll() {
 }
 function resetPreview() {
   stopPreviewPoll()
+  stopElapsed()
   previewJobId.value = null
   previewStatus.value = ''
   previewProgress.value = 0
   previewError.value = ''
   previewAudioUrl.value = ''
   previewFromCache.value = false
+  previewAction.value = ''
+  previewElapsed.value = 0
 }
 /** 轮询试听任务；成功后取出音频资产地址就地播放 */
 async function pollPreview(jobId: string) {
@@ -171,17 +211,25 @@ async function pollPreview(jobId: string) {
     const st = job.status as string
     if (st === 'succeeded') {
       stopPreviewPoll()
+      stopElapsed()
       previewStatus.value = 'succeeded'
       previewProgress.value = 100
       const assets =
         ((job.result as { assets?: Array<{ asset_id?: string; asset_type?: string }> } | null)
           ?.assets) ?? []
       const audio = assets.find((a) => a.asset_type === 'audio') ?? assets[0]
-      if (audio?.asset_id) previewAudioUrl.value = getAudioAssetUrl(audio.asset_id)
+      if (audio?.asset_id) {
+        previewAudioUrl.value = getAudioAssetUrl(audio.asset_id)
+        // 用户点击试听即触发本次播放（浏览器把该调用视为手势内的自动播放，允许发声）
+        void nextTick(() => {
+          previewAudioEl.value?.play().catch(() => {})
+        })
+      }
       return
     }
     if (st === 'failed' || st === 'lost' || st === 'canceled') {
       stopPreviewPoll()
+      stopElapsed()
       previewStatus.value = 'failed'
       previewError.value = job.error_msg || job.error_code || '任务未完成，请重试'
       return
@@ -190,6 +238,7 @@ async function pollPreview(jobId: string) {
     previewProgress.value = job.progress ?? 0
   } catch (e) {
     stopPreviewPoll()
+    stopElapsed()
     previewStatus.value = 'failed'
     previewError.value = (e as Error)?.message || '查询试听任务状态失败'
   }
@@ -206,6 +255,8 @@ function previewCurrent(force = false) {
     return
   }
   resetPreview()
+  previewAction.value = force ? 'regen' : 'listen'
+  startElapsed()
   previewVoice(v.id, { force })
     .then((r) => {
       if (r.cached) {
@@ -213,9 +264,12 @@ function previewCurrent(force = false) {
         previewFromCache.value = true
         previewStatus.value = 'cached'
         previewAudioUrl.value = r.asset_id ? getAudioAssetUrl(r.asset_id) : (r.audio_url ?? '')
+        stopElapsed()
+        previewAction.value = ''
         return
       }
       if (!r.job_id) {
+        stopElapsed()
         previewStatus.value = 'failed'
         previewError.value = '未返回任务 ID'
         return
@@ -224,10 +278,12 @@ function previewCurrent(force = false) {
       const jobId = r.job_id
       previewJobId.value = jobId
       previewStatus.value = 'queued'
+      if (r.reused) message.info('该音色已有在途试听任务，直接复用（不重复排队）')
       void pollPreview(jobId)
       previewTimer = setInterval(() => void pollPreview(jobId), 1500)
     })
     .catch((e: Error) => {
+      stopElapsed()
       previewStatus.value = 'failed'
       previewError.value = e.message
     })
@@ -306,17 +362,17 @@ onBeforeUnmount(stopPreviewPoll)
               size="small"
               type="primary"
               ghost
-              :loading="previewing"
+              :loading="previewing && previewAction === 'listen'"
               :disabled="previewing"
               @click="previewCurrent(false)"
-            >{{ previewing ? '合成中' : '试听' }}</NButton>
+            >{{ previewing && previewAction === 'listen' ? '合成中' : '试听' }}</NButton>
             <NButton
               size="tiny"
               quaternary
-              :loading="previewing"
+              :loading="previewing && previewAction === 'regen'"
               :disabled="previewing"
               @click="previewCurrent(true)"
-            >重新生成</NButton>
+            >{{ previewing && previewAction === 'regen' ? '重新生成中' : '重新生成' }}</NButton>
           </div>
         </div>
         <div v-else class="hero hero-empty">
@@ -334,7 +390,10 @@ onBeforeUnmount(stopPreviewPoll)
           :class="{ 'is-error': previewStatus === 'failed', 'is-cached': previewFromCache }"
         >
           <div class="preview-head">
-            <span class="preview-title">{{ PREVIEW_STATUS_TEXT[previewStatus] || previewStatus }}</span>
+            <span class="preview-title">
+              {{ PREVIEW_STATUS_TEXT[previewStatus] || previewStatus }}
+              <span v-if="previewing && previewElapsed" class="preview-elapsed">{{ previewElapsed }}s</span>
+            </span>
             <span v-if="previewJobId" class="preview-job">{{ previewJobId }}</span>
             <span v-else-if="previewFromCache" class="preview-job">不消耗合成资源</span>
           </div>
@@ -345,10 +404,17 @@ onBeforeUnmount(stopPreviewPoll)
             :height="6"
             processing
           />
+          <p v-if="previewWaitHint" class="preview-hint">{{ previewWaitHint }}</p>
           <p v-if="previewStatus === 'failed'" class="preview-err">
             {{ previewError || '任务未完成' }}
           </p>
-          <audio v-if="previewAudioUrl" class="preview-audio" :src="previewAudioUrl" controls />
+          <audio
+            v-if="previewAudioUrl"
+            ref="previewAudioEl"
+            class="preview-audio"
+            :src="previewAudioUrl"
+            controls
+          />
         </div>
         <div class="panel">
           <div class="panel-head">
@@ -500,6 +566,12 @@ onBeforeUnmount(stopPreviewPoll)
 .preview-title { font-size: 12px; font-weight: 700; }
 .preview-job { font-size: 11px; opacity: 0.55; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .preview-err { margin: 0; font-size: 11px; line-height: 1.5; color: var(--state-danger); }
+/* 排队/合成计时：让等待有可感知的进展 */
+.preview-elapsed {
+  margin-left: 6px; font-size: 11px; font-weight: 600;
+  font-variant-numeric: tabular-nums; opacity: 0.7;
+}
+.preview-hint { margin: 0; font-size: 11px; line-height: 1.5; opacity: 0.65; }
 .preview-audio { width: 100%; height: 32px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 12px; font-weight: 600; opacity: 0.82; }

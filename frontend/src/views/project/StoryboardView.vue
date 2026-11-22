@@ -9,7 +9,7 @@ import {
 import { listCharacters, listProps, listScenes, listSceneShots, reorderSceneShots } from '@/api/script'
 import { getProject } from '@/api/projects'
 import { generateProjectShots } from '@/api/storyboard'
-import { listJobs } from '@/api/jobs'
+import { listJobs, cancelProjectJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { getClipGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
@@ -20,6 +20,7 @@ import StageCard from '@/components/ui/StageCard.vue'
 import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
 import { useStageTransition } from '@/composables/useStageTransition'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -231,18 +232,46 @@ const estimatedWaitText = computed(() => {
 
 const clipsDoneCount = computed(() => clipProgress.data.value?.with_clip ?? allShots.value.filter((s) => !!s.current_assets?.clip).length)
 
-/** 单镜在途状态文案：生成中 42% / 排队第 3 位 / 等待前序镜头 */
-function clipInflightText(job?: ClipGenerationJob): string {
-  if (!job) return ''
-  if (job.status === 'running') return typeof job.progress === 'number' ? `视频生成中 ${job.progress}%` : '视频生成中'
-  if (job.status === 'chained_wait') return job.queue_rank > 0 ? `等待前序镜头（第 ${job.queue_rank} 位）` : '等待前序镜头'
-  if (job.status === 'queued') return job.queue_rank > 0 ? `排队第 ${job.queue_rank} 位` : '排队中'
-  return '提交确认中'
-}
 
 /** 批量出视频/重新生成后：立即建基线并轮询，全部完成后统一提示 */
 async function trackClipProgress() {
   await clipProgress.start({ notifyOnComplete: true })
+}
+
+/**
+ * 批量取消在途出视频任务（2026-11-21）：
+ * 链式批量会把后续镜头压成 chained_wait 排队，任务中心下线后没有任何入口叫停；
+ * 选错工作流只能等 8 镜全跑完（每镜可能 20 分钟）。这里按 stage 批量取消。
+ */
+const cancellingClip = ref(false)
+const confirmDialog = useConfirmDialog()
+const clipInflightCount = computed(() => clipProgress.data.value?.inflight_count ?? 0)
+function handleCancelClip() {
+  const n = clipInflightCount.value
+  if (!n) return
+  const q = queuedClipCount.value
+  const running = clipProgress.data.value?.inflight_running ?? 0
+  confirmDialog({
+    title: '取消进行中的出视频任务',
+    message: `将取消当前 ${n} 个在途分镜视频任务（渲染中 ${running} 个、排队/等待前序 ${q} 个）。正在渲染的会同时中断 ComfyUI，已生成完成的视频不受影响。`,
+    impact: [`在途视频任务 ${n} 个（渲染中 ${running}、排队 ${q}）`],
+    confirmText: '取消这些任务',
+    cancelText: '继续渲染',
+    onConfirm: async () => {
+      cancellingClip.value = true
+      try {
+        const res = await cancelProjectJobs(projectId.value, { target: 'clip' })
+        message.success(
+          `已取消 ${res.jobs} 个视频任务${res.interrupted ? `（中断渲染 ${res.interrupted} 个）` : ''}`,
+        )
+        await clipProgress.refresh()
+      } catch (e: any) {
+        message.error(`取消失败: ${e?.message ?? e}`)
+      } finally {
+        cancellingClip.value = false
+      }
+    },
+  })
 }
 
 // 页面进入/刷新：有在途视频任务才轮询（放在 allShots 等依赖定义之后，避免初始化顺序问题）
@@ -684,14 +713,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         <span v-if="!readiness.all" class="gate-text">
           公共资产未齐全：{{ readiness.done }}/{{ readiness.total }}，生成分镜图前请先在资产库完成生成
         </span>
-        <!-- 在途明细：正在渲染的那一镜 + 接下来排队的几镜 -->
-        <span v-for="job in clipProgress.data.value?.inflight?.slice(0, 6) ?? []" :key="job.job_id" class="gen-inflight-item">
-          <span class="gen-inflight-name">{{ job.scene_title || '未知场景' }} · 镜 {{ job.shot_seq ?? '—' }}</span>
-          <span class="gen-inflight-state" :class="job.status">{{ clipInflightText(job) }}</span>
-        </span>
-        <span v-if="(clipProgress.data.value?.inflight?.length ?? 0) > 6" class="gen-inflight-more">
-          等 {{ clipProgress.data.value?.inflight?.length }} 个任务
-        </span>
       </template>
 
       <template #actions>
@@ -749,6 +770,19 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       <span class="stage-sel">已选 <b>{{ selectedShotIds.length }}</b> / {{ allShots.length }}</span>
 
       <template #actions>
+        <!-- 取消在途：任务中心已下线，这里是唯一能叫停链式批量的入口。
+             只在真有在途任务时出现，避免常驻一个永远禁用的按钮。 -->
+        <n-button
+          v-if="clipInflightCount > 0"
+          size="small"
+          secondary
+          type="warning"
+          :loading="cancellingClip"
+          :title="`取消排队 / 渲染中的 ${clipInflightCount} 个分镜视频任务`"
+          @click="handleCancelClip"
+        >
+          取消在途（{{ clipInflightCount }}）
+        </n-button>
         <n-button
           size="small"
           type="primary"
@@ -968,21 +1002,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   max-width: 260px;
 }
 
-.gen-inflight-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  padding: 2px var(--sp-2);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-}
-.gen-inflight-name { color: var(--text-primary); }
-.gen-inflight-state { color: var(--text-secondary); }
-.gen-inflight-state.running { color: var(--brand-primary); }
-.gen-inflight-state.chained_wait { color: var(--accent-amber); }
-.gen-inflight-more { font-size: 11px; color: var(--text-tertiary); align-self: center; }
 .page-loading {
   display: flex;
   justify-content: center;

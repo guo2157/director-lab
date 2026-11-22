@@ -1204,11 +1204,48 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 _chain_mode = (job.input_snapshot or {}).get("chain_mode")
                 if _chain_mode == "independent":
                     media_files.pop("ref_prev_frame", None)
-                elif _chain_mode == "chained" and "ref_prev_frame" not in media_files:
-                    from app.services.shot_chain import resolve_prev_frame
-                    _pf = resolve_prev_frame(db, _shot)
-                    if _pf is not None:
-                        media_files["ref_prev_frame"] = _pf["file_path"]
+                elif _chain_mode == "chained":
+                    if "ref_prev_frame" not in media_files:
+                        from app.services.shot_chain import resolve_prev_frame
+                        _pf = resolve_prev_frame(db, _shot)
+                        if _pf is not None:
+                            media_files["ref_prev_frame"] = _pf["file_path"]
+                    # 尾帧一致性门禁：与 api/v1/generate.py 的 409 prev_frame_missing 同口径。
+                    # chained 模式声明承接上一镜尾帧却解析不到时，必须明确失败并留痕，
+                    # 不再静默跳过——静默跳过会让尾帧约束在成片里悄悄消失，
+                    # 相邻镜头人物位置与朝向对不上（Part B 核查结论）。
+                    if "ref_prev_frame" not in media_files:
+                        _need_prev = bool(getattr(_shot, "requires_prev_frame", False))
+                        _write_event(db, job, "job.prev_frame_missing", {
+                            "episode": _shot.episode,
+                            "seq": _shot.seq,
+                            "requires_prev_frame": _need_prev,
+                            "chain_mode": _chain_mode,
+                            "note": (
+                                "chained 模式未解析到上一镜尾帧"
+                                + ("，按镜头要求阻断本次出片" if _need_prev
+                                   else "，已降级为无尾帧约束（开场状态按剧情与分镜图推断）")
+                            ),
+                        })
+                        _snap_pf = dict(job.input_snapshot or {})
+                        _snap_pf["prev_frame_missing"] = {
+                            "episode": _shot.episode,
+                            "seq": _shot.seq,
+                            "requires_prev_frame": _need_prev,
+                        }
+                        job.input_snapshot = _snap_pf
+                        if _need_prev:
+                            job.status = "failed"
+                            job.error_code = "prev_frame_missing"
+                            job.error_msg = (
+                                f"第{_shot.episode}集第{_shot.seq}镜要求承接上一镜尾帧，"
+                                "但未能解析到上一镜末帧（上一镜未出片或尾帧已失效），"
+                                "请先生成上一镜视频后重试"
+                            )[:500]
+                            job.finished_at = _now()
+                        db.commit()
+                        if _need_prev:
+                            return
                 elif "ref_prev_frame" not in media_files and _shot.last_frame_asset_id:
                     _lf = db.get(Asset, _shot.last_frame_asset_id)
                     if _lf is not None:

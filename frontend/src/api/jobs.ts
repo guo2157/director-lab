@@ -32,3 +32,29 @@ export function retryJob(id: string) {
 export function cancelJob(id: string) {
   return post<Job>(`/jobs/${id}/cancel`)
 }
+
+/** 批量取消在途任务：target 按阶段（job_type）过滤，shotIds 可选限定镜头 */
+export interface BulkCancelResult {
+  project_id: string
+  target: 'keyframe' | 'clip' | 'audio' | 'all'
+  /** 实际取消的任务数 */
+  jobs: number
+  /** 其中处于 running 的任务数 */
+  running: number
+  /** 成功向 ComfyUI 发出中断的数量 */
+  interrupted: number
+  /** 连带收尾的编排任务数（无剩余在途 Job 的批次任务） */
+  tasks: number
+  job_ids: string[]
+}
+
+export function cancelProjectJobs(
+  projectId: string,
+  opts: { target?: 'keyframe' | 'clip' | 'audio' | 'all'; shotIds?: string[] } = {},
+) {
+  const qs = new URLSearchParams()
+  if (opts.target) qs.set('target', opts.target)
+  if (opts.shotIds?.length) qs.set('shot_ids', opts.shotIds.join(','))
+  const suffix = qs.toString() ? `?${qs.toString()}` : ''
+  return post<BulkCancelResult>(`/jobs/projects/${projectId}/cancel${suffix}`)
+}

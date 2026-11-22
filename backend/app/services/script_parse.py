@@ -605,11 +605,19 @@ def _assemble_image_prompt(sh: dict) -> str:
         return str(state)
 
     beats = sh.get("beats") or []
-    beat_desc = "；".join(
-        f"第{i + 1}拍 {b.get('action') or ''}"
-        f"（{b.get('start_pose') or ''} → {b.get('end_pose') or ''}，约{b.get('duration') or 2}秒）"
-        for i, b in enumerate(beats) if isinstance(b, dict)
-    ) or "（无节拍，按剧情自然表演）"
+    # 分镜图只画一个瞬间：动作多拍（第1拍/第2拍…）属于视频时序，写进生图提示词会被
+    # 图像模型理解成「几个不同姿态的同一角色」，产出分身/双人的废图（2026-11-21 实测：
+    # 「第1拍 从坐姿站起；第2拍 右手高举挥手」→ 图里坐着一个小孩 + 站着一个小孩）。
+    # 因此这里只取第一拍的**起始瞬间**，并显式禁止表现动作过程与结果。
+    first_beat = next((b for b in beats if isinstance(b, dict)), None)
+    if first_beat is not None:
+        beat_desc = (
+            f"动作起始瞬间：{first_beat.get('action') or ''}"
+            f"（起始姿态 {first_beat.get('start_pose') or '未指定'}）。"
+            "画面定格在这一动作刚开始的那一瞬，不表现动作过程、不表现动作结果"
+        )
+    else:
+        beat_desc = "（无节拍，按剧情自然表演；只取该镜头起始瞬间的单一姿态）"
     template = get_prompt("image_prompt")
     return template.format(
         episode=sh.get("episode") or 1,
@@ -627,18 +635,15 @@ def _assemble_image_prompt(sh: dict) -> str:
     )
 
 
-_register_default("image_prompt", """任务：生成第 {episode}-{seq} 镜的单帧分镜图
+_register_default("image_prompt", """任务：生成第 {episode}-{seq} 镜的单帧分镜图（只画一个瞬间）
 
 【本镜剧情】{shot_purpose}
-【人物动作】{beats}
+【本镜动作】{beats}
 【出场角色】{character_id}；涉及道具：{props}
 【画面情绪】{emotion}——用表情、眼神与姿态外化，不用抽象情绪词。
 【镜头语言】景别 {shot_type}；角度 {camera_angle}；运动 {camera_movement}。
-【开场状态】{start_state}
-【目标状态】{end_state}
 
-必须保持：人物面部特征、发型、服装与配饰与参考图一致；场景空间结构、建筑布局与光线方向与基准图一致；道具形状、颜色与材质一致。
-禁止：人物畸形、多余肢体、换脸、服装跳变、未绑定人物与道具、文字与字幕、水印与 Logo、拼贴与分屏。""")
+画面要求：一张完整单帧，所有内容自然连成一个整体。""")
 
 # --- 候选解析确认后的级联落库（API.md §5 parse-version confirm / PROMPTS.md §3 集级合并规则） ---
 def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, episode_count: int,

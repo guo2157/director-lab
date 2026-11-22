@@ -25,12 +25,15 @@ const props = withDefaults(
     allSelected?: boolean
     batchLoading?: boolean
     inflightCount?: number
+    /** 取消在途任务的请求中状态 */
+    cancelLoading?: boolean
     /** 当前选中的分镜出图工作流（storyboard_image 槽位） */
     workflowId?: string
   }>(),
   {
     allSelected: false,
     batchLoading: false,
+    cancelLoading: false,
     inflightCount: 0,
   },
 )
@@ -39,6 +42,7 @@ const emit = defineEmits<{
   'update:workflowId': [string | undefined]
   'toggle-all': [boolean]
   generate: []
+  'cancel-inflight': []
 }>()
 
 const someChecked = computed(() => props.selected > 0 && !props.allSelected)
@@ -76,6 +80,19 @@ watch(
     <span class="stage-sel">已选 <b>{{ selected }}</b> / {{ total }}</span>
 
     <template #actions>
+      <!-- 取消在途：任务中心已下线，这里必须是唯一可用的「停下来」入口。
+           只在真有在途任务时出现（没有任务时它只是一个永远禁用的按钮）。 -->
+      <n-button
+        v-if="inflightCount > 0"
+        size="small"
+        secondary
+        type="warning"
+        :loading="cancelLoading"
+        :title="`取消当前批次还在排队 / 运行中的 ${inflightCount} 个出图任务`"
+        @click="emit('cancel-inflight')"
+      >
+        取消在途（{{ inflightCount }}）
+      </n-button>
       <n-button
         size="small"
         type="primary"

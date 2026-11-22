@@ -91,10 +91,13 @@ def _keyframe_asset_id(client, shot_id):
 
 
 @pytest.fixture()
-def mock_render(monkeypatch):
+def mock_render(monkeypatch, tmp_path):
+    """mock 渲染必须落在临时 media_dir，禁止写真实 backend/data/media。"""
     import app.worker.executor as ex_mod
     from app.core.config import Settings
-    monkeypatch.setattr(ex_mod, "get_settings", lambda: Settings(render_mock=True))
+    monkeypatch.setattr(
+        ex_mod, "get_settings", lambda: Settings(render_mock=True, media_dir=tmp_path / "media")
+    )
 
 
 # --- 锁定功能已移除 ---

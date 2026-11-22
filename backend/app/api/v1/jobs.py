@@ -4,6 +4,7 @@
 - GET /api/jobs/{id}：任务详情，含 error_code/error_msg/retryable/result/seq
 - POST /api/jobs/{id}/retry：重试（新任务 ID，继承累计次数与 input_snapshot）
 - POST /api/jobs/{id}/cancel：取消（running 生成任务调用 ComfyUI 中断）
+- POST /api/jobs/projects/{id}/cancel：批量取消在途任务（target=keyframe/clip/audio/all）
 - POST /api/jobs/projects/{id}/retry-failed：批量重试（D-14）
 retryable 判定：failed/lost 且 attempts < job_max_attempts（§5.7）。
 SSE 事件流见 events.py（/api/events）。
@@ -219,6 +220,47 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobOut:
     db.add(new_job)
     db.commit()
     return _to_out(new_job, db)
+
+
+@router.post("/projects/{project_id}/cancel")
+def cancel_project_jobs(
+    project_id: str,
+    target: str = Query("all", description="keyframe / clip / audio / all：只取消该阶段的在途任务"),
+    shot_ids: str | None = Query(None, description="可选，逗号分隔的镜头 ID，只取消这些镜头的任务"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """批量取消项目下的在途任务（分镜图 / 分镜看板页的「取消在途」入口）。
+
+    为什么需要这个入口（2026-11-21）：
+    任务中心页面已下线，逐条取消任务的 UI 不复存在，而分镜图 / 分镜看板在批量生成后
+    完全没有取消入口——批量出图跑错工作流、批量出视频排了 8 镜，用户只能等它跑完。
+    本接口提供按 stage（job_type）维度的批量取消。
+
+    取消语义与单条取消完全一致（共用 job_cancel_ops.cancel_jobs）：
+    - running 生成任务调 ComfyUI /interrupt 释放显卡
+    - 清 prompt_id，避免 scheduler 复跑已取消任务
+    - 写 job.cancelled 事件并桥接编排层（task_stage → cancelled，Task 自动闭环）
+    - 对 running 任务登记跨进程取消信号
+    """
+    from app.services.job_cancel_ops import TARGET_JOB_TYPES, cancel_jobs, select_inflight
+
+    p = db.get(Project, project_id)
+    if p is None or p.deleted_at is not None:
+        raise errors.AppError("project_not_found", "作品不存在", 404)
+    if target not in TARGET_JOB_TYPES:
+        raise errors.AppError(
+            "invalid_target",
+            f"target 只支持 {'/'.join(TARGET_JOB_TYPES)}，收到 {target}",
+            400,
+        )
+    ids = [s.strip() for s in (shot_ids or "").split(",") if s.strip()]
+    jobs = select_inflight(db, project_id, target=target, shot_ids=ids or None)
+    stats = cancel_jobs(db, jobs, reason=f"bulk_cancel_{target}")
+    return {
+        "project_id": project_id,
+        "target": target,
+        **stats,
+    }
 
 
 @router.post("/projects/{project_id}/retry-failed", status_code=201)

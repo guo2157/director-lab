@@ -339,8 +339,19 @@ def generate_from_plans(project_id: str, payload: dict, db: Session = Depends(ge
                 })
                 continue
             params: dict = {}
-            if plan.prompt:
-                params["prompt"] = plan.prompt
+            # 分镜图提示词单一出口：resolve_keyframe_prompt 统一编译，
+            # 成功后回写 plan.prompt 保证页面显示与实际下发一致
+            from app.services.prompt_compiler import resolve_keyframe_prompt
+            kf_prompt, _kf_meta = resolve_keyframe_prompt(
+                db, shot, wf,
+                plan_prompt=plan.prompt or "",
+                user_edited=False,
+            )
+            params["prompt"] = kf_prompt
+            # 回写 plan.prompt（仅在非手改时）
+            if _kf_meta.get("source") != "user_edited" and kf_prompt:
+                plan.prompt = kf_prompt
+                db.add(plan)
             # 负向提示词：仅在当前工作流真实绑定 $negative 时注入，否则不假装生效
             # （场景纯净度依赖此处的否定约束，缺了它五类污染否定词到不了模型）
             if _workflow_binds_param(wf, "negative"):
