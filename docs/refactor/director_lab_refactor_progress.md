@@ -31,6 +31,46 @@
 - 真实 ComfyUI/GPU：未验证。
 - 详细代码位置、工作流槽位和既有失败见 `director_lab_refactor_audit.md`。
 
+## 基线失败清偿（2026-11-22）
+
+审计基线记录的 7 项后端失败已全部定位并修复，全量后端测试归零：
+
+- 全量复核：`1308 passed, 92 warnings`（656.44s），无 failed、无 error。
+- 较基线 `1281 passed / 7 failed` 净增通过数，含本轮新增切片测试。
+- 前端本轮未改动，沿用既有构建通过结论。
+
+### 失败归因与修复
+
+| # | 失败项 | 根因 | 修复方式 |
+|---|---|---|---|
+| 1-2 | `test_project_purge_fk_coverage.py` 两例 | 测试种子插入 `Shot` 时未给非空无默认值的 `shot_kind`、`duration`；补齐后又暴露 `StoryboardRegenConfig.created_at` 同为必填 | 只补测试种子数据，与生产两处创建点显式传 `created_at` 的既有约定对齐；不改模型、不加默认值 |
+| 3 | `test_prompt_compiler.py` 模板残留占位符 | 分镜图模板 v2 新增 `action_moment`、`aspect_desc`、`ref_duty_block` 三个占位符，测试 mapping 未覆盖，`render_template` 抛 `prompt_template_missing_field` | 补齐三个字段映射，不放宽 `render_template` 的缺字段校验 |
+| 4 | `test_prompt_docs_sync.py` 文档同步 | `docs/prompts/compile_storyboard_image.md` 仍是旧版文案，与运行时常量不一致 | 以 `workspace/prompts/` 外置 v2 文件为真值同步文档（`prompt_store.get_prompt` 外置优先、常量为回退），不改模板实现 |
+| 5-6 | `test_prompt_empty_fill.py` 两例 | 用例依赖真实 `data/media` 资产文件与资产质检状态，环境缺失即触发 `reference_asset_file_missing` / `reference_asset_quality_failed` 并 409 硬阻断 | 新增 autouse fixture 隔离 `_media_file_exists`；`ctx` fixture 内会话级把质检 failed 资产置 pending 并 rollback；断言由旧模板分段改为 v2 分段 |
+
+### 变更文件
+
+```
+backend/tests/test_project_purge_fk_coverage.py   +2 -2
+backend/tests/test_prompt_compiler.py             +4 -0
+backend/tests/test_prompt_empty_fill.py           +19 -2
+docs/prompts/compile_storyboard_image.md          +13 -12
+```
+
+4 个文件、37 insertions / 17 deletions，全部为测试与文档改动，未触碰生产代码、模型、迁移、API 与工作流 JSON。
+
+### 回滚
+
+```bash
+git checkout -- backend/tests/test_project_purge_fk_coverage.py backend/tests/test_prompt_compiler.py backend/tests/test_prompt_empty_fill.py docs/prompts/compile_storyboard_image.md
+```
+
+### 未验证项
+
+- 真实 ComfyUI/GPU 生成、H3/Ref2VA、TTS、合成导出仍未实机验证。
+- 修复只做测试侧隔离，未验证真实 `data/media` 目录下参考图文件与资产质检状态是否合法；该验证需在有真实资产的环境执行。
+- Ruff 全仓历史问题按原口径不清零，不作为本次通过项。
+
 ## 当前实施清单
 
 ### Slice 1：原文溯源（Phase 1）

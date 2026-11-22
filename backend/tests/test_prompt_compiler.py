@@ -118,6 +118,10 @@ def test_templates_render_without_residual_placeholders():
         "character_count": 1, "character_count_rule": "画面中的人物总数必须严格等于 1 人（小马），不多不少；每个人只出现一次，不出现分身、镜像、重影、背影复制",
         "composition": "三分法", "camera_movement": "固定机位",
         "character_slots": "ref_identity", "scene_slot": "ref_scene", "prop_slots": "无", "scene_target": "以 <image1> 为场景编辑底图", "ref_bindings": "<image1> 为场景；<image2> 为角色「小马」",
+        # 分镜图模板 v2 新增：参考图职责块、起始动作瞬间、画幅中文描述
+        "ref_duty_block": "- <image1> 为场景基准图；<image2> 为角色「小马」身份参考",
+        "action_moment": "站在木栅栏东侧低头吃草",
+        "aspect_desc": "9:16 竖幅",
         "duration": "5", "start_state": "站立", "main_action": "转头", "end_state": "注视",
         "pacing": "平稳", "environment_changes": "无", "continuity_in_type": "none",
         "source_shot_id": "无", "source_frame_file_id": "无", "continuity_out_state": "延续",

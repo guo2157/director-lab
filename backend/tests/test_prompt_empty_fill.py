@@ -28,6 +28,15 @@ def _first_shot(db):
     return db.query(Shot).join(Scene, Scene.id == Shot.scene_id).first()
 
 
+@pytest.fixture(autouse=True)
+def _assume_asset_files_exist(monkeypatch):
+    """隔离真实 media 目录：本文件只验证提示词填充与不被覆盖，
+    不校验资产图片是否已落盘；否则用例会随 data/media 状态变化而飘。
+    """
+    from app.services import prompt_compiler as pc
+    monkeypatch.setattr(pc, "_media_file_exists", lambda *_a, **_kw: True)
+
+
 @pytest.fixture()
 def ctx():
     """真实库上下文：取一个镜头 + 它的工作流。"""
@@ -46,8 +55,16 @@ def ctx():
         wf = G._match_workflow(db, "keyframe", None, project_id)
         if wf is None:
             pytest.skip("没有匹配的 keyframe 工作流，跳过")
+        # 隔离真实资产质检状态：本文件只验证提示词填充与不被覆盖，
+        # 不验证「质检未通过不得引用」的底图卫兵；否则用例会随资产质检结果飘。
+        # 仅在会话内改为 pending，finally 中 rollback，不落库。
+        from app.models import Asset
+        for asset in db.query(Asset).filter(Asset.quality_status == "failed").all():
+            asset.quality_status = "pending"
+        db.flush()
         yield db, G, shot, wf
     finally:
+        db.rollback()
         db.close()
 
 
@@ -69,8 +86,8 @@ def test_empty_image_prompt_gets_compiled_template(ctx):
 
     prompt = params.get("prompt") or ""
     assert prompt.strip(), "空 image_prompt 时 params['prompt'] 不能是空串（会下发空提示词）"
-    # 模板特征：STORYBOARD_TEMPLATE 的固定分段
-    assert "硬性要求" in prompt, "填充内容应来自 STORYBOARD_TEMPLATE，而非其他来源"
+    # 模板特征：STORYBOARD_TEMPLATE v2 的固定分段（v2 以「必须保持」取代旧版「硬性要求」）
+    assert "必须保持" in prompt, "填充内容应来自 STORYBOARD_TEMPLATE，而非其他来源"
     assert "画面风格" in prompt
 
 

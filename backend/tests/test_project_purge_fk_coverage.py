@@ -46,13 +46,13 @@ def _seed(db):
     sc = Scene(id="scn_1", project_id=p.id, title="山坡", seq=1, episode=1)
     db.add(sc)
     db.flush()
-    sh = Shot(id="sht_1", scene_id=sc.id, seq=1, episode=1)
+    sh = Shot(id="sht_1", scene_id=sc.id, seq=1, episode=1, shot_kind="visual", duration=5)
     a = Asset(id="ast_1", project_id=p.id, asset_type="keyframe", name="分镜图1", version=1)
     db.add_all([sh, a])
     db.flush()
     # 两个 FK 子表：一个漏了都会让 purge 在删 shot / asset 时炸掉
     db.add_all([
-        StoryboardRegenConfig(id="rgc_1", project_id=p.id, shot_id=sh.id, target="clip"),
+        StoryboardRegenConfig(id="rgc_1", project_id=p.id, shot_id=sh.id, target="clip", created_at=_now()),
         SeriesAsset(id="sas_1", series_id=s.id, asset_id=a.id, created_at=_now()),
     ])
     db.commit()
