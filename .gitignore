@@ -71,3 +71,6 @@ sales/xianyu/
 # 代理工具运行期临时目录（任务附件、scratch 输出，不入库）
 .box-agent/
 .box-agent-scratch/
+
+# 视频教程录屏与剪辑素材（体积大，仅本地保留，不入库）
+tutorial/
