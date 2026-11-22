@@ -119,37 +119,15 @@ def _path_for(key: str, roots: set[str], via: dict[str, dict]) -> list[str]:
     return list(reversed(path))
 
 
-def preview_dependency_impact(db: Session, project_id: str, *, node_type: str,
-                              node_id: str) -> dict:
-    """计算上游节点变化的下游影响；不写库、不触发重生成。"""
-    graph = build_dependency_graph(db, project_id)
-    nodes = {node["key"]: node for node in graph["nodes"]}
-    root_key = f"{node_type}:{node_id}"
-    root_node = nodes.get(root_key)
-    if root_node is None:
-        root_node = _load_root_node(db, project_id, node_type, node_id)
-        if root_node is None:
-            raise DependencyNodeNotFound(root_key)
+def _collect_affected(graph: dict, nodes: dict[str, dict], start_keys: list[str],
+                      roots: set[str], asset_by_id: dict,
+                      lineage_current: dict) -> tuple[list[dict], dict[str, str]]:
+    """从起点集合向下游 BFS，逐个下游节点判定变更状态。
 
-    asset_by_id, lineage_current = _asset_context(db, project_id)
-    root_asset = asset_by_id.get(node_id) if node_type == "asset" else None
-    start_keys = [root_key]
-    lineage_versions: list[int] = []
-    if root_asset is not None:
-        lineage = (root_asset.asset_type, root_asset.name)
-        lineage_versions = sorted({
-            asset.version for asset in asset_by_id.values()
-            if (asset.asset_type, asset.name) == lineage
-        })
-        start_keys = [
-            f"asset:{asset.id}" for asset in asset_by_id.values()
-            if (asset.asset_type, asset.name) == lineage and f"asset:{asset.id}" in nodes
-        ]
-        if root_key not in start_keys:
-            start_keys.append(root_key)
-
+    ``roots`` 是「变化源」，本身不进入影响清单；返回（影响清单，状态索引），
+    状态索引供下游节点判断「上游是否已需重做」。
+    """
     traversal = _bfs_affected(graph, start_keys)
-    roots = set(start_keys)
     incoming: dict[str, list[dict]] = defaultdict(list)
     for edge in graph["edges"]:
         incoming[edge["target"]].append(edge)
@@ -217,7 +195,11 @@ def preview_dependency_impact(db: Session, project_id: str, *, node_type: str,
         })
 
     affected.sort(key=lambda item: (item["depth"], item["key"]))
-    summary = {
+    return affected, status_by_key
+
+
+def _summarize(affected: list[dict]) -> dict:
+    return {
         "affected_count": len(affected),
         "redo_required": sum(item["change_status"] == "redo_required" for item in affected),
         "rebind_required": sum(item["change_status"] == "rebind_required" for item in affected),
@@ -225,11 +207,50 @@ def preview_dependency_impact(db: Session, project_id: str, *, node_type: str,
         "up_to_date": sum(item["change_status"] == "up_to_date" for item in affected),
         "unknown_version": sum(item["change_status"] == "unknown_version" for item in affected),
     }
+
+
+_READ_ONLY_POLICY = {
+    "auto_regenerate": False,
+    "mark_stale": False,
+    "delete_existing": False,
+    "writes": False,
+    "note": "仅预演影响范围；重做、标记失效与重生成必须由用户确认后单独触发",
+}
+
+
+def preview_dependency_impact(db: Session, project_id: str, *, node_type: str,
+                              node_id: str) -> dict:
+    """计算上游节点变化的下游影响；不写库、不触发重生成。"""
+    graph = build_dependency_graph(db, project_id)
+    nodes = {node["key"]: node for node in graph["nodes"]}
+    root_key = f"{node_type}:{node_id}"
+    root_node = nodes.get(root_key)
+    if root_node is None:
+        root_node = _load_root_node(db, project_id, node_type, node_id)
+        if root_node is None:
+            raise DependencyNodeNotFound(root_key)
+
+    asset_by_id, lineage_current = _asset_context(db, project_id)
+    root_asset = asset_by_id.get(node_id) if node_type == "asset" else None
+    start_keys = [root_key]
+    lineage_versions: list[int] = []
+    if root_asset is not None:
+        lineage = (root_asset.asset_type, root_asset.name)
+        lineage_versions = sorted({
+            asset.version for asset in asset_by_id.values()
+            if (asset.asset_type, asset.name) == lineage
+        })
+        start_keys = [
+            f"asset:{asset.id}" for asset in asset_by_id.values()
+            if (asset.asset_type, asset.name) == lineage and f"asset:{asset.id}" in nodes
+        ]
+        if root_key not in start_keys:
+            start_keys.append(root_key)
+
+    affected, _ = _collect_affected(
+        graph, nodes, start_keys, set(start_keys), asset_by_id, lineage_current,
+    )
     affected_keys = {item["key"] for item in affected}
-    diagnostics = [
-        issue for issue in graph["diagnostics"]
-        if issue.get("node") in affected_keys
-    ]
     return {
         "algorithm": IMPACT_ALGORITHM,
         "root": {
@@ -239,14 +260,55 @@ def preview_dependency_impact(db: Session, project_id: str, *, node_type: str,
             "version": root_node["version"],
             "lineage_versions": lineage_versions,
         },
-        "policy": {
-            "auto_regenerate": False,
-            "mark_stale": False,
-            "delete_existing": False,
-            "writes": False,
-            "note": "仅预演影响范围；重做、标记失效与重生成必须由用户确认后单独触发",
-        },
+        "policy": dict(_READ_ONLY_POLICY),
         "affected": affected,
-        "diagnostics": diagnostics,
-        "summary": summary,
+        "diagnostics": [
+            issue for issue in graph["diagnostics"] if issue.get("node") in affected_keys
+        ],
+        "summary": _summarize(affected),
+    }
+
+
+def preview_project_impact(db: Session, project_id: str) -> dict:
+    """项目级总览：以「所有已过期依赖的上游」为变化源，一次性算出全项目待处理对象。
+
+    与单节点预演共用同一套分类逻辑，同样只读。用于看板/资产库直接回答
+    「当前有哪些东西因为上游变化需要重做或重绑」，不必逐个节点点开查询。
+    """
+    graph = build_dependency_graph(db, project_id)
+    nodes = {node["key"]: node for node in graph["nodes"]}
+    asset_by_id, lineage_current = _asset_context(db, project_id)
+
+    stale_roots: set[str] = set()
+    for edge in graph["edges"]:
+        source_node = nodes.get(edge["source"])
+        if source_node is None:
+            continue
+        current_version = _current_version(source_node, asset_by_id, lineage_current)
+        if edge["validity"] != "current":
+            stale_roots.add(edge["source"])
+        elif edge["source_version"] is not None and current_version is not None \
+                and edge["source_version"] != current_version:
+            stale_roots.add(edge["source"])
+
+    affected, _ = _collect_affected(
+        graph, nodes, sorted(stale_roots), stale_roots, asset_by_id, lineage_current,
+    )
+    affected_keys = {item["key"] for item in affected}
+    return {
+        "algorithm": IMPACT_ALGORITHM,
+        "policy": dict(_READ_ONLY_POLICY),
+        "changed_roots": [
+            {
+                "key": key, "type": nodes[key]["type"], "id": nodes[key]["id"],
+                "version": nodes[key]["version"],
+            }
+            for key in sorted(stale_roots) if key in nodes
+        ],
+        "affected": affected,
+        "diagnostics": [
+            issue for issue in graph["diagnostics"]
+            if issue.get("node") in affected_keys or issue.get("node") in stale_roots
+        ],
+        "summary": _summarize(affected),
     }

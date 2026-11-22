@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation } from '@tanstack/vue-query'
 import { NButton, NIcon, NProgress, useMessage } from 'naive-ui'
 import { ArrowForwardOutline } from '@vicons/ionicons5'
-import { listScenes, listSceneShots } from '@/api/script'
+import { getShot, listScenes, listSceneShots } from '@/api/script'
 import { generateShot, generateProjectShots } from '@/api/storyboard'
 import { cancelProjectJobs } from '@/api/jobs'
 import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { replaceAsset } from '@/api/assets'
 import { getProject } from '@/api/projects'
 import { getKeyframeGenerationProgress } from '@/api/generation'
+import { buildShotImpactMap, getProjectImpactPreview } from '@/api/dependencies'
+import type { DependencyChangeStatus } from '@/api/dependencies'
+import { relativeTime } from '@/utils/time'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Shot } from '@/types/script'
 import type { KeyframeGenerationJob, KeyframeGenerationProgress } from '@/types/generation'
@@ -349,6 +352,53 @@ function refreshAll() {
   return Promise.all(jobs)
 }
 
+// --- 批量生成前的依赖影响预检（Phase 3 / 10，只读） ---
+// 用户点「依赖预检」或提交批量生成时，拉一次项目级预演，把勾选镜头中
+// 受上游资产/依赖变化影响的列出来，由用户决定是否继续；不自动重做、不写库。
+// 预检失败不阻断提交（接口只读、可能因服务异常失败），只提示本次未做预检。
+const impactByShotId = ref<Map<string, DependencyChangeStatus>>(new Map())
+const impactChecked = ref(false)
+const impactCheckedAt = ref('')
+const impactChecking = ref(false)
+const impactError = ref('')
+
+const selectedImpactShots = computed(() =>
+  impactChecked.value ? selectedList.value.filter((s) => impactByShotId.value.has(s.id)) : [],
+)
+const impactNote = computed(() => {
+  if (!impactChecked.value || !selectedList.value.length) return ''
+  const n = selectedImpactShots.value.length
+  return n
+    ? `所选 ${n} / ${selectedList.value.length} 个镜头受上游变化影响，生成前请确认`
+    : '所选镜头无上游依赖变化'
+})
+
+async function ensureImpactChecked(): Promise<boolean> {
+  if (impactChecked.value) return true
+  impactChecking.value = true
+  impactError.value = ''
+  try {
+    const data = await getProjectImpactPreview(projectId.value)
+    impactByShotId.value = buildShotImpactMap(data)
+    impactCheckedAt.value = new Date().toISOString()
+    impactChecked.value = true
+    return true
+  } catch (e: any) {
+    impactError.value = e?.message ?? '依赖预检失败'
+    return false
+  } finally {
+    impactChecking.value = false
+  }
+}
+
+/** 手动重新预检：勾选变化后可用它刷新结果（不自动请求） */
+async function runImpactCheck() {
+  impactChecked.value = false
+  if (!(await ensureImpactChecked())) {
+    message.warning(`依赖预检失败：${impactError.value}`)
+  }
+}
+
 const batchMutation = useMutation({
   mutationFn: (ids: string[]) =>
     generateProjectShots(projectId.value, {
@@ -363,7 +413,7 @@ const batchMutation = useMutation({
   onError: (e: any) => message.error(`批量生成失败: ${e?.message ?? e}`),
 })
 
-function handleBatchGenerate() {
+async function handleBatchGenerate() {
   const picked = selectedList.value
   if (!picked.length) {
     message.warning('请先勾选需要生成分镜图的镜头')
@@ -371,7 +421,30 @@ function handleBatchGenerate() {
   }
   // 不再有前端审核前置与锁定检查：生成条件由后端 assets_gate 权威校验
   // （必需资产是否真实生成完成），前端重复判断只会造成两套口径。
-  void submitByPlans(picked)
+  const checked = await ensureImpactChecked()
+  if (!checked) {
+    message.warning(`依赖预检失败（${impactError.value}），本次批量生成未做依赖影响检查`)
+    void submitByPlans(picked)
+    return
+  }
+  const affected = picked.filter((s) => impactByShotId.value.has(s.id))
+  if (!affected.length) {
+    void submitByPlans(picked)
+    return
+  }
+  // 受上游变化影响的镜头逐条列出（最多 6 条，其余合并计数），
+  // 让用户带着影响范围决定是否继续，而不是静默按旧依赖重画。
+  const impact = affected.slice(0, 6).map((s) => `镜头 #${shotGlobalSeq(s)}`)
+  if (affected.length > impact.length) impact.push(`另有 ${affected.length - impact.length} 个镜头`)
+  confirmDialog({
+    title: '所选镜头存在依赖变化',
+    message: '上游资产或依赖已变化：继续批量生成会用当前资产重新出图。',
+    impact,
+    confirmText: '仍然批量生成',
+    cancelText: '取消',
+    danger: false,
+    onConfirm: () => submitByPlans(picked),
+  })
 }
 
 /** 按已定稿定义批量提交：名称与提示词以库中定义为准；定义缺失时回退镜头级批量 */
@@ -526,6 +599,63 @@ function openDetail(shot: Shot) {
   dialogRef.value?.open(shot)
 }
 
+/**
+ * 从分镜看板「以历史版本为基准重做」跳转而来：`?shot=<id>&base=<asset_id>&basev=<n>`。
+ *
+ * 先按 shot_id 拉取镜头元信息确定所属集数（可能不是当前集），切集后等该集镜头
+ * 加载完成再打开详情，并把 base 版本透传给工作台。打开后清掉 query，
+ * 避免刷新或返回时重复弹出。
+ */
+const pendingOpen = ref<{
+  shotId: string
+  base: { id: string; version: number | null } | null
+} | null>(null)
+
+watch(
+  [() => route.query.shot, () => route.query.base, () => route.query.basev],
+  async ([shotId, baseId, basev]) => {
+    if (typeof shotId !== 'string' || !shotId) return
+    try {
+      const shot = await getShot(shotId)
+      if (shot.episode !== activeEpisode.value) activeEpisode.value = shot.episode
+      pendingOpen.value = {
+        shotId,
+        base:
+          typeof baseId === 'string' && baseId
+            ? { id: baseId, version: basev ? Number(basev) || null : null }
+            : null,
+      }
+    } catch (e: any) {
+      message.error(`打开镜头失败：${e?.message ?? e}`)
+      clearShotQuery()
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  [allShots, pendingOpen],
+  async ([shots, pending]) => {
+    if (!pending) return
+    const shot = shots.find((s) => s.id === pending.shotId)
+    if (!shot) return
+    pendingOpen.value = null
+    await nextTick()
+    dialogRef.value?.open(shot, pending.base ?? undefined)
+    clearShotQuery()
+  },
+  { immediate: true },
+)
+
+/** 清掉跳转参数，保留其余 query */
+function clearShotQuery() {
+  const q = { ...route.query }
+  delete q.shot
+  delete q.base
+  delete q.basev
+  void router.replace({ query: q })
+}
+
 /** 详情里首次生成：同步工作台提示词后走镜头级生成链路 */
 function onFirstGenerate(shot: Shot, prompt: string) {
   promptDraft.value[shot.id] = prompt
@@ -618,6 +748,24 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       @cancel-inflight="handleCancelInflight"
     />
 
+    <!-- 依赖预检：手动触发，只读展示所选镜头是否受上游变化影响 -->
+    <div class="impact-precheck">
+      <n-button size="tiny" quaternary :loading="impactChecking" @click="runImpactCheck">
+        依赖预检
+      </n-button>
+      <span
+        v-if="impactNote"
+        class="impact-precheck-text"
+        :class="{ 'is-warn': selectedImpactShots.length > 0 }"
+      >
+        {{ impactNote }}
+        <template v-if="impactCheckedAt">（{{ relativeTime(impactCheckedAt) }}检查）</template>
+      </span>
+      <span v-else-if="impactError" class="impact-precheck-text is-error">
+        依赖预检失败：{{ impactError }}
+      </span>
+    </div>
+
     <ErrorRetry
       v-if="scenesQuery.isError.value"
       title="场景加载失败"
@@ -694,6 +842,26 @@ function onFirstGenerate(shot: Shot, prompt: string) {
 <style scoped>
 .sb-images-page {
   min-height: calc(100vh - var(--app-header-height, 52px));
+}
+
+/* 批量出图卡下方的依赖预检行：默认无结果时只有按钮，避免常驻噪音 */
+.impact-precheck {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 0 var(--sp-1);
+  margin-top: calc(var(--sp-2) * -1);
+}
+.impact-precheck-text {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.impact-precheck-text.is-warn {
+  color: var(--state-warning);
+}
+.impact-precheck-text.is-error {
+  color: var(--danger-text);
 }
 
 /* ===== 执行进度卡内容（容器样式由 StageCard 提供） ===== */

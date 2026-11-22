@@ -48,6 +48,14 @@ export function useKeyframeRegen(opts: {
 
   const detailVisible = ref(false)
   const detailShot = ref<Shot | null>(null)
+  /**
+   * 「以历史版本为基准重做」的目标版本。
+   *
+   * 只传 base_asset_id 给重生成接口，让后端按该版本载入提示词/工作流；
+   * 参考图仍由后端按当前镜头定义重新解析（build_base_config 会用当前
+   * AssetPlanDependency 覆盖快照 refs），不会复用快照里的参考图版本。
+   */
+  const regenBaseAsset = ref<{ id: string; version: number | null } | null>(null)
   const kfRefs = ref<RegenerateRef[]>([])
   const kfInjectedRefs = ref<KfInjectedRef[]>([])
   const kfRefsLoading = ref(false)
@@ -80,10 +88,11 @@ export function useKeyframeRegen(opts: {
     props: propItems,
   })
 
-  /** 打开详情：重置重新生成工作台状态 */
-  function openDetail(shot: Shot) {
+  /** 打开详情：重置重新生成工作台状态；传入 base 表示「以历史版本为基准重做」 */
+  function openDetail(shot: Shot, base?: { id: string; version: number | null }) {
     detailShot.value = shot
     detailVisible.value = true
+    regenBaseAsset.value = base ?? null
     regenPrompt.value = shot.image_prompt ?? ''
     regenMode.value = 'inherit_prompt_only'
     regenRefs.value = []
@@ -96,10 +105,11 @@ export function useKeyframeRegen(opts: {
     kfInjectedRefs.value = []
     kfActualSlots.value = []
     kfNegativeSupported.value = false
-    if (!shot.current_assets?.keyframe) return
+    // 有 base 版本时，即使当前镜头没有分镜图也要载入该版本的配置
+    if (!shot.current_assets?.keyframe && !regenBaseAsset.value) return
     kfRefsLoading.value = true
     try {
-      const cfg = await fetchRegenerateConfig(shot.id, 'keyframe')
+      const cfg = await fetchRegenerateConfig(shot.id, 'keyframe', regenBaseAsset.value?.id)
       kfActualSlots.value = cfg.available_slots ?? []
       kfRefs.value = (cfg.refs ?? []).filter((r) => r.enabled !== false)
       kfNegativeSupported.value = Boolean(cfg.negative_prompt?.supported)
@@ -316,6 +326,7 @@ export function useKeyframeRegen(opts: {
         mode: regenMode.value,
         prompt: regenPrompt.value,
       }
+      if (regenBaseAsset.value) payload.base_asset_id = regenBaseAsset.value.id
       if (regenMode.value === 'full_reconfigure') {
         // 只有「切换工作流 / 改参数」才允许覆盖工作流与参数；
         // 其余模式沿用原快照，避免静默改变历史配置
@@ -352,6 +363,7 @@ export function useKeyframeRegen(opts: {
         prompt: regenPrompt.value,
         idempotency_key: `${shot.id}-keyframe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       }
+      if (regenBaseAsset.value) payload.base_asset_id = regenBaseAsset.value.id
       if (regenMode.value !== 'inherit_prompt_only') {
         payload.refs = regenRefs.value.map((r) => ({
           slot_param: r.slot_param,
@@ -377,9 +389,9 @@ export function useKeyframeRegen(opts: {
     }
   }
 
-  /** 详情页生成入口：已有分镜图走工作台重新生成；首次生成同步工作台提示词后走原链路 */
+  /** 详情页生成入口：已有分镜图（或指定了 base 版本）走工作台重新生成；否则走首次生成链路 */
   function detailGenerate(shot: Shot) {
-    if (shot.current_assets?.keyframe) {
+    if (shot.current_assets?.keyframe || regenBaseAsset.value) {
       void submitRegen()
       return
     }
@@ -391,6 +403,8 @@ export function useKeyframeRegen(opts: {
     detailVisible,
     detailShot,
     openDetail,
+    /** 以历史版本为基准重做时的目标版本（null=普通详情） */
+    regenBaseAsset,
     // 槽位
     kfSlots,
     kfSlotMeta,

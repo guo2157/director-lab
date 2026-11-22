@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { NTab, NTabs, useMessage } from 'naive-ui'
+import { NButton, NTab, NTabs, useMessage } from 'naive-ui'
 import {
   listAssets,
   replaceAsset, getAssetRegenerateConfig,
@@ -812,6 +812,14 @@ onMounted(() => {
       @refresh="assetProgress.refresh()"
     />
 
+    <!-- 资产变更影响：只读列表页，展示上游版本变化波及的镜头与产物，不自动重做 -->
+    <div class="impact-entry">
+      <n-button size="tiny" quaternary @click="router.push(`/project/${projectId}/assets/impact`)">
+        查看资产变更影响
+      </n-button>
+      <span class="impact-entry-hint">只读检查，不会自动重做或删除已有结果</span>
+    </div>
+
     <!-- 批量操作：固定在标签页上方，滚动时不跑掉 -->
     <AssetBatchToolbar
       v-if="activeCategory !== 'voice'"
@@ -949,6 +957,15 @@ onMounted(() => {
 }
 .assets-tabs {
   margin-bottom: var(--sp-4);
+}
+.impact-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.impact-entry-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 .tab-count {
   margin-left: var(--sp-2);

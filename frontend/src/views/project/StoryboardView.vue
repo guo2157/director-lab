@@ -14,9 +14,12 @@ import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { getClipGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Scene, Shot, ShotKind } from '@/types/script'
+import { buildShotImpactMap, IMPACT_SHOT_LABEL } from '@/api/dependencies'
+import type { DependencyChangeStatus, DependencyProjectImpactPreview } from '@/api/dependencies'
 import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import ShotDetailModal from '@/components/storyboard/ShotDetailModal.vue'
 import StageCard from '@/components/ui/StageCard.vue'
+import DependencyImpactOverview from '@/components/ui/DependencyImpactOverview.vue'
 import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
 import { useStageTransition } from '@/composables/useStageTransition'
@@ -511,11 +514,63 @@ async function handlePromptsSaved(shot: Shot) {
   await loadSceneShots(shot.scene_id, shot.episode)
 }
 
+// --- 依赖影响 → 镜头卡片常驻标记（Phase 3 / 7，只读） ---
+// 卡三「检查依赖影响」手动触发后，把待处理清单派生为 shotId → 状态映射，
+// 受影响镜头在缩略图左上角常驻警示角标，直到下次检查结果更新或刷新页面。
+// 保持与后端只读策略一致：只提示、不推断依赖、不提供自动重做入口。
+const shotImpactByShotId = ref<Map<string, DependencyChangeStatus>>(new Map())
+function handleImpactLoaded(data: DependencyProjectImpactPreview) {
+  shotImpactByShotId.value = buildShotImpactMap(data)
+}
+function shotImpactLabel(shotId: string): string {
+  const status = shotImpactByShotId.value.get(shotId)
+  return (status && IMPACT_SHOT_LABEL[status]) || ''
+}
+
+// --- 按依赖状态筛选镜头（Phase 3 / 7，纯前端只读） ---
+// 数据只来自卡三最近一次「检查依赖影响」，没有检查结果时不显示筛选条，
+// 也不在本地推断依赖；筛选只影响看板显示，不改选中集合与任何后端状态。
+const impactFilter = ref<'all' | 'affected'>('all')
+const impactFilterActive = computed(() => shotImpactByShotId.value.size > 0)
+const affectedShotCount = computed(
+  () => allShots.value.filter((s) => shotImpactByShotId.value.has(s.id)).length,
+)
+const displayScenes = computed(() => {
+  if (impactFilter.value === 'all') return filteredScenes.value
+  return filteredScenes.value.filter((scene) => {
+    if (loadingShots.value[scene.id]) return true
+    return (shotsMap.value[scene.id] || []).some((s) => shotImpactByShotId.value.has(s.id))
+  })
+})
+function visibleShots(sceneId: string): Shot[] {
+  const shots = shotsMap.value[sceneId] || []
+  if (impactFilter.value === 'all') return shots
+  return shots.filter((s) => shotImpactByShotId.value.has(s.id))
+}
+// 新一轮检查若已无受影响镜头，自动回到「全部镜头」，避免看板空白被误读为没有镜头
+watch(impactFilterActive, (active) => {
+  if (!active && impactFilter.value === 'affected') impactFilter.value = 'all'
+})
+
 /** 详情里提交生成任务后：刷新列表与任务，并启动进度轮询 */
 function handleDetailSubmitted() {
   queryClient.invalidateQueries({ queryKey: ['scenes', projectId] })
   queryClient.invalidateQueries({ queryKey: ['jobs', projectId, 'generate_clip'] })
   void trackClipProgress()
+}
+
+/** 以历史版本为基准重做：跳到分镜图工作台，由它按 base_asset_id 载入该版本配置 */
+function handleRebase(payload: { shotId: string; assetId: string; version: number | null }) {
+  detailVisible.value = false
+  void router.push({
+    name: 'storyboard-images',
+    params: { id: projectId.value },
+    query: {
+      shot: payload.shotId,
+      base: payload.assetId,
+      ...(payload.version != null ? { basev: String(payload.version) } : {}),
+    },
+  })
 }
 
 // --- 出口：全部镜头视频生成完成后可去合成导出 ---
@@ -794,6 +849,14 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
         </n-button>
       </template>
     </StageCard>
+
+    <!-- 卡三：依赖影响（只读）。放在批量出视频之后：
+         它回答「已经产出的东西是否因上游变化需要重做」，
+         属于批量生成前的核对信息，而不是执行进度本身。 -->
+    <StageCard label="依赖影响">
+      <DependencyImpactOverview :project-id="projectId" @loaded="handleImpactLoaded" />
+    </StageCard>
+
     <!-- Loading -->
     <n-spin v-if="scenesQuery.isLoading.value" class="page-loading" />
 
@@ -812,14 +875,27 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 
     <!-- Scenes -->
     <div v-else class="scenes-container">
-      <div v-for="scene in filteredScenes" :key="scene.id" class="scene-group">
+      <!-- 依赖影响筛选：仅在有检查结果时出现，避免常驻无效控件 -->
+      <div v-if="impactFilterActive" class="impact-filter-bar">
+        <span class="impact-filter-label">依赖影响</span>
+        <n-radio-group v-model:value="impactFilter" size="small">
+          <n-radio value="all">全部镜头</n-radio>
+          <n-radio value="affected">仅受影响（{{ affectedShotCount }}）</n-radio>
+        </n-radio-group>
+        <span class="impact-filter-hint">来自卡三最近一次检查结果，仅影响显示</span>
+      </div>
+
+      <div v-for="scene in displayScenes" :key="scene.id" class="scene-group">
         <div class="scene-header">
           <span class="scene-seq">#{{ scene.seq }}</span>
           <span class="scene-title">{{ scene.title }}</span>
           <n-tag v-if="scene.episodes?.length" size="tiny" round>
             第 {{ scene.episodes.join(', ') }} 集
           </n-tag>
-          <span class="shot-count">{{ scene.shot_count ?? 0 }} 镜头</span>
+          <span v-if="impactFilter === 'affected'" class="shot-count">
+            {{ visibleShots(scene.id).length }} / {{ scene.shot_count ?? 0 }} 镜头
+          </span>
+          <span v-else class="shot-count">{{ scene.shot_count ?? 0 }} 镜头</span>
         </div>
 
         <div
@@ -837,7 +913,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           <n-spin v-if="loadingShots[scene.id]" size="small" />
           <template v-else>
             <div
-              v-for="shot in shotsMap[scene.id] || []"
+              v-for="shot in visibleShots(scene.id)"
               :key="shot.id"
               class="shot-card-wrapper"
               draggable="true"
@@ -863,6 +939,13 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                   <div v-else class="thumb-placeholder">
                     <span>{{ shotKindLabels[shot.shot_kind] }}</span>
                   </div>
+                  <!-- 依赖影响角标（只读提示）：来自卡三「检查依赖影响」结果，点击卡片打开详情可查看影响面板 -->
+                  <div
+                    v-if="shotImpactByShotId.has(shot.id)"
+                    class="impact-badge"
+                    :class="`is-${shotImpactByShotId.get(shot.id)}`"
+                    :title="shotImpactLabel(shot.id)"
+                  >!</div>
                   <div class="status-badge" :style="{ background: getShotStatus(shot).color }">
                     {{ getShotStatus(shot).label }}
                   </div>
@@ -911,6 +994,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       :prop-items="propsData?.items ?? []"
       @submitted="handleDetailSubmitted"
       @prompts-saved="handlePromptsSaved"
+      @rebase="handleRebase"
     />
     <!-- 批量出视频方式选择弹窗：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接） -->
     <n-modal
@@ -1016,6 +1100,24 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .scene-group {
   background: transparent;
+}
+.impact-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.impact-filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.impact-filter-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 .scene-header {
   display: flex;
@@ -1185,6 +1287,29 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   font-size: 11px;
   color: var(--text-on-brand);
   white-space: nowrap;
+}
+/* 依赖影响角标：缩略图左上角常驻，区别于右下角的生产状态徽章。
+   位置避开左上角的选择框（.shot-check 挂在卡片层，z-index 更低不会重叠）。 */
+.impact-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-on-brand);
+  background: var(--state-warning);
+  cursor: help;
+}
+.impact-badge.is-redo_required {
+  background: var(--state-danger);
 }
 .shot-info {
   padding: var(--sp-2) var(--sp-3);

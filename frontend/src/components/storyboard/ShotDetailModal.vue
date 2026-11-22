@@ -13,6 +13,8 @@ import type { Character, Prop, Scene, Shot } from '@/types/script'
 import { useShotDetail } from './useShotDetail'
 import type { Asset } from '@/types/asset'
 import { listAssets, uploadAsset } from '@/api/assets'
+import DependencyImpactPanel from '@/components/ui/DependencyImpactPanel.vue'
+import JobSnapshotPanel from './JobSnapshotPanel.vue'
 
 type StatusKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'locked' | 'stale'
 
@@ -37,6 +39,8 @@ const emit = defineEmits<{
   'update:shotId': [value: string]
   submitted: []
   'prompts-saved': [shot: Shot]
+  /** 以历史版本为基准重做：交给上层跳转分镜图工作台 */
+  rebase: [payload: { shotId: string; assetId: string; version: number | null }]
 }>()
 
 const message = useMessage()
@@ -298,6 +302,24 @@ async function uploadRefImage(file: File) {
           </template>
 
 
+        </div>
+
+        <!-- 依赖影响（只读预演） -->
+        <div class="dg-sec">
+          <div class="dg-label">
+            依赖影响
+            <span class="dg-hint">（只读预演，不会自动重做）</span>
+          </div>
+          <DependencyImpactPanel
+            :project-id="props.projectId"
+            node-type="shot"
+            :node-id="props.shotId"
+          />
+        </div>
+
+        <!-- 生成快照（只读，手动加载） -->
+        <div class="dg-sec">
+          <JobSnapshotPanel :shot-id="props.shotId" @rebase="emit('rebase', $event)" />
         </div>
 
         <!-- 重新生成按钮 -->

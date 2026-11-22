@@ -474,6 +474,19 @@ def get_job_snapshot(job_id: str, db: Session = Depends(get_db)) -> dict:
     if job is None:
         raise errors.AppError("job_not_found", "任务不存在", 404)
     snap = job.input_snapshot or {}
+    ref_rows = (
+        db.query(JobInputRef)
+        .filter(JobInputRef.job_id == job.id)
+        .order_by(JobInputRef.seq)
+        .all()
+    )
+    # 只读比对：快照冻结的资产版本 vs 资产当前版本，用于提示「该图已过期」。
+    # 只报告差异，不标记失效、不重生成、不修改任何资产或依赖记录。
+    asset_ids = {r.asset_id for r in ref_rows if r.asset_id}
+    current_versions = {
+        a.id: a.version
+        for a in db.query(Asset).filter(Asset.id.in_(asset_ids)).all()
+    } if asset_ids else {}
     refs = [
         {
             "slot_param": r.slot_param,
@@ -486,18 +499,35 @@ def get_job_snapshot(job_id: str, db: Session = Depends(get_db)) -> dict:
             "semantic": r.semantic,
             "enabled": bool(r.enabled),
             "file_path": r.file_path,
+            # 资产已被删除时为 None；版本不一致即说明快照引用的图已不是当前版本
+            "current_version": current_versions.get(r.asset_id),
+            "version_stale": (
+                None if r.asset_id not in current_versions
+                else r.asset_version != current_versions[r.asset_id]
+            ),
         }
-        for r in db.query(JobInputRef)
-        .filter(JobInputRef.job_id == job.id)
-        .order_by(JobInputRef.seq)
-        .all()
+        for r in ref_rows
     ]
+    # 该任务产出的资产版本，用于「以此版本为基准重做」。旧版本只会被标记
+    # superseded、记录仍保留，因此可直接作为 base_asset_id 传给重生成工作台。
+    result_asset = (
+        db.query(Asset)
+        .filter(Asset.source_job_id == job.id)
+        .order_by(Asset.version.desc())
+        .first()
+    )
     return {
         "job_id": job.id,
         "status": job.status,
         "snapshot": snap.get("snapshot"),
         "refs": refs,
         "frozen": True,
+        "result_asset": None if result_asset is None else {
+            "asset_id": result_asset.id,
+            "asset_type": result_asset.asset_type,
+            "version": result_asset.version,
+            "validity": result_asset.validity,
+        },
     }
 
 

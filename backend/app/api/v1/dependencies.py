@@ -10,7 +10,10 @@ from app.services.dependency_graph import (
     build_dependency_graph,
     traverse_dependency_graph,
 )
-from app.services.dependency_impact import preview_dependency_impact
+from app.services.dependency_impact import (
+    preview_dependency_impact,
+    preview_project_impact,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["dependencies"])
 
@@ -51,6 +54,13 @@ def get_dependency_prerequisites(project_id: str, node_type: str, node_id: str,
 def get_dependency_impact(project_id: str, node_type: str, node_id: str,
                           db: Session = Depends(get_db)) -> dict:
     return _traverse(project_id, node_type, node_id, "impact", db)
+
+
+@router.get("/{project_id}/dependency-graph/impact-preview")
+def get_project_impact_preview(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """项目级只读总览：汇总所有因上游版本/失效变化而待重做、待重绑的对象。"""
+    _get_project(db, project_id)
+    return preview_project_impact(db, project_id)
 
 
 @router.get("/{project_id}/dependency-graph/{node_type}/{node_id}/impact-preview")

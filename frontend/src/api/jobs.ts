@@ -7,6 +7,7 @@ export function listJobs(params?: PaginationParams & {
   project_id?: string
   job_type?: JobType
   status?: JobStatus
+  shot_id?: string
   updated_since_seq?: number
   updated_since?: string
 }) {

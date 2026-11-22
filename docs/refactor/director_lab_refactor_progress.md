@@ -11,14 +11,14 @@
 | 0 源码审计与基线 | 已完成 | 审计报告已落盘；后端、Ruff、前端基线已实测 |
 | 1 Script Intelligence 拆分 | 进行中 | 第一切片：原文区块索引；第三切片：结构分析契约、证据校验与只读 Shadow Run；语义分析仍需外部文档 |
 | 2 Storyboard Planning | 进行中 | 第一切片：规划契约校验、Shot 兼容 dry-run Adapter、覆盖/顺序/锁定冲突检查；未接规划生成与写入 |
-| 3 Dependency/Snapshot | 进行中 | 只读图查询与诊断；新增变更影响预演（版本比较、重做/重绑分类、只读策略）；不新建依赖表 |
+| 3 Dependency/Snapshot | 进行中 | 只读图查询与诊断；单节点影响预演已接入镜头/资产详情；项目级待处理总览已接入分镜看板；批量出图前已接依赖预检；生成快照已可只读查看并提示参考图版本差异；资产变更影响已有独立只读列表页；快照支持以历史版本为基准重做（仅传 `base_asset_id`）；不新建依赖表 |
 | 4 Reference Binding | 已有实现，溢出阻断已验证 | 七角色超六槽回归证明 Resolver 留痕、Compiler 报错、生成硬阻断 |
 | 5 Prompt/Workflow Compiler | 已有实现，未改 | 保持 D-24 单一编译层 |
 | 6 分镜图生产 | 已有实现，未改 | 保留单有效版本，不实施 Plan 通用候选图库建议 |
-| 7 Storyboard Board | 已有实现，未改 | 待统一依赖查询验收后决定最小 UI 接入 |
+| 7 Storyboard Board | 进行中 | 镜头详情只读影响面板 + 生成快照查看 + 看板级「依赖影响」卡 + 镜头卡片依赖影响常驻角标 + 分镜图批量出图前依赖预检 + 按依赖状态筛选 + 资产变更影响列表页（手动触发，不自动重做）+ 快照历史版本一键进入分镜图工作台重做 |
 | 8 连续性与视频依赖 | 已有实现，未改 | 不改 H3/Ref2VA/TTS/合成导出约定 |
 | 9 Job/Event/Recovery | 已有实现，未改 | 不新增任务框架 |
-| 10 前端全流程体验 | 未开始 | 不整页重写 |
+| 10 前端全流程体验 | 进行中 | 依赖影响预演已接入镜头/资产详情、看板卡片标记、分镜图批量出图前预检与资产变更影响列表页；镜头详情可查看生成快照，并可一键带历史版本进入分镜图工作台重做；均由真实接口驱动，不做虚假状态 |
 | 11 DB/API 兼容 | 进行中 | 第一批 additive API，无 DB 迁移 |
 | 12 E2E 与验收 | 未开始 | mock 与真实环境验证分开记录 |
 
@@ -121,12 +121,170 @@ git checkout -- backend/tests/test_project_purge_fk_coverage.py backend/tests/te
 - [x] 聚焦测试：`tests/test_dependency_impact.py`，2 passed；四个切片联合回归 14 passed；新增文件 Ruff 通过。
 - [ ] 自动标记失效、重规划写入与前端影响范围展示未实施。
 
+### Slice 6：依赖影响预演接入前端（Phase 3 / 7 / 10）
+
+- [x] 新增 `frontend/src/api/dependencies.ts`，封装 `GET .../dependency-graph/{node_type}/{node_id}/impact-preview`，类型与后端返回结构一一对应。
+- [x] 新增共用组件 `frontend/src/components/ui/DependencyImpactPanel.vue`：手动触发查询、按层级展示下游对象、状态标签（需重生成/需重绑定/未生成/已最新）、过期输入原因与只读策略说明。
+- [x] 接入镜头详情（`ShotDetailModal.vue`，`node_type=shot`）与资产详情（`AssetDetailModal.vue`，`node_type=asset`）。
+- [x] 组件默认不自动请求，切换节点时清空旧结果，避免打开详情即打一次依赖图或展示上一个节点的数据。
+- [x] 仅消费后端只读接口，前端不推断依赖、不提供自动重做/删除入口，与后端 `auto_regenerate=false / writes=false` 策略一致。
+- [x] 批量操作影响范围预览已由 Slice 9 落地（分镜图批量出图前预检）。
+- [ ] 生成快照查看页未实施（JobInputRef / input_snapshot 只读展示待后续切片）。
+
+### Slice 7：项目级依赖待处理总览（Phase 3 / 7）
+
+- [x] 后端新增 `preview_project_impact`：以「所有已过期/版本不一致依赖的上游」为变化源，一次算出全项目待处理对象。
+- [x] 抽出 `_collect_affected` / `_summarize` / `_READ_ONLY_POLICY`，与单节点预演共用同一套分类与只读策略，避免两份逻辑漂移。
+- [x] additive API：`GET .../dependency-graph/impact-preview`；返回 `changed_roots` 与受影响清单；未知项目 404。
+- [x] 前端新增 `DependencyImpactOverview.vue`，只看 `redo_required` / `rebind_required` / `stale_reference` 三类待办，默认收起，无待办时只显示「未影响任何下游产物」。
+- [x] 接入分镜看板第三张卡「依赖影响」；手动触发，不自动请求、不自动重做。
+- [x] 测试：`tests/test_dependency_impact.py` 新增项目级用例（聚合、分类、只读性、404），6 passed。
+
+### Slice 8：依赖状态进入看板镜头卡片常驻标记（Phase 3 / 7 / 10）
+
+- [x] `DependencyImpactOverview.vue` 新增 `loaded` 事件，把项目级预演原始数据抛给页面，不重复请求。
+- [x] `StoryboardView.vue` 消费 `loaded`：镜头节点直接映射；job 等产物节点通过 `path` 中的 `shot:` 键回映射到镜头，`redo_required` 优先于其他状态。
+- [x] 受影响镜头卡片缩略图右上角常驻警示角标（`--state-warning` / `--state-danger`，无硬编码色值），hover 提示具体原因（需重做 / 需重绑定 / 引用失效）。
+- [x] 保持手动触发口径：仅在卡三点击「检查依赖影响」后出现并随每次检查刷新；不自动请求、不推断依赖、无自动重做入口。
+- [x] 前端验证：`npm run build`（含 `vue-tsc -b`）通过；`check-colors.mjs` 0 处硬编码色值、`check-contrast.mjs` 全部令牌达标。
+- [x] 后端回归：`tests/test_dependency_impact.py`、`tests/test_dependency_graph.py` 6 passed，接口契约未变、无后端改动。
+
+### Slice 9：分镜图批量出图前依赖影响预检（Phase 3 / 7 / 10）
+
+- [x] 把「预演结果 → 镜头状态」映射抽为共享的 `buildShotImpactMap` / `IMPACT_SHOT_LABEL`（`frontend/src/api/dependencies.ts`），`StoryboardView.vue` 改为复用，看板角标与批量预检使用同一口径。
+- [x] 分镜图页新增「依赖预检」入口，手动触发项目级 `GET .../dependency-graph/impact-preview`；只读、不写库、不自动重做。
+- [x] 勾选镜头与预检结果求交：显示「所选 N / M 个镜头受上游变化影响」，并标注检查时刻，避免把旧结果当当前状态。
+- [x] 批量生成前若勾选镜头受影响，先弹确认框逐条列出受影响镜头（最多 6 条，其余合并计数），确认后才提交；取消则不提交。
+- [x] 预检失败不阻断批量生成，但明确提示本次未做依赖影响检查，不伪造「无影响」。
+- [x] 无自动请求：仅在点击「依赖预检」或提交批量生成时请求一次；结果保留到下次预检。
+
+### Slice 10：生成快照只读查看（Phase 3 / 7 / 10）
+
+- [x] 复用既有 `GET /api/jobs/{job_id}/snapshot`（已返回 `snapshot` 编译快照、`refs` 参考图索引与 `frozen`），未新增重复路由。
+- [x] `GET /api/jobs` 增加可选 `shot_id` 过滤（`app/api/v1/jobs.py`），使镜头详情能只取本镜头任务，不必拉全项目再筛；`total` 随过滤条件收敛。
+- [x] 新增 `JobSnapshotPanel.vue`：手动点击「加载快照」才请求；下拉切换该镜头历次任务，展示模式、快照哈希、冻结时间、提示词、模型参数、参考图（槽位 / 资产类型 / 版本 / 必需 / 未注入）与工作流节点数。
+- [x] 接入镜头详情 `ShotDetailModal.vue`，切换镜头即清空上一个镜头的快照，避免错位展示。
+- [x] 只读口径：不提供「按快照重跑 / 改依赖」入口；快照为历史记录，不随当前资产变化，重做仍走既有重生成链路。
+- [x] 早期任务无快照时显示明确空态，不伪造数据。
+- [x] 测试：`tests/test_jobs_list_filter.py` 2 passed（按镜头过滤、与项目过滤取交集）。
+
+### Slice 11：快照参考图版本比对（Phase 3 / 7）
+
+- [x] `GET /api/jobs/{job_id}/snapshot` 的每条参考图新增 `current_version` 与 `version_stale`：批量查询资产当前版本，与快照冻结版本比对。
+- [x] 只报告差异：资产已删除时 `current_version=null`、`version_stale=null`（无法判断）；不标记失效、不重生成、不改资产版本与快照记录。
+- [x] `JobSnapshotPanel.vue` 展示「快照 v2 → 当前 v3」与「资产已删除」标签，标题汇总「N 张已非当前版本」，并在底部说明不会自动重做。
+- [x] 测试：`tests/test_job_snapshot_versions.py` 2 passed（版本差异与删除资产、只读性）。
+
+### Slice 12：看板按依赖状态筛选（Phase 3 / 7 / 10）
+
+- [x] `StoryboardView.vue` 在卡三返回检查结果后显示「依赖影响」筛选条：全部镜头 / 仅受影响（N）。
+- [x] 筛选只影响显示：按 `shotImpactByShotId` 过滤镜头卡片并隐藏无受影响镜头的场景；场景标题显示「受影响 / 总数」。
+- [x] 无检查结果时不显示筛选条；新一轮检查若无受影响镜头则自动回到「全部镜头」，避免空白看板被误读。
+- [x] 不本地推断依赖、不改选中集合、不触发任何请求或重做，数据仍只来自卡三手动触发的项目级预演。
+
+### Slice 13：资产变更影响列表页（Phase 3 / 7 / 10）
+
+- [x] 新增 `frontend/src/views/project/AssetImpactView.vue`，路由 `/project/:id/assets/impact`，资产库页提供「查看资产变更影响」入口。
+- [x] 复用项目级 `GET .../dependency-graph/impact-preview`，按变化源（上游资产）分组，只列 `redo_required` / `rebind_required` / `stale_reference` 三类待处理对象。
+- [x] 每行展示层级、节点类型、名称（资产经 `listAssets` 全量索引还原为「类型 + 名称」）、状态标签与过期输入来源；资产索引加载失败时退化为 ID，不阻断列表。
+- [x] 顶部概览展示变化源数与三类计数，并显示最近检查时刻与只读策略说明；无待办时显示明确空态。
+- [x] 依赖状态与节点类型文案抽到 `api/dependencies.ts` 的 `IMPACT_STATUS_LABEL` / `IMPACT_NODE_TYPE_LABEL`，与 `DependencyImpactOverview.vue` 共用，消除重复常量。
+- [x] 顺带修正 `DependencyImpactOverview.vue` 中未定义的 `--state-error` 令牌为 `--danger-text`。
+- [x] 只读：进入页面即检查一次（用户显式导航），不标记失效、不删除产物、不提供自动重做入口。
+
+### Slice 14：以历史版本为基准重做（Phase 3 / 7 / 10）
+
+- [x] 后端快照接口 `GET /jobs/{job_id}/snapshot` 新增 `result_asset`（`asset_id` / `asset_type` / `version` / `validity`），由 `Asset.source_job_id` 反查该任务产出的资产版本；无产物时为 `null`。
+- [x] 快照面板（`JobSnapshotPanel.vue`）在分镜图任务且有产出资产时显示「以 vN 为基准重做」，事件只携带 `shotId / assetId / version`。
+- [x] 看板（`ShotDetailModal.vue`）转发 `rebase` 事件；`StoryboardView.vue` 跳转 `storyboard-images` 并携带 `?shot=&base=&basev=`，关闭当前弹窗。
+- [x] `StoryboardImagesView.vue` 消费 query：先按 `getShot` 确定镜头所属集数，切集后等该集镜头加载完成再打开详情；打开后 `router.replace` 清除 query，避免刷新重复弹出。
+- [x] `useKeyframeRegen.ts` 新增 `regenBaseAsset` 状态：`openDetail(shot, base?)`、config 请求传 `base_asset_id`、预检与提交 payload 均带 `base_asset_id`；无当前分镜图但有 base 时仍载入该版本配置。
+- [x] `ShotDetailDialog.vue` 的 `open(shot, base?)` 透传 base，并新增提示条：提示词/工作流来自该版本，参考图按当前镜头定义重新解析，不复用快照里的参考图版本；无当前分镜图时用 base 资产作预览。
+- [x] 不改 `build_base_config` 的既有决定：参考图始终以当前 `AssetPlanDependency` 覆盖历史快照 refs（修复「提示词两个角色、参考图只有一个槽位」），因此不提供「按快照参考图重做」。
+- [x] 不新增任务/快照重放写路径，不自动重做；仅在用户显式点击后跳转并预填工作台，提交仍需用户确认。
+
+### 基线失败清偿（Windows 路径断言）
+
+- [x] `tests/test_shot_chain.py::test_resolve_prev_frame_returns_dict_when_asset_exists` 在 Windows 上失败：`resolve_prev_frame` 有意把路径分隔符归一为 `/`（修复历史 `ast_frames\...` 反斜杠路径导致 `os.path.exists` 恒 False），测试仍按原生 `str(path)` 断言。
+- [x] 修正测试断言为归一化后的路径，不改生产逻辑；`tests/test_shot_chain.py` 12 passed。
+
 ### 随后核查
 
 - [x] 角色超过可用参考槽位时不得静默丢弃必需角色：七角色/六角色槽回归验证 Resolver 记录 `slot_limit/skip`，Compiler 返回 `reference_capacity_exceeded(capacity=6)`，生成层抛出 409 `prompt_validation_failed`；与既有容量测试合计 2 passed。
 - [x] Phase 1 Shadow Run 已以只读对比形式落地；语义分析 Adapter 与持久化仍待后续切片，Phase 1 不标记完成。
 
 ## 本批验证记录
+
+### Slice 14（以历史版本为基准重做）
+
+- 后端：`python -m pytest -q tests/test_job_snapshot_versions.py tests/test_jobs_list_filter.py` → 6 passed；新增 `result_asset` 有产出/无产出两条用例，既有字段语义未变。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过；路由 query 消费、base 版本透传与提示条无类型错误。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 回滚：还原快照接口 `result_asset` 查询与返回、`JobSnapshotPanel.vue` 按钮/事件、`ShotDetailModal.vue` 与 `StoryboardView.vue` 的 `rebase` 转发、`StoryboardImagesView.vue` 的 query 消费、`useKeyframeRegen.ts` 的 `regenBaseAsset` 与 payload 字段、`ShotDetailDialog.vue` 的 `open` 参数与提示条。
+- 已知边界：仅分镜图（`generate_keyframe`）任务提供重做入口；旧版本被标记 `superseded` 但记录保留，可直接作为 `base_asset_id`；参考图不会复用快照版本，这是既有 `build_base_config` 决定的明确取舍。
+
+### Slice 13（资产变更影响列表页）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过；新增页面、路由与资产库入口无类型错误。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 后端：无改动，沿用项目级 `impact-preview` 接口契约；纯只读页面，不新增表、不改迁移与工作流 JSON。
+- 回滚：删除 `AssetImpactView.vue`、还原路由与 `AssetsView.vue` 入口、还原 `dependencies.ts` 常量抽取与 `DependencyImpactOverview.vue` 文案引用。
+- 已知边界：变化源仍以「已过期依赖记录的上游」为起点，依赖记录从未写入的早期资产不会被识别；资产名称索引依赖 `listAssets` 分页，资产量极大时首屏会多几次请求。
+
+### Slice 12（看板按依赖状态筛选）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 纯前端切片，未改后端与接口；回滚仅需还原 `StoryboardView.vue`。
+- 已知边界：筛选基于最近一次手动检查结果，页面刷新或集数切换后需重新检查；筛选不改变批量选择的勾选集合。
+
+### Slice 11（快照参考图版本比对）
+
+- 后端：`tests/test_job_snapshot_versions.py`、`tests/test_jobs_list_filter.py` 合计 4 passed；快照接口仅新增 `current_version` / `version_stale` 两个字段，未改既有字段语义。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 只读：比对为一次批量资产查询，不写库；资产删除时明确返回无法判断，不猜测。
+- 回滚：还原 `app/api/v1/regeneration.py` 快照接口片段与 `JobSnapshotPanel.vue`，删除 `tests/test_job_snapshot_versions.py`。
+
+### Slice 10（生成快照只读查看）
+
+- 后端：`tests/test_jobs_list_filter.py` 2 passed；`GET /api/jobs` 仅新增可选 `shot_id` 查询参数，未改响应结构与既有过滤语义。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，`JobSnapshotPanel.vue`、`ShotDetailModal.vue` 无类型错误。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌在四档背景上 ≥ 4.5:1。
+- 未新增表、未改迁移、未改工作流 JSON、未改生成链；回滚需还原 `app/api/v1/jobs.py`、`frontend/src/api/jobs.ts`、`ShotDetailModal.vue` 并删除 `JobSnapshotPanel.vue`。
+- 已知边界：快照只覆盖执行器/重生成链路已落库的 `input_snapshot`；早期任务无快照时只显示空态。`app/jobs.py` 为未挂载的历史副本，本次未改其行为。
+
+### Slice 9（分镜图批量出图前依赖影响预检）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，`StoryboardImagesView.vue`、`StoryboardView.vue` 与 `api/dependencies.ts` 无类型错误。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌在四档背景上 ≥ 4.5:1。
+- 后端：无改动；`tests/test_dependency_impact.py`、`tests/test_dependency_graph.py` 6 passed。
+- 纯前端切片，不新增表、不改 API、不改工作流 JSON；回滚只需还原上述三个前端文件。
+- 已知边界：预检结果是点击时刻的项目级快照，勾选变化或上游再次变更后需重新预检；预检只提示，不阻止提交，也不触发任何重做。
+
+### Slice 8（看板镜头卡片依赖影响常驻标记）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过；`StoryboardView.vue`、`DependencyImpactOverview.vue` 改动无类型错误。
+- 设计规范：`check-colors.mjs` 0 处硬编码色值；`check-contrast.mjs` 全部文本令牌在四档背景上 ≥ 4.5:1。
+- 后端：无改动；`tests/test_dependency_impact.py`、`tests/test_dependency_graph.py` 回归 6 passed。
+- 纯前端切片，不新增表、不改 API、不改工作流 JSON；回滚仅需还原两个前端文件。
+- 已知边界：角标来自手动触发的项目级检查结果，页面刷新或集数切换后需重新检查；job 节点经 `path` 回映射镜头，若依赖记录缺失则该镜头不会被标记（与项目级总览同一边界）。
+
+### Slice 7（项目级依赖待处理总览）
+
+- 后端：`tests/test_dependency_impact.py`、`tests/test_dependency_graph.py` 6 passed。
+- 全量后端：1309 passed、92 warnings（403.39s），无 failed、无 error。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过；新增 `DependencyImpactOverview.vue` 与看板接入无类型错误。
+- 未新增表、未改迁移、未改工作流 JSON、未改生成链；项目级接口与前端卡片均可独立回退。
+- 项目级总览的遍历以「过期依赖的上游」为起点，若依赖记录本身从未写入（如早期资产无 ref），不会被识别为变化源，属已知边界。
+
+### Slice 6（依赖影响预演接入前端）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，`DependencyImpactPanel.vue`、`dependencies.ts` 与两处接入无类型错误。
+- 后端：`tests/test_dependency_impact.py`、`tests/test_dependency_graph.py` 5 passed，接口契约未变。
+- 全量后端：1307 passed、1 failed、92 warnings（380.56s），唯一失败为本机 Windows 路径分隔符断言；修正测试断言后 `tests/test_shot_chain.py` 12 passed。
+- 未改后端生产代码、模型、迁移与工作流 JSON；前端仅新增只读面板，可单独回退。
+- 真实 ComfyUI/GPU 未参与，依赖预演为纯只读计算，无生成行为变化。
 
 ### Slice 5（依赖变更影响预演）
 

@@ -46,6 +46,12 @@ const router = createRouter({
       meta: { title: '资产库' },
     },
     {
+      path: '/project/:id/assets/impact',
+      name: 'asset-impact',
+      component: () => import('../views/project/AssetImpactView.vue'),
+      meta: { title: '资产变更影响' },
+    },
+    {
       path: '/project/:id/compose',
       name: 'compose',
       component: () => import('../views/project/ComposeView.vue'),

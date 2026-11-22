@@ -40,6 +40,7 @@ const {
   detailVisible,
   detailShot,
   openDetail,
+  regenBaseAsset,
   kfSlots,
   kfMaxRefs,
   kfRefsLoading,
@@ -57,11 +58,17 @@ const {
   onFirstGenerate: (shot, prompt) => emit('first-generate', shot, prompt),
 })
 
-defineExpose({ open: openDetail, visible: detailVisible })
+defineExpose({
+  open: (shot: Shot, base?: { id: string; version: number | null }) => openDetail(shot, base),
+  visible: detailVisible,
+})
 
 const heroUrl = computed(() => {
   const kf = detailShot.value?.current_assets?.keyframe
-  return kf?.url || kf?.thumb_url || ''
+  const url = kf?.url || kf?.thumb_url
+  if (url) return url
+  // 以历史版本为基准重做、但当前镜头暂无有效分镜图时，预览基准版本
+  return regenBaseAsset.value ? `/api/assets/${regenBaseAsset.value.id}/file` : ''
 })
 const hasKeyframe = computed(() => Boolean(detailShot.value?.current_assets?.keyframe))
 
@@ -178,6 +185,16 @@ const refRows = computed(() => {
 
         <!-- 右栏：编辑区 -->
         <div class="dg-main">
+          <!-- 以历史版本为基准重做：只传 base_asset_id，参考图按当前镜头定义解析 -->
+          <div v-if="regenBaseAsset" class="dg-rebase">
+            <span class="dg-rebase-tag">
+              以历史版本{{ regenBaseAsset.version ? ` v${regenBaseAsset.version}` : '' }}为基准重做
+            </span>
+            <span class="dg-rebase-hint">
+              提示词与工作流来自该版本；参考图按当前镜头定义重新解析，不复用旧快照里的参考图版本。
+            </span>
+          </div>
+
           <!-- 提示词 -->
           <div class="dg-sec">
             <div class="dg-label">提示词</div>
@@ -233,12 +250,14 @@ const refRows = computed(() => {
             <n-button
               type="primary"
               :loading="regenSubmitting"
-              :disabled="!hasKeyframe"
+              :disabled="!hasKeyframe && !regenBaseAsset"
               @click="detailShot && detailGenerate(detailShot)"
             >
               重新生成分镜图
             </n-button>
-            <span v-if="!hasKeyframe" class="dg-note">尚未生成分镜图，请先使用左侧按钮生成</span>
+            <span v-if="!hasKeyframe && !regenBaseAsset" class="dg-note">
+              尚未生成分镜图，请先使用左侧按钮生成
+            </span>
           </div>
         </div>
       </div>
@@ -407,6 +426,26 @@ const refRows = computed(() => {
   flex-direction: column;
   gap: var(--sp-4);
   min-width: 0;
+}
+/* 以历史版本为基准重做的提示条：明确「只换基准版本、不复用快照参考图」 */
+.dg-rebase {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--brand-primary);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+.dg-rebase-tag {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.dg-rebase-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 .dg-sec {
   display: flex;

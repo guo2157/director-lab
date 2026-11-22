@@ -158,3 +158,39 @@ def test_isolated_node_has_empty_impact_and_foreign_node_is_isolated(client_and_
         "/api/projects/prj_missing/dependency-graph/asset/ast_v1/impact-preview",
     )
     assert unknown_project.status_code == 404
+
+
+def test_project_impact_preview_aggregates_stale_roots_without_writes(client_and_session):
+    client, factory = client_and_session
+    project_id = _project(client, "项目总览")
+    other_project_id = _project(client, "别的项目")
+    session = factory()
+    try:
+        _seed(session, project_id, other_project_id)
+    finally:
+        session.close()
+
+    response = client.get(f"/api/projects/{project_id}/dependency-graph/impact-preview")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # 过期上游只有 ast_v1（边缘记录 source_version=1，血缘当前版本=2）
+    assert [root["key"] for root in body["changed_roots"]] == ["asset:ast_v1"]
+    assert body["policy"]["writes"] is False
+    by_key = {item["key"]: item for item in body["affected"]}
+    assert set(by_key) == {"shot:sht_a", "job:job_a", "asset:ast_sb"}
+    assert by_key["job:job_a"]["change_status"] == "redo_required"
+    assert by_key["shot:sht_a"]["change_status"] == "rebind_required"
+    assert body["summary"] == {
+        "affected_count": 3, "redo_required": 2, "rebind_required": 1,
+        "not_generated": 0, "up_to_date": 0, "unknown_version": 0,
+    }
+
+    # 只读：调用前后依赖记录与资产版本均不变
+    with factory() as check:
+        assert check.query(AssetRef).filter(AssetRef.id == "asr_a").one().source_version == 1
+        assert check.query(Asset).filter(Asset.id == "ast_v2").one().validity == "current"
+
+    assert client.get(
+        "/api/projects/prj_missing/dependency-graph/impact-preview",
+    ).status_code == 404

@@ -67,3 +67,7 @@ backend/scripts/_test_rewrite_refs.py
 
 # 闲鱼上架素材与买家交付物（含网盘链接等，仅本地保留，不入库）
 sales/xianyu/
+
+# 代理工具运行期临时目录（任务附件、scratch 输出，不入库）
+.box-agent/
+.box-agent-scratch/

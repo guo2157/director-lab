@@ -70,7 +70,8 @@ def _to_out(j: Job, db: Session | None = None) -> JobOut:
 
 @router.get("")
 def list_jobs(project_id: str | None = Query(None), status: str | None = Query(None),
-              job_type: str | None = Query(None), limit: int = Query(50, ge=1, le=200),
+              job_type: str | None = Query(None), shot_id: str | None = Query(None),
+              limit: int = Query(50, ge=1, le=200),
               page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
               updated_since_seq: int | None = Query(None, ge=0),
               updated_since: datetime | None = Query(None),
@@ -82,6 +83,8 @@ def list_jobs(project_id: str | None = Query(None), status: str | None = Query(N
         q = q.filter(Job.status == status)
     if job_type:
         q = q.filter(Job.job_type == job_type)
+    if shot_id:
+        q = q.filter(Job.shot_id == shot_id)
     # 增量补齐（API.md §9/§12）：updated_since_seq 为准（seq 严格大于，升序）；
     # updated_since 时间戳仅兼容保留，同一毫秒内多条更新可能漏取或重复
     if updated_since_seq is not None:

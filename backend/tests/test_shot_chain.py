@@ -162,7 +162,8 @@ def test_resolve_prev_frame_returns_dict_when_asset_exists(client, tmp_path):
         shot2 = s.get(Shot, s2["id"])
         result = resolve_prev_frame(s, shot2)
         assert result is not None
-        assert result["file_path"] == str(frame_file)
+        # resolve_prev_frame 统一把路径分隔符归一为 "/"，保证跨平台 os.path.exists 可用
+        assert result["file_path"] == str(frame_file).replace("\\", "/")
         assert result["prev_shot_id"] == s1["id"]
     finally:
         s.close()
