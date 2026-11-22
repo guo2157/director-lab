@@ -160,6 +160,10 @@ E2E 约束：LLM 与渲染均为替身，媒体写入临时目录，不触达外
 2. 续集复用既有角色/道具缺端到端用例。
 3. 数据迁移无自动化测试（本重构未新增迁移）。
 4. 真实 ComfyUI/GPU 全链路（§4）尚未执行，Phase 12 不能标记为完成。
-5. 视频 / TTS / BGM 真实链路被环境阻塞（2026-11-22 核查，同日复验 `GET /api/workflows` 的 `runtime_status`）：仅 `wf_image_ref_qwen21_multi` / `wf_image_t2i_qwen21_turbo` 为 `ready`，其余 8 条（5 条 video、2 条 tts、1 条 bgm）全部 `missing_deps`。视频缺 `minimax_h3_video_vae_int8_convrot`（服务器只有 `fp16`）与 `minimax_h3_ref2v_turbo_4step` LoRA；TTS 缺自定义节点 `Qwen3Loader` / `Qwen3CustomVoice`；BGM 缺 `stable-audio-open-1.0` / `t5-base`。需补齐后重跑 §4.2 / §4.3。
+5. 视频 / TTS 真实链路被远端环境阻塞（2026-11-22 核查，同日复验 `GET /api/workflows` 与 `POST /api/workflows/{id}/check-runtime`）：仅 `wf_image_ref_qwen21_multi` / `wf_image_t2i_qwen21_turbo` 为 `ready`，5 条 video、2 条 tts 全部 `missing_deps`。精确缺口：
+   - 视频（`wf_video_h3_ref2va_std_5s` 等）：`vae/minimax_h3_video_vae_int8_convrot.safetensors`（服务器 VAE 目录只有 `minimax_h3_audio_vae_fp32` 与 `minimax_h3_video_vae_fp16`）、`loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`（LoRA 目录无任何 H3 文件），合计 4.44 GiB。
+   - TTS（`wf_tts_qwen3_custom_voice` / `wf_tts_qwen3_voice_clone`）：缺自定义节点 `Qwen3Loader` / `Qwen3CustomVoice`（`DarioFT/ComfyUI-Qwen3-TTS`），模型按 HF 仓库在线加载、无需本地 safetensors。
+   - BGM：`wf_bgm_stable_audio` 已移入 `data/workflows/_retired`，当前无在用 BGM 工作流，其 `stable-audio-open-1.0` / `t5-base` 模型不计入本轮验收范围；后续启用时再补。
+   - 补齐方式（在 ComfyUI 所在机器执行，仓库自带脚本已覆盖上述资产）：`python autodl_comfyui_qwen21_h3_setup.py download --groups h3speed`（或 `all --groups tts --no-download --no-launch` 装 TTS 节点，再重启 ComfyUI）。补齐后重跑 §4.2 / §4.3。
 6. 自动生成路径不写 `asset_ref` 表（只有手动绑定接口 `POST /api/shots/{id}/assets` 写入），自动参考关系记录在 `job.input_snapshot.reference_manifest`。实测分镜图任务 manifest 含 `ref_scene`（教室）+ `ref_identity`（林晓）两槽位，属预期行为；若前端「引用资产」列表依赖 `asset_ref` 会显示为空，需按 manifest 兜底（未实施）。
 7. ~~`/api/health` 的 `worker` 字段为硬编码 `"ok"`~~（已修复，Slice 27）：worker 主循环写心跳文件，health 读心跳返回 `ok` / `stale` / `not_running` / `unknown` 并附带 `worker_last_beat`；worker 停止超过 120s 时 `status` 降为 `degraded`。已实测停 worker → `stale`/`degraded`，重启 → `ok`/`healthy`。
