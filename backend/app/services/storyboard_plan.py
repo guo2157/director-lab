@@ -1,11 +1,17 @@
 """分镜规划契约校验、兼容 Adapter 预览与既有 Shot 对比（Phase 2 切片）。
 
 设计约定：
-- 只读：校验与转换均为 dry-run，不写 Shot、不改存量数据、不调用生成链路。
+- 校验与转换默认只读：``validate_storyboard_plan`` 不写 Shot、不改存量数据。
+- 写入需显式调用 ``apply_storyboard_plan``，且只在规划零错误时执行：
+  - 只写规划显式提供的字段，缺省字段保留既有值（尤其 image_prompt，避免
+    清空生产层已编译的提示词）；
+  - 已确认锁定镜头（keyframe_confirmed）的 seq/duration/shot_kind 不被覆盖，
+    只报告并跳过；
+  - 不删除规划未包含的旧镜头，只返回 orphan_shot_ids 供人工处理；
+  - 不重建资产计划、不调用生成链路。
 - 规划层只决定“怎么拍”，不分配参考槽位、不编译生产 Prompt；
   ``image_prompt`` 仅在规划文档显式提供时透传，缺失时留给 PromptCompiler。
 - 每个镜头必须带原文区块证据，且资产引用使用真实 ID，不以名称作为唯一引用。
-- 锁定/已确认镜头不覆盖：只报告冲突，Adapter 明确 ``writable=false``。
 - 新结构通过 Adapter 映射为现有 Shot 字段，保持当前生产流程兼容。
 """
 from itertools import pairwise
@@ -18,8 +24,26 @@ from app.services.script_analysis import build_structure, scene_key
 from app.services.source_index import build_source_index
 
 PLAN_ALGORITHM = "storyboard-plan-adapter-v1"
+PLAN_APPLY_ALGORITHM = "storyboard-plan-apply-v1"
 MAX_PLAN_SHOTS = 500
 MAX_DURATION_SECONDS = 60
+MAX_SHOT_ID_LENGTH = 32
+
+# 规划字段 → Shot 列。只有规划文档显式出现的键才写入，避免误清空既有值。
+_WRITE_FIELD_MAP = (
+    ("sequence", "seq"),
+    ("duration", "duration"),
+    ("shot_kind", "shot_kind"),
+    ("shot_type", "shot_type"),
+    ("camera_angle", "camera_angle"),
+    ("camera_movement", "camera_movement"),
+    ("dialogue", "dialogue"),
+    ("shot_purpose", "shot_purpose"),
+    ("emotion", "emotion"),
+    ("sound_notes", "soundscape"),
+    ("start_state", "start_state"),
+    ("end_state", "end_state"),
+)
 
 
 def _issue(issues: list[dict], level: str, code: str, path: str,
@@ -229,10 +253,45 @@ def _compare_existing(issues: list[dict], plan_shots: list[dict],
         "removed_shot_ids": sorted(existing_ids - reused_plan_shot_ids),
         "sequence_conflicts": sequence_conflicts,
         "locked_conflicts": locked_conflicts,
+        "field_changes": _field_changes(plan_shots, adapted, existing_by_id),
         "duration_total_seconds": sum(
             int(shot.get("duration") or 0) for shot in adapted
         ),
     }
+
+
+def _field_changes(plan_shots: list[dict], adapted: list[dict],
+                   existing_by_id: dict[str, Shot]) -> list[dict]:
+    """写入前的逐镜头字段差异：与 ``apply`` 实际写入口径保持一致。
+
+    - 只比较规划显式提供的字段（``_write_fields`` 决定），未提供的字段不会出现在差异里；
+    - ``will_skip`` 表示该镜头因已锁定且关键字段（seq/duration/shot_kind）变化，
+      写入时会被整体跳过，与 ``skipped_locked`` 判定一致；
+    - 只读：不写库。
+    """
+    plan_by_id = {
+        shot.get("shot_id"): shot for shot in plan_shots if isinstance(shot, dict)
+    }
+    changes: list[dict] = []
+    for adapted_shot in adapted:
+        shot_id = adapted_shot.get("id")
+        previous = existing_by_id.get(shot_id)
+        plan_shot = plan_by_id.get(shot_id)
+        if previous is None or plan_shot is None:
+            continue
+        fields = _write_fields(plan_shot, adapted_shot)
+        diffs = [
+            {"field": column, "from": getattr(previous, column), "to": value}
+            for column, value in fields.items()
+            if getattr(previous, column) != value
+        ]
+        if not diffs:
+            continue
+        will_skip = bool(previous.keyframe_confirmed) and any(
+            diff["field"] in ("seq", "duration", "shot_kind") for diff in diffs
+        )
+        changes.append({"shot_id": shot_id, "will_skip": will_skip, "fields": diffs})
+    return changes
 
 
 def _adapt_shot(shot: dict, scene: Scene | None, character_ids: list[str],
@@ -407,4 +466,196 @@ def validate_storyboard_plan(db: Session, script_version: ScriptVersion, *,
             ],
         },
         "comparison": comparison,
+    }
+
+
+def _write_fields(plan_shot: dict, adapted: dict) -> dict:
+    """规划文档 → Shot 列：只取显式提供的字段，缺省项保留既有值。"""
+    fields: dict = {}
+    for source, column in _WRITE_FIELD_MAP:
+        if source in plan_shot:
+            fields[column] = plan_shot[source]
+    if "character_asset_ids" in plan_shot:
+        fields["character_id"] = adapted["character_id"]
+    if "prop_asset_ids" in plan_shot:
+        fields["props"] = adapted["props"]
+    if "beat_ids" in plan_shot:
+        fields["beats"] = plan_shot["beat_ids"]
+    # 空提示词不覆盖既有值：缺失/为空时交给生产编译层，避免清空已编译 Prompt
+    if plan_shot.get("image_prompt"):
+        fields["image_prompt"] = plan_shot["image_prompt"]
+    return fields
+
+
+def apply_storyboard_plan(db: Session, script_version: ScriptVersion, *,
+                          project_id: str, plan: object) -> dict:
+    """把已校验的分镜规划写入既有 Shot 表（安全 upsert）。
+
+    安全边界：
+    - 规划存在 error 级问题时不写入，返回 ``applied=false``；
+    - 已确认锁定镜头的 seq/duration/shot_kind 不被覆盖，列入 ``skipped_locked``；
+    - 规划未包含的旧镜头不删除，列入 ``orphan_shot_ids``；
+    - 规划外的字段、参考槽位、资产计划与生成任务均不改动。
+    """
+    preview = validate_storyboard_plan(db, script_version,
+                                       project_id=project_id, plan=plan)
+    base = {
+        "algorithm": PLAN_APPLY_ALGORITHM,
+        "mode": "upsert",
+        "script_version_id": script_version.id,
+        "script_version": script_version.version,
+        "issues": preview["issues"],
+        "coverage": preview["coverage"],
+        "comparison": preview["comparison"],
+    }
+    empty = {
+        "applied": False,
+        "created_shot_ids": [],
+        "updated_shot_ids": [],
+        "unchanged_shot_ids": [],
+        "skipped_locked": [],
+        "orphan_shot_ids": [],
+        "conflicts": [],
+    }
+    if not preview["valid"]:
+        return {**base, **empty, "reason": "validation_failed"}
+
+    plan_version = plan.get("plan_version") if isinstance(plan, dict) else None
+    if not isinstance(plan_version, int) or plan_version < 1:
+        return {**base, **empty, "reason": "missing_plan_version"}
+
+    plan_shots = {
+        shot["shot_id"]: shot
+        for shot in plan["shots"] if isinstance(shot, dict)
+    }
+    adapted_by_id = {shot["id"]: shot for shot in preview["adapted_shots"]}
+    involved_scene_ids = {shot["scene_id"] for shot in preview["adapted_shots"]}
+    existing_by_id = {
+        shot.id: shot
+        for shots in _existing_shots(db, project_id).values()
+        for shot in shots
+    }
+
+    # 写入前统一检查：ID 合法性/跨项目冲突、镜头换场、与保留镜头的序号冲突
+    problems: list[dict] = []
+    new_ids = [shot_id for shot_id in adapted_by_id if shot_id not in existing_by_id]
+    for shot_id in adapted_by_id:
+        if not isinstance(shot_id, str) or not shot_id.strip() or len(shot_id) > MAX_SHOT_ID_LENGTH:
+            problems.append({"code": "invalid_shot_id", "shot_id": shot_id})
+    if new_ids:
+        foreign_ids = [
+            row[0] for row in db.query(Shot.id).filter(Shot.id.in_(new_ids)).all()
+        ]
+        for shot_id in foreign_ids:
+            problems.append({"code": "shot_id_conflict", "shot_id": shot_id})
+    for shot_id, adapted in adapted_by_id.items():
+        target = existing_by_id.get(shot_id)
+        if target is not None and target.scene_id != adapted["scene_id"]:
+            problems.append({"code": "scene_change_not_supported", "shot_id": shot_id})
+
+    updates: list[tuple[Shot, dict]] = []
+    creates: list[tuple[str, dict, dict]] = []
+    skipped_locked: list[dict] = []
+    unchanged: list[str] = []
+    for shot_id, adapted in adapted_by_id.items():
+        plan_shot = plan_shots[shot_id]
+        target = existing_by_id.get(shot_id)
+        if target is None:
+            creates.append((shot_id, plan_shot, adapted))
+            continue
+        changed_locked = [
+            field for field in ("seq", "duration", "shot_kind")
+            if getattr(target, field) != adapted.get(field)
+        ]
+        if target.keyframe_confirmed and changed_locked:
+            skipped_locked.append({"shot_id": shot_id, "fields": changed_locked})
+            continue
+        fields = _write_fields(plan_shot, adapted)
+        if all(getattr(target, column) == value for column, value in fields.items()):
+            unchanged.append(shot_id)
+            continue
+        updates.append((target, fields))
+
+    # 序号冲突：最终会占用的 (scene, episode, seq) 不能与保留镜头重叠
+    updated_ids = {target.id for target, _ in updates}
+    preserved = [
+        shot for shot in existing_by_id.values()
+        if shot.scene_id in involved_scene_ids and shot.id not in updated_ids
+    ]
+    preserved_keys = {
+        (shot.scene_id, shot.episode, shot.seq): shot.id for shot in preserved
+    }
+    final_keys: dict[tuple[str, int, int], str] = {}
+    for shot_id, _, adapted in creates:
+        final_keys[(adapted["scene_id"], adapted["episode"], adapted["seq"])] = shot_id
+    for target, fields in updates:
+        final_keys[(target.scene_id, target.episode, fields.get("seq", target.seq))] = target.id
+    conflicts = [
+        {
+            "scene_id": scene_id,
+            "episode": episode,
+            "seq": seq,
+            "shot_id": shot_id,
+            "conflicts_with": preserved_keys[(scene_id, episode, seq)],
+        }
+        for (scene_id, episode, seq), shot_id in final_keys.items()
+        if (scene_id, episode, seq) in preserved_keys
+    ]
+    if problems or conflicts:
+        reason = "shot_id_conflict" if any(
+            item["code"] == "shot_id_conflict" for item in problems
+        ) else ("sequence_conflict" if conflicts else "invalid_shot_id")
+        return {**base, **empty, "reason": reason,
+                "problems": problems, "conflicts": conflicts}
+
+    orphan_shot_ids = sorted(
+        shot.id for shot in existing_by_id.values()
+        if shot.scene_id in involved_scene_ids and shot.id not in adapted_by_id
+    )
+
+    try:
+        # 两阶段序号：先把要移动的镜头置为负序号，避开 (scene, episode, seq) 唯一约束
+        for target, fields in updates:
+            if fields.get("seq", target.seq) != target.seq:
+                target.seq = -(abs(target.seq) or 1)
+        if updates:
+            db.flush()
+        for target, fields in updates:
+            for column, value in fields.items():
+                setattr(target, column, value)
+        for shot_id, plan_shot, adapted in creates:
+            payload = {
+                "id": shot_id,
+                "scene_id": adapted["scene_id"],
+                "episode": adapted["episode"],
+                "seq": adapted["seq"],
+                "duration": adapted["duration"],
+                "shot_kind": adapted["shot_kind"],
+                "status": "pending",
+                "character_id": adapted["character_id"],
+                "props": adapted["props"],
+                "beats": adapted["beats"],
+            }
+            payload.update(_write_fields(plan_shot, adapted))
+            db.add(Shot(**payload))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        **base,
+        "applied": True,
+        "created_shot_ids": sorted(shot_id for shot_id, _, _ in creates),
+        "updated_shot_ids": sorted(target.id for target, _ in updates),
+        "unchanged_shot_ids": sorted(unchanged),
+        "skipped_locked": sorted(skipped_locked, key=lambda item: item["shot_id"]),
+        "orphan_shot_ids": orphan_shot_ids,
+        "conflicts": [],
+        "notes": [
+            "仅写入规划显式提供的字段，缺省字段保留既有值",
+            "锁定镜头的 seq/duration/shot_kind 未被覆盖",
+            "规划未包含的旧镜头未删除，需人工确认后再处理",
+            "未重建资产计划、未触发生成任务",
+        ],
     }

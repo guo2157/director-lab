@@ -220,6 +220,283 @@ def test_confirmed_shot_reuse_is_reported_and_not_overwritten(client):
         session.close()
 
 
+def test_validate_reports_field_changes_before_apply(client):
+    """写入前差异：只列规划显式字段的变化，锁定镜头关键字段标记 will_skip。"""
+    context = _setup(client)
+    session = _session()
+    try:
+        session.add_all([
+            Shot(id="sht_plan_1", scene_id=context["scenes"]["classroom"], episode=1,
+                 seq=1, shot_kind="visual", duration=2, props=[], beats=[]),
+            Shot(id="sht_plan_2", scene_id=context["scenes"]["corridor"], episode=1,
+                 seq=1, shot_kind="narration", duration=3, keyframe_confirmed=True),
+        ])
+        session.commit()
+    finally:
+        session.close()
+
+    plan = _valid_plan(context)
+    plan["shots"][0]["dialogue"] = "你来了。"
+    plan["shots"][1]["duration"] = 4
+
+    body = _post_plan(client, context, plan)
+    changes = {item["shot_id"]: item for item in body["comparison"]["field_changes"]}
+    assert set(changes) == {"sht_plan_1", "sht_plan_2"}
+
+    first = {item["field"]: item for item in changes["sht_plan_1"]["fields"]}
+    assert first["duration"] == {"field": "duration", "from": 2, "to": 5}
+    assert first["props"] == {"field": "props", "from": [], "to": ["钥匙"]}
+    assert first["dialogue"] == {"field": "dialogue", "from": None, "to": "你来了。"}
+    assert changes["sht_plan_1"]["will_skip"] is False
+
+    second = {item["field"]: item for item in changes["sht_plan_2"]["fields"]}
+    assert second["duration"] == {"field": "duration", "from": 3, "to": 4}
+    assert changes["sht_plan_2"]["will_skip"] is True
+
+    # 校验只读：既有镜头字段未被改动
+    session = _session()
+    try:
+        stored = session.get(Shot, "sht_plan_1")
+        assert stored.duration == 2
+        assert stored.dialogue is None
+        assert session.get(Shot, "sht_plan_2").duration == 3
+    finally:
+        session.close()
+
+
+def test_validate_omits_unchanged_fields_from_diff(client):
+    """规划未显式提供的字段不进入差异，值相同的字段也不进入。"""
+    context = _setup(client)
+    session = _session()
+    try:
+        session.add(Shot(
+            id="sht_plan_1", scene_id=context["scenes"]["classroom"], episode=1,
+            seq=1, shot_kind="visual", duration=5,
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    plan = _valid_plan(context)
+    plan["shots"] = [plan["shots"][0]]
+    body = _post_plan(client, context, plan)
+
+    changes = {item["shot_id"]: item for item in body["comparison"]["field_changes"]}
+    fields = {item["field"] for item in changes["sht_plan_1"]["fields"]}
+    # 序号/时长/镜头类型与既有值一致；规划未提供 dialogue/机位等，均不进入差异
+    assert "seq" not in fields
+    assert "duration" not in fields
+    assert "shot_kind" not in fields
+    assert "dialogue" not in fields
+    assert fields == {"character_id", "props", "beats"}
+
+
+def _post_apply(client: TestClient, context: dict, plan: dict):
+    return client.post(
+        f"/api/projects/{context['project_id']}/script-versions/"
+        f"{context['script_version_id']}/storyboard-plan/apply",
+        json={"plan": plan},
+    )
+
+
+def test_apply_creates_shots_from_valid_plan(client):
+    context = _setup(client)
+    plan = _valid_plan(context)
+    plan["shots"][0]["image_prompt"] = "教室全景，林晓推门"
+
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["applied"] is True
+    assert body["created_shot_ids"] == ["sht_plan_1", "sht_plan_2"]
+    assert body["updated_shot_ids"] == []
+    assert body["orphan_shot_ids"] == []
+    assert body["skipped_locked"] == []
+
+    session = _session()
+    try:
+        first = session.get(Shot, "sht_plan_1")
+        assert first.scene_id == context["scenes"]["classroom"]
+        assert first.episode == 1
+        assert first.seq == 1
+        assert first.status == "pending"
+        assert first.props == ["钥匙"]
+        assert first.beats == plan["shots"][0]["beat_ids"]
+        assert first.image_prompt == "教室全景，林晓推门"
+        assert first.video_prompt is None
+        assert session.query(Shot).count() == 2
+    finally:
+        session.close()
+
+
+def test_apply_rejects_invalid_plan_without_writing(client):
+    context = _setup(client)
+    plan = _valid_plan(context)
+    plan["shots"][0]["scene_id"] = "scn_missing"
+
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "storyboard_plan_invalid"
+    assert any(issue["level"] == "error" for issue in detail["issues"])
+
+    session = _session()
+    try:
+        assert session.query(Shot).count() == 0
+    finally:
+        session.close()
+
+
+def test_apply_requires_plan_version(client):
+    context = _setup(client)
+    plan = _valid_plan(context)
+    plan.pop("plan_version")
+
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "storyboard_plan_invalid"
+
+    session = _session()
+    try:
+        assert session.query(Shot).count() == 0
+    finally:
+        session.close()
+
+
+def test_apply_skips_locked_shot_fields(client):
+    context = _setup(client)
+    session = _session()
+    try:
+        session.add(Shot(
+            id="sht_plan_1", scene_id=context["scenes"]["classroom"], episode=1,
+            seq=1, shot_kind="visual", duration=3, keyframe_confirmed=True,
+            image_prompt="已确认的分镜图提示词",
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    response = _post_apply(client, context, _valid_plan(context))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["skipped_locked"] == [
+        {"shot_id": "sht_plan_1", "fields": ["duration"]},
+    ]
+    assert "sht_plan_1" not in body["updated_shot_ids"]
+    assert body["created_shot_ids"] == ["sht_plan_2"]
+
+    session = _session()
+    try:
+        stored = session.get(Shot, "sht_plan_1")
+        assert stored.duration == 3
+        assert stored.image_prompt == "已确认的分镜图提示词"
+    finally:
+        session.close()
+
+
+def test_apply_updates_existing_shot_and_keeps_orphans(client):
+    context = _setup(client)
+    session = _session()
+    try:
+        session.add_all([
+            Shot(id="sht_plan_1", scene_id=context["scenes"]["classroom"], episode=1,
+                 seq=1, shot_kind="visual", duration=2, props=[], beats=[]),
+            Shot(id="sht_old", scene_id=context["scenes"]["classroom"], episode=1,
+                 seq=9, shot_kind="narration", duration=2),
+        ])
+        session.commit()
+    finally:
+        session.close()
+
+    response = _post_apply(client, context, _valid_plan(context))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "sht_plan_1" in body["updated_shot_ids"]
+    assert body["orphan_shot_ids"] == ["sht_old"]
+
+    session = _session()
+    try:
+        stored = session.get(Shot, "sht_plan_1")
+        assert stored.duration == 5
+        assert stored.props == ["钥匙"]
+        assert session.get(Shot, "sht_old") is not None
+    finally:
+        session.close()
+
+
+def test_apply_handles_sequence_swap(client):
+    context = _setup(client)
+    beat = next(
+        item for item in context["structure"]["beats"]
+        if item["scene_id"] == context["structure"]["scenes"][0]["scene_id"]
+    )
+    plan = {
+        "plan_version": 1,
+        "shots": [
+            {
+                "shot_id": "sht_a", "scene_id": context["scenes"]["classroom"],
+                "beat_ids": [beat["beat_id"]], "sequence": 2, "duration": 3,
+                "shot_kind": "visual", "visual_description": "教室空镜",
+                "source_block_ids": beat["source_block_ids"],
+            },
+            {
+                "shot_id": "sht_b", "scene_id": context["scenes"]["classroom"],
+                "beat_ids": [beat["beat_id"]], "sequence": 1, "duration": 3,
+                "shot_kind": "visual", "visual_description": "林晓推门",
+                "source_block_ids": beat["source_block_ids"],
+            },
+        ],
+    }
+    session = _session()
+    try:
+        session.add_all([
+            Shot(id="sht_a", scene_id=context["scenes"]["classroom"], episode=1,
+                 seq=1, shot_kind="visual", duration=3),
+            Shot(id="sht_b", scene_id=context["scenes"]["classroom"], episode=1,
+                 seq=2, shot_kind="visual", duration=3),
+        ])
+        session.commit()
+    finally:
+        session.close()
+
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body["updated_shot_ids"]) == {"sht_a", "sht_b"}
+
+    session = _session()
+    try:
+        assert session.get(Shot, "sht_a").seq == 2
+        assert session.get(Shot, "sht_b").seq == 1
+    finally:
+        session.close()
+
+
+def test_apply_rejects_sequence_conflict_with_orphan(client):
+    context = _setup(client)
+    session = _session()
+    try:
+        session.add(Shot(
+            id="sht_old", scene_id=context["scenes"]["classroom"], episode=1,
+            seq=1, shot_kind="visual", duration=2,
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    response = _post_apply(client, context, _valid_plan(context))
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "storyboard_plan_conflict"
+    assert detail["conflicts"][0]["conflicts_with"] == "sht_old"
+
+    session = _session()
+    try:
+        assert session.query(Shot).count() == 1
+    finally:
+        session.close()
+
+
 def test_plan_api_enforces_project_isolation(client):
     context = _setup(client)
     other_project = client.post(
@@ -239,3 +516,6 @@ def test_plan_api_enforces_project_isolation(client):
         json={"plan": _valid_plan(context)},
     ).status_code == 404
     assert client.post(url, json={"plan": _valid_plan(context)}).status_code == 200
+
+    assert _post_apply(client, {**context, "project_id": other_project},
+                       _valid_plan(context)).status_code == 404

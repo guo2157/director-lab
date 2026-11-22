@@ -1,6 +1,7 @@
 import { computed, type ComputedRef } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { getCurrentScript, getParseStatus, getProject, getScriptAgentStatus } from '@/api/projects'
+import { getStageReadiness } from '@/api/stageReadiness'
 import { stageIndex } from '@/constants/stages'
 
 /**
@@ -143,6 +144,21 @@ export function useProjectFlow(projectId: ComputedRef<string>, routeName: Comput
   const currentStage = computed(() => project.value?.current_stage ?? '')
   const currentStageIndex = computed(() => stageIndex(currentStage.value))
 
+  /**
+   * 分镜图阶段是否已就绪：左栏「分镜看板」的解锁条件。
+   *
+   * 为什么必须读后端接口而不能只看 current_stage：分镜图阶段的门槛是
+   * 「至少 1 张分镜图」（后端 `_STAGE_MIN_DONE`），而 current_stage 只在
+   * 全部关键帧完成后才推进到 clips。只用 current_stage 会让左栏显示
+   * 「已锁定：请先完成分镜图」，与页内「去分镜看板」按钮已可点击相互矛盾。
+   * 复用同一接口保证两处口径一致。
+   */
+  const { data: imagesReadiness } = useQuery({
+    queryKey: computed(() => ['stage-readiness', projectId.value, 'storyboard_images']),
+    queryFn: () => getStageReadiness(projectId.value, 'storyboard_images'),
+    enabled,
+  })
+
   /** 剧本步骤完成：存在已保存版本（解析一律以已保存版本为准） */
   const scriptSaved = computed(() => Boolean(script.value?.exists && script.value.script_version_id))
 
@@ -187,11 +203,17 @@ export function useProjectFlow(projectId: ComputedRef<string>, routeName: Comput
       // 前置步骤未完成 → 锁定。按定义顺序遍历，前置项必然已计算。
       // 解析特殊处理：继续解析 / 重新解析时它的展示态是 running，但库里
       // 已有上一次的产出，不能让资产库及之后重新变锁（否则解析期间无法离开本页）。
-      const locked = def.requires
-        ? def.requires === 'parse'
-          ? !parseDone.value
-          : out[def.requires].status !== 'done'
-        : false
+      // 分镜图特殊处理：门槛是「≥1 张」（后端判定），不能只看 current_stage，
+      // 否则部分生成时左栏会误锁分镜看板（详见 imagesReadiness 注释）。
+      const prevDone =
+        def.requires === 'parse'
+          ? parseDone.value
+          : def.requires === 'storyboard-images'
+            ? imagesReadiness.value?.ready === true
+            : def.requires
+              ? out[def.requires].status === 'done'
+              : true
+      const locked = def.requires ? !prevDone : false
       let status: StepStatus
       if (locked) {
         status = 'locked'

@@ -554,14 +554,18 @@ const stageTransition = useStageTransition({
   projectId: () => projectId.value,
   stage: 'storyboard_images',
   to: (pid) => `/project/${pid}/storyboard`,
-  notReadyTitle: '分镜图片尚未全部生成完成',
+  notReadyTitle: '尚未生成任何分镜图片',
   confirmTitle: '确认进入分镜看板？',
   confirmDescription: [
-    '所有分镜图片已经生成完成。',
+    '分镜图片已生成，可以进入分镜看板。',
     '请确认分镜图片的构图、人物形象、角色站位、场景和道具均没有问题。',
     '确认后将进入分镜看板，开始生成分镜视频。',
   ].join('\n'),
   confirmText: '确认，进入分镜看板',
+  // 分镜图阶段放宽为「≥1 张即可进入」，未生成的镜头需明确告知影响：
+  // 分镜看板批量出视频只提交已有分镜图的镜头，其余会被跳过。
+  partialHint: (blockers) =>
+    `还有 ${blockers.length} 镜尚未生成分镜图，进入后这些镜头暂不能生成视频`,
   notify: { warning: (m) => message.warning(m), error: (m) => message.error(m) },
   push: (path) => router.push(path),
 })
@@ -821,6 +825,7 @@ function onFirstGenerate(shot: Shot, prompt: string) {
       :done="stageTransition.readiness.value.done"
       :blockers="stageTransition.blockers.value"
       :ready="stageTransition.readiness.value.ready"
+      :partial-hint="stageTransition.partialHint.value"
       :loading="stageTransition.loading.value"
       @confirm="stageTransition.confirm()"
       @cancel="stageTransition.cancel()"

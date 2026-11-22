@@ -280,6 +280,7 @@ def preview_project_impact(db: Session, project_id: str) -> dict:
     asset_by_id, lineage_current = _asset_context(db, project_id)
 
     stale_roots: set[str] = set()
+    markable_by_root: dict[str, int] = {}
     for edge in graph["edges"]:
         source_node = nodes.get(edge["source"])
         if source_node is None:
@@ -290,6 +291,8 @@ def preview_project_impact(db: Session, project_id: str) -> dict:
         elif edge["source_version"] is not None and current_version is not None \
                 and edge["source_version"] != current_version:
             stale_roots.add(edge["source"])
+            # 可写失效标记的边：仍是 current，但引用了旧版本
+            markable_by_root[edge["source"]] = markable_by_root.get(edge["source"], 0) + 1
 
     affected, _ = _collect_affected(
         graph, nodes, sorted(stale_roots), stale_roots, asset_by_id, lineage_current,
@@ -302,6 +305,7 @@ def preview_project_impact(db: Session, project_id: str) -> dict:
             {
                 "key": key, "type": nodes[key]["type"], "id": nodes[key]["id"],
                 "version": nodes[key]["version"],
+                "markable_edge_count": markable_by_root.get(key, 0),
             }
             for key in sorted(stale_roots) if key in nodes
         ],

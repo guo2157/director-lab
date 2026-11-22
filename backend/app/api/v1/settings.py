@@ -529,10 +529,31 @@ def health_check() -> dict:
     except Exception:
         disk_ok = True
 
+    # worker 真实状态：读调度进程写下的心跳文件，而不是硬编码 "ok"。
+    #
+    # 历史问题：这里曾固定返回 "ok"，worker 未启动时任务会一直停在 queued，
+    # 而健康检查依然报 healthy，用户和前端都无从判断「后端没在消费任务」。
+    # 判定标准：心跳文件存在且距今不超过 worker_heartbeat_stale_seconds。
+    worker_status = "unknown"
+    worker_last_beat = None
+    try:
+        from app.worker.scheduler import heartbeat_path
+        hb = heartbeat_path()
+        if hb.exists():
+            beat = float(hb.read_text(encoding="utf-8").strip() or 0)
+            worker_last_beat = beat
+            stale_after = float(getattr(s, "worker_heartbeat_stale_seconds", 120.0) or 120.0)
+            worker_status = "ok" if (time.time() - beat) <= stale_after else "stale"
+        else:
+            worker_status = "not_running"
+    except Exception:
+        worker_status = "unknown"
+
     # 数据库不可用视为 down；其余任一依赖异常为 degraded（API.md：healthy/degraded/down 三态）
+    # worker 不是 down 的依据：它不参与 API 可用性，只影响任务消费，故仅降级。
     if not db_ok:
         status = "down"
-    elif all([comfyui_ok, disk_ok]):
+    elif all([comfyui_ok, disk_ok, worker_status == "ok"]):
         status = "healthy"
     else:
         status = "degraded"
@@ -541,6 +562,7 @@ def health_check() -> dict:
         "database": "ok" if db_ok else "error",
         "comfyui": "ok" if comfyui_ok else "unreachable",
         "comfyui_instances": comfyui_instances_status,
-        "worker": "ok",
+        "worker": worker_status,
+        "worker_last_beat": worker_last_beat,
         "disk": "ok" if disk_ok else "low",
     }

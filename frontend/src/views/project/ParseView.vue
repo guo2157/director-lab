@@ -303,6 +303,26 @@ const { data: parseStatusData } = useQuery({
 })
 const parseStatus = computed(() => parseStatusData.value ?? null)
 /**
+ * Agent 任务状态：必须声明在 `parsePersisted` / `needsPersistPoll` 之前。
+ *
+ * vue-query 会在 setup 阶段同步求值 `refetchInterval`（函数形式），而
+ * `characters` / `props` 两个查询的 refetchInterval 会调用 needsPersistPoll →
+ * parsePersisted → agentStatusData。若本声明留在文件末尾，客户端路由进入时
+ * query 缓存已有 parse-status，`statusTotalEpisodes === 0` 的短路不再生效，
+ * 于是访问到尚未初始化的 `agentStatusData`，抛
+ * `ReferenceError: Cannot access 'fe' before initialization`（TDZ），
+ * 整页渲染中断 —— 表现就是「从剧本页点去解析，解析页空白，刷新才正常」。
+ * 全量刷新时缓存为空、短路生效，所以旧代码没暴露这个问题。
+ */
+const { data: agentStatusData } = useQuery({
+  queryKey: computed(() => ['script-agent-status', projectId.value]),
+  queryFn: () => getScriptAgentStatus(projectId.value),
+  enabled: computed(() => !!projectId.value),
+  // 始终轮询：后端可能还有另一个 running 任务（连点两次会留下 running + queued）。
+  // 不能因为「已持有 jobId」就停掉轮询，否则永远不会发现真正的 running 任务。
+  refetchInterval: 4000,
+})
+/**
  * 集号列表：唯一来源是后端锁定的总集数 + 已有解析记录的最大集号。
  * 评估页下线后前端不再持有「用户选中集」（scriptFlow.selectedEpisodes 已移除），
  * 解析范围由 Agent 自己决定，页面只负责把结果按集展示。
@@ -535,7 +555,7 @@ function formatResult(r: Record<string, any> | null | undefined): string {
       lines.push(`  ▸ ${sc.title || '未命名'}${sc.time_note ? '（' + sc.time_note + '）' : ''} ${epLabel}  ${shots.length} 镜`)
       for (const sh of shots) {
         const prefix = sh.shot_no ? `#${sh.shot_no}` : ''
-        lines.push(`     ${prefix} ${sh.description || ''}`.trimEnd())
+        lines.push(`     ${prefix} ${sh.shot_purpose || sh.description || ''}`.trimEnd())
       }
     }
     lines.push('')
@@ -783,7 +803,7 @@ const allParseShots = computed<ParseShotRow[]>(() => {
         shotNo: (sh?.shot_no ?? sh?.seq ?? '') as number | string,
         shotType: String(sh?.shot_type ?? ''),
         duration: sh?.duration == null ? null : Number(sh.duration),
-        desc: String(sh?.description ?? ''),
+        desc: String(sh?.shot_purpose ?? sh?.description ?? ''),
         props: Array.isArray(sh?.props) ? sh.props.map(String) : [],
         who: String(sh?.character_id ?? sh?.speaker ?? ''),
         kind: String(sh?.shot_kind ?? ''),
@@ -1084,15 +1104,8 @@ const overviewStats = computed(() => {
  * 依赖 GET /projects/{id}/script-agent/status（返回最近一个 script_agent 任务的 id/status）。
  * 只恢复「仍在排队/运行」的任务：已结束的任务不接管，避免页面重新进入失败态展示，
  * 失败信息由集级解析状态 + 失败面板负责（单一事实来源）。
+ * 查询本体已上移到 parsePersisted 之前声明，此处只保留恢复逻辑。
  */
-const { data: agentStatusData } = useQuery({
-  queryKey: computed(() => ['script-agent-status', projectId.value]),
-  queryFn: () => getScriptAgentStatus(projectId.value),
-  enabled: computed(() => !!projectId.value),
-  // 始终轮询：后端可能还有另一个 running 任务（连点两次会留下 running + queued）。
-  // 不能因为「已持有 jobId」就停掉轮询，否则永远不会发现真正的 running 任务。
-  refetchInterval: 4000,
-})
 watch(
   () => agentStatusData.value,
   (s) => {

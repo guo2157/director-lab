@@ -1,7 +1,5 @@
-/** 依赖图只读查询（Phase 3）：影响预演接口封装。
- * 后端服务为纯只读：不标记失效、不删除产物、不自动重生成。
- */
-import { get } from './client'
+/** 依赖图查询（Phase 3）：影响预演为只读；仅 `invalidateDependencyRefs` 是显式写入。 */
+import { get, post } from './client'
 
 export type DependencyChangeStatus =
   | 'redo_required'
@@ -70,6 +68,8 @@ export interface DependencyProjectImpactPreview {
     type: string
     id: string
     version?: number | null
+    /** 仍是 current 但引用旧版本、可显式标记失效的依赖边数 */
+    markable_edge_count: number
   }>
   affected: DependencyAffectedNode[]
   diagnostics: Array<Record<string, unknown>>
@@ -142,5 +142,97 @@ export function getDependencyImpactPreview(
 export function getProjectImpactPreview(projectId: string): Promise<DependencyProjectImpactPreview> {
   return get<DependencyProjectImpactPreview>(
     `/projects/${projectId}/dependency-graph/impact-preview`,
+  )
+}
+
+/** 工作流版本影响（Phase 3 / 6.5）：只读比对历史任务版本与当前工作流版本 */
+export type WorkflowImpactStatus =
+  | 'workflow_changed'
+  | 'workflow_disabled'
+  | 'unknown_workflow_version'
+
+export interface WorkflowImpactItem {
+  job_id: string
+  job_type: string
+  shot_id: string | null
+  scene_id: string | null
+  scene_title: string | null
+  episode: number | null
+  seq: number | null
+  workflow_id: string
+  workflow_name: string | null
+  job_workflow_version: number
+  current_workflow_version: number | null
+  workflow_status: string | null
+  change_status: WorkflowImpactStatus
+  has_output: boolean
+  output_asset: {
+    asset_id: string
+    asset_type: string
+    name: string
+    version: number
+    validity: string
+  } | null
+}
+
+export interface WorkflowImpactPreview {
+  algorithm: string
+  policy: DependencyImpactPreview['policy']
+  items: WorkflowImpactItem[]
+  summary: {
+    checked_job_count: number
+    affected_job_count: number
+    affected_shot_count: number
+    workflow_changed: number
+    workflow_disabled: number
+    unknown_workflow_version: number
+  }
+}
+
+export const WORKFLOW_IMPACT_LABEL: Record<WorkflowImpactStatus, string> = {
+  workflow_changed: '工作流版本已更新',
+  workflow_disabled: '工作流已停用',
+  unknown_workflow_version: '工作流版本未知',
+}
+
+/** 工作流版本影响预检：只读，不标记失效、不触发重生成 */
+export function getWorkflowImpact(projectId: string): Promise<WorkflowImpactPreview> {
+  return get<WorkflowImpactPreview>(`/projects/${projectId}/workflow-impact`)
+}
+
+/** 显式失效标记结果：只写依赖边，不重生成、不删除产物 */
+export interface DependencyInvalidateResult {
+  algorithm: string
+  policy: DependencyImpactPreview['policy']
+  root: {
+    type: string
+    id: string
+    version: number | null
+    source_ids: string[]
+  }
+  marked: Array<{
+    edge_id: string
+    source_type: string
+    source_id: string
+    source_version: number
+    target_type: string
+    target_id: string
+    role: string | null
+  }>
+  summary: {
+    marked: number
+    already_stale: number
+    kept_current: number
+  }
+}
+
+/** 标记失效：把该来源下游仍引用旧版本的依赖边置为 stale（用户显式确认后调用） */
+export function invalidateDependencyRefs(
+  projectId: string,
+  nodeType: string,
+  nodeId: string,
+): Promise<DependencyInvalidateResult> {
+  return post<DependencyInvalidateResult>(
+    `/projects/${projectId}/dependency-graph/${nodeType}/${nodeId}/invalidate`,
   )
 }

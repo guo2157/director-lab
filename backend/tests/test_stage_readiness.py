@@ -4,11 +4,11 @@
 
 分镜图阶段（storyboard_images）：
 1. 所有分镜图片生成完成 → ready，允许确认进入分镜看板
-2. 缺少一张分镜图 → 阻止跳转，missing 里指出该镜
-3. 分镜图正在生成且无有效版本 → 阻止跳转
-4. 分镜图生成失败且无有效旧图 → 阻止跳转
-5. 分镜图片文件不存在 → 阻止跳转
-6. 存在失效图片（superseded 且无 current）→ 阻止跳转
+2. 至少 1 张已生成即可进入（2026-11 放宽）；缺失镜头进 blockers 明细，不再阻断
+3. 一张都没有 → 阻止跳转
+4. 有已生成图 + 其它镜在途/失败 → 放行，在途与失败镜头进明细
+5. 分镜图片文件不存在 → 该镜不计入 done
+6. 存在失效图片（superseded 且无 current）→ 该镜按未生成处理
 7. 项目无镜头 → 阻止跳转
 
 分镜视频阶段（storyboard_videos）：
@@ -167,7 +167,8 @@ def test_images_ready_when_all_generated(client, tmp_path):
     assert r.blockers == []
 
 
-def test_images_blocked_when_one_missing(client, tmp_path):
+def test_images_ready_with_partial_when_some_missing(client, tmp_path):
+    """分镜图放宽为「≥1 张即可进入」：缺 1 张时仍放行，但缺失镜头必须出现在明细里。"""
     pid = _project(client)
     scn = _scene(client, pid)
     shots = _shots(client, scn["id"], 3)
@@ -180,15 +181,33 @@ def test_images_blocked_when_one_missing(client, tmp_path):
     from app.services.stage_readiness import check_storyboard_images_ready
 
     r = _with_db(lambda db: check_storyboard_images_ready(db, pid))
-    assert r.ready is False
+    assert r.ready is True
     assert (r.total, r.done) == (3, 2)
-    assert len(r.missing) == 1
-    assert r.missing[0].shot_id == shots[2]
-    assert r.missing[0].reason == "shot_missing_asset"
-    assert r.missing[0].name == "第 1 集 第 3 镜"
+    assert len(r.blockers) == 1
+    assert r.blockers[0].shot_id == shots[2]
+    assert r.blockers[0].reason == "shot_missing_asset"
+    assert r.blockers[0].name == "第 1 集 第 3 镜"
+    # 放行不等于全部就绪：message 必须说明还差几镜、影响是什么
+    assert "2/3" in r.message
+    assert "1 镜未完成" in r.message
 
 
-def test_images_blocked_while_generating(client, tmp_path):
+def test_images_blocked_when_none_generated(client, tmp_path):
+    """一张都没有时仍然拦截：0 张进分镜看板没有任何可出视频的镜头。"""
+    pid = _project(client)
+    scn = _scene(client, pid)
+    _shots(client, scn["id"], 2)
+
+    from app.services.stage_readiness import check_storyboard_images_ready
+
+    r = _with_db(lambda db: check_storyboard_images_ready(db, pid))
+    assert r.ready is False
+    assert r.done == 0
+    assert "至少生成 1 张" in r.message
+
+
+def test_images_ready_while_other_shot_generating(client, tmp_path):
+    """有一张已生成、另一张在途：分镜图阶段放行（在途镜头按缺失明细返回）。"""
     pid = _project(client)
     scn = _scene(client, pid)
     shots = _shots(client, scn["id"], 2)
@@ -207,12 +226,13 @@ def test_images_blocked_while_generating(client, tmp_path):
     from app.services.stage_readiness import check_storyboard_images_ready
 
     r = _with_db(lambda db: check_storyboard_images_ready(db, pid))
-    assert r.ready is False
+    assert r.ready is True
     assert r.generating == 1
-    assert r.missing[0].reason == "shot_generating"
+    assert r.blockers[0].reason == "shot_generating"
 
 
-def test_images_blocked_on_failed_without_valid_version(client, tmp_path):
+def test_images_ready_on_failed_shot_with_other_generated(client, tmp_path):
+    """一张失败、一张成功：分镜图阶段放行，失败镜头进入后需自行重试。"""
     pid = _project(client)
     scn = _scene(client, pid)
     shots = _shots(client, scn["id"], 2)
@@ -231,9 +251,9 @@ def test_images_blocked_on_failed_without_valid_version(client, tmp_path):
     from app.services.stage_readiness import check_storyboard_images_ready
 
     r = _with_db(lambda db: check_storyboard_images_ready(db, pid))
-    assert r.ready is False
+    assert r.ready is True
     assert r.failed == 1
-    assert r.missing[0].reason == "shot_failed"
+    assert r.blockers[0].reason == "shot_failed"
 
 
 def test_images_blocked_when_file_missing(client, tmp_path):

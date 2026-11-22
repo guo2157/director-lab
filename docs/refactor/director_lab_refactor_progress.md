@@ -10,17 +10,17 @@
 |---|---|---|
 | 0 源码审计与基线 | 已完成 | 审计报告已落盘；后端、Ruff、前端基线已实测 |
 | 1 Script Intelligence 拆分 | 进行中 | 第一切片：原文区块索引；第三切片：结构分析契约、证据校验与只读 Shadow Run；语义分析仍需外部文档 |
-| 2 Storyboard Planning | 进行中 | 第一切片：规划契约校验、Shot 兼容 dry-run Adapter、覆盖/顺序/锁定冲突检查；未接规划生成与写入 |
-| 3 Dependency/Snapshot | 进行中 | 只读图查询与诊断；单节点影响预演已接入镜头/资产详情；项目级待处理总览已接入分镜看板；批量出图前已接依赖预检；生成快照已可只读查看并提示参考图版本差异；资产变更影响已有独立只读列表页；快照支持以历史版本为基准重做（仅传 `base_asset_id`）；不新建依赖表 |
+| 2 Storyboard Planning | 进行中 | 第一切片：规划契约校验、Shot 兼容 dry-run Adapter、覆盖/顺序/锁定冲突检查；第二切片：显式 `apply` 安全 upsert 写入 Shot；第三切片：看板「分镜规划」导入入口（校验预览 + 显式写入）；第四切片：写入前逐镜头字段差异预览（只读）；规划自动生成接入未做 |
+| 3 Dependency/Snapshot | 进行中 | 只读图查询与诊断；单节点影响预演已接入镜头/资产详情；项目级待处理总览已接入分镜看板；批量出图前已接依赖预检；生成快照已可只读查看并提示参考图版本差异；资产变更影响已有独立只读列表页；快照支持以历史版本为基准重做（仅传 `base_asset_id`）；工作流版本影响只读预检已接入资产变更影响页与看板角标；失效标记写路径已接入（复用 `DependencyRef.validity`，用户显式确认后写入）；不新建依赖表 |
 | 4 Reference Binding | 已有实现，溢出阻断已验证 | 七角色超六槽回归证明 Resolver 留痕、Compiler 报错、生成硬阻断 |
 | 5 Prompt/Workflow Compiler | 已有实现，未改 | 保持 D-24 单一编译层 |
 | 6 分镜图生产 | 已有实现，未改 | 保留单有效版本，不实施 Plan 通用候选图库建议 |
-| 7 Storyboard Board | 进行中 | 镜头详情只读影响面板 + 生成快照查看 + 看板级「依赖影响」卡 + 镜头卡片依赖影响常驻角标 + 分镜图批量出图前依赖预检 + 按依赖状态筛选 + 资产变更影响列表页（手动触发，不自动重做）+ 快照历史版本一键进入分镜图工作台重做 |
+| 7 Storyboard Board | 进行中 | 镜头详情只读影响面板 + 生成快照查看 + 看板级「依赖影响」卡 + 镜头卡片依赖影响常驻角标 + 工作流版本影响角标 + 分镜图批量出图前依赖预检 + 按依赖状态筛选 + 资产变更影响列表页（手动触发，不自动重做）+ 快照历史版本一键进入分镜图工作台重做 |
 | 8 连续性与视频依赖 | 已有实现，未改 | 不改 H3/Ref2VA/TTS/合成导出约定 |
 | 9 Job/Event/Recovery | 已有实现，未改 | 不新增任务框架 |
-| 10 前端全流程体验 | 进行中 | 依赖影响预演已接入镜头/资产详情、看板卡片标记、分镜图批量出图前预检与资产变更影响列表页；镜头详情可查看生成快照，并可一键带历史版本进入分镜图工作台重做；均由真实接口驱动，不做虚假状态 |
+| 10 前端全流程体验 | 进行中 | 依赖影响预演已接入镜头/资产详情、看板卡片标记、分镜图批量出图前预检与资产变更影响列表页；镜头详情可查看生成快照，并可一键带历史版本进入分镜图工作台重做；看板镜头卡片新增工作流版本影响角标；均由真实接口驱动，不做虚假状态 |
 | 11 DB/API 兼容 | 进行中 | 第一批 additive API，无 DB 迁移 |
-| 12 E2E 与验收 | 未开始 | mock 与真实环境验证分开记录 |
+| 12 E2E 与验收 | 进行中 | mock 与真实环境验证分开记录；样例 A（短剧本快速路径）、样例 B（中途失败 → 显式重试）、样例 C（多集复杂路径）已落地；测试矩阵与人工验收清单已落盘 `director_lab_refactor_test_plan.md`；真实图片链路已实测通过（4/4 任务成功，产物落盘），视频/TTS/BGM 被模型与自定义节点缺失阻塞；解析页客户端跳转白屏与「画面」列取数已修复；分镜图阶段放宽为「≥1 张即可进入」；`/api/health` 改为读取 worker 心跳并返回 `ok/stale/not_running/unknown`；后端全量 1335 passed |
 
 ## Phase 0 验收记录
 
@@ -203,6 +203,89 @@ git checkout -- backend/tests/test_project_purge_fk_coverage.py backend/tests/te
 - [x] 不改 `build_base_config` 的既有决定：参考图始终以当前 `AssetPlanDependency` 覆盖历史快照 refs（修复「提示词两个角色、参考图只有一个槽位」），因此不提供「按快照参考图重做」。
 - [x] 不新增任务/快照重放写路径，不自动重做；仅在用户显式点击后跳转并预填工作台，提交仍需用户确认。
 
+### Slice 15：分镜规划安全写入（Phase 2）
+
+- [x] 新增 `POST /api/projects/{project_id}/script-versions/{script_version_id}/storyboard-plan/apply`，复用既有规划校验契约；只有零 error 时才写入。
+- [x] 写入语义为安全 upsert：按 `shot_id` 复用既有镜头，新镜头使用规划提供的稳定 ID 创建（`status=pending`，`episode` 取场景集数）。
+- [x] 只写规划显式提供的字段（sequence/duration/shot_kind/shot_type/机位/运镜/dialogue/角色/道具/节拍/起止状态/声音/`image_prompt` 等）；缺省字段保留既有值，空 `image_prompt` 不覆盖，避免清空生产层已编译提示词。
+- [x] 锁定镜头保护：`keyframe_confirmed` 镜头的 `seq/duration/shot_kind` 不被覆盖，写入结果列入 `skipped_locked` 并返回字段差异。
+- [x] 不删除规划未包含的旧镜头，列入 `orphan_shot_ids`；如需删除由后续显式切片处理。
+- [x] 写入前统一预检：镜头 ID 合法性/跨项目冲突、镜头换场、与保留镜头的 `(scene, episode, seq)` 冲突；冲突返回 409 且零写入。
+- [x] 序号变更采用两阶段写入（先负序号、后最终值），支持同场景内换序而不触发唯一约束。
+- [x] 不重建资产计划、不重算依赖、不触发任何生成任务；规划生成接入留待后续切片。
+
+### Slice 16：分镜规划导入入口（Phase 2 / Phase 10）
+
+- [x] 新增 API 客户端 `storyboardPlan.ts`：校验/写入类型与 `validateStoryboardPlan`、`applyStoryboardPlan`。
+- [x] 新增 `StoryboardPlanImportDialog.vue`：粘贴规划 JSON → 客户端 JSON 校验 → 服务端只读校验预览 → 通过后才允许写入。
+- [x] 预览展示：错误/警告数量、场景与节拍覆盖率、镜头数与总时长、复用/锁定冲突/规划外旧镜头列表、逐条 issue（路径 + 说明）。
+- [x] 写入结果展示：新增/更新/无变化/跳过锁定/规划外旧镜头，以及服务端 notes；写入成功后触发看板场景与镜头刷新。
+- [x] 入口放在分镜看板「分镜规划」卡，明确提示「校验只读；写入不覆盖锁定镜头、不删除旧镜头、不触发生成」。
+- [x] 剧本版本由 `GET /projects/{id}/script-versions/current` 实时解析，无版本时阻止校验并提示先保存剧本。
+- [x] 不新增后端接口、不改生成链路；仍为显式人工操作。
+
+### Slice 17：工作流版本影响预检（Phase 3 / 7 / 10）
+
+- [x] 新增只读服务 `workflow_impact.py`：比对已成功任务的 `job.workflow_version` 与 `workflow.version`，输出 `workflow_changed` / `workflow_disabled` / `unknown_workflow_version` 分类与项目级汇总。
+- [x] 新增 `GET /api/projects/{project_id}/workflow-impact`：仅读，无写库、无失效标记、无重生成；项目不存在返回 404。
+- [x] 影响项包含镜头定位（集/镜）、工作流名与版本变化（执行时 → 当前）、最新产出资产摘要；按集/镜排序。
+- [x] 前端 `dependencies.ts` 增加类型与 `getWorkflowImpact`；资产变更影响页新增「工作流版本影响」卡，与资产级影响并列展示。
+- [x] 空状态口径调整为「无资产影响且无工作流影响」才显示；工作流预检失败不阻断资产影响主列表。
+- [x] 不改生成链路、不自动重做；是否重做仍由用户在分镜看板显式触发。
+
+### Slice 18：工作流版本影响看板角标（Phase 3 / 7 / 10）
+
+- [x] 分镜看板接入 `getWorkflowImpact`（TanStack Query），按 `shot_id` 派生工作流影响映射。
+- [x] 镜头缩略图左下角新增文字型角标「工作流已更新」/「工作流已停用」，悬停显示工作流名与 `v执行时 → v当前`。
+- [x] 同镜头多条任务时停用优先于版本变化；无镜头绑定的任务不进角标，避免误标。
+- [x] 纯只读提示：不自动重做、不标记失效；重做仍走既有生成入口。
+- [x] 与左上角依赖影响角标、右下角生产状态徽章分位置展示，避免遮挡。
+
+### Slice 19：依赖失效标记写路径（Phase 3 / 6.4）
+
+- [x] 新增 `dependency_mark.py`：用户确认后把来源下游仍引用旧版本的 `DependencyRef` 边置为 `validity="stale"`；不重生成、不删除产物、不改资产有效性。
+- [x] 资产按同名版本序列处理：引用旧版本资产的边全部标记；当前版本边保持 `current`；已失效边幂等跳过。
+- [x] 非资产来源（如镜头）无版本概念，标记其全部 `current` 边。
+- [x] 新增 `POST /api/projects/{project_id}/dependency-graph/{node_type}/{node_id}/invalidate`；节点不属于本项目返回 404。
+- [x] 项目级影响预演的 `changed_roots` 增加只读字段 `markable_edge_count`，前端仅对存在可标记边的根显示「标记失效」。
+- [x] 资产变更影响页新增「标记失效」操作（确认框列明可标记边数/下游数/不重生成），写入后刷新列表。
+- [x] 写后读路径联动：依赖图边 `validity=stale`，影响预演出现 `dependency_invalid` 诊断。
+
+### Slice 20：分镜规划写入前字段差异预览（Phase 2 / Phase 10）
+
+- [x] 校验接口的 `comparison` 新增只读 `field_changes`：逐镜头列出写入将变化的字段与 `from → to` 值。
+- [x] 差异口径与 `apply` 实际写入一致：只比较规划显式提供的字段（`_write_fields`），未提供的字段不进入差异；值相同不列出。
+- [x] 锁定镜头若 `seq/duration/shot_kind` 变化，标记 `will_skip=true`，与 `skipped_locked` 判定一致，避免「预览说会改、写入却跳过」。
+- [x] 导入弹窗新增「写入将改动 N 个既有镜头的字段」区块，字段名转中文、长文本截断、空值显式标注为「空」。
+- [x] 只读：校验阶段不写库；仍须先校验通过才能写入，写入语义未变。
+
+### Slice 21：E2E 样例 A「短剧本快速路径」（Phase 12）
+
+- [x] 新增 `backend/tests/test_pipeline_e2e.py`：剧本版本 → 大纲评估 → 解析任务 → 实体落库 → 公共资产生成与审核 → 分镜规划只读校验 → 分镜图 → 视频 → 只读影响预检。
+- [x] LLM 与渲染全部替身：解析用假 `LLMClient`，场景板 LLM 编译替换为抛错走规则兜底，渲染走 `render_mock` + 临时 `media_dir`，不触达外网、不写真实媒体目录。
+- [x] 断言主链路：角色/道具/场景/镜头落库数量与字段正确；公共资产审核后分镜图可生成；视频依赖分镜图就绪；clip 资产落库并回填 `source_job_id`。
+- [x] 断言只读性：规划校验 dry-run 前后镜头数不变；影响预检前后任务数与镜头快照完全一致。
+- [x] 边界：真实 ComfyUI/GPU 验收不在本测试范围，需按人工验收清单单独执行并记录。
+
+### Slice 22：E2E 样例 B「中途失败 → 显式重试」（Phase 12）
+
+- [x] `test_pipeline_e2e.py` 新增失败重试用例：mock 渲染首次抛错 → 任务 `failed`、`error_code=mock_render_failed`、`retryable=true`、无资产落库。
+- [x] 显式重试：`POST /api/jobs/{id}/retry` 生成新任务（`queued`、继承 `attempts=1`），执行后 `succeeded` 且 `attempts=2`。
+- [x] 断言重试只落一份资产，且 `source_job_id` 指向新任务；原失败任务保持 `failed`，不被覆盖。
+- [x] 边界：不自动重试、不清理失败任务；重试由用户显式触发，符合既有任务语义。
+
+### Slice 23：E2E 样例 C「多集复杂路径」（Phase 12）
+
+- [x] `test_pipeline_e2e.py` 新增复杂路径用例：两集 / 三场景 / 双角色 / 双道具 / 6 镜头，覆盖解析落库、公共资产、场景批量分镜图、同集链式尾帧与跨集拦截。
+- [x] 解析断言：2 角色、2 道具、3 场景（`(1, 教室) / (1, 走廊) / (2, 屋顶)`）、6 镜头（3 / 1 / 2）。
+- [x] 公共资产：双角色定妆图、三场景基准图、双道具锚定图全部经审核闸口后生成。
+- [x] 场景批量分镜图：教室 3 镜走 `POST /api/scenes/{id}/generate`，`count=3` 且逐任务成功；走廊 / 屋顶单镜单独生成。
+- [x] 同集链式尾帧：教室第 1 镜 clip 后 `last_frame_asset_id` 非空；第 2、3 镜 `prev_frame.injected=true`，`prev_shot_id` / `frame_asset_id` 严格指向前一镜实际尾帧。
+- [x] 集首镜口径：第 1 集首镜 `prev_frame.injected=false`、`reason=first_shot_handled_by_continuity`，不错误引用同集其他镜头。
+- [x] 跨集拦截：第 1 集未合成、无连续性记录时，第 2 集首镜生成返回 422 `continuity_check_failed`，不创建任务、不写尾帧，避免跨集串帧。
+- [x] 只读预检：依赖图影响预演与工作流影响接口仍返回 200，镜头数不变。
+- [x] 边界：跨集正向衔接（合成 → 末帧提取 → 首帧注入）已由 `tests/test_continuity.py` 的六条用例覆盖；本 E2E 只验证生成入口在缺少连续性记录时的显式拦截，不重复合成链路。
+
 ### 基线失败清偿（Windows 路径断言）
 
 - [x] `tests/test_shot_chain.py::test_resolve_prev_frame_returns_dict_when_asset_exists` 在 Windows 上失败：`resolve_prev_frame` 有意把路径分隔符归一为 `/`（修复历史 `ast_frames\...` 反斜杠路径导致 `os.path.exists` 恒 False），测试仍按原生 `str(path)` 断言。
@@ -214,6 +297,132 @@ git checkout -- backend/tests/test_project_purge_fk_coverage.py backend/tests/te
 - [x] Phase 1 Shadow Run 已以只读对比形式落地；语义分析 Adapter 与持久化仍待后续切片，Phase 1 不标记完成。
 
 ## 本批验证记录
+
+### Slice 15（分镜规划安全写入）
+
+- 聚焦测试：`python -m pytest -q tests/test_storyboard_plan.py` → 11 passed；新增创建、校验拒绝、缺 `plan_version`、锁定跳过、更新+孤儿保留、同场景换序、保留镜头序号冲突 409、项目隔离共 8 条。
+- 全量回归：`python -m pytest -q` → 1322 passed，无既有行为回归。
+- 写入边界：校验失败/ID 冲突/换场/序号冲突均零写入；锁定镜头关键字段不变；旧镜头不删除；不触发资产计划与生成。
+- 回滚：删除 `apply_storyboard_plan` 与 `_write_fields`、`apply` 路由与错误映射、对应测试，并将服务模块 docstring 恢复为只读表述。
+
+### Slice 16（分镜规划导入入口）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，4364 modules，无类型错误；新增 `api/storyboardPlan.ts`、`StoryboardPlanImportDialog.vue` 与 `StoryboardView.vue` 入口改动均通过编译。
+- 设计规范：`node scripts/check-colors.mjs` 0 处硬编码色值；`node scripts/check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 交互边界：导入弹窗只做「粘贴 JSON → 只读校验 → 显式写入」，校验不通过不允许写入；写入后仅刷新场景与当前集镜头，不自动重生成、不删除旧镜头。
+- 后端：无改动，复用 Slice 15 的 `validate` / `apply` 接口契约。
+- 回滚：删除 `frontend/src/api/storyboardPlan.ts`、`frontend/src/components/storyboard/StoryboardPlanImportDialog.vue`，并移除 `StoryboardView.vue` 的导入、`planDialogVisible` / `refreshStoryboard`、分镜规划 `StageCard` 与弹窗绑定。
+
+### Slice 17（工作流版本影响预检）
+
+- 后端：`python -m pytest -q tests/test_workflow_impact.py` → 3 passed（版本变化/停用分类、只读幂等与项目隔离、未知项目 404）；全量 `1325 passed`。
+- Ruff：新增服务与测试无问题；`dependencies.py` 仍为既有 `Depends` 默认参数（B008），非本次引入。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，4364 modules；`check-colors.mjs` 0 处硬编码；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 边界：只比对 `status=succeeded` 且带 `workflow_version` 的任务；工作流记录缺失（外键删除受限）归为 `unknown_workflow_version`，仅在数据异常时出现。
+- 回滚：删除 `backend/app/services/workflow_impact.py`、`backend/tests/test_workflow_impact.py`，移除 `dependencies.py` 的导入与新路由；前端移除 `dependencies.ts` 的工作流影响类型/函数与 `AssetImpactView.vue` 的卡、状态和 `load` 分支。
+
+### Slice 18（工作流版本影响看板角标）
+
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，4364 modules；`check-colors.mjs` 0 处硬编码；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1（角标使用 `--state-warning` / `--danger-text` 与 `--bg-elevated`）。
+- 后端：无改动，复用 Slice 17 的 `GET /projects/{id}/workflow-impact`。
+- 边界：角标仅由已成功任务驱动；查询失败时 `workflowImpactByShot` 为空，看板其他信息不受影响。
+- 回滚：移除 `StoryboardView.vue` 的 `getWorkflowImpact` / `WORKFLOW_IMPACT_LABEL` 导入、`workflowImpactQuery` 与派生函数、缩略图角标与 `.workflow-badge` 样式。
+
+### Slice 19（依赖失效标记写路径）
+
+- 后端：`python -m pytest -q tests/test_dependency_invalidate.py` → 4 passed（旧版本边标记/当前边保持、幂等、非资产来源、外来/未知节点 404）；全量 `1329 passed`。
+- 读路径联动：测试同时断言 `GET /dependency-graph` 中该边 `validity=stale` 且产生 `dependency_invalid` 诊断；标记后 `changed_roots[].markable_edge_count` 归零。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过，4364 modules；`check-colors.mjs` 0 处硬编码；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- Ruff：新增服务/测试无问题；`dependencies.py` 仍为既有 `Depends` 默认参数（B008），非本次引入。
+- 边界：只写 `DependencyRef`，不触碰 `Asset.validity`、`Shot.status`、任务与产物；无迁移。
+- 回滚：删除 `backend/app/services/dependency_mark.py`、`backend/tests/test_dependency_invalidate.py`，移除 `dependencies.py` 的导入与 POST 路由；前端移除 `invalidateDependencyRefs`、`markable_edge_count` 与 `AssetImpactView.vue` 的按钮/确认逻辑。
+
+### Slice 20（分镜规划写入前字段差异预览）
+
+- 后端：`python -m pytest -q tests/test_storyboard_plan.py` → 13 passed（新增「字段差异 + 锁定 will_skip + 校验只读」「未提供/同值字段不进入差异」2 条）。
+- Ruff：`app/services/storyboard_plan.py`、`tests/test_storyboard_plan.py` 无问题。
+- 前端：`npm run build`（含 `vue-tsc -b`）通过；`check-colors.mjs` 0 处硬编码；`check-contrast.mjs` 全部文本令牌 ≥ 4.5:1。
+- 口径一致性：差异只覆盖 `_write_fields` 实际会写的字段；`will_skip` 与 `skipped_locked` 判定同源，避免预览与实际写入不一致。
+- 边界：校验仍为零写入；写入语义、锁定保护、旧镜头保留均未变。
+- 回滚：移除 `storyboard_plan.py` 的 `_field_changes` 调用与函数、`storyboardPlan.ts` 的差异类型字段、导入弹窗的差异区块与 `FIELD_LABELS` / `formatChangeValue`，并删除两条新测试。
+
+### Slice 21（E2E 样例 A：短剧本快速路径）
+
+- 后端：`python -m pytest -q tests/test_pipeline_e2e.py` → 1 passed（4.71s）。
+- 替身边界：解析 LLM、场景板 LLM 编译均为替身；渲染走 `render_mock` + 临时 `media_dir`；测试不触达外网，不写 `backend/data/media`。
+- 覆盖：实体落库（1 角色 / 1 道具 / 2 场景 / 3 镜头）、公共资产审核闸口、规划 dry-run 零写入、分镜图 → 视频依赖、clip 资产落库。
+- 只读断言：影响预检前后任务数与镜头快照完全一致。
+- 边界：真实 ComfyUI/GPU 未验证，不能据此认为真实渲染链路通过。
+- 回滚：删除 `backend/tests/test_pipeline_e2e.py`；无生产代码改动。
+
+### Slice 22（E2E 样例 B：中途失败 → 显式重试）
+
+- 后端：`python -m pytest -q tests/test_pipeline_e2e.py` → 2 passed（4.53s）。
+- 失败注入：仅替换 `mock_render.mock_outputs` 首次调用抛错，执行器其余状态机保持真实。
+- 断言：失败任务 `error_code/error_msg/retryable` 正确且零资产；重试新任务 `attempts` 继承并递增；成功后资产唯一且归属新任务。
+- 边界：未验证真实 ComfyUI 断连/超时分支；该分支需在真实环境按人工清单验收。
+- 回滚：删除 `test_generation_failure_then_retry_succeeds` 用例；无生产代码改动。
+
+### Slice 23（E2E 样例 C：多集复杂路径）
+
+- 后端：`python -m pytest -q tests/test_pipeline_e2e.py` → 3 passed（9.41s）。
+- 全量回归：`python -m pytest -q` → 1334 passed（435.65s），无既有行为回归。
+- Ruff：`tests/test_pipeline_e2e.py` 无问题。
+- 覆盖：双角色 / 双道具 / 三场景 / 六镜头的解析落库、公共资产审核、场景批量分镜图（`count=3`）、同集链式尾帧、集首镜口径与跨集拦截。
+- 跨集口径修正：初版用例假设第 2 集首镜可直接生成，实测被 `continuity_check_failed` 拦截——第 1 集未合成时不存在连续性记录，这是既有的显式安全门禁。用例改为断言 422 且不创建任务、不写尾帧，避免用假数据绕过真实约束。
+- 边界：跨集正向衔接（合成 → 末帧提取 → 首帧注入）由 `tests/test_continuity.py` 覆盖，本 E2E 只验证缺少连续性记录时的生成入口拦截。
+- 回滚：删除 `test_complex_multi_episode_pipeline` 用例及复杂路径常量；无生产代码改动。
+
+### Slice 24（测试计划与验收矩阵文档）
+
+- 新增 `docs/refactor/director_lab_refactor_test_plan.md`：§15.1 矩阵逐项映射到现有测试，§15.2 记录 E2E 样例 A/B/C，§15.2 之后补真实环境人工验收清单与已知缺口。
+- 状态口径：只把有直接用例的项标「已覆盖」；实现有校验但缺专项用例的标「部分覆盖」；无自动化用例的标「未覆盖」。
+- 复核结果：已修正文档中不存在的测试文件名引用（改为 `test_prompt_compiler.py` / `test_ref_and_parallel.py`），其余引用均按 `backend/tests` 实际文件核对。
+- 已知缺口：对白时长冲突、Beat 聚合/拆分、续集复用既有资产缺专项用例；本重构未新增迁移，无迁移测试；真实 ComfyUI/GPU 未验收。
+- 边界：本次仅新增文档，不改生产代码、不改测试。
+- 回滚：删除 `docs/refactor/director_lab_refactor_test_plan.md`。
+
+### Slice 26（分镜图阶段进入门槛放宽为「≥1 张」）
+
+- 需求：分镜图不必全部生成才能进分镜看板。
+- 决策：`storyboard_images` 阶段改为「至少 1 张已生成即可进入」；`done == 0` 仍拦截。分镜视频与合成导出阶段维持全量要求。
+- 安全性论证：分镜看板批量出视频只提交已有分镜图的镜头，其余跳过并提示；单镜生成另有 `_check_keyframe_ready` 校验；`derive_progress` 在关键帧缺失时不会推进到合成阶段。因此放宽入口不会产出错误视频或残缺成片，最坏结果只是部分镜头暂时无法出视频。
+- 后端：`stage_readiness.py` 新增 `_STAGE_MIN_DONE = {STAGE_STORYBOARD_IMAGES: 1}`；`check_storyboard_images_ready` 的 ready 判定改为 `done >= min_done`，未完成镜头仍进 `blockers`，并在 `message` 中说明「已生成 x/y，还有 N 镜未完成；这些镜头进入后暂不能生成视频」。
+- 前端：`StageTransitionDialog` 新增 `partialHint`，已就绪但存在未完成项时以警示样式列出缺失镜头；`useStageTransition` 透传该提示；`StoryboardImagesView` 提供文案并把拦截标题从「尚未全部生成完成」改为「尚未生成任何分镜图片」。
+- 一致性修复：左侧「制作流程」栏原先只看 `current_stage`，部分生成时仍显示「已锁定：请先完成分镜图」，与页内按钮已可点击矛盾。`useProjectFlow` 改为对 `storyboard-images` 前置项读取同一 `stage-readiness` 接口的 `ready`。
+- 测试：`test_stage_readiness.py` 三个原「缺一张即拦截」用例改写为放行断言（缺 1 张 / 在途 / 失败），新增「0 张仍拦截」用例；`pytest tests/test_stage_readiness.py tests/test_ref_slot_validity_and_seq.py` 24 passed。
+- 验证：真实项目 `prj_a10bc7d70728`（6 镜仅 1 张分镜图）接口返回 `ready=true / done=1 / blockers=5`；浏览器实测弹窗出现且列出 5 个缺失镜头、控制台 0 错误；左侧第 05 步由「已锁定」变为「未开始」且可点击跳转，第 06 步仍按分镜视频锁定。
+- 边界：不改生成逻辑、不改资产判定、不改合成门槛。
+- 回滚：删除 `_STAGE_MIN_DONE` 与其分支（回到 `done == total`），并还原前端 `partialHint` 与 `useProjectFlow` 的 `storyboard-images` 分支。
+
+### Slice 27（worker 心跳与 `/api/health` 真实状态）
+
+- 缺陷：`/api/health` 的 `worker` 字段硬编码 `"ok"`。worker 未启动时任务长期停在 `queued`，健康检查仍报 `healthy`，前端只能靠「排队超过 60 秒」猜测后端没在消费任务，用户完全看不出问题。
+- 方案：worker 主循环落心跳文件，健康检查读心跳判定 worker 四态。
+- 后端：
+  - `app/worker/scheduler.py` 新增 `heartbeat_path()`（`data_dir/worker_heartbeat`）与 `_write_heartbeat()`；启动后写一次，之后每轮主循环、并发满等待循环各写一次。写失败只打日志，不中断调度。
+  - `app/api/v1/settings.py` 的 health 改读心跳：文件存在且距今 ≤ `worker_heartbeat_stale_seconds` → `ok`；超阈值 → `stale`；文件不存在 → `not_running`；读取异常 → `unknown`。同时返回 `worker_last_beat`。`status` 三态保持：DB 不可用 `down`；其余任一依赖（含 worker 非 `ok`）异常 `degraded`；全正常 `healthy`。
+  - `app/core/config.py` 新增 `worker_heartbeat_stale_seconds: float = 120.0`，必须明显大于 poll 间隔（2s），避免正常轮询间隙被误判。
+- 测试：`tests/test_smoke.py` 新增 `test_health_worker_status_reflects_heartbeat`，用 `tmp_path` + monkeypatch 覆盖三态：无文件 → `not_running`；新鲜心跳 → `ok` 且 `worker_last_beat` 非空；过期 1 小时 → `stale` 且 `status == "degraded"`。
+- 验证（真实环境 2026-11-22）：
+  - worker 运行：`status=healthy`、`worker=ok`、`worker_last_beat=1795353724.04`。
+  - 停掉 worker 并等待超过 120s：`status=degraded`、`worker=stale`、`worker_last_beat` 保持旧值（1795353560.02），与心跳文件 `LastWriteTime` 一致。
+  - 重启 worker 后恢复 `healthy` / `ok`，心跳时间戳前移。
+  - 后端全量 `python -m pytest -q` → 1335 passed（1683.75s）。
+- 边界：心跳只反映「调度进程是否在轮询」，不代表任务执行成功；`degraded` 不阻断 API 可用性（worker 不参与 API 存活判定）。桌面版 `desktop.py` 已以子进程方式拉起 worker，无需额外改动。
+- 回滚：删除 `heartbeat_path` / `_write_heartbeat` 及其调用、`worker_heartbeat_stale_seconds` 配置，并把 health 的 `worker` 恢复为固定值（不推荐，会重新掩盖 worker 未运行）。
+
+### Slice 25（解析页客户端跳转白屏与分镜「画面」列修复）
+
+- 缺陷 1：从剧本页点「去解析」进入解析页时整页空白，必须手动刷新才显示内容。
+- 根因：`ParseView.vue` 的 `agentStatusData` 查询声明在文件末尾，而 `characters` / `props` 查询的 `refetchInterval` 会在 setup 阶段同步求值，经 `needsPersistPoll → parsePersisted` 读取 `agentStatusData`。客户端路由进入时 vue-query 缓存中已有 `parse-status`，`statusTotalEpisodes === 0` 的短路不再生效，访问未初始化变量抛 `ReferenceError: Cannot access 'fe' before initialization`（TDZ），组件渲染中断。全量刷新时缓存为空、短路生效，因此旧代码只在跳转路径暴露。
+- 修复：把 `agentStatusData` 的 `useQuery` 上移到 `parseStatus` 之后、`parsePersisted` 之前，删除末尾重复声明，并加注释说明声明顺序约束。
+- 缺陷 2：解析结果分镜表「画面」列 6 行全空。
+- 根因：列取 `sh.description`，而 `job.result.scenes[].shots[]` 没有 `description` 字段（实际为 `shot_purpose` / `beats` / `start_state` / `end_state`）；DB 中 6 条 `shot.image_prompt` 均非空（660–688 字符），说明数据侧正常。
+- 修复：取数改为 `sh.shot_purpose ?? sh.description`，纯文本导出同口径调整。
+- 验证：`npm run build`（含 `vue-tsc -b`）通过，4364 modules；浏览器实测剧本页 → 点「去解析」不刷新，body 文本 36 → 372 字符，AI Agent 卡片「已完成 / 已解析 1/1 集」、解析结果 1 场景 / 1 角色 / 1 道具 / 6 分镜 / 1 台词正常渲染，控制台 0 错误，`navigation` 仅 1 条记录证明未 reload。
+- 边界：仅前端字段与声明顺序调整，不改后端接口、模型、迁移与工作流 JSON。
+- 回滚：还原 `ParseView.vue` 的 `agentStatusData` 声明位置与 `desc` / 文本导出的取数字段。
 
 ### Slice 14（以历史版本为基准重做）
 

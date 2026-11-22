@@ -47,11 +47,17 @@ const props = withDefaults(
     ready?: boolean
     /** 阻断项最多展示几条（其余折叠成「等 N 项」） */
     maxBlockers?: number
+    /**
+     * 已就绪但仍存在未完成项时的提示（当前仅分镜图阶段会出现）。
+     * 由调用方给出具体影响，避免组件里写死某个阶段的文案。
+     */
+    partialHint?: string
   }>(),
   {
     blockers: () => [],
     loading: false,
     maxBlockers: 12,
+    partialHint: '',
   },
 )
 
@@ -139,6 +145,24 @@ function onCancel() {
     <!-- 已就绪：展示阶段说明，等待用户确认 -->
     <template v-else>
       <p v-for="(line, i) in descriptionLines" :key="i" class="st-lead">{{ line }}</p>
+      <!--
+        部分完成也可进入的阶段（当前仅分镜图）：放行不等于全部就绪。
+        必须把未完成的镜头列出来，否则用户会带着大量缺失进入看板，
+        到批量出视频时才发现大半镜头被跳过。
+      -->
+      <template v-if="blockers.length">
+        <p class="st-lead is-partial">
+          <n-icon :component="WarningOutline" :size="15" />
+          {{ partialHint || `还有 ${blockers.length} 项未完成` }}
+        </p>
+        <ul class="st-blockers">
+          <li v-for="(b, i) in shownBlockers" :key="`${b.name}-${i}`" class="st-blocker">
+            <span class="st-blocker-name">{{ b.name }}</span>
+            <span class="st-blocker-reason">{{ reasonLabel(b.reason) }}</span>
+          </li>
+          <li v-if="restCount" class="st-blocker is-more">等 {{ restCount }} 项</li>
+        </ul>
+      </template>
     </template>
 
     <template #footer>
@@ -187,6 +211,9 @@ function onCancel() {
 }
 .st-lead.is-blocked {
   color: var(--danger-text, var(--state-danger));
+}
+.st-lead.is-partial {
+  color: var(--state-warning);
 }
 .st-blockers {
   margin: 0;

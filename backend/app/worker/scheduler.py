@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta
+from pathlib import Path
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
@@ -34,6 +35,27 @@ _RECONCILE_TIMEOUT = 3.0
 def _handle_signal(signum, frame):
     global _RUNNING
     _RUNNING = False
+
+
+def heartbeat_path():
+    """worker 心跳文件路径：与数据库同目录，随实例部署一起走。"""
+    return Path(get_settings().data_dir) / "worker_heartbeat"
+
+
+def _write_heartbeat() -> None:
+    """每轮主循环落一次心跳（写入 epoch 秒）。
+
+    为什么需要它：`/api/health` 过去把 worker 硬编码为 "ok"，worker 没启动时
+    任务会长期停在 queued，而健康检查仍报正常 —— 前端只能靠「排队超过 60 秒」
+    猜测后端没在消费，用户则完全看不出问题。心跳让健康检查反映真实情况。
+    """
+    try:
+        p = heartbeat_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(time.time()), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        # 心跳失败不能拖垮调度主循环
+        print(f"[worker] 写入心跳失败（不影响调度）: {e}")
 
 
 def _reconcile_submission_unknown(db: Session) -> int:
@@ -313,12 +335,14 @@ def run_worker(once: bool = False) -> None:
     db.close()
     # 启动 ComfyUI 实例健康心跳（熔断机制后台探测，幂等）
     comfyui_pool.start_heartbeat()
+    _write_heartbeat()
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dlab-worker")
     # future -> job_id 映射：运行期失联回收时据此排除本进程正在执行的任务
     in_flight: dict = {}
     last_stall_check = 0.0
     try:
         while _RUNNING:
+            _write_heartbeat()
             # 每轮重算并发度（实例配置运行时生效）；线程池按需扩容
             concurrency = _compute_concurrency()
             if pool._max_workers != concurrency:  # noqa: SLF001
@@ -363,6 +387,7 @@ def run_worker(once: bool = False) -> None:
             # 否则只要有一个任务在跑，comfy_timeout/comfy_unreachable 任务的取回就会停摆。
             while len(in_flight) >= concurrency and _RUNNING:
                 time.sleep(0.2)
+                _write_heartbeat()
                 in_flight = {f: jid for f, jid in in_flight.items() if not f.done()}
                 now_ts = time.monotonic()
                 if now_ts - last_stall_check >= 30.0:

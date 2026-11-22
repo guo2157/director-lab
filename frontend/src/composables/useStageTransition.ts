@@ -26,6 +26,11 @@ export function useStageTransition(opts: {
   confirmDescription: string
   /** 确认按钮文案 */
   confirmText: string
+  /**
+   * 已就绪但仍存在未完成项时的提示（仅「部分完成也可进入」的阶段需要，如分镜图）。
+   * 未提供时弹窗只展示通用文案「还有 N 项未完成」。
+   */
+  partialHint?: (blockers: StageBlocker[]) => string
   /** 未就绪时的 message 提示（由页面注入，避免这里依赖 naive-ui） */
   notify: {
     warning: (msg: string) => void
@@ -111,11 +116,19 @@ export function useStageTransition(opts: {
   /** 弹窗可用的阻断列表：已就绪时为空 */
   const blockers = computed(() => readiness.value.blockers)
 
+  /** 已就绪但仍有未完成项时的提示；无未完成项时为空串（弹窗不渲染） */
+  const partialHint = computed(() => {
+    if (!readiness.value.ready || !readiness.value.blockers.length) return ''
+    if (opts.partialHint) return opts.partialHint(readiness.value.blockers)
+    return `还有 ${readiness.value.blockers.length} 项未完成`
+  })
+
   return {
     visible,
     loading,
     readiness,
     blockers,
+    partialHint,
     request,
     confirm,
     cancel,

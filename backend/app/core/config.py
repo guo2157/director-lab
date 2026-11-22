@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     # 强杀会让 running 任务在下次启动被无脑重跑，等于白烧一遍 token。
     worker_shutdown_grace_seconds: float = 20.0
     worker_poll_interval_seconds: float = 2.0
+    # 心跳过期阈值：超过该时长未更新即认为 worker 未在消费任务。
+    # 必须明显大于 poll 间隔（默认 2s），避免正常轮询间隙被误判。
+    worker_heartbeat_stale_seconds: float = 120.0
     # 运行期自愈阈值：LLM 类任务处于 running 且长时间无事件、且本进程无执行线程时回收
     # 运行期自愈阈值：running 且 started_at 早于该时长、且本进程无执行线程的
     # LLM 任务按重试上限重新入队。需明显小于 llm_stream_idle_timeout 之外的总耗时，

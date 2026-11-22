@@ -65,6 +65,15 @@ STAGE_JOB_TYPE = {
 _INFLIGHT_STATUSES = ("queued", "running", "chained_wait", "submission_unknown")
 _FAILED_STATUSES = ("failed", "lost", "cancelled")
 
+# 各阶段允许进入下一阶段的「最少已完成数」。未列出的阶段默认要求全部完成。
+#
+# 分镜图放宽为 1：分镜看板本身是逐镜闸口（批量出视频只提交已有分镜图的镜头，
+# 其余跳过并提示），合成与导出另有全量要求，因此「部分已生成就进入」不会产出
+# 错误视频或残缺成片，最坏结果只是部分镜头暂时无法出视频。
+# 全量门槛换不来质量保障，只换来等待（真实环境约 150s/张）。
+# 分镜视频 / 合成阶段保持全量要求：它们直接决定成片完整性。
+_STAGE_MIN_DONE = {STAGE_STORYBOARD_IMAGES: 1}
+
 
 @dataclass
 class StageBlocker:
@@ -290,10 +299,24 @@ def check_stage_readiness(db: Session, project_id: str, stage: str) -> StageRead
 
     generating = sum(1 for b in blockers if b.reason == "shot_generating")
     failed_count = sum(1 for b in blockers if b.reason in ("shot_failed", "shot_file_missing"))
-    ready = done == total
-    message = ""
-    if not ready:
-        message = f"{label}尚未全部生成完成（{done}/{total}），请完成所有{label}生成后再进入下一阶段"
+    min_done = _STAGE_MIN_DONE.get(stage)
+    if min_done is None:
+        ready = done == total
+        message = ""
+        if not ready:
+            message = f"{label}尚未全部生成完成（{done}/{total}），请完成所有{label}生成后再进入下一阶段"
+    else:
+        # 放宽阶段：达到最少完成数即放行，未完成的镜头作为 missing 明细返回，
+        # 由前端提示「这些镜头进入后暂不能生成视频」，而不是阻断整个项目。
+        ready = done >= min_done
+        message = ""
+        if not ready:
+            message = f"尚未生成任何{label}（0/{total}），请至少生成 1 张{label}后再进入下一阶段"
+        elif blockers:
+            message = (
+                f"{label}已生成 {done}/{total}，还有 {len(blockers)} 镜未完成；"
+                f"这些镜头进入后暂不能生成视频"
+            )
     return StageReadiness(
         stage=stage,
         ready=ready,
