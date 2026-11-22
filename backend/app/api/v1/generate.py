@@ -439,9 +439,19 @@ def _compile_shot_prompt(db: Session, shot: Shot, wf: Workflow, params: dict,
     # keyframe 提示词统一走编译结果（v2 模板含 ref_duty_block/action_moment/aspect_desc），
     # 不再因「params 里已有 prompt」（来自解析期 image_prompt）而跳过编译。
     # clip 暂保持「有则保留」策略（视频提示词可能被人工精修）。
-    if task == "keyframe":
-        out = apply_to_params(compiled, out)
-    elif "prompt" not in out:
+    if task == "keyframe" or "prompt" not in out:
+        if compiled.status != "ready":
+            # 编译未就绪（典型：绑定的参考图质检不合格）时 apply_to_params 会抛裸
+            # ValueError，接口层表现为 500 且响应体为空，页面只能显示「批量生成失败」，
+            # 用户无从知道是哪张参考图、该怎么处理。这里统一转成可读的 409 并带回阻断项。
+            messages = [i.get("message") or i.get("code", "") for i in compiled.blocking_issues]
+            raise errors.AppError(
+                "prompt_compilation_blocked",
+                "分镜图提示词未就绪：" + "；".join(m for m in messages if m),
+                409,
+                blocking_issues=compiled.blocking_issues,
+                template_id=compiled.template_id,
+            )
         out = apply_to_params(compiled, out)
     else:
         out["prompt"] = to_h3_clip_prompt(shot, out.get("prompt") or "")

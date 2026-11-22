@@ -130,7 +130,7 @@ def test_assemble_image_prompt_handles_missing_optional_fields():
     minimal = {"episode": 1, "seq": 1}
     rendered = _assemble_image_prompt(minimal)
     assert rendered.strip()
-    assert "第 1-1 镜" in rendered
+    assert "第 1 集第 1 镜" in rendered
 
 
 def test_assemble_video_prompt_still_works():
@@ -142,4 +142,4 @@ def test_assemble_video_prompt_still_works():
     shot = norm.data["scenes"][0]["shots"][0]
     rendered = _assemble_video_prompt(shot, is_first=True)
     assert rendered.strip()
-    assert "第 1-1 镜" in rendered
+    assert "第 1 集第 1 镜" in rendered

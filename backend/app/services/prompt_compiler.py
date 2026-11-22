@@ -46,9 +46,9 @@ TEMPLATE_REGISTRY: dict[str, dict] = {
                          "prompt_name": "compile_character_asset"},
     TEMPLATE_SCENE: {"version": 2, "task_type": TASK_ASSET_IMAGE, "asset_type": "scene",
                      "prompt_name": "compile_scene_asset"},
-    TEMPLATE_PROP: {"version": 1, "task_type": TASK_ASSET_IMAGE, "asset_type": "prop",
+    TEMPLATE_PROP: {"version": 2, "task_type": TASK_ASSET_IMAGE, "asset_type": "prop",
                     "prompt_name": "compile_prop_asset"},
-    TEMPLATE_STORYBOARD: {"version": 2, "task_type": TASK_STORYBOARD_IMAGE, "asset_type": "keyframe",
+    TEMPLATE_STORYBOARD: {"version": 3, "task_type": TASK_STORYBOARD_IMAGE, "asset_type": "keyframe",
                           "prompt_name": "compile_storyboard_image"},
     TEMPLATE_VIDEO: {"version": 4, "task_type": TASK_SHOT_VIDEO, "asset_type": "clip",
                      "prompt_name": "compile_shot_video"},
@@ -166,6 +166,8 @@ SCENE_TEMPLATE = """场景板（空镜）：{name}，{time_and_weather}，{empty
 整个画面只由环境本身与天空构成。
 画面风格：{style}"""
 
+# 道具锚定图只输出单一视角：并排多视图（正视+侧视）会让下游分镜图复制这种分格排版，
+# 把单帧画面生成成多格拼图（实测 ast_25f8313d91c3 两视图导致第 3、6 镜出现四格拼图）。
 PROP_TEMPLATE = """生成一张独立的道具参考图，画面中只能有一件道具：{name}。
 道具定义：{identity}
 形状与结构：{shape}
@@ -174,9 +176,9 @@ PROP_TEMPLATE = """生成一张独立的道具参考图，画面中只能有一�
 相对尺寸与比例：{relative_scale}
 必须保留的关键细节：{distinctive_features}
 构图要求：整件道具完整入画、主体居中、轮廓清晰、形状容易辨认，采用干净统一的纯色或低干扰背景；以独立物品展示，不放进故事场景，不表现使用过程。
-视图规范：
-- 单件道具为主视图，结构复杂时在同一画面内并排展示正视与侧视两个角度，两个角度是同一件道具
-- 多角度共用同一套光照与背景，尺寸比例完全一致
+视图规范（单视图为默认交付，直接作为分镜道具参考）：
+- 单件道具、单一视角：画面中只有这一件道具，只从一个角度（正面或轻微四分之三视角）完整展示
+- 不做并排多视角拼图，不做正视与侧视的组合排版，画面中不出现分格线
 - 材质必须可辨识：金属有反光与高光、木质有纹理、布料有织物结构、玻璃有透光与折射
 
 一致性要求：不增加数量、装饰、图案、附件或包装；同一件道具的多部件结构整体展示，不拆成多件独立物品；不凭空添加磨损、划痕、锈迹等剧本未描述的痕迹。
@@ -195,7 +197,7 @@ PROP_TEMPLATE = """生成一张独立的道具参考图，画面中只能有一�
 _DUTY_LINE = {
     "scene":     "- <image{n}>（场景基准图）：@{name} —— 仅用作背景的空间结构、地形、植被、光线方向与色调；不要把它缩小、平铺或原样放进画面。",
     "character": "- <image{n}>（角色定妆图）：@{name} —— 仅用作该角色的面部、发型、体型与服装；禁止与其他参考图混合。",
-    "prop":      "- <image{n}>（道具锚定图）：@{name} —— 仅用作该道具的形状、颜色与材质。",
+    "prop":      "- <image{n}>（道具锚定图）：@{name} —— 仅用作该道具的形状、颜色与材质；画面中只出现这一个道具、一个视角。",
 }
 
 def _aspect_desc(ratio: str | None, width: int | None = None, height: int | None = None) -> str:
@@ -235,7 +237,7 @@ STORYBOARD_TEMPLATE = """任务：生成镜头 {shot_id} 的一张完整单帧�
 - 不出现未绑定道具：只出现 {props}，不加其他可移动物品、车辆、杂物、包装
 - 场景元素只用底图：背景、建筑结构、地形、植被取自场景参考图，不新增未定义的建筑、招牌、家具、装饰，不改动空间结构
 - 画面连续：地面接触阴影真实，人物有立足点，不悬浮、不穿模、不与道具或环境融合
-输出：一张{aspect_desc}的完整画面，所有内容自然连成一个整体；不含文字、字幕、标签、水印、边框与分格线。
+输出：一张{aspect_desc}的完整画面，单一视角、单一瞬间，所有内容自然连成一个整体；不含文字、字幕、标签、水印、边框与分格线。
 画面风格：{style}
 """
 
@@ -733,15 +735,22 @@ def _scene_mapping(scene: Scene, style: str | None = None) -> dict:
 
 def _prop_mapping(prop: Prop, style: str | None = None) -> dict:
     data = _as_dict(prop.appearance)
-    appearance = prop.description or ""
+    # appearance 为纯文本时是道具的视觉外观定义；description 往往混入剧情用法
+    # （如「此后一直由林晓捧在手中」），不能当作外观细节拼进提示词。
+    appearance_text = _text(prop.appearance if isinstance(prop.appearance, str) else None, "")
     return {
         "name": prop.name or "未命名道具",
-        "identity": _text(prop.appearance if isinstance(prop.appearance, str) else None, appearance or "按道具定义"),
+        "identity": appearance_text or _text(prop.description, "按道具定义"),
         "shape": _text(data.get("shape")),
         "color": _text(data.get("color")),
         "material": _text(data.get("material")),
         "relative_scale": _text(data.get("relative_scale")),
-        "distinctive_features": _text(data.get("distinctive_features"), appearance or "按道具定义"),
+        # 「必须保留的关键细节」只取外观：实测把 description 里的「由林晓捧在手中」
+        # 拼进提示词，模型会在道具锚定图里画出人手，而道具图要求空场无人物，
+        # 质检直接判不合格并阻断所有引用该道具的分镜图（prp_b21f3590710f）。
+        "distinctive_features": _text(
+            data.get("distinctive_features"), appearance_text or "按道具定义"
+        ),
         "style": style or asset_prompts._DEFAULT_STYLE,
     }
 

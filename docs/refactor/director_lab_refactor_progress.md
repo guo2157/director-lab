@@ -20,7 +20,7 @@
 | 9 Job/Event/Recovery | 已有实现，未改 | 不新增任务框架 |
 | 10 前端全流程体验 | 进行中 | 依赖影响预演已接入镜头/资产详情、看板卡片标记、分镜图批量出图前预检与资产变更影响列表页；镜头详情可查看生成快照，并可一键带历史版本进入分镜图工作台重做；看板镜头卡片新增工作流版本影响角标；均由真实接口驱动，不做虚假状态 |
 | 11 DB/API 兼容 | 进行中 | 第一批 additive API，无 DB 迁移 |
-| 12 E2E 与验收 | 进行中 | mock 与真实环境验证分开记录；样例 A（短剧本快速路径）、样例 B（中途失败 → 显式重试）、样例 C（多集复杂路径）已落地；测试矩阵与人工验收清单已落盘 `director_lab_refactor_test_plan.md`；真实图片链路已实测通过（4/4 任务成功，产物落盘），视频/TTS/BGM 被模型与自定义节点缺失阻塞；解析页客户端跳转白屏与「画面」列取数已修复；分镜图阶段放宽为「≥1 张即可进入」；`/api/health` 改为读取 worker 心跳并返回 `ok/stale/not_running/unknown`；后端全量 1335 passed |
+| 12 E2E 与验收 | 进行中 | mock 与真实环境验证分开记录；样例 A（短剧本快速路径）、样例 B（中途失败 → 显式重试）、样例 C（多集复杂路径）已落地；测试矩阵与人工验收清单已落盘 `director_lab_refactor_test_plan.md`；真实图片链路已实测通过（4/4 任务成功，产物落盘），视频/TTS/BGM 被模型与自定义节点缺失阻塞；解析页客户端跳转白屏与「画面」列取数已修复；分镜图阶段放宽为「≥1 张即可进入」；`/api/health` 改为读取 worker 心跳并返回 `ok/stale/not_running/unknown`；分镜图 6/6 实测为单帧（修复镜头编号被误读为「第 1 到第 6 镜」导致的多格拼图）；道具锚定图改为单视图；后端全量 1339 passed |
 
 ## Phase 0 验收记录
 
@@ -285,6 +285,16 @@ git checkout -- backend/tests/test_project_purge_fk_coverage.py backend/tests/te
 - [x] 跨集拦截：第 1 集未合成、无连续性记录时，第 2 集首镜生成返回 422 `continuity_check_failed`，不创建任务、不写尾帧，避免跨集串帧。
 - [x] 只读预检：依赖图影响预演与工作流影响接口仍返回 200，镜头数不变。
 - [x] 边界：跨集正向衔接（合成 → 末帧提取 → 首帧注入）已由 `tests/test_continuity.py` 的六条用例覆盖；本 E2E 只验证生成入口在缺少连续性记录时的显式拦截，不重复合成链路。
+
+### Slice 24：分镜图多格拼图修复与真实图片链路复验（Phase 6 / 12）
+
+- [x] 根因定位：`workspace/prompts/image_prompt.md` 首行渲染为「生成第 1-6 镜」，被模型理解为「第 1 到第 6 镜」而输出多格竖条拼图；改为「生成第 {episode} 集第 {seq} 镜的单帧分镜图（只画这一个镜头的一个瞬间）」。
+- [x] 同步 `script_parse.py` 的 `image_prompt` / `video_prompt_first` / `video_prompt_body` 默认模板与 `workspace/prompts/video_prompt_*.md`，统一为「第 {episode} 集第 {seq} 镜」，避免图像与视频提示词口径漂移。
+- [x] 道具锚定图改为单视图：`PROP_TEMPLATE` 删除「并排展示正视与侧视」，`_DUTY_LINE["prop"]`、`prompt_qc.py` 的 `_ROLE_KEEP["prop"]`、`docs/prompts/compile_prop_asset.md` 同步，模板版本 `TEMPLATE_PROP` 1→2、`TEMPLATE_STORYBOARD` 2→3；避免下游分镜图复制双视图分格排版。
+- [x] 资产质检误报修复：`image_quality.py` 增加外接框宽高均 ≥2 格的约束（`_SKIN_MIN_BLOCK_SIDE=2`），排除书口等 1 格宽细条被误判为人物肤色块。
+- [x] 真实复验（项目 `prj_a10bc7d70728`，5090 实例）：道具锚定图重生成 19s 单视角干净；分镜图逐镜重生成后 6/6 为单帧、`validity=current`、`quality_status=passed`，产物位于 `backend/data/media/storyboards/storyboard_{1..6}_img.png`。
+- [x] 测试同步：`test_asset_prompt_hardening.py` 断言改为单视图口径，`test_two_stage_parse.py` 断言改为「第 1 集第 1 镜」，`test_scene_cleanliness.py` 新增细条不误判用例；后端全量 1339 passed（322.09s）。
+- [x] 未验证项：视频 / TTS 真实链路仍被远端模型缺失阻塞（需 45.4 GiB，远端可用 26G），见 `director_lab_refactor_test_plan.md` §5.5。
 
 ### 基线失败清偿（Windows 路径断言）
 

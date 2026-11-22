@@ -101,6 +101,39 @@ def test_nonempty_image_prompt_is_not_overwritten(ctx):
     assert params.get("prompt") == sentinel
 
 
+def test_blocked_compilation_raises_409_not_500(ctx, monkeypatch):
+    """编译未就绪且自带提示词时，必须返回可读 409，不能抛裸 ValueError（500）。
+
+    实测 bug（2026-11-22）：道具锚定图质检未通过 → 批量出图接口 500 且响应体为空，
+    页面只能显示「批量生成失败」，用户无从知道是哪张参考图不合格。
+    """
+    from types import SimpleNamespace
+
+    from app.services import prompt_compiler as pc
+
+    db, G, shot, wf = ctx
+    compiled = SimpleNamespace(
+        status="needs_review",
+        blocking_issues=[
+            {
+                "code": "reference_asset_quality_failed",
+                "message": "道具锚定图质检未通过（疑似混入人物），需重新生成",
+            }
+        ],
+        template_id="storyboard_image_v2",
+    )
+    monkeypatch.setattr(pc, "validate_compilation", lambda _payload: compiled)
+
+    with pytest.raises(Exception) as ei:
+        G._compile_shot_prompt(db, shot, wf, {"prompt": "已有提示词"}, "keyframe")
+
+    exc = ei.value
+    assert getattr(exc, "status_code", None) == 409, f"应返回 409，实际 {exc!r}"
+    detail = getattr(exc, "detail", {}) or {}
+    assert detail.get("code") == "prompt_compilation_blocked"
+    assert "质检未通过" in detail.get("message", "")
+
+
 def test_apply_compiled_media_fills_only_when_empty():
     """单元级锁定：_apply_compiled_media 只在 prompt 为空时填充。"""
     from types import SimpleNamespace

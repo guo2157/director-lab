@@ -259,6 +259,29 @@ def test_compile_prop_asset_excludes_hands(db, tmp_path):
     assert "手" in compiled.negative_prompt
 
 
+def test_prop_prompt_excludes_narrative_usage_from_description(db, tmp_path):
+    """道具 description 的剧情用法不得拼进锚定图提示词。
+
+    实测 bug（2026-11-22）：description 写「此后一直由林晓捧在手中」，
+    该句被当作「必须保留的关键细节」下发，模型在道具图上画出人手，
+    质检判不合格（疑似混入人物），进而阻断所有引用该道具的分镜图。
+    """
+    from app.services.prompt_compiler import compile_asset_image
+
+    project = _project(db, tmp_path)
+    prop = Prop(
+        id=ids.prop_id(), project_id=project.id, name="蓝色笔记本",
+        appearance="A5 大小长方形本子，雾蓝色布纹封面，米白色横线内页",
+        description="林晓在课桌发现的笔记本；此后一直由林晓捧在手中。",
+    )
+    db.add(prop)
+    db.commit()
+    compiled = compile_asset_image(db, "prop", prop.id)
+    assert "捧在手中" not in compiled.positive_prompt
+    assert "林晓" not in compiled.positive_prompt
+    assert "雾蓝色布纹封面" in compiled.positive_prompt
+
+
 def test_compile_asset_name_only_falls_back_to_name(db, tmp_path):
     """仅有名称时按既有资产模板语义以名称兜底：不阻断，只留告警。"""
     from app.services.prompt_compiler import compile_asset_image

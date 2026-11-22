@@ -3,7 +3,7 @@
 覆盖：
 - 角色模板三视图交付规范（同一角色三视角、身高对齐、共用光照）
 - 场景模板五类污染源分层约束（人影/间接人影/动物载具/剧情道具/文字）
-- 道具模板多视角与纯净度约束
+- 道具模板单视角与纯净度约束
 - 底图卫兵：质检 failed 的资产不得作为下游参考，pending 不误伤
 - 场景板接线：plate_text 优先于 description，且不拼接第四行风格
 - 地点圣经：同地点 anchors 复用
@@ -56,12 +56,17 @@ def test_scene_template_five_pollution_layers():
 
 
 def test_prop_template_view_and_purity():
-    from app.services.prompt_compiler import PROP_TEMPLATE
+    from app.services.prompt_compiler import PROP_TEMPLATE, _DUTY_LINE
 
-    assert "正视与侧视" in PROP_TEMPLATE
+    # 单视图为默认交付：并排正视+侧视会让分镜图复制分格排版（实测第 3、6 镜出现多格拼图）
+    assert "单一视角" in PROP_TEMPLATE
+    assert "不做并排多视角拼图" in PROP_TEMPLATE
+    assert "并排展示正视与侧视" not in PROP_TEMPLATE
     assert "材质必须可辨识" in PROP_TEMPLATE
     assert "没有使用场景" in PROP_TEMPLATE
     assert "不出现角色" in PROP_TEMPLATE
+    # 分镜图侧的参考图职责同样要求单一视角，避免模板两处口径不一致
+    assert "一个视角" in _DUTY_LINE["prop"]
 
 
 # ---------- 底图卫兵 ----------

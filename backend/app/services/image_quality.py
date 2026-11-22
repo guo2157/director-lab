@@ -57,6 +57,7 @@ _SKIN_GRID = 16
 _SKIN_CELL_PX = 8
 _SKIN_CELL_RATIO = 0.35        # 单格肤色像素占比达到此值记为肤色格
 _SKIN_MIN_BLOCK = 4            # 相邻肤色格连通块不小于此值才判为人物
+_SKIN_MIN_BLOCK_SIDE = 2       # 连通块外接框宽高至少各占此值（排除一维细条误报）
 _SKIN_FULL_FRAME_RATIO = 0.55  # 全图肤色占比超过此值视为整体暖色调背景，不报
 _SKIN_LUMA_MIN = 40            # 过暗区域（阴影/黑色物体）不计入肤色
 _SKIN_LUMA_MAX = 235
@@ -146,25 +147,35 @@ def _detect_person(rgb) -> str | None:
 
     seen: set[int] = set()
     largest = 0
+    largest_side = 0
     for start in hot:
         if start in seen:
             continue
         stack = [start]
         seen.add(start)
         block = 0
+        min_r = max_r = start // _SKIN_GRID
+        min_c = max_c = start % _SKIN_GRID
         while stack:
             cur = stack.pop()
             block += 1
             r, c = divmod(cur, _SKIN_GRID)
+            min_r, max_r = min(min_r, r), max(max_r, r)
+            min_c, max_c = min(min_c, c), max(max_c, c)
             for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
                 if 0 <= nr < _SKIN_GRID and 0 <= nc < _SKIN_GRID:
                     nxt = nr * _SKIN_GRID + nc
                     if nxt in hot and nxt not in seen:
                         seen.add(nxt)
                         stack.append(nxt)
-        largest = max(largest, block)
+        if block > largest:
+            largest = block
+            largest_side = min(max_c - min_c + 1, max_r - min_r + 1)
 
-    if largest >= _SKIN_MIN_BLOCK:
+    # 一维细条不算人物：米白色纸张边缘、木条、椅腿等浅色窄带会落入肤色区间，
+    # 实测道具图 ast_25f8313d91c3 的书口被识别成 1 格宽 × 10 格高的竖条并误报。
+    # 人物是二维聚集块，外接框宽高至少各占 2 格。
+    if largest >= _SKIN_MIN_BLOCK and largest_side >= _SKIN_MIN_BLOCK_SIDE:
         return (
             f'疑似混入人物（肤色聚集块 {largest} 格，全图肤色 {skin_ratio:.1%}），'
             '场景/道具图应为空场，需重采样'

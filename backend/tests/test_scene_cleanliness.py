@@ -93,3 +93,16 @@ def test_detect_person_on_skin_block_returns_message(tmp_path):
     ImageDraw.Draw(img).rectangle((40, 30, 90, 100), fill=SKIN)
     msg = _detect_person(img)
     assert msg is not None and "疑似混入人物" in msg
+
+
+def test_detect_person_ignores_thin_cream_strip(tmp_path):
+    """一维浅色窄条不算人物。
+
+    实测 bug（2026-11-22）：道具图 ast_25f8313d91c3 的书口（米白色页边）
+    被识别成 1 格宽 × 10 格高的竖条，误报「疑似混入人物」，
+    导致道具锚定图被判不合格并阻断所有引用该道具的分镜图。
+    """
+    img = Image.new("RGB", (128, 128), (30, 40, 60))
+    # 128px / 16 格 = 8px 一格；宽 8px、高 80px 的米白窄条
+    ImageDraw.Draw(img).rectangle((48, 16, 55, 95), fill=(230, 220, 195))
+    assert _detect_person(img) is None

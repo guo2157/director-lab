@@ -480,7 +480,7 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
 # ── video_prompt 兜底模板（P1 外置）：LLM 未生成时按状态衔接模板拼装 ───
 # 首镜版：无上一镜尾帧，仅 <Picture 1> 分镜图；
 # 非首镜版：<Picture 1> 上镜尾帧 + <Picture 2> 当前分镜图
-_register_default("video_prompt_first", """任务：Ref2VA 第 {episode}-{seq} 镜
+_register_default("video_prompt_first", """任务：Ref2VA 第 {episode} 集第 {seq} 镜
 
 【<Picture 1>：当前镜头分镜图】当前镜头的构图、人物站位与画面内容基准（Ref2VA 参考图，不保证作为强制首帧）：景别、构图、机位、人物外貌与关键动作。
 
@@ -509,7 +509,7 @@ _register_default("video_prompt_first", """任务：Ref2VA 第 {episode}-{seq} �
 
 输出：时长 {duration} 秒，按项目画幅，高质量输出。""")
 
-_register_default("video_prompt_body", """任务：Ref2VA 第 {episode}-{seq} 镜
+_register_default("video_prompt_body", """任务：Ref2VA 第 {episode} 集第 {seq} 镜
 
 【<Picture 1>：上一镜头尾帧】仅用于时间与空间连续性参考：理解人物位置、站姿、朝向、视线、道具状态与场景空间关系。它不是本镜头需要显示的画面，禁止直接复现、叠加、双重曝光、叠化或保留为背景层，禁止出现半透明人物、残影、虚影或重影。
 
@@ -635,7 +635,7 @@ def _assemble_image_prompt(sh: dict) -> str:
     )
 
 
-_register_default("image_prompt", """任务：生成第 {episode}-{seq} 镜的单帧分镜图（只画一个瞬间）
+_register_default("image_prompt", """任务：生成第 {episode} 集第 {seq} 镜的单帧分镜图（只画这一个镜头的一个瞬间）
 
 【本镜剧情】{shot_purpose}
 【本镜动作】{beats}
