@@ -670,8 +670,7 @@ MODEL_ROOTS = [
 ]
 
 # 平台的公共模型库（只读挂载）：AutoDL Pro 是 /.autodl-model/data，
-# 新版 AutoDL 实例是 /.autodl；结构都是 HuggingFace 的
-# <owner>/<repo>/<文件路径>，可以按仓库路径直接命中，命中后软链、零下载。
+# 结构就是 HuggingFace 的 <owner>/<repo>/<文件路径>，可以按仓库路径直接命中。
 PUBLIC_MODEL_ROOTS = [
     item.strip()
     for item in os.environ.get(
@@ -742,8 +741,8 @@ def _find_model_files(names, roots=None, max_depth=6):
 def _public_hits(items):
     """在平台公共模型库里按「仓库 + 文件路径」精确找文件，返回 {path: 真实路径}。
 
-    AutoDL 把公共模型库挂在 /.autodl-model/data 或 /.autodl，目录结构和
-    HF 仓库一致，所以能直接命中，不用遍历、也不用下载。
+    AutoDL Pro 把公共模型库挂在 /.autodl-model/data，目录结构和 HF 仓库一致，
+    所以能直接命中，不用遍历、也不用下载。
     """
     hits = {}
     if not items:
@@ -773,7 +772,7 @@ def scan_existing_models(groups=None, link=False, roots=None):
     返回 {ComfyUI 内相对路径: 实际文件路径}。
 
     顺序：① ComfyUI/models 里已就绪的；② 平台公共模型库
-    /.autodl-model/data、/.autodl；③ MODEL_ROOTS 下同名同大小的文件。
+    /.autodl-model/data；③ MODEL_ROOTS 下同名同大小的文件。
     """
     selected = [g for g in (groups or DOWNLOAD_GROUPS) if g in GROUPS]
     items = [m for m in MODELS if m.group in selected]
