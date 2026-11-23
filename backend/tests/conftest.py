@@ -26,6 +26,8 @@ _TEST_DATA_ROOT = Path(tempfile.mkdtemp(prefix="dlab-test-media-"))
 os.environ.setdefault("DLAB_DATA_DIR", str(_TEST_DATA_ROOT / "data"))
 os.environ.setdefault("DLAB_MEDIA_DIR", str(_TEST_DATA_ROOT / "data" / "media"))
 os.environ["DLAB_RENDER_MOCK"] = "false"  # 避免 .env 的真实配置漏进测试
+# API lifespan 会内嵌调度线程；测试不允许后台消费任务（会抢跑用例手工构造的 queued 任务）
+os.environ["DLAB_WORKER_EMBEDDED"] = "false"
 
 
 @pytest.fixture(autouse=True)

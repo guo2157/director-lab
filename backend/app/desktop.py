@@ -3,29 +3,22 @@
 职责：
 - 数据目录固定到 %APPDATA%\\DirectorLab，避免写入只读的程序目录
 - 把打包内的 ffmpeg/ffprobe 目录注入 PATH（业务代码用 shutil.which 探测）
-- 以子进程方式启动 worker（worker 在主线程注册信号，不能放进线程）
 - 启动 uvicorn 并自动打开浏览器；未配置 ComfyUI 时直接进入设置页
+- 调度进程由 API lifespan 自动拉起（见 app/main.py），无需单独的子进程
 """
 from __future__ import annotations
 
 import os
 import socket
-import subprocess
 import sys
 import threading
-import time
 import webbrowser
 from pathlib import Path
 
 APP_DIR_NAME = "DirectorLab"
 DEFAULT_PORT = 8765
-WORKER_ARG = "--worker"
 
 _LOG_STREAM = None
-
-
-def _is_frozen() -> bool:
-    return bool(getattr(sys, "_MEIPASS", None))
 
 
 def _bundle_dir() -> Path:
@@ -85,26 +78,6 @@ def _pick_port(start: int = DEFAULT_PORT, tries: int = 20) -> int:
     raise RuntimeError(f"端口 {start}-{start + tries - 1} 均被占用，请关闭占用程序后重试")
 
 
-def _start_worker() -> subprocess.Popen:
-    cmd = [sys.executable, WORKER_ARG] if _is_frozen() else [sys.executable, "-m", "app.worker.scheduler"]
-    return subprocess.Popen(cmd, cwd=os.getcwd(), stdout=sys.stdout, stderr=sys.stderr)
-
-
-def _worker_after_ready(port: int, holder: dict) -> None:
-    """等 API 端口可连接后再拉起 worker。
-
-    首次运行需要执行全部数据库迁移，worker 若在迁移期间启动会抢先建库/查表，
-    造成首次启动失败，因此必须等服务真正就绪。
-    """
-    deadline = time.monotonic() + 180
-    while time.monotonic() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            if sock.connect_ex(("127.0.0.1", port)) == 0:
-                holder["proc"] = _start_worker()
-                return
-        time.sleep(0.5)
-
-
 def _fatal(message: str) -> None:
     try:
         import ctypes
@@ -127,30 +100,13 @@ def main() -> int:
     root = _prepare_environment()
     _redirect_output(root)
 
-    if WORKER_ARG in sys.argv:
-        from app.worker.scheduler import run_worker
-
-        run_worker()
-        return 0
-
     import uvicorn
 
     from app.main import app
 
     port = _pick_port()
-    holder: dict = {}
-    threading.Thread(target=_worker_after_ready, args=(port, holder), daemon=True).start()
     threading.Timer(1.8, lambda: webbrowser.open(_open_url(port))).start()
-    try:
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", access_log=False)
-    finally:
-        worker = holder.get("proc")
-        if worker is not None:
-            worker.terminate()
-            try:
-                worker.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                worker.kill()
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", access_log=False)
     return 0
 
 

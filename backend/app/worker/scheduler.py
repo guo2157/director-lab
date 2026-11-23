@@ -8,6 +8,7 @@
 - 调度模型：主循环为唯一取任务者（无取任务竞态），执行线程池按并发度消费；
   线程崩溃残留的 running 任务由下次启动恢复逻辑重置
 """
+import os
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +26,10 @@ from app.worker.export_executor import execute_export_job
 from app.worker.parse_executor import execute_parse_job
 
 _RUNNING = True
+
+# 调度进程互斥锁的持有句柄（进程内单例）。两个 worker 同时消费同一批任务会互相
+# 把对方的 running 任务重置为 queued，导致同一任务被重复提交到 ComfyUI。
+_WORKER_LOCK_HANDLE = None
 
 # 对账性能约束：失联 ComfyUI 实例下，单轮最多对账任务数 & 单实例请求超时（秒）。
 # 避免大量失败任务 + 失联实例时，对账循环长时间持有 DB 事务拖垮整个服务。
@@ -56,6 +61,65 @@ def _write_heartbeat() -> None:
     except Exception as e:  # noqa: BLE001
         # 心跳失败不能拖垮调度主循环
         print(f"[worker] 写入心跳失败（不影响调度）: {e}")
+
+
+def acquire_worker_lock() -> bool:
+    """抢占调度互斥锁（跨进程文件锁），成功返回 True。
+
+    API 内嵌调度、独立 `python -m app.worker.scheduler`、桌面版的子进程 worker
+    可能同时存在，必须保证全局只有一个消费者。锁随进程退出由操作系统自动释放，
+    不会因崩溃留下死锁。同一进程内重复调用是幂等的。
+    """
+    global _WORKER_LOCK_HANDLE
+    if _WORKER_LOCK_HANDLE is not None:
+        return True
+    p = Path(get_settings().data_dir) / "worker.lock"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(p, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    _WORKER_LOCK_HANDLE = fh
+    return True
+
+
+def release_worker_lock() -> None:
+    """释放调度互斥锁（正常退出路径使用；进程被杀时由操作系统回收）。"""
+    global _WORKER_LOCK_HANDLE
+    fh = _WORKER_LOCK_HANDLE
+    _WORKER_LOCK_HANDLE = None
+    if fh is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        fh.close()
+
+
+def request_stop() -> None:
+    """请求调度主循环退出（内嵌在 API 进程时由 lifespan 关闭钩子调用）。"""
+    global _RUNNING
+    _RUNNING = False
 
 
 def _reconcile_submission_unknown(db: Session) -> int:
@@ -308,12 +372,21 @@ def _execute_job(job_id: str, job_type: str) -> dict:
     return {"ok": False, "reason": "unsupported_job_type"}
 
 
-def run_worker(once: bool = False) -> None:
-    """启动 worker 主循环。once=True 时只执行一轮（用于测试，等价于旧串行行为）。"""
+def run_worker(once: bool = False, install_signal_handlers: bool = True) -> None:
+    """启动 worker 主循环。
+
+    - once=True：只执行一轮（测试用，等价旧串行行为）
+    - install_signal_handlers=False：内嵌在 API 进程的线程中运行时必须关闭
+      （signal.signal 只能在主线程注册），改由 lifespan 调用 request_stop 退出
+    """
     global _RUNNING
+    if not acquire_worker_lock():
+        print("[worker] 已有调度进程在运行（worker.lock 被占用），本进程跳过调度")
+        return
     settings = get_settings()
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    if install_signal_handlers:
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
     db = SessionLocal()
     recovered = _recover_interrupted_jobs(db)
     if recovered:
@@ -434,6 +507,7 @@ def run_worker(once: bool = False) -> None:
                     print(f"[worker] 任务线程异常: {e}")
     finally:
         pool.shutdown(wait=False)
+        release_worker_lock()
     print("[worker] 停止")
 
 
