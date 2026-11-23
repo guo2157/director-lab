@@ -1289,8 +1289,10 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
     style = _style_for(db, project, "storyboard")
     style_snap = style_config.style_snapshot((project.settings if project else {}) or {},
                                              project_id=project.id if project else None)
-    beats = shot.beats or []
-    action = _text(beats[0] if beats else (shot.dialogue or ""), "镜头动作未提供")
+    # P1 聚合改造：通过 shot_timeline() 访问器读取，旧数据自动回退 beats
+    from app.services.shot_timeline import shot_timeline as _tl
+    timeline = _tl(shot)
+    action = _text(timeline[0] if timeline else (shot.dialogue or ""), "镜头动作未提供")
     position_specs, standable_items, opening_blocking, gaze_targets = _build_position_specs(shot, characters, scene)
     def _image_no(slot: dict, fallback: int) -> int:
         """槽位对应的提示词编号：取 input_key 的 image_N，保证与工作流实际连线一致。"""
@@ -2119,7 +2121,7 @@ def compile_shot_video(db: Session, shot_id: str, *,
         "scene": scene.title if scene is not None and scene.title else "未指定场景",
         "props": "、".join(p.name for p in prop_rows) or "无",
         "start_state": _describe_state(shot.start_state, "延续已审核分镜图初始状态"),
-        "main_action": _describe_beats(shot.beats, "按已审核分镜图完成镜头动作"),
+        "main_action": _describe_beats(_tl(shot), "按已审核分镜图完成镜头动作"),
         "end_state": _describe_state(shot.end_state, "延续动作的自然收束状态"),
         "shot_size": _text(shot.shot_type),
         "camera_angle": _text(shot.camera_angle),

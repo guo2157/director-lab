@@ -120,13 +120,17 @@ def _shot_action_texts(shot: Shot) -> list[str]:
 
     只取动作/姿态/位置/持物类字段，不取 dialogue 正文——
     台词里被谈论的人不等于在画面里。
+
+    P1 聚合改造：改为通过 shot_timeline() 访问器读取，旧数据自动回退 beats。
     """
+    from app.services.shot_timeline import shot_timeline as _tl
     texts: list[str] = []
-    for beat in (shot.beats or []):
-        if not isinstance(beat, dict):
+    for unit in _tl(shot):
+        if not isinstance(unit, dict):
             continue
+        # timeline 单元取 action；legacy beats 保留 action/start_pose/end_pose
         for key in ("action", "start_pose", "end_pose"):
-            val = beat.get(key)
+            val = unit.get(key)
             if isinstance(val, str) and val:
                 texts.append(val)
     for state in (shot.start_state, shot.end_state):

@@ -83,6 +83,10 @@ class ShotUpdate(BaseModel):
     character_id: str | None = None
     # 尾帧依赖声明（P0）：可随时开关，变更会经由既有失效传播标记下游
     requires_prev_frame: bool | None = None
+    # --- 聚合改造新增 ---
+    timeline: list | None = None
+    cut_reason: str | None = None
+    aggregation_meta: dict | None = None
 
 
 class ShotOrderUpdate(BaseModel):
@@ -125,6 +129,10 @@ class ShotOut(BaseModel):
     last_frame_asset_id: str | None
     beats: list | None
     emotion_curve: dict | None
+    # --- 聚合改造新增（P1 数据层）---
+    timeline: list | None = None
+    cut_reason: str | None = None
+    aggregation_meta: dict | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -123,6 +123,22 @@ class Settings(BaseSettings):
     h3_duration_max_seconds: int = 15
     h3_default_resolution: str = "768P"
 
+    # --- 分镜聚合改造（P1 数据层 + P2 解析，方案 §3.4/§5）---
+    # 聚合功能总开关：False 时完全回到旧提示词与旧 lint，新列均可空不影响旧数据
+    shot_aggregation_enabled: bool = False
+    # 推荐目标时长区间 [min, max]（秒），P0 实测标定前为默认配置
+    shot_target_duration_min: int = 6
+    shot_target_duration_max: int = 12
+    # 单镜说话人：默认 2 / 硬上限 3（受 3 条参考音频限制）
+    shot_max_speakers: int = 2
+    shot_hard_max_speakers: int = 3
+    # 台词字数/秒系数（待 P0 实测标定，参考项目默认 5.5）
+    chars_per_second: float = 5.5
+    # 单镜最大角色数
+    shot_max_characters: int = 3
+    # 镜内道具易手次数上限
+    shot_max_prop_transfers: int = 2
+
     # --- Stable Audio（T-06：单次上限经验值约 47 秒） ---
     stable_audio_max_seconds: float = 47.0
 

@@ -480,7 +480,10 @@ def _write_fields(plan_shot: dict, adapted: dict) -> dict:
     if "prop_asset_ids" in plan_shot:
         fields["props"] = adapted["props"]
     if "beat_ids" in plan_shot:
-        fields["beats"] = plan_shot["beat_ids"]
+        # P1 聚合改造：不再写入 Shot.beats（与解析路径的语义冲突——解析写动作字典，规划写 ID 字符串）
+        # 改为存入 aggregation_meta.source_beat_ids，保留原有 aggregation_meta 其他字段
+        existing_meta = adapted.get("aggregation_meta") if isinstance(adapted.get("aggregation_meta"), dict) else {}
+        fields["aggregation_meta"] = {**existing_meta, "source_beat_ids": plan_shot["beat_ids"]}
     # 空提示词不覆盖既有值：缺失/为空时交给生产编译层，避免清空已编译 Prompt
     if plan_shot.get("image_prompt"):
         fields["image_prompt"] = plan_shot["image_prompt"]

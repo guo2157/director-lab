@@ -184,6 +184,13 @@ class Shot(TimestampMixin, Base):
     end_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     last_frame_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     beats: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # --- 聚合改造新增（见 director_lab_full_pipeline_refactor_execution_plan.md §3.3）---
+    # timeline：镜内时间轴，成为唯一事实源；beats 降级为派生只读视图
+    timeline: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # cut_reason：本镜结束原因（枚举见方案 §3.2）
+    cut_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # aggregation_meta：预算占用与聚合决策记录
+    aggregation_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     emotion_curve: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 

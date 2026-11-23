@@ -651,8 +651,10 @@ def check_prop_count_consistency(db: Session, shot: Shot) -> list[dict[str, str]
     issues: list[dict[str, str]] = []
     seen: set[str] = set()
     events: list[dict] = []
-    for beat in (shot.beats or []):
-        action = beat.get("action") if isinstance(beat, dict) else str(beat)
+    # P1 聚合改造：通过 shot_timeline() 访问器读取，旧数据自动回退 beats
+    from app.services.shot_timeline import shot_timeline as _tl
+    for unit in _tl(shot):
+        action = unit.get("action") if isinstance(unit, dict) else str(unit)
         events.extend(_beat_events(str(action or ""), sorted(names), default_actor))
 
     props = set(_prop_names(db, scene.project_id))

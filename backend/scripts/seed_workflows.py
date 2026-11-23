@@ -37,6 +37,7 @@ _BUILTIN_DESCRIPTIONS: dict[str, str] = {
     "wf_video_h3_flf2v": "首尾帧视频",
     "wf_video_h3_ref2va_std_5s": "标准5秒图生视频",
     "wf_video_h3_ref2va_fast_5s": "极速5秒图生视频",
+    "wf_video_h3_ref2va_quality_5s": "质量5秒图生视频",
     "wf_video_h3_ref2va_quality_10s": "高清10秒图生视频",
     "wf_tts_qwen3_voice_clone": "声音克隆",
     "wf_tts_qwen3_custom_voice": "自定义语音",

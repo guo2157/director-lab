@@ -502,18 +502,25 @@ def _aspect_ratio(db: Session, shot: Shot) -> str:
 
 
 def build_action_timeline(db: Session, shot: Shot, bindings: list[dict], spatial: dict) -> dict:
-    """把分镜 beats 转成动作时间轴，动作主体缺失标 pending_confirmation。"""
+    """把分镜时间轴转成动作时间轴，动作主体缺失标 pending_confirmation。
+
+    P1 聚合改造：改为通过 shot_timeline() 访问器读取，旧数据自动回退 beats。
+    timeline 有真实起止时间时直接用，不再均分。
+    """
+    from app.services.shot_timeline import shot_timeline as _tl
+
     name_to_id = {b["character_name"]: b.get("character_id") for b in bindings}
     duration = float(shot.duration or 0) or None
-    beats = shot.beats if isinstance(shot.beats, list) else []
+    timeline = _tl(shot)
     actions: list[dict] = []
-    for index, beat in enumerate(beats):
-        if isinstance(beat, str):
-            text = beat
+    n = len(timeline)
+    for index, unit in enumerate(timeline):
+        if isinstance(unit, str):
+            text = unit
             subject = None
-        elif isinstance(beat, dict):
-            text = beat.get("action") or beat.get("description") or ""
-            subject = beat.get("character") or beat.get("subject")
+        elif isinstance(unit, dict):
+            text = unit.get("action") or unit.get("description") or ""
+            subject = unit.get("character") or unit.get("subject")
         else:
             continue
         matched = None
@@ -521,12 +528,21 @@ def build_action_timeline(db: Session, shot: Shot, bindings: list[dict], spatial
             if name and name in text:
                 matched = name
                 break
+        # 用 timeline 真实起止时间（有则用），否则回退均分
+        start_t = unit.get("start") if isinstance(unit, dict) else None
+        end_t = unit.get("end") if isinstance(unit, dict) else None
+        if start_t is not None and end_t is not None and duration:
+            sp = round(start_t / duration, 3)
+            ep = round(end_t / duration, 3)
+        else:
+            sp = round(index / max(1, n), 3)
+            ep = round((index + 1) / max(1, n), 3)
         actions.append({
             "action_id": f"action_{index + 1:03d}",
             "character_id": name_to_id.get(subject) if subject else name_to_id.get(matched) if matched else None,
             "character_name": subject or matched,
-            "start_progress": round(index / max(1, len(beats)), 3),
-            "end_progress": round((index + 1) / max(1, len(beats)), 3),
+            "start_progress": sp,
+            "end_progress": ep,
             "action_description": text,
             "status": "confirmed" if (subject or matched) else "subject_pending",
         })
@@ -538,7 +554,7 @@ def build_action_timeline(db: Session, shot: Shot, bindings: list[dict], spatial
             if actions and all(a["status"] == "confirmed" for a in actions)
             else ("pending_confirmation" if actions else "empty")
         ),
-        "source": "shot.beats",
+        "source": "shot.timeline" if shot.timeline else "shot.beats",
     }
 
 
