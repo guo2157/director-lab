@@ -463,3 +463,70 @@ def test_no_asset_workspace_prompt_has_no_dangling_picture_refs(client):
     assert tags == list(range(1, len(enabled) + 1)), (
         "参考图 {} 张，但提示词引用了 {}".format(len(enabled), tags)
     )
+
+
+def _add_keyframe(tmp_path, project_id, shot_id):
+    """给镜头补一张当前生效分镜图（来源任务成功），用于验证 clip 目标回退。"""
+    import app.core.database as db_mod
+    db = db_mod.SessionLocal()
+    try:
+        job = Job(
+            id="job_kf_fallback", project_id=project_id, shot_id=shot_id,
+            job_type="generate_keyframe", workflow_id="wf_h3_noasset", workflow_version=7,
+            params={"prompt": "原分镜图提示词"}, status="succeeded", created_at=regen._now(),
+            input_snapshot={"workflow_version": 7, "params": {"prompt": "原分镜图提示词"}},
+        )
+        db.add(job)
+        db.flush()
+        asset = Asset(
+            id="ast_kf_fallback", project_id=project_id, asset_type="keyframe",
+            name="storyboard_1_img", version=1,
+            file_path=_media(tmp_path, "kf.png"), source_job_id=job.id, validity="current",
+        )
+        db.add(asset)
+        db.commit()
+        return asset.id
+    finally:
+        db.close()
+
+
+def test_workspace_submit_allows_shot_without_any_asset(client):
+    """零产物镜头提交必须成功：GET 能打开、POST 却 404 会让待生成镜头链路断掉。"""
+    _, shot_id = _seed_no_assets(client)
+    r = client.post(
+        "/api/shots/{}/regenerate/workspace/regenerate".format(shot_id),
+        json={"target": "clip", "final_prompt": "镜头开始，人物走入画面。"},
+    )
+    assert r.status_code == 202, r.text
+    job_id = r.json()["id"]
+    import app.core.database as db_mod
+    db = db_mod.SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        assert job is not None
+        assert job.status == "queued"
+        snap = job.input_snapshot or {}
+        assert snap.get("base_asset_id") is None
+        assert snap.get("base_asset_version") is None
+    finally:
+        db.close()
+
+
+def test_workspace_submit_falls_back_to_current_keyframe(client, tmp_path):
+    """尚无分镜视频但有分镜图时，以分镜图为基准提交，不得报『尚无当前生效产物』。"""
+    pid, shot_id = _seed_no_assets(client)
+    kf_id = _add_keyframe(tmp_path, pid, shot_id)
+    r = client.post(
+        "/api/shots/{}/regenerate/workspace/regenerate".format(shot_id),
+        json={"target": "clip", "final_prompt": "镜头开始，人物走入画面。"},
+    )
+    assert r.status_code == 202, r.text
+    job_id = r.json()["id"]
+    import app.core.database as db_mod
+    db = db_mod.SessionLocal()
+    try:
+        snap = db.get(Job, job_id).input_snapshot or {}
+        assert snap.get("base_asset_id") == kf_id
+    finally:
+        db.close()
+

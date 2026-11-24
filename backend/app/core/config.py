@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     # 强杀会让 running 任务在下次启动被无脑重跑，等于白烧一遍 token。
     worker_shutdown_grace_seconds: float = 20.0
     worker_poll_interval_seconds: float = 2.0
+    # 调度进程是否随 API 进程自动启动（默认开启）。
+    # 启动 uvicorn 即自动消费任务，无需再手动起 `python -m app.worker.scheduler`。
+    # 需要把调度拆成独立服务（如 systemd 多实例部署）时设为 false。
+    # 无论开关如何，跨进程文件锁保证同一数据目录下只有一个消费者。
+    worker_embedded: bool = True
     # 心跳过期阈值：超过该时长未更新即认为 worker 未在消费任务。
     # 必须明显大于 poll 间隔（默认 2s），避免正常轮询间隙被误判。
     worker_heartbeat_stale_seconds: float = 120.0

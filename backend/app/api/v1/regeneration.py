@@ -754,22 +754,23 @@ def _ws_upsert_config(
     return row
 
 
-@router.get("/shots/{shot_id}/regenerate/workspace")
-def get_regenerate_workspace(
-    shot_id: str,
-    target: str = "clip",
-    db: Session = Depends(get_db),
-) -> dict:
-    """读取重新生成工作台完整数据。
+def _resolve_workspace_base(
+    db: Session,
+    shot: Shot,
+    target: str,
+    base_asset_id: str | None = None,
+) -> tuple[Asset | None, dict, str | None]:
+    """工作区基础版本解析（GET / PUT / 预检 / 提交共用同一口径）。
 
-    有已保存配置时以保存内容为准，否则由基础快照推导并标注待确认项；
-    同时返回历史数据兼容标记，供前端提示『历史配置不完整』。
+    - 显式传入 base_asset_id 时严格按该版本解析，不做回退
+    - clip 目标尚未出视频时回退当前分镜图快照，连分镜图也没有时返回空配置
+    - 空配置也必须能提交：分镜看板的「待生成 → 视频生成中」流程要求用户在
+      工作区调好提示词与参考图后直接提交，只有 GET 能打开、POST 却 404 会断链
     """
-    from app.services import regen_workspace as ws
+    if base_asset_id:
+        asset = _resolve_base_asset(db, shot, target, base_asset_id)
+        return asset, regen.build_base_config(db, asset), None
 
-    shot = _get_shot(db, shot_id)
-    if target not in _TARGET_ASSET_TYPE:
-        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
     fallback_from: str | None = None
     try:
         base_asset = _resolve_base_asset(db, shot, target, None)
@@ -777,7 +778,7 @@ def get_regenerate_workspace(
         # 尚未生成分镜视频时，视频侧没有可用的基础版本。此时仍应展示参考图，
         # 否则详情页参考图区为空，用户无法新增或修改参考图。改为复用当前分镜图
         # 那次任务的参考图绑定，正文换用该镜头的分镜视频提示词。
-        if target != "clip" or (exc.detail or {}).get("code") != "asset_not_found":
+        if target != "clip" or _err_code(exc) != "asset_not_found":
             raise
         try:
             base_asset = _resolve_base_asset(db, shot, "keyframe", None)
@@ -791,6 +792,7 @@ def get_regenerate_workspace(
             fallback_from = "none"
         else:
             fallback_from = "keyframe"
+
     if base_asset is not None:
         base_config = regen.build_base_config(db, base_asset)
     else:
@@ -845,6 +847,26 @@ def get_regenerate_workspace(
         refs = _merge_system_refs(refs, _system_refs_for_clip(db, shot))
         refs.sort(key=lambda r: 0 if r.get("slot_param") == "ref_prev_frame" else 1)
         base_config["refs"] = refs
+    return base_asset, base_config, fallback_from
+
+
+@router.get("/shots/{shot_id}/regenerate/workspace")
+def get_regenerate_workspace(
+    shot_id: str,
+    target: str = "clip",
+    db: Session = Depends(get_db),
+) -> dict:
+    """读取重新生成工作台完整数据。
+
+    有已保存配置时以保存内容为准，否则由基础快照推导并标注待确认项；
+    同时返回历史数据兼容标记，供前端提示『历史配置不完整』。
+    """
+    from app.services import regen_workspace as ws
+
+    shot = _get_shot(db, shot_id)
+    if target not in _TARGET_ASSET_TYPE:
+        raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
+    base_asset, base_config, fallback_from = _resolve_workspace_base(db, shot, target)
     workflow = _ws_load_workflow(db, shot, target, {}, base_config)
     saved = ws.load_saved_config(db, shot.id, target)
     data = ws.build_workspace(
@@ -897,8 +919,9 @@ def put_regenerate_workspace(shot_id: str, payload: dict, db: Session = Depends(
     if target not in _TARGET_ASSET_TYPE:
         raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
     project_id = _project_id_of(db, shot)
-    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
-    base_config = regen.build_base_config(db, base_asset)
+    base_asset, base_config, _fallback = _resolve_workspace_base(
+        db, shot, target, payload.get("base_asset_id")
+    )
     workflow = _ws_load_workflow(db, shot, target, payload, base_config)
     row = _ws_upsert_config(
         db,
@@ -924,7 +947,7 @@ def put_regenerate_workspace(shot_id: str, payload: dict, db: Session = Depends(
         "saved_version": row.version,
         "base_snapshot_complete": bool(base_config.get("snapshot_complete")),
         "incomplete_reasons": base_config.get("incomplete_reasons") or [],
-        "base_asset_id": base_asset.id,
+        "base_asset_id": base_asset.id if base_asset is not None else None,
     }
     return data
 
@@ -945,8 +968,9 @@ def post_regenerate_workspace_validate(
     target = payload.get("target") or "clip"
     if target not in _TARGET_ASSET_TYPE:
         raise errors.AppError("invalid_request", f"不支持的目标：{target}", 400)
-    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
-    base_config = regen.build_base_config(db, base_asset)
+    base_asset, base_config, _fallback = _resolve_workspace_base(
+        db, shot, target, payload.get("base_asset_id")
+    )
     workflow = _ws_load_workflow(db, shot, target, payload, base_config)
     data = ws.build_workspace(
         db,
@@ -1040,8 +1064,9 @@ def post_regenerate_workspace_generate(
         if exist is not None:
             return _job_out(exist, (exist.input_snapshot or {}).get("snapshot"))
     project_id = _project_id_of(db, shot)
-    base_asset = _resolve_base_asset(db, shot, target, payload.get("base_asset_id"))
-    base_config = regen.build_base_config(db, base_asset)
+    base_asset, base_config, _fallback = _resolve_workspace_base(
+        db, shot, target, payload.get("base_asset_id")
+    )
     workflow = _ws_load_workflow(db, shot, target, payload, base_config)
     refs = _ws_refs_to_slots(payload.get("references") or [])
     if target == "clip":
@@ -1121,8 +1146,8 @@ def post_regenerate_workspace_generate(
             "prompt_version": _prompt_version_payload(params),
             "params": params,
             "generation_mode": regen.MODE_FULL_RECONFIGURE,
-            "base_asset_id": base_asset.id,
-            "base_asset_version": base_asset.version,
+            "base_asset_id": base_asset.id if base_asset is not None else None,
+            "base_asset_version": base_asset.version if base_asset is not None else None,
             "regeneration": True,
             "workspace": {
                 "references": payload.get("references") or [],

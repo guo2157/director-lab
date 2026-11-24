@@ -5,8 +5,10 @@
 - 长耗时操作返回 202 + job 对象（阶段 4 实现）
 """
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 import sys
+import threading
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -89,10 +91,68 @@ def _startup_selfcheck() -> dict:
     return report
 
 
+_embedded_worker: dict = {"thread": None, "stop": None}
+
+
+def _start_embedded_worker() -> None:
+    """随 API 进程自动拉起调度线程（无需再手动启动独立 worker 进程）。
+
+    跨进程文件锁保证同一数据目录下只有一个消费者：独立 worker 或另一个 API
+    实例正在消费时，本进程会等待锁释放后接管，不会重复取任务。
+    迁移在 _startup_selfcheck 中已完成，此时启动调度不会与建表竞争。
+    """
+    if not get_settings().worker_embedded:
+        return
+    stop = threading.Event()
+
+    def _run() -> None:
+        from app.worker import scheduler as sched
+
+        while not stop.is_set():
+            if sched.acquire_worker_lock():
+                break
+            # 独立 worker 已占用（或热重载时新旧进程交替），稍后重试接管
+            stop.wait(3.0)
+        if stop.is_set():
+            return
+        try:
+            sched.run_worker(install_signal_handlers=False)
+        except Exception:  # noqa: BLE001
+            logging.getLogger("director-lab.startup").exception("内嵌调度进程异常退出")
+        finally:
+            sched.release_worker_lock()
+
+    thread = threading.Thread(target=_run, name="dlab-scheduler", daemon=True)
+    thread.start()
+    _embedded_worker["thread"] = thread
+    _embedded_worker["stop"] = stop
+
+
+def _stop_embedded_worker() -> None:
+    """停止内嵌调度：给在途任务留出有界退出时间，避免被硬杀后重复执行。"""
+    thread = _embedded_worker.get("thread")
+    stop = _embedded_worker.get("stop")
+    if stop is not None:
+        stop.set()
+    if thread is None:
+        return
+    from app.worker import scheduler as sched
+
+    sched.request_stop()
+    grace = float(getattr(get_settings(), "worker_shutdown_grace_seconds", 20.0) or 20.0)
+    thread.join(timeout=grace + 5.0)
+    _embedded_worker["thread"] = None
+    _embedded_worker["stop"] = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _startup_selfcheck()
-    yield
+    _start_embedded_worker()
+    try:
+        yield
+    finally:
+        _stop_embedded_worker()
 
 
 def _frontend_dist() -> Path | None:
