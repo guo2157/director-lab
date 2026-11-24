@@ -198,6 +198,11 @@ class Shot(TimestampMixin, Base):
     # aggregation_meta：预算占用与聚合决策记录
     aggregation_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     emotion_curve: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # --- 镜头级契约（shot_plan v1，分镜图生成改造 Phase 1）---
+    # 分镜规划的导演决策落库：画内角色 / 画外声音 / 可见道具 / 构图 / 首帧状态。
+    # 下游 compiler / resolver / 门禁 / 注入器统一读这一份出场清单（ShotCast），
+    # 不再各写一套启发式推断「谁在画面里」。无该字段的镜头走旧启发式兜底，行为不变。
+    shot_plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 # shot 表建议索引：(scene_id, episode) 支撑分镜看板按场景按集加载

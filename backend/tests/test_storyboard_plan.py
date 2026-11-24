@@ -136,7 +136,11 @@ def test_valid_plan_maps_to_shot_preview_without_writing(client):
     assert first["props"] == ["钥匙"]
     assert first["image_prompt"] is None
     assert first["video_prompt"] is None
-    assert first["plan_meta"]["visual_description"].startswith("林晓")
+    # Phase 1：plan_meta 已由镜头级契约 shot_plan 取代（导演决策落库）
+    assert first["shot_plan"]["visual_description"].startswith("林晓")
+    assert first["shot_plan"]["source"] == "storyboard_plan"
+    assert first["shot_plan"]["on_screen_characters"][0]["character_id"] == context["character_id"]
+    assert first["shot_plan"]["on_screen_characters"][0]["role"] == "primary"
 
     assert body["coverage"]["scenes"] == {
         "total": 2, "covered": 2, "uncovered_scene_ids": [],
@@ -289,7 +293,8 @@ def test_validate_omits_unchanged_fields_from_diff(client):
     assert "shot_kind" not in fields
     assert "dialogue" not in fields
     # P1 聚合改造：beats 降级为派生只读视图，规划路径写入 aggregation_meta.source_beat_ids
-    assert fields == {"character_id", "props", "aggregation_meta"}
+    # Phase 1：规划提供出场清单时生成镜头级契约 shot_plan 并进入差异
+    assert fields == {"character_id", "props", "aggregation_meta", "shot_plan"}
 
 
 def _post_apply(client: TestClient, context: dict, plan: dict):
@@ -520,3 +525,123 @@ def test_plan_api_enforces_project_isolation(client):
 
     assert _post_apply(client, {**context, "project_id": other_project},
                        _valid_plan(context)).status_code == 404
+
+
+def test_apply_writes_shot_plan_contract(client):
+    """验收用例 D：apply 写入多角色镜头的 shot_plan 契约，重复 apply 幂等。"""
+    context = _setup(client)
+    session = _session()
+    try:
+        laoma = Character(id=ids.character_id(), project_id=context["project_id"],
+                          name="老马", description="老师")
+        wang = Character(id=ids.character_id(), project_id=context["project_id"],
+                         name="王老师", description="班主任")
+        session.add_all([laoma, wang])
+        session.commit()
+        laoma_id, wang_id = laoma.id, wang.id
+    finally:
+        session.close()
+    beat = next(
+        item for item in context["structure"]["beats"]
+        if item["scene_id"] == context["structure"]["scenes"][0]["scene_id"]
+    )
+    plan = {
+        "plan_version": 1,
+        "shots": [
+            {
+                "shot_id": "sht_cast_1",
+                "scene_id": context["scenes"]["classroom"],
+                "beat_ids": [beat["beat_id"]],
+                "sequence": 1, "duration": 5, "shot_kind": "dialogue",
+                "visual_description": "林晓与老马、王老师在教室对话",
+                "source_block_ids": beat["source_block_ids"],
+                "character_asset_ids": [context["character_id"], laoma_id, wang_id],
+                "on_screen_character_ids": [context["character_id"], laoma_id, wang_id],
+                "blocking": {
+                    context["character_id"]: {"anchor": "教室前门", "side": "左"},
+                    laoma_id: {"anchor": "讲台", "side": "中"},
+                    wang_id: {"anchor": "黑板", "side": "右"},
+                },
+            },
+        ],
+    }
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is True
+    session = _session()
+    try:
+        stored = session.get(Shot, "sht_cast_1")
+        # character_id 仍兼容写首个；完整出场清单进 shot_plan
+        assert stored.character_id == context["character_id"]
+        contract = stored.shot_plan
+        assert contract["version"] == 1
+        assert contract["source"] == "storyboard_plan"
+        assert [c["character_id"] for c in contract["on_screen_characters"]] == [
+            context["character_id"], laoma_id, wang_id,
+        ]
+        assert contract["on_screen_characters"][0]["role"] == "primary"
+        assert contract["on_screen_characters"][0]["position"] == {
+            "anchor": "教室前门", "side": "左",
+        }
+    finally:
+        session.close()
+    # 重复 apply 幂等：字段一致 → unchanged
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["applied"] is True
+    assert "sht_cast_1" in body["unchanged_shot_ids"]
+
+
+def test_apply_preserves_locked_shot_plan_cast(client):
+    """验收用例 D：锁定镜头的 shot_plan.on_screen_characters 不被覆盖。"""
+    context = _setup(client)
+    session = _session()
+    try:
+        laoma = Character(id=ids.character_id(), project_id=context["project_id"],
+                          name="老马", description="老师")
+        session.add(laoma)
+        session.commit()
+        laoma_id = laoma.id
+        session.add(Shot(
+            id="sht_lock_1", scene_id=context["scenes"]["classroom"], episode=1,
+            seq=1, shot_kind="visual", duration=5, keyframe_confirmed=True,
+            shot_plan={
+                "version": 1, "source": "storyboard_plan", "confirmed": True,
+                "on_screen_characters": [{"character_id": context["character_id"],
+                                          "role": "primary"}],
+            },
+        ))
+        session.commit()
+    finally:
+        session.close()
+    beat = next(
+        item for item in context["structure"]["beats"]
+        if item["scene_id"] == context["structure"]["scenes"][0]["scene_id"]
+    )
+    plan = {
+        "plan_version": 1,
+        "shots": [
+            {
+                "shot_id": "sht_lock_1",
+                "scene_id": context["scenes"]["classroom"],
+                "beat_ids": [beat["beat_id"]],
+                "sequence": 1, "duration": 5, "shot_kind": "visual",
+                "visual_description": "林晓与老马在教室",
+                "source_block_ids": beat["source_block_ids"],
+                "character_asset_ids": [context["character_id"], laoma_id],
+                "on_screen_character_ids": [context["character_id"], laoma_id],
+            },
+        ],
+    }
+    response = _post_apply(client, context, plan)
+    assert response.status_code == 200, response.text
+    session = _session()
+    try:
+        stored = session.get(Shot, "sht_lock_1")
+        # 锁定镜头：on_screen_characters 保持原值（1 人），不被规划覆盖
+        assert [c["character_id"] for c in stored.shot_plan["on_screen_characters"]] == [
+            context["character_id"],
+        ]
+    finally:
+        session.close()

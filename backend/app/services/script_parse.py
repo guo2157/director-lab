@@ -200,7 +200,7 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 18. time_note：时段与天气，如清晨·薄雾、正午·晴。同一地点的不同时段视为不同场景，title 可加时段后缀区分。
 
 ════ 五、镜头 shots ════
-19. 每个 shot 含 episode、seq（同场景同集内唯一，从 1 连续）、scene_id、character_id（主说话角色名，可空）、props（道具名数组）、dialogue、dialogue_segments（每项 speaker/text/emotion/order，可选 start_time/end_time）、speaker（可空）、emotion（neutral/happy/sad/angry/fearful，取情绪曲线终点）、emotion_curve（from/trigger/turn_at/to/expression）、beats（上限 3 个，每项 action/start_pose/end_pose/duration）、start_state、end_state（六项枚举：pose/position/expression/holding/costume/injury）、image_prompt、video_prompt（可空）、shot_type、camera_angle、camera_movement、transition、shot_purpose、duration（秒，整数）、shot_kind（dialogue/narration/visual/transition）、time_jump（默认 false）、requires_prev_frame（默认 false）。
+19. 每个 shot 含 episode、seq（同场景同集内唯一，从 1 连续）、scene_id、character_id（主说话角色名，可空）、on_screen_characters（画内角色名数组：本镜画面里实际出现的角色，旁白/画外音角色不列入）、offscreen_speakers（画外说话人名数组：有台词但不在画面里的角色）、props（道具名数组）、dialogue、dialogue_segments（每项 speaker/text/emotion/order，可选 start_time/end_time）、speaker（可空）、emotion（neutral/happy/sad/angry/fearful，取情绪曲线终点）、emotion_curve（from/trigger/turn_at/to/expression）、beats（上限 3 个，每项 action/start_pose/end_pose/duration）、start_state、end_state（六项枚举：pose/position/expression/holding/costume/injury）、image_prompt、video_prompt（可空）、shot_type、camera_angle、camera_movement、transition、shot_purpose、duration（秒，整数）、shot_kind（dialogue/narration/visual/transition）、time_jump（默认 false）、requires_prev_frame（默认 false）。
 20. duration：单镜 3-10 秒。超过 10 秒的剧情必须拆成多个镜头，不得用长 duration 硬塞。
 21. 对白可制作性：
     - dialogue_segments 每段 text 不超过 40 字，超过必须拆成多段
@@ -989,6 +989,44 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             _shot_props = sh.get("props")
             if _shot_props is not None and not isinstance(_shot_props, list):
                 _shot_props = None
+            # 镜头级契约草稿（分镜图生成改造 Phase 1）：解析提示词标注的
+            # 画内/画外角色名数组 → source=parse_heuristic、confirmed=false 草稿，
+            # 供下游 ShotCast 读取；未标注（历史提示词/缓存输出）保持 None 走旧启发式。
+            # 只解析名字数组不要求长文本，避免输出变长导致 JSON 截断（提示词第 27 条）。
+            _screen_ids: list[str] = []
+            _off_ids: list[str] = []
+            for _field, _target in (("on_screen_characters", _screen_ids),
+                                    ("offscreen_speakers", _off_ids)):
+                _raw = sh.get(_field)
+                if not isinstance(_raw, list):
+                    continue
+                for _name in _raw:
+                    if not isinstance(_name, str) or not _name.strip():
+                        continue
+                    _ch = (char_map.get(_name)
+                           or char_norm_map.get(normalize_entity_name(_name)))
+                    if _ch is not None and _ch.id not in _target:
+                        _target.append(_ch.id)
+            _off_ids = [cid for cid in _off_ids if cid not in set(_screen_ids)]
+            _shot_plan = None
+            if _screen_ids or _off_ids:
+                _primary_id = (char_id if char_id in _screen_ids
+                               else (_screen_ids[0] if _screen_ids else None))
+                _shot_plan = {
+                    "version": 1,
+                    "source": "parse_heuristic",
+                    "confirmed": False,
+                    "on_screen_characters": [
+                        {"character_id": cid,
+                         "role": "primary" if cid == _primary_id else "secondary"}
+                        for cid in _screen_ids
+                    ],
+                    "offscreen_voices": [
+                        {"character_id": cid, "kind": "offscreen_dialogue"}
+                        for cid in _off_ids
+                    ],
+                    "visible_props": [],
+                }
             # 分镜图提示词兜底：两段式改造后 LLM 不再产出 image_prompt，
             # 由模板按结构化事实渲染。下游 6 处依赖该字段（prompt_qc /
             # shot_refs / reference_resolver / asset_plan 道具绑定 /
@@ -1030,10 +1068,19 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             if existing:
                 for k, v in fields.items():
                     setattr(existing, k, v)
+                # 镜头级契约（Phase 1）：解析草稿不覆盖已确认/规划来源的契约；
+                # 未标注画内/画外时不触碰既有契约（避免重解析清空规划决策）
+                if _shot_plan is not None:
+                    _old_plan = existing.shot_plan
+                    if not (isinstance(_old_plan, dict) and (
+                            _old_plan.get("confirmed")
+                            or _old_plan.get("source") == "storyboard_plan")):
+                        existing.shot_plan = _shot_plan
                 stats["shots_updated"] += 1
             else:
                 db.add(Shot(id=id_gen.shot_id(), scene_id=scene.id, episode=ep_i,
-                            seq=int(seq), status="pending", **fields))
+                            seq=int(seq), status="pending", shot_plan=_shot_plan,
+                            **fields))
                 db.flush()
                 stats["shots_created"] += 1
 

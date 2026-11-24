@@ -294,8 +294,169 @@ def _field_changes(plan_shots: list[dict], adapted: list[dict],
     return changes
 
 
+_SHOT_PLAN_OFFSCREEN_KINDS = ("voice_over", "offscreen_dialogue", "mentioned")
+_SHOT_PLAN_PROP_INTERACTIONS = ("held", "carried", "worn", "placed", "none")
+# 规划文档中属于镜头级契约的六个可选字段：任一出现即生成 shot_plan
+_SHOT_PLAN_CONTRACT_KEYS = (
+    "on_screen_character_ids", "offscreen_voices", "visible_props",
+    "blocking", "composition", "keyframe_state",
+)
+
+
+def _validate_offscreen_voices(issues: list[dict], value: object, path: str,
+                               characters: dict[str, Character]) -> tuple[list[str], list[dict]]:
+    """校验画外声音数组；返回 (角色 ID 列表, 清洗后的契约项)。"""
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        _issue(issues, "error", "invalid_value", path, "offscreen_voices 必须是数组")
+        return [], []
+    ids: list[str] = []
+    items: list[dict] = []
+    for position, item in enumerate(value):
+        item_path = f"{path}[{position}]"
+        if not isinstance(item, dict):
+            _issue(issues, "error", "invalid_value", item_path, "画外声音项必须是对象")
+            continue
+        character_id = item.get("character_id")
+        if not isinstance(character_id, str) or not character_id.strip():
+            _issue(issues, "error", "missing_field", f"{item_path}.character_id",
+                   "画外声音缺少 character_id")
+            continue
+        if character_id not in characters:
+            _issue(issues, "error", "asset_not_found", f"{item_path}.character_id",
+                   f"角色 ID 不存在或不属于当前项目：{character_id}")
+            continue
+        kind = item.get("kind") or "voice_over"
+        if kind not in _SHOT_PLAN_OFFSCREEN_KINDS:
+            _issue(issues, "error", "invalid_value", f"{item_path}.kind",
+                   f"kind 必须是 {_SHOT_PLAN_OFFSCREEN_KINDS} 之一")
+            continue
+        ids.append(character_id)
+        items.append({"character_id": character_id, "kind": kind})
+    return ids, items
+
+
+def _validate_visible_props(issues: list[dict], value: object, path: str,
+                             props: dict[str, Prop],
+                             characters: dict[str, Character]) -> tuple[list[str], list[dict]]:
+    """校验可见道具数组；返回 (道具 ID 列表, 清洗后的契约项)。"""
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        _issue(issues, "error", "invalid_value", path, "visible_props 必须是数组")
+        return [], []
+    ids: list[str] = []
+    items: list[dict] = []
+    for position, item in enumerate(value):
+        item_path = f"{path}[{position}]"
+        if not isinstance(item, dict):
+            _issue(issues, "error", "invalid_value", item_path, "可见道具项必须是对象")
+            continue
+        prop_id = item.get("prop_id")
+        if not isinstance(prop_id, str) or not prop_id.strip():
+            _issue(issues, "error", "missing_field", f"{item_path}.prop_id",
+                   "可见道具缺少 prop_id")
+            continue
+        if prop_id not in props:
+            _issue(issues, "error", "asset_not_found", f"{item_path}.prop_id",
+                   f"道具 ID 不存在或不属于当前项目：{prop_id}")
+            continue
+        holder = item.get("holder_character_id")
+        if holder is not None and holder not in characters:
+            _issue(issues, "error", "asset_not_found", f"{item_path}.holder_character_id",
+                   f"持有角色 ID 不存在或不属于当前项目：{holder}")
+            continue
+        interaction = item.get("interaction") or "none"
+        if interaction not in _SHOT_PLAN_PROP_INTERACTIONS:
+            _issue(issues, "error", "invalid_value", f"{item_path}.interaction",
+                   f"interaction 必须是 {_SHOT_PLAN_PROP_INTERACTIONS} 之一")
+            continue
+        ids.append(prop_id)
+        items.append({
+            "prop_id": prop_id,
+            "holder_character_id": holder,
+            "interaction": interaction,
+            "position": item.get("position"),
+            "appearance_constraint": item.get("appearance_constraint"),
+        })
+    return ids, items
+
+
+def _check_speaker_classification(issues: list[dict], shot: dict, path: str,
+                                   characters: dict[str, Character],
+                                   classified: set[str]) -> None:
+    """规划文档自带 dialogue_segments 时：说话人应归类为画内或画外，否则告警。"""
+    segments = shot.get("dialogue_segments")
+    if not isinstance(segments, list):
+        return
+    by_name = {character.name: character for character in characters.values()
+               if character.name}
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        speaker = segment.get("speaker")
+        if not isinstance(speaker, str) or not speaker.strip():
+            continue
+        character = by_name.get(speaker.strip())
+        if character is not None and character.id not in classified:
+            _issue(issues, "warning", "speaker_unclassified", f"{path}.dialogue_segments",
+                   f"说话人『{speaker}』未归类为画内或画外角色",
+                   related_ids=[character.id])
+
+
+def _build_shot_plan(shot: dict, character_ids: list[str],
+                     on_screen_ids: list[str], offscreen_voices: list[dict],
+                     visible_props: list[dict]) -> dict | None:
+    """从规划文档镜头构造 shot_plan（schema v1）。
+
+    - 六个契约字段任一提供、或出场清单非空时生成契约：完整出场清单不再被
+      压成首个（character_id 仍兼容写首个）；两者均无时返回 None，
+      镜头保持无契约状态，下游走旧启发式兜底；
+    - 未显式声明画内角色时，默认「出场清单减去画外声音」在画内（与既有行为一致）；
+    - blocking 按 character_id 提供站位，写入 on_screen_characters[].position。
+    """
+    has_contract = any(key in shot for key in _SHOT_PLAN_CONTRACT_KEYS)
+    if not has_contract and not character_ids:
+        return None
+    if "on_screen_character_ids" in shot:
+        screen_ids = list(on_screen_ids)
+    else:
+        excluded = {item["character_id"] for item in offscreen_voices}
+        screen_ids = [cid for cid in character_ids if cid not in excluded]
+    blocking = shot.get("blocking") if isinstance(shot.get("blocking"), dict) else {}
+    on_screen: list[dict] = []
+    for index, character_id in enumerate(screen_ids):
+        entry: dict = {
+            "character_id": character_id,
+            "role": "primary" if index == 0 else "secondary",
+        }
+        position = blocking.get(character_id)
+        if isinstance(position, dict) and position:
+            entry["position"] = position
+        elif isinstance(position, str) and position.strip():
+            entry["position"] = {"note": position.strip()}
+        on_screen.append(entry)
+    composition = shot.get("composition")
+    return {
+        "version": 1,
+        "source": "storyboard_plan",
+        "confirmed": False,
+        "visual_description": shot.get("visual_description"),
+        "on_screen_characters": on_screen,
+        "offscreen_voices": [
+            {"character_id": item["character_id"], "kind": item["kind"]}
+            for item in offscreen_voices
+        ],
+        "visible_props": visible_props,
+        "composition": composition if isinstance(composition, dict) else None,
+        "keyframe": {"t": 0, "state": shot.get("keyframe_state"), "avoid": []},
+    }
+
+
 def _adapt_shot(shot: dict, scene: Scene | None, character_ids: list[str],
-                prop_names: list[str], evidence: list[str]) -> dict:
+                prop_names: list[str], evidence: list[str],
+                shot_plan: dict | None) -> dict:
     return {
         "id": shot.get("shot_id"),
         "scene_id": shot.get("scene_id"),
@@ -314,11 +475,9 @@ def _adapt_shot(shot: dict, scene: Scene | None, character_ids: list[str],
         # 规划层不编译 Prompt：仅透传显式提供的字段，缺失时由生产编译层生成
         "image_prompt": shot.get("image_prompt"),
         "video_prompt": None,
-        "plan_meta": {
-            "visual_description": shot.get("visual_description"),
-            "character_asset_ids": character_ids,
-            "locked": bool(shot.get("locked")),
-        },
+        # 镜头级契约（Phase 1）：导演决策落库，取代此前无人读取的 plan_meta；
+        # 无契约字段的规划保持 None，下游走旧启发式兜底
+        "shot_plan": shot_plan,
     }
 
 
@@ -437,7 +596,43 @@ def validate_storyboard_plan(db: Session, script_version: ScriptVersion, *,
         prop_ids = _validate_assets(issues, shot.get("prop_asset_ids"),
                                     f"{path}.prop_asset_ids", props, "道具")
         prop_names = [props[prop_id].name for prop_id in prop_ids]
-        adapted.append(_adapt_shot(shot, scene, character_ids, prop_names, evidence))
+        # --- 镜头级契约字段校验（shot_plan v1，Phase 1）---
+        on_screen_ids = _validate_assets(issues, shot.get("on_screen_character_ids"),
+                                         f"{path}.on_screen_character_ids",
+                                         characters, "画内角色")
+        if on_screen_ids and character_ids and not set(on_screen_ids) <= set(character_ids):
+            _issue(issues, "error", "on_screen_not_in_cast",
+                   f"{path}.on_screen_character_ids",
+                   "画内角色必须属于 character_asset_ids 出场清单",
+                   related_ids=sorted(set(on_screen_ids) - set(character_ids)))
+        offscreen_ids, offscreen_voices = _validate_offscreen_voices(
+            issues, shot.get("offscreen_voices"), f"{path}.offscreen_voices", characters)
+        overlap = set(on_screen_ids) & set(offscreen_ids)
+        if overlap:
+            _issue(issues, "error", "on_screen_offscreen_overlap", path,
+                   "同一角色不能同时出现在画内与画外", related_ids=sorted(overlap))
+        visible_prop_ids, visible_props = _validate_visible_props(
+            issues, shot.get("visible_props"), f"{path}.visible_props", props, characters)
+        stray_props = [prop_id for prop_id in visible_prop_ids
+                       if prop_id not in set(prop_ids)]
+        if stray_props:
+            _issue(issues, "warning", "visible_prop_not_in_cast",
+                   f"{path}.visible_props",
+                   "可见道具未列入 prop_asset_ids，仍按规划写入契约",
+                   related_ids=stray_props)
+        if len(on_screen_ids) >= 2:
+            blocking = shot.get("blocking") if isinstance(shot.get("blocking"), dict) else {}
+            missing_positions = [cid for cid in on_screen_ids if not blocking.get(cid)]
+            if missing_positions:
+                _issue(issues, "warning", "blocking_missing", f"{path}.blocking",
+                       "画内角色 ≥2 时应为每人提供 blocking 站位",
+                       related_ids=missing_positions)
+        _check_speaker_classification(issues, shot, path, characters,
+                                      set(on_screen_ids) | set(offscreen_ids))
+        shot_plan = _build_shot_plan(shot, character_ids, on_screen_ids,
+                                     offscreen_voices, visible_props)
+        adapted.append(_adapt_shot(shot, scene, character_ids, prop_names,
+                                   evidence, shot_plan))
 
     if shots:
         _check_sequences(issues, [shot for shot in shots if isinstance(shot, dict)])
@@ -487,6 +682,9 @@ def _write_fields(plan_shot: dict, adapted: dict) -> dict:
     # 空提示词不覆盖既有值：缺失/为空时交给生产编译层，避免清空已编译 Prompt
     if plan_shot.get("image_prompt"):
         fields["image_prompt"] = plan_shot["image_prompt"]
+    # 镜头级契约（Phase 1）：规划生成契约时写入 shot_plan（含完整出场清单）
+    if adapted.get("shot_plan") is not None:
+        fields["shot_plan"] = adapted["shot_plan"]
     return fields
 
 
@@ -574,6 +772,14 @@ def apply_storyboard_plan(db: Session, script_version: ScriptVersion, *,
             skipped_locked.append({"shot_id": shot_id, "fields": changed_locked})
             continue
         fields = _write_fields(plan_shot, adapted)
+        # 锁定镜头不覆盖 shot_plan.on_screen_characters（沿用既有锁定规则）：
+        # 分镜图已按当前画内角色确认，改画内清单会使确认失效
+        if (target.keyframe_confirmed and fields.get("shot_plan") is not None
+                and isinstance(target.shot_plan, dict)
+                and target.shot_plan.get("on_screen_characters") is not None):
+            merged = dict(fields["shot_plan"])
+            merged["on_screen_characters"] = target.shot_plan["on_screen_characters"]
+            fields["shot_plan"] = merged
         if all(getattr(target, column) == value for column, value in fields.items()):
             unchanged.append(shot_id)
             continue
