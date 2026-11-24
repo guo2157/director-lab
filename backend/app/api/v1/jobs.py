@@ -290,6 +290,8 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
         .filter(Job.status.in_(("queued", "running")), Job.shot_id.isnot(None))
         .all()
     }
+    # 入口预取的快照：用于区分「本来就在途」与「本轮已建过重试任务」两种跳过原因
+    preexisting = set(inflight)
     for j in q.all():
         key = (j.shot_id, j.job_type)
         if j.shot_id and key in inflight:
@@ -300,7 +302,7 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
             # job_9bf6f2cd3c88 与 job_678e5c8960ee，白跑一次云端出图。
             skipped.append({
                 "source_job_id": j.id,
-                "reason": "job_in_flight" if key not in inflight else "duplicate_in_batch",
+                "reason": "job_in_flight" if key in preexisting else "duplicate_in_batch",
             })
             continue
         new_job = Job(
@@ -331,8 +333,11 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
     return {
         "retried": retried,
         "retried_count": len(retried),
-        "skipped_capped": skipped,
-        "skipped_count": len(skipped),
+        # skipped_capped 只放「已达重试上限」的任务 ID；skipped_count 是全部跳过数
+        # （在途/批内重复 + 已达上限），与 D-14「已达上限的单独返回」口径一致。
+        "skipped_capped": capped_ids,
+        "skipped": skipped,
+        "skipped_count": len(skipped) + len(capped_ids),
     }
 
 

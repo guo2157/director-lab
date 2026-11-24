@@ -14,14 +14,34 @@ import pytest
 
 
 class _FakeShot:
+    """最小 Shot 替身：_shot_props 已委托 ShotCast，需覆盖其 legacy 路径读取的字段。"""
+
     def __init__(self, props=None, image_prompt=None):
+        self.id = "shot_x"
         self.props = props
         self.image_prompt = image_prompt
+        self.video_prompt = None
+        # 无 shot_plan 契约 → 走 legacy 启发式（本文件验证的就是旧口径兜底）
+        self.shot_plan = None
+        self.character_id = None
+        self.scene_id = "scn_x"
+        self.dialogue_segments = None
+        # shot_timeline 访问器读取的字段
+        self.timeline = None
+        self.beats = None
+        self.start_state = None
+        self.end_state = None
 
 
 class _FakeProp:
     def __init__(self, name):
+        self.id = f"prop_{name}"
         self.name = name
+
+
+class _FakeScene:
+    def __init__(self, project_id):
+        self.project_id = project_id
 
 
 class _FakeQuery:
@@ -34,12 +54,25 @@ class _FakeQuery:
     def all(self):
         return self._rows
 
+    def first(self):
+        return self._rows[0] if self._rows else None
+
 
 class _FakeDB:
-    def __init__(self, prop_names):
+    def __init__(self, prop_names, project_id="prj_x"):
         self._props = [_FakeProp(n) for n in prop_names]
+        self._scene = _FakeScene(project_id) if project_id else None
 
-    def query(self, *a, **k):
+    def get(self, model, pk):
+        from app.models import Scene
+
+        return self._scene if model is Scene else None
+
+    def query(self, model, *a, **k):
+        from app.models import Prop, PropShotState
+
+        if model is PropShotState:
+            return _FakeQuery([])
         return _FakeQuery(self._props)
 
 
@@ -101,6 +134,7 @@ def test_unknown_prop_name_is_ignored():
 
 
 def test_no_project_id_returns_empty():
-    db = _FakeDB(["帆布包"])
+    """无法确定项目范围（镜头无所属场景）时不返回任何道具。"""
+    db = _FakeDB(["帆布包"], project_id=None)
     shot = _FakeShot(props=["帆布包"])
-    assert _shot_props(db, shot, project_id="") == []
+    assert _shot_props(db, shot) == []

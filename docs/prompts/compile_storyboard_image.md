@@ -2,6 +2,7 @@
 参考图职责：
 {ref_duty_block}
 目标画面：在场景「{scene}」中，{action_moment}。
+{plan_posture_block}
 角色站位（不可互换）：
 {position_specs}
 站位规则：
