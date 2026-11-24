@@ -357,6 +357,34 @@ def build_base_config(db: Session, asset: Asset) -> dict:
     prompt = params.get("prompt") or ""
     negative = params.get("negative") or ""
 
+    # 提示词正文以**当前定义**（AssetPlan.prompt）为权威源，快照仅兜底。
+    #
+    # 2026-11-24 修复：此前详情页只拿历史任务快照的 prompt。快照是生成当时的文本，
+    # 图若由旧代码产出，正文里就只有当时那几行「参考图职责」——实测
+    # sht_08f1d95942c7 的快照只有 image1(场景)+image2(角色) 两行，而重建后的定义
+    # 已有三行（含 image3 道具锚定图）。于是详情页出现自相矛盾的三件套：
+    #   「参考图」列表 3 个槽位 ← 读当前定义
+    #   提示词职责段 2 行       ← 读历史快照
+    #   提交参数 2 个 ref_*     ← 读历史快照
+    # 用户看到「参考图有道具、提示词没道具」。这里改成定义优先，快照兜底，
+    # 三条链路同源；下游 inject_asset_refs 只做增量补 @引用，不再需要猜图序。
+    if _shot_id and _plan_type == "keyframe":
+        try:
+            from app.models import AssetPlan
+
+            _def_plan = (
+                db.query(AssetPlan)
+                .filter(
+                    AssetPlan.owner_id == _shot_id,
+                    AssetPlan.plan_type == "keyframe",
+                )
+                .first()
+            )
+            if _def_plan is not None and (_def_plan.prompt or "").strip():
+                prompt = _def_plan.prompt
+        except Exception:  # noqa: BLE001 - 定义读取失败保留快照文本
+            pass
+
     # 提示词头部的「参考资产」按当前口径重算（2026-11-21 修复）。
     #
     # 快照里的 prompt 是**生成时**的文本。当时的 collect_shot_characters 只认
@@ -389,6 +417,23 @@ def build_base_config(db: Session, asset: Asset) -> dict:
         for k, v in params.items()
         if not str(k).startswith("__") and k not in ("prompt", "negative")
     }
+    # 参考图槽位参数以**当前定义**为准补齐（2026-11-24 修复）。
+    #
+    # 缺陷现象：详情页「参考图」列表按当前定义显示了 3 个槽位（角色/场景/道具），
+    # 但提示词职责段只写了两张图、提交时也只注入两张 —— 因为 model_params 完全
+    # 来自历史任务快照 params，而那张图是旧代码生成的（当时还没有 ref_prop 绑定）。
+    # 实测 E2E prj_7717c671b15c 场1-镜1：refs=3 个槽位，model_params 只有
+    # ref_identity/ref_scene，道具「黑色雨伞」的锚定图从未进入生成参数。
+    # 这里用当前 refs 的 file_path 反推槽位参数，缺失的补上（已有值不覆盖）。
+    for _ref in refs:
+        _slot = _ref.get("slot_param")
+        _path = _ref.get("file_path")
+        if not _slot or not _path or _slot in model_params:
+            continue
+        if not str(_path).lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            continue
+        # 与快照同格式：只写文件名（执行器按 data/media 目录解析）
+        model_params[_slot] = os.path.basename(_path)
 
     return {
         "base": _asset_brief(asset),

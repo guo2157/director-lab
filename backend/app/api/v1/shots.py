@@ -28,6 +28,69 @@ def _get_shot(db: Session, shot_id: str) -> Shot:
     return s
 
 
+def _effective_prompt_for(db: Session, shot: Shot) -> str | None:
+    """分镜图「实际下发」提示词：与生成链路共用同一出口 + 同一套图序校正。
+
+    为什么不能再用 inject_asset_refs(shot.image_prompt)：
+    真正提交给模型的是 resolve_keyframe_prompt → compile_storyboard_image 渲染的
+    v3 模板（含权威角色/道具槽位与参考图职责段），而 image_prompt 是解析阶段
+    落库的旧版正文。两者内容不同，详情页会展示出一份「永远不会被下发」的提示词。
+
+    这里完整复现提交链路的三步，确保页面所见即实际所发：
+    1. resolve_keyframe_prompt 取提示词（compiled / fallback / user_edited 三态一致）；
+    2. 用 resolve_shot_references 算出实际会注入的媒体槽位；
+    3. rewrite_picture_refs 按压缩后的连续图序校正 <imageN>。
+    第 3 步不能省：编译产物里的编号来自工作流静态 input_key（道具固定写
+    image_6），而执行器会把未注入槽位删掉重排，页面若显示 <image6> 而实际
+    只有 4 张图，用户对照参考图必然错位。
+    """
+    from app.models.asset_plan import AssetPlan
+    from app.services.prompt_compiler import resolve_keyframe_prompt
+    from app.services.reference_resolver import resolve_shot_references
+    from app.services.ref_inject import rewrite_picture_refs
+    from app.services.workflow.capabilities import declared_reference_slots
+
+    plan = (
+        db.query(AssetPlan)
+        .filter(AssetPlan.owner_id == shot.id, AssetPlan.plan_type == "keyframe")
+        .first()
+    )
+    plan_prompt = (plan.prompt or "") if plan is not None else ""
+    # 必须取与生成时同一个工作流：传 None 会让 compile_storyboard_image 拿不到
+    # 槽位声明，编译结果退化成「无参考图绑定」，页面就会显示一份没有参考图的提示词。
+    wf = None
+    try:
+        from app.api.v1.generate import _match_workflow
+        wf = _match_workflow(db, "keyframe", None)
+    except Exception:
+        wf = None
+    try:
+        prompt, _meta = resolve_keyframe_prompt(
+            db, shot, wf, plan_prompt=plan_prompt, user_edited=False
+        )
+    except Exception:  # 编译异常不能让详情接口 500
+        return inject_asset_refs(db, shot, shot.image_prompt) if shot.image_prompt else None
+    if not prompt or not prompt.strip():
+        # 编译与回退都为空时退回旧口径，至少让页面有内容可看
+        return inject_asset_refs(db, shot, shot.image_prompt) if shot.image_prompt else None
+    # 图序校正：让页面编号与实际注入的连续序号一致
+    try:
+        scene = db.get(Scene, shot.scene_id)
+        project_id = scene.project_id if scene is not None else ""
+        if not project_id:
+            return prompt
+        manifest = resolve_shot_references(
+            db, shot.id, project_id, target="keyframe"
+        )
+        media = {s.slot: s.file_path for s in manifest.slots if s.file_path}
+        if not media:
+            return prompt
+        wf_slots = declared_reference_slots(wf.capabilities) if wf is not None else None
+        return rewrite_picture_refs(db, project_id, prompt, media, wf_slots)
+    except Exception:
+        return prompt
+
+
 def _mark_downstream_stale(db: Session, shot_id: str, roles: list[str] | None = None) -> None:
     """按依赖矩阵将镜头下游产物标 stale（仅视频或全部，视修改字段而定）。"""
     refs = db.query(AssetRef).filter(AssetRef.shot_id == shot_id).all()
@@ -144,10 +207,15 @@ def get_shot(shot_id: str, db: Session = Depends(get_db)) -> dict:
         if character else None
     )
     out["props"] = [{"id": p.id, "name": p.name, "anchor_asset_id": p.anchor_asset_id} for p in props]
-    # 实际生成用提示词：注入 @引用（含道具）后的增强版本，与任务提交链路一致
-    out["effective_image_prompt"] = (
-        inject_asset_refs(db, s, s.image_prompt) if s.image_prompt else None
-    )
+    # 实际生成用提示词：必须与生成链路同一个出口（2026-11-24 修复）。
+    #
+    # 原实现是 inject_asset_refs(db, s, s.image_prompt)：取的是解析阶段落库的
+    # 旧版 image_prompt，而真正下发的提示词走 resolve_keyframe_prompt →
+    # compile_storyboard_image 的 v3 模板。两条来源不同，于是出现「页面显示的
+    # 提示词」和「job.params.prompt」完全不是一回事：实测 E2E prj_7717c671b15c
+    # 页面头部有「参考资产：@程野 @林夏 @水泥楼梯间 @深灰色外套」和参考图职责段，
+    # 而下发内容里这两段都不存在。用户照页面判断「参考图都带上了」，实际没有。
+    out["effective_image_prompt"] = _effective_prompt_for(db, s)
     out["current_assets"] = {
         "keyframe": _current_asset_info(db, shot_id, "keyframe"),
         "clip": _current_asset_info(db, shot_id, "clip"),

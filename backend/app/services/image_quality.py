@@ -61,6 +61,22 @@ _SKIN_MIN_BLOCK_SIDE = 2       # 连通块外接框宽高至少各占此值（�
 _SKIN_FULL_FRAME_RATIO = 0.55  # 全图肤色占比超过此值视为整体暖色调背景，不报
 _SKIN_LUMA_MIN = 40            # 过暗区域（阴影/黑色物体）不计入肤色
 _SKIN_LUMA_MAX = 235
+# 形状约束（2026-11-24 新增）：肤色聚集块还必须「像人」，否则暖色背景会被判成人物。
+# 实测两处误报（E2E prj_7717c671b15c，同一批 7 张场景/道具图命中 2 张）：
+#   * 城市天台 ast_90c242520e2e：湿水泥地的橙色反光构成 8 格宽 × 3 格高的横向条带，
+#     判「混入人物 16 格 / 肤色 13.0%」→ 编译阻断 → 分镜图回退旧版单人提示词；
+#   * 水泥楼梯间 ast_e42d88e0c876：米白色墙面占满 13×13 格（填充率 0.61），
+#     判「混入人物 103 格 / 肤色 36.1%」→ 同样的连锁回退。
+# 人物形态是「竖长、不铺满画幅」：外接框高宽比 ≥ 0.8，且宽高都不接近整幅。
+_SKIN_MIN_ASPECT = 0.8         # 外接框 高/宽 下限：横向条带（反光/地面/条状物）达不到
+_SKIN_MAX_SPAN_RATIO = 0.75    # 外接框 宽或高 占网格比例上限：整墙/整片背景超限
+# 饱和度约束（2026-11-24 新增，第 3 处误报）：黄铜/古铜等金属色与湿地面霓虹反光的
+# 色相几乎和肤色重合，形状也竖长，前两条判据都拦不住。实测道具「旧钥匙」
+# （ast_9e52f5fe03bf，黄铜钥匙竖放在米白背景）被判「混入人物 27 格」，
+# 进而阻断所有引用该道具的分镜图编译。
+# 真肤色饱和度低：实测程野 S 中位数 48、林夏 46、合成图 90；
+# 而黄铜钥匙 159、湿地面霓虹反光 165 —— 高饱和是材质/光源，不是皮肤。
+_SKIN_MAX_SATURATION_MEDIAN = 130
 _NO_PERSON_CHECK_TYPES = {"scene", "prop"}
 
 
@@ -113,6 +129,13 @@ def _detect_person(rgb) -> str | None:
     返回问题描述，未命中返回 None。
     这是启发式筛查而非视觉模型：命中后由执行器换 seed 重新采样，
     不宣称已精确识别『几个人』或『是谁』。
+
+    三级判据（任一不满足即放行）：
+    1. 肤色聚集块足够大（≥ _SKIN_MIN_BLOCK 格，外接框宽高各 ≥ 2 格）；
+    2. 形状像人：外接框高宽比 ≥ _SKIN_MIN_ASPECT 且不铺满画幅
+       —— 排除横向反光条带与整片墙面；
+    3. 饱和度像皮肤：肤色像素 S 中位数 ≤ _SKIN_MAX_SATURATION_MEDIAN
+       —— 排除黄铜/古铜等金属色与霓虹反光。
     """
     size = _SKIN_GRID * _SKIN_CELL_PX
     small = rgb.resize((size, size))
@@ -123,6 +146,7 @@ def _detect_person(rgb) -> str | None:
 
     cells = [0] * (_SKIN_GRID * _SKIN_GRID)
     skin_total = 0
+    sat_values: list[int] = []
     for idx in range(size * size):
         y = y_data[idx]
         if y < _SKIN_LUMA_MIN or y > _SKIN_LUMA_MAX:
@@ -140,6 +164,22 @@ def _detect_person(rgb) -> str | None:
         # 整体暖色调画面（沙地、木墙、夕照），不是局部人物
         return None
 
+    # 饱和度判据：高饱和 = 金属材质或强色光源，不是皮肤。
+    # 只在命中候选块后计算会更省，但这里已遍历过一遍，顺手取样即可。
+    hsv = small.convert('HSV')
+    sat_data = hsv.getchannel('S').tobytes()
+    for idx in range(size * size):
+        y = y_data[idx]
+        if y < _SKIN_LUMA_MIN or y > _SKIN_LUMA_MAX:
+            continue
+        if 77 <= cb_data[idx] <= 127 and 133 <= cr_data[idx] <= 173:
+            sat_values.append(sat_data[idx])
+    if sat_values:
+        sat_values.sort()
+        sat_median = sat_values[len(sat_values) // 2]
+        if sat_median > _SKIN_MAX_SATURATION_MEDIAN:
+            return None
+
     per_cell = _SKIN_CELL_PX * _SKIN_CELL_PX
     hot = {i for i, n in enumerate(cells) if n / per_cell >= _SKIN_CELL_RATIO}
     if len(hot) < _SKIN_MIN_BLOCK:
@@ -148,6 +188,9 @@ def _detect_person(rgb) -> str | None:
     seen: set[int] = set()
     largest = 0
     largest_side = 0
+    # 最大连通块的外接框必须单独记录：min_r/max_r/min_c/max_c 是每个连通块的
+    # 循环内局部量，循环结束后残留的是「最后一块」而不是「最大块」的包围盒。
+    best_box = (0, 0, 0, 0)  # (min_r, max_r, min_c, max_c)
     for start in hot:
         if start in seen:
             continue
@@ -171,16 +214,29 @@ def _detect_person(rgb) -> str | None:
         if block > largest:
             largest = block
             largest_side = min(max_c - min_c + 1, max_r - min_r + 1)
+            best_box = (min_r, max_r, min_c, max_c)
 
     # 一维细条不算人物：米白色纸张边缘、木条、椅腿等浅色窄带会落入肤色区间，
     # 实测道具图 ast_25f8313d91c3 的书口被识别成 1 格宽 × 10 格高的竖条并误报。
     # 人物是二维聚集块，外接框宽高至少各占 2 格。
-    if largest >= _SKIN_MIN_BLOCK and largest_side >= _SKIN_MIN_BLOCK_SIDE:
-        return (
-            f'疑似混入人物（肤色聚集块 {largest} 格，全图肤色 {skin_ratio:.1%}），'
-            '场景/道具图应为空场，需重采样'
-        )
-    return None
+    if largest < _SKIN_MIN_BLOCK or largest_side < _SKIN_MIN_BLOCK_SIDE:
+        return None
+
+    # 形状约束：仅「像人」的聚集块才算人物（2026-11-24）。
+    # 上面两处 E2E 误报分别是横向条带（高宽比 0.375）与铺满画幅的墙面
+    # （13×13 格 / 81% 画幅），都在这里被排除，不再触发编译阻断连锁。
+    min_r, max_r, min_c, max_c = best_box
+    box_w = max_c - min_c + 1
+    box_h = max_r - min_r + 1
+    aspect = box_h / box_w
+    span = max(box_w, box_h) / _SKIN_GRID
+    if aspect < _SKIN_MIN_ASPECT or span > _SKIN_MAX_SPAN_RATIO:
+        return None
+
+    return (
+        f'疑似混入人物（肤色聚集块 {largest} 格，外接框 {box_w}×{box_h} 格，'
+        f'全图肤色 {skin_ratio:.1%}），场景/道具图应为空场，需重采样'
+    )
 
 
 def check_image_quality(file_path: str, *, asset_type: str | None = None) -> dict:

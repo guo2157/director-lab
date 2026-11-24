@@ -106,3 +106,53 @@ def test_detect_person_ignores_thin_cream_strip(tmp_path):
     # 128px / 16 格 = 8px 一格；宽 8px、高 80px 的米白窄条
     ImageDraw.Draw(img).rectangle((48, 16, 55, 95), fill=(230, 220, 195))
     assert _detect_person(img) is None
+
+
+def test_detect_person_ignores_horizontal_band(tmp_path):
+    """横向暖色条带不算人物（形状判据）。
+
+    实测 bug（2026-11-24）：场景图 ast_90c242520e2e（城市天台）里湿水泥地的
+    橙色霓虹反光构成 8 格宽 × 3 格高的横向条带，被判「混入人物 16 格 / 肤色 13.0%」，
+    于是 compile_storyboard_image 整单阻断 → resolve_keyframe_prompt 回退到旧版
+    单人提示词 → 分镜图里第二个角色根本没画出来。
+    """
+    img = Image.new("RGB", (128, 128), (30, 40, 60))
+    # 8 格宽 × 3 格高 = 64×24 px 的横向肤色条带（高宽比 0.375 < 0.8）
+    ImageDraw.Draw(img).rectangle((32, 60, 95, 83), fill=SKIN)
+    assert _detect_person(img) is None
+
+
+def test_detect_person_ignores_full_frame_wall(tmp_path):
+    """铺满画幅的暖色墙面不算人物（形状判据）。
+
+    实测 bug（2026-11-24）：场景图 ast_e42d88e0c876（水泥楼梯间）的米白色墙面
+    占据 13×13 格（81% 画幅），被判「混入人物 103 格 / 肤色 36.1%」。
+    """
+    img = Image.new("RGB", (128, 128), (30, 40, 60))
+    # 13×13 格 = 104×104 px 的大面积米白墙
+    ImageDraw.Draw(img).rectangle((8, 8, 111, 111), fill=(232, 214, 196))
+    assert _detect_person(img) is None
+
+
+def test_detect_person_ignores_high_saturation_brass(tmp_path):
+    """高饱和金属色（黄铜/古铜）不算人物（饱和度判据）。
+
+    实测 bug（2026-11-24）：道具图 ast_9e52f5fe03bf（旧钥匙）是竖放的黄铜钥匙，
+    色相与肤色重合、形状也竖长（4 格宽 × 12 格高，高宽比 3.0），前两条判据都拦不住。
+    真肤色 S 中位数实测 46~48，黄铜钥匙 159 —— 高饱和是材质不是皮肤。
+    """
+    img = Image.new("RGB", (128, 128), (30, 40, 60))
+    # 4 格宽 × 12 格高 = 32×96 px 的竖长黄铜色块（S≈160）
+    ImageDraw.Draw(img).rectangle((48, 16, 79, 111), fill=(196, 150, 52))
+    assert _detect_person(img) is None
+
+
+def test_detect_person_still_flags_real_skin_after_shape_and_saturation_guards(tmp_path):
+    """加了形状/饱和度判据后，真正的低饱和肤色人物块仍须被判出（防误放行回归）。"""
+    img = Image.new("RGB", (128, 128), (30, 40, 60))
+    # 躯干 + 头：竖长、不铺满、低饱和
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((56, 56, 79, 119), fill=SKIN)   # 躯干 3 格宽 × 8 格高
+    draw.rectangle((60, 24, 75, 55), fill=SKIN)    # 头 2 格宽 × 4 格高
+    msg = _detect_person(img)
+    assert msg is not None and "疑似混入人物" in msg, msg

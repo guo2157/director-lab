@@ -217,15 +217,35 @@ def resolve_shot_references(
     props = (
         db.query(Prop).filter(Prop.project_id == project_id).all()
     )
-    # 道具沿用提示词 @引用 提取（道具没有 character_id 这类结构化字段可依，
-    # 而 Shot.props 由 _shot_props 在编译期读取，这里保持与历史一致的 @引用 口径）。
+    # 道具沿用结构化字段 + @引用 提取（2026-11-24 修复）。
+    # 原实现只用 extract_refs(shot.image_prompt)：两段式改造后 LLM 不再产出
+    # image_prompt（由 STORYBOARD_TEMPLATE 渲染），正文里只有「涉及道具：深灰色外套」
+    # 这类纯文本、没有 @道具名，extract_refs 恒返回 [] —— 于是道具锚定图
+    # 100% 不注入。实测 E2E prj_7717c671b15c：shot.props=['深灰色外套']、
+    # 锚定图 ast_4a9725062ef3 有效，但 job 的 __media__ 只有 3 个槽位、无 ref_prop。
+    # 现在优先读结构化 shot.props（与 prompt_compiler._shot_props 同口径），
+    # 提示词 @引用 仅作历史数据兜底。
     mentioned: set[str] = set()
     for text in (shot.image_prompt or "", shot.video_prompt or ""):
         mentioned.update(extract_refs(text))
+    structured: set[str] = set()
+    _raw_props = getattr(shot, "props", None)
+    if isinstance(_raw_props, list):
+        structured = {str(x).strip() for x in _raw_props if str(x or "").strip()}
+    elif isinstance(_raw_props, str) and _raw_props.strip():
+        import json as _json
+        try:
+            _parsed = _json.loads(_raw_props)
+        except (ValueError, TypeError):
+            _parsed = None
+        if isinstance(_parsed, list):
+            structured = {str(x).strip() for x in _parsed if str(x or "").strip()}
+        else:
+            structured = {x.strip() for x in _raw_props.replace("，", ",").split(",") if x.strip()}
     props_to_resolve: list[tuple[Prop, PropShotState | None]] = []
     for p in props:
         st = next((s for s in states if s.prop_id == p.id), None)
-        in_shot = p.name in mentioned or p.id in prop_ids_with_state
+        in_shot = p.name in mentioned or p.name in structured or p.id in prop_ids_with_state
         if in_shot:
             props_to_resolve.append((p, st))
 

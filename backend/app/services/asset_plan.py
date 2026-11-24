@@ -205,15 +205,60 @@ def _picture_body(shot: Shot) -> str:
     return text or "按本镜剧情呈现单一瞬间的画面"
 
 
+def _shot_prop_names_for(shot: Shot) -> list[str]:
+    """本镜涉及的道具名（结构化 ``shot.props`` 优先，提示词 @引用 兜底）。
+
+    与 prompt_compiler._shot_props 同口径：解析阶段落库的 ``Shot.props`` 是权威来源，
+    两段式改造后 LLM 不再产出 image_prompt，靠正则提取会静默丢光全部道具参考图。
+    """
+    from app.services.ref_inject import extract_refs
+
+    names: list[str] = []
+    raw = getattr(shot, "props", None)
+    if isinstance(raw, list):
+        names = [str(x).strip() for x in raw if str(x or "").strip()]
+    elif isinstance(raw, str) and raw.strip():
+        import json as _json
+        try:
+            parsed = _json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, list):
+            names = [str(x).strip() for x in parsed if str(x or "").strip()]
+        else:
+            names = [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+    if not names:
+        names = extract_refs(getattr(shot, "image_prompt", None) or "")
+    # 去重保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def _keyframe_prompt(shot: Shot, char_key: str | None, char_name: str | None,
-                     scene_key: str, scene_title: str) -> str:
+                     scene_key: str, scene_title: str,
+                     char_names: list[str] | None = None,
+                     prop_names: list[str] | None = None) -> str:
     """生成分镜图提示词：包含任务/参考图职责/目标画面/必须保持/输出五个 _SECTION_RE 标准段。
     「参考图职责」段使用 <imageN> 占位，由 relabel_reference_block 按真实槽位重建；
     任务段正向定性为单帧完整画面，输出段用肯定句排除拼贴分格。
+
+    ``char_names`` 是本镜**全部**主体角色（权威口径 shot_subject_characters）。
+    2026-11-24 修复：此前只传 ``char_name``（= shot.character_id 单值），于是双人镜
+    提示词写「画面中只有 X 一个人物」，而参考图槽位按权威口径注入了两个角色 ——
+    提示词与槽位互相矛盾，实测 E2E prj_7717c671b15c 第 4 镜权威判定程野+林夏，
+    出图只有程野、林夏根本没画；11 个镜头里 6 个双人镜全部踩中。
     """
     episode = shot.episode or 1
     seq = shot.seq or 1
     body = _picture_body(shot)
+    # 主体角色：优先用权威口径传入的全量列表，未传时退回单值（兼容旧调用）
+    names = [n for n in (char_names or []) if n] or ([char_name] if char_name else [])
+    props = [p for p in (prop_names or []) if p]
     # 任务段：正向定性为一张完整单帧电影画面
     lines = [
         f"任务：生成第 {episode} 集第 {seq} 镜的一张完整单帧电影画面。"
@@ -227,10 +272,17 @@ def _keyframe_prompt(shot: Shot, char_key: str | None, char_name: str | None,
             f"仅用作背景的空间结构、地形、植被、光线方向与色调；"
             f"不要把它缩小、平铺或原样放进画面。"
         )
-    if char_name:
+    # 角色槽位编号按声明顺序顺延：场景占 1，角色从 2 起
+    for i, name in enumerate(names, start=2):
         ref_lines.append(
-            f"- <image2>（角色定妆图）：@{char_name} —— "
+            f"- <image{i}>（角色定妆图）：@{name} —— "
             f"仅用作该角色的面部、发型、体型与服装。"
+        )
+    prop_base = 2 + len(names)
+    for i, name in enumerate(props, start=prop_base):
+        ref_lines.append(
+            f"- <image{i}>（道具锚定图）：@{name} —— "
+            f"仅用作该道具的形状、颜色与材质。"
         )
     lines.extend(ref_lines)
     # 目标画面段
@@ -238,11 +290,18 @@ def _keyframe_prompt(shot: Shot, char_key: str | None, char_name: str | None,
         lines.append(f"目标画面：在 @{scene_title} 的场景中，{body}")
     # 必须保持段
     keep_items: list[str] = []
-    if char_name:
-        keep_items.append(
-            f"画面中只有 {char_name} 一个人物；面部、发型、体型、服装"
-            f"与 @{char_name} 的定妆图严格一致"
-        )
+    if names:
+        if len(names) == 1:
+            keep_items.append(
+                f"画面中只有 {names[0]} 一个人物；面部、发型、体型、服装"
+                f"与 @{names[0]} 的定妆图严格一致"
+            )
+        else:
+            joined = "、".join(names)
+            keep_items.append(
+                f"画面中的人物总数必须严格等于 {len(names)} 人（{joined}），"
+                f"不多不少；每个角色的面部、发型、体型、服装分别与其定妆图严格一致"
+            )
     if scene_title:
         keep_items.append(
             f"场景的空间结构、光线方向与色调与 @{scene_title} 的基准图一致。"
@@ -497,9 +556,18 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
         idx = shot.seq
         kf_key = make_asset_key("keyframe", char.name if char else scene.title,
                                 f"{project.id}|{shot.id}", seq=idx)
+        # 主体角色/道具必须用权威口径的全量集合渲染提示词（2026-11-24）：
+        # 此前只传 char.name（= shot.character_id 单值），双人镜提示词写「只有 X 一个人物」，
+        # 与按 shot_subject_characters 注入的多角色槽位互相矛盾，导致第二个角色根本没画出来。
+        from app.services.shot_refs import shot_subject_characters as _subjects_fn
+        _subjects = _subjects_fn(db, shot)
+        _char_names = [c.name for c in _subjects if getattr(c, "name", None)]
+        _shot_prop_names = _shot_prop_names_for(shot)
         kf_prompt = _keyframe_prompt(shot, char_plan.asset_key if char_plan else None,
                                      char.name if char else None,
-                                     scene_plan.asset_key if scene_plan else "", scene.title)
+                                     scene_plan.asset_key if scene_plan else "", scene.title,
+                                     char_names=_char_names,
+                                     prop_names=_shot_prop_names)
         kf_plan = _upsert_plan(db, project, "keyframe", kf_key, kf_prompt, "shot", shot.id,
                                char.name if char else scene.title, episode=shot.episode, seq=idx)
         kf_plans[shot.id] = kf_plan
@@ -559,10 +627,18 @@ def build_asset_plans(db: Session, project, episode_start: int = 1,
             _bind_dep(db, kf_plan, "ref_scene", scene_plan.asset_key, scene_plan)
             bound_slots.add("ref_scene")
             stats["deps"] += 1
-        # 道具参考：仅当镜头提示词显式 @道具名 时绑定（ref_prop 单槽位，取首个匹配）
-        if prop_by_name and shot.image_prompt:
-            from app.services.ref_inject import extract_refs
-            for _ref_name in extract_refs(shot.image_prompt):
+        # 道具参考：按本镜**结构化道具清单**绑定（ref_prop 单槽位，取首个匹配）。
+        #
+        # 2026-11-24 修复：此前这里用 `extract_refs(shot.image_prompt)` 从正文里捞
+        # @道具名，而两段式改造后 LLM 不再产出 image_prompt 正文（解析阶段改把道具
+        # 落库到结构化字段 `shot.props`）。实测 E2E prj_7717c671b15c 第 1 集：
+        # 9 个镜头 shot.props 明确有道具（黑色雨伞/深灰色外套/旧钥匙），
+        # 但 extract_refs(image_prompt) 全部返回 [] —— 于是 ref_prop 槽位一个都没绑，
+        # 道具锚定图生成了却从未进入分镜图，模型只能凭文字猜外观。
+        # 现在统一走 _shot_prop_names_for（结构化优先、@引用兜底），与提示词渲染同口径。
+        _prop_names_for_bind = _shot_prop_names_for(shot)
+        if prop_by_name and _prop_names_for_bind:
+            for _ref_name in _prop_names_for_bind:
                 _prop_plan = prop_by_name.get(_ref_name)
                 if _prop_plan is not None:
                     _bind_dep(db, kf_plan, "ref_prop", _prop_plan.asset_key, _prop_plan)

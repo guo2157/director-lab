@@ -1648,6 +1648,27 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     preferred=preferred_inst, exclude=exclude_instances
                 )
             except ComfyUIError as e:
+                # 取不到客户端 ≠ 任务失败（2026-11-24 修复）。
+                # 原实现直接 _fail_job()，于是「实例整机掉线」时排队中的任务
+                # 一个接一个立刻判死，job_max_attempts=3 完全没机会生效。
+                # 实测 E2E prj_7717c671b15c：06:56:32~34 的 1 秒内 4 个 job
+                # 全部 attempts=1 就 failed（comfy_unreachable），而当时只是
+                # trycloudflare 隧道整机掉了。
+                # 现在按 job_max_attempts 重新入队，并把失败实例记进
+                # exclude_instances 供下轮故障转移；达上限才真正判失败。
+                if e.code == "comfy_unreachable":
+                    _max_attempts = int(getattr(settings, "job_max_attempts", 3) or 3)
+                    if (job.attempts or 0) < _max_attempts:
+                        job.status = "queued"
+                        _write_event(db, job, "job.retry", {
+                            "stage": "acquire_client",
+                            "error_code": e.code,
+                            "error_message": e.message,
+                            "attempt": job.attempts or 0,
+                            "max_attempts": _max_attempts,
+                        })
+                        db.commit()
+                        return {"ok": False, "reason": "comfy_unreachable", "retriable": True}
                 _fail_job(db, job, e.code, e.message)
                 return {"ok": False, "reason": e.code}
 

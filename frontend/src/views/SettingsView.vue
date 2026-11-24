@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import WorkflowTestPanel from '@/components/workflow/WorkflowTestPanel.vue'
 import {
@@ -29,8 +30,24 @@ const message = useMessage()
 const queryClient = useQueryClient()
 
 // --- Tabs（带图标与描述） ---
-const activeTab = ref('comfyui')
-const tabs = [
+const route = useRoute()
+const TAB_KEYS = ['comfyui', 'llm', 'workflows', 'about'] as const
+type TabKey = (typeof TAB_KEYS)[number]
+/** 支持 ?tab=xxx 直达（顶栏「尚未配置 ComfyUI」确认后落到 tab=comfyui）。
+ *  只接受已知 key，非法值回落到默认档，不让 URL 决定渲染出不存在的面板。 */
+function resolveTab(value: unknown): TabKey {
+  const raw = Array.isArray(value) ? value[0] : value
+  return TAB_KEYS.includes(raw as TabKey) ? (raw as TabKey) : 'comfyui'
+}
+const activeTab = ref<TabKey>(resolveTab(route.query.tab))
+// 同页参数变化（不含组件重挂载）时同步标签页
+watch(
+  () => route.query.tab,
+  (v) => {
+    activeTab.value = resolveTab(v)
+  }
+)
+const tabs: { key: TabKey; label: string; desc: string }[] = [
   { key: 'comfyui', label: 'ComfyUI', desc: '多实例加权负载均衡' },
   { key: 'llm', label: '语言模型', desc: '剧本评估与解析模型' },
   { key: 'workflows', label: '工作流', desc: '工作流资产管理' },

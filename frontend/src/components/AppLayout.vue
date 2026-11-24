@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, h } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import logoUrl from '@/assets/logo.svg'
 import { useRoute, useRouter } from 'vue-router'
-import { NLayout, NLayoutContent, NDropdown, NIcon, useMessage } from 'naive-ui'
-import type { DropdownOption } from 'naive-ui'
-import { ChevronDownOutline } from '@vicons/ionicons5'
+import { NLayout, NLayoutContent, NModal, useMessage } from 'naive-ui'
 import { useAgentStore } from '@/stores/agent'
 import { useQuery } from '@tanstack/vue-query'
 import { getProject } from '@/api/projects'
@@ -138,8 +136,21 @@ onMounted(() => {
 })
 onUnmounted(() => mq?.removeEventListener('change', syncMarkSize))
 const comfyCount = computed(() => comfyTargets.value.length)
-/** 只有一个地址时没有「选择」这一步，直接打开；多于一个才挂下拉 */
-const comfyNeedsChoice = computed(() => comfyCount.value > 1)
+/** 入口点击后的三种分支：0 个 → 提示弹窗；1 个 → 直接新标签页打开；多个 → 选择弹窗 */
+const comfyModal = ref<'none' | 'choose' | null>(null)
+/** 弹窗标题 id：给 role=dialog 提供可访问名 */
+const COMFY_DIALOG_TITLE_ID = 'comfy-dialog-title'
+/** 入口的可访问名与原生 title：把「点了会发生什么」说清楚，不依赖视觉推断 */
+const comfyAriaLabel = computed(() => {
+  if (comfyCount.value === 0) return '打开 ComfyUI（尚未配置实例）'
+  if (comfyCount.value === 1) return `在新标签页打开 ${comfyTargets.value[0]}`
+  return `打开 ComfyUI（共 ${comfyCount.value} 个可用实例，点击选择）`
+})
+const comfyEntryTitle = computed(() => {
+  if (comfyCount.value === 0) return '尚未配置 ComfyUI 实例'
+  if (comfyCount.value === 1) return `在新标签页打开 ${comfyTargets.value[0]}`
+  return `选择要打开的 ComfyUI 实例（共 ${comfyCount.value} 个）`
+})
 
 /** 打开外部地址：新标签页，不接管当前工作台上下文。
  *  注意不能用 window.open(url, '_blank', 'noopener') —— 带 noopener 特性时规范要求返回 null，
@@ -160,55 +171,36 @@ function openComfy(url: string) {
 }
 
 function onComfyClick() {
+  // 首次查询未完成时结论不可靠，先不响应（模板上用 aria-busy 说明正在读取）
   if (instancesQuery.isLoading.value) return
   const list = comfyTargets.value
+  // 零实例：先弹窗说明原因，用户确认后才跳转，避免点击瞬间页面被切走像误触
   if (!list.length) {
-    // 不留死按钮：直接把人送到配置处，并说明为什么点不动
-    message.warning('尚未配置可用的 ComfyUI 实例，请先在设置中添加')
-    void router.push({ name: 'settings' })
+    comfyModal.value = 'none'
     return
   }
-  // 单实例：本函数负责打开；多实例：交给 NDropdown 展开选择
-  if (list.length === 1) openComfy(list[0])
+  // 单实例：没有「选择」这一步，直接在新标签页打开
+  if (list.length === 1) {
+    openComfy(list[0])
+    return
+  }
+  // 多实例：弹窗让用户选，选中即打开
+  comfyModal.value = 'choose'
 }
 
-/**
- * 多实例下拉项：序号 + 地址两段。
- * 下拉内容会被 teleport 到 body，scoped CSS 命中不到，所以样式用令牌写在内联 style 上
- * （只引用 var(--token)，不写色值字面量）。
- */
-const comfyOptions = computed<DropdownOption[]>(() =>
-  comfyTargets.value.map((url, i) => ({
-    key: url,
-    label: () =>
-      h('span', { style: 'display:flex;align-items:center;gap:10px;min-width:0;max-width:380px' }, [
-        h(
-          'span',
-          {
-            style:
-              'flex:none;font-family:var(--font-mono);font-size:11px;line-height:18px;padding:0 6px;' +
-              'border-radius:var(--radius-pill);color:var(--brand-primary);background:var(--brand-soft);' +
-              'box-shadow:inset 0 0 0 1px var(--brand-line)',
-          },
-          String(i + 1).padStart(2, '0'),
-        ),
-        h(
-          'span',
-          {
-            style:
-              'font-family:var(--font-mono);font-size:12px;line-height:18px;color:var(--text-primary);' +
-              'overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
-            title: url,
-          },
-          url,
-        ),
-      ]),
-  })),
-)
-
-function onComfySelect(key: string | number) {
-  openComfy(String(key))
+/** 未配置时的确认动作：带上 tab 参数直接落在 ComfyUI 配置区，少一次翻找 */
+function goComfySettings() {
+  comfyModal.value = null
+  void router.push({ name: 'settings', query: { tab: 'comfyui' } })
 }
+
+/** 多实例选择：选中即打开新标签页，并关闭弹窗 */
+function chooseComfy(url: string) {
+  comfyModal.value = null
+  openComfy(url)
+}
+
+
 </script>
 
 <template>
@@ -248,32 +240,12 @@ function onComfySelect(key: string | number) {
               <span class="crumb-current">{{ projectName }}</span>
             </template>
           </div>
-          <n-dropdown
-            v-if="comfyNeedsChoice"
-            trigger="click"
-            placement="bottom-end"
-            :options="comfyOptions"
-            :show-arrow="true"
-            @select="onComfySelect"
-          >
-            <button
-              type="button"
-              class="comfy-entry"
-              :aria-label="`打开 ComfyUI（${comfyCount} 个可用实例，点击选择）`"
-              :title="`选择要打开的 ComfyUI 实例（共 ${comfyCount} 个）`"
-              :aria-haspopup="true"
-            >
-              <ComfyUIMark :size="markSize" />
-              <span class="comfy-label">Comfy<span class="comfy-label-accent">UI</span></span>
-              <n-icon class="comfy-caret" :component="ChevronDownOutline" :size="14" aria-hidden="true" />
-            </button>
-          </n-dropdown>
           <button
-            v-else
             type="button"
             class="comfy-entry"
-            :aria-label="comfyCount === 1 ? '在新标签页打开 ComfyUI' : '打开 ComfyUI（尚未配置实例）'"
-            :title="comfyCount === 1 ? `在新标签页打开 ${comfyTargets[0]}` : '尚未配置 ComfyUI 实例'"
+            :aria-label="comfyAriaLabel"
+            :aria-haspopup="comfyCount > 1 ? 'dialog' : undefined"
+            :title="comfyEntryTitle"
             @click="onComfyClick"
           >
             <ComfyUIMark :size="markSize" />
@@ -282,6 +254,60 @@ function onComfySelect(key: string | number) {
         </div>
       </div>
     </header>
+    <!-- ComfyUI 弹窗：未配置提示与多实例选择共用一套外壳，标题/说明/主体按状态切换，
+         两种状态都由同一次实例查询结果驱动，不额外发请求。 -->
+    <n-modal
+      :show="comfyModal !== null"
+      :mask-closable="true"
+      @update:show="(v: boolean) => { if (!v) comfyModal = null }"
+    >
+      <div
+        class="comfy-dialog"
+        role="dialog"
+        aria-modal="true"
+        :aria-labelledby="COMFY_DIALOG_TITLE_ID"
+      >
+        <div class="comfy-dialog-head">
+          <ComfyUIMark :size="24" />
+          <h2 :id="COMFY_DIALOG_TITLE_ID" class="comfy-dialog-title">
+            {{ comfyModal === 'none' ? '尚未配置 ComfyUI' : '选择要打开的 ComfyUI' }}
+          </h2>
+        </div>
+        <p class="comfy-dialog-desc">
+          {{
+            comfyModal === 'none'
+              ? '顶栏入口会打开设置里配置的实例地址，当前还没有可用地址。'
+              : `已配置 ${comfyCount} 个可用实例，选择后将在新标签页打开。`
+          }}
+        </p>
+        <ul v-if="comfyModal === 'choose'" class="comfy-dialog-list">
+          <li v-for="(url, i) in comfyTargets" :key="url">
+            <button
+              type="button"
+              class="comfy-option"
+              :aria-label="`在新标签页打开 ${url}`"
+              @click="chooseComfy(url)"
+            >
+              <span class="comfy-option-index">{{ String(i + 1).padStart(2, '0') }}</span>
+              <span class="comfy-option-url" :title="url">{{ url }}</span>
+            </button>
+          </li>
+        </ul>
+        <div class="comfy-dialog-actions">
+          <button
+            v-if="comfyModal === 'none'"
+            type="button"
+            class="comfy-btn is-primary"
+            @click="goComfySettings"
+          >
+            前往设置
+          </button>
+          <button type="button" class="comfy-btn" @click="comfyModal = null">
+            {{ comfyModal === 'none' ? '稍后再说' : '取消' }}
+          </button>
+        </div>
+      </div>
+    </n-modal>
 
     <n-layout-content class="app-content" :class="{ 'is-fixed': isFixedViewport }">
       <div
@@ -528,15 +554,122 @@ function onComfySelect(key: string | number) {
   color: var(--brand-primary);
 }
 
-.comfy-caret {
-  color: var(--text-tertiary);
-  flex: none;
-  margin-left: -2px;
-  transition: color var(--transition-fast);
+/* ComfyUI 弹窗（未配置提示 / 多实例选择）：两种状态共用一套外壳。
+   容器走 DESIGN 的弹窗档：--radius-xl 圆角 + --bg-elevated 底 + --border-strong 描边，
+   阴影只用弹窗专属的 --shadow-lg；内部固定『标题 + 说明 + 列表/动作』三段，
+   不引入第二套按钮或输入体系。 */
+.comfy-dialog {
+  width: 440px;
+  max-width: calc(100vw - var(--sp-8));
+  padding: var(--sp-5);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
 }
-
-.comfy-entry:hover .comfy-caret {
+.comfy-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.comfy-dialog-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+.comfy-dialog-desc {
+  margin: var(--sp-3) 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+/* 列表上限 320px + 内部滚动：实例多时不把弹窗撑出视口 */
+.comfy-dialog-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 320px;
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.comfy-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  font: inherit;
+  text-align: left;
+  color: var(--text-primary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.comfy-option:hover {
+  background: var(--overlay-hover);
+  border-color: var(--brand-line);
+}
+.comfy-option:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+/* 序号徽章沿用顶栏入口的分色语义：品牌色只出现在小面积标记上 */
+.comfy-option-index {
+  flex: none;
+  padding: 0 var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
   color: var(--brand-primary);
+  background: var(--brand-soft);
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--brand-line);
+}
+.comfy-option-url {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.comfy-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-5);
+}
+.comfy-btn {
+  padding: var(--sp-1) var(--sp-4);
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.comfy-btn:hover {
+  border-color: var(--brand-primary);
+}
+.comfy-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.comfy-btn.is-primary {
+  color: var(--text-on-brand);
+  background: var(--brand-primary);
+  border-color: var(--brand-primary);
 }
 
 .crumb-back {
@@ -696,8 +829,12 @@ function onComfySelect(key: string | number) {
     font-size: 13px;
     letter-spacing: -0.005em;
   }
-  .comfy-caret {
-    display: none;
+  /* 弹窗在小屏收窄内距：440px 外壳靠 max-width 兜住，动作区允许换行 */
+  .comfy-dialog {
+    padding: var(--sp-4);
+  }
+  .comfy-dialog-actions {
+    flex-wrap: wrap;
   }
 }
 /* 360 档（iPhone SE）：不新增断点，靠上面 480 块里的「极限压缩」兜住——

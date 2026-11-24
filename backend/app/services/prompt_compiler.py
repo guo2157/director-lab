@@ -1295,10 +1295,24 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
     action = _text(timeline[0] if timeline else (shot.dialogue or ""), "镜头动作未提供")
     position_specs, standable_items, opening_blocking, gaze_targets = _build_position_specs(shot, characters, scene)
     def _image_no(slot: dict, fallback: int) -> int:
-        """槽位对应的提示词编号：取 input_key 的 image_N，保证与工作流实际连线一致。"""
-        item = declared_map.get(slot.get("slot_key") or "") or {}
-        m = re.search(r"image_(\d+)\s*$", str(item.get("input_key") or ""))
-        return int(m.group(1)) if m else fallback
+        """槽位对应的提示词编号：必须按「实际注入后压缩的连续序号」取值。
+
+        2026-11-24 修复（图序错位）：原实现直接取工作流静态声明的
+        ``input_key`` 的 image_N（如道具固定写 ``images.image_6``），但执行器
+        ``compact_reference_slots()`` 会删掉未注入的槽位并把剩下的键重排成 0..N-1。
+        于是「场景+2角色+道具」实际只注入 4 张图，提示词却把道具标成
+        <image6> —— 文字说的「图6」在模型那里根本不存在，道具约束整段失效。
+        现在用 reference_layout.compressed_numbers 按真实注入槽位算连续编号，
+        与 reference_layout.final_input_key / 页面槽位展示完全同一套数字。
+        """
+        from app.services.reference_layout import compressed_numbers
+
+        active = [str(s["slot_key"]) for s in slots if s.get("slot_key")]
+        numbers = compressed_numbers(active, declared)
+        key = slot.get("slot_key")
+        if key and key in numbers:
+            return numbers[key]
+        return fallback
 
     # ── ref_duty_block：按 _SECTION_RE 兼容格式生成参考图职责块 ──
     scene_slot = next((s for s in slots if s["role"] == "scene_layout_reference"), None)

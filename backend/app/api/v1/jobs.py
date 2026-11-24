@@ -291,8 +291,17 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
         .all()
     }
     for j in q.all():
-        if j.shot_id and (j.shot_id, j.job_type) in inflight:
-            skipped.append({"source_job_id": j.id, "reason": "job_in_flight"})
+        key = (j.shot_id, j.job_type)
+        if j.shot_id and key in inflight:
+            # 命中在途任务，或本轮循环里已经为同一镜头建过重试任务。
+            # 后者是 2026-11-24 修的缺陷：inflight 只在入口预取一次，循环内新建的
+            # queued 任务没有回写集合，于是同一镜头的两条失败历史（att1 / att2）
+            # 会各建一个重试任务 —— 实测 E2E prj_7717c671b15c 出现镜 3 同时排队
+            # job_9bf6f2cd3c88 与 job_678e5c8960ee，白跑一次云端出图。
+            skipped.append({
+                "source_job_id": j.id,
+                "reason": "job_in_flight" if key not in inflight else "duplicate_in_batch",
+            })
             continue
         new_job = Job(
             id=ids.job_id(), project_id=j.project_id, shot_id=j.shot_id,
@@ -303,6 +312,9 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         db.add(new_job)
+        if j.shot_id:
+            # 立即登记，防止同一批里同一镜头再被建第二个重试任务
+            inflight.add(key)
         retried.append({"source_job_id": j.id, "new_job_id": new_job.id})
     # 已达上限的失败任务单独列出（前端提示不可重试原因）
     capped = (
@@ -314,7 +326,7 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
         )
         .all()
     )
-    skipped = [j.id for j in capped]
+    capped_ids = [j.id for j in capped]
     db.commit()
     return {
         "retried": retried,

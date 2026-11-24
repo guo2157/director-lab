@@ -228,8 +228,8 @@ console.log('\n== 单实例：点击直接打开 ==')
     if (!url.startsWith(SINGLE[0].base_url)) fail(`popup URL 不符: ${url}`)
     await popup.close()
   }
-  const dropdown = await page.$('.n-dropdown-menu')
-  if (dropdown) fail('单实例不应出现下拉')
+  const dialog = await page.$('.comfy-dialog')
+  if (dialog) fail('单实例不应弹出选择弹窗')
   // 回归防护：window.open(url,'_blank','noopener') 返回 null，会误触发「被拦截」假警告
   const warned = await page.evaluate(() => !!document.querySelector('.n-message'))
   if (warned) fail('成功打开后不应出现「被拦截」提示')
@@ -243,34 +243,67 @@ console.log('\n== 多实例：下拉选择 ==')
   const page = await newPage(ctx, MULTI)
   const m0 = await page.evaluate(MEASURE)
   if (m0.entryText !== 'ComfyUI') fail(`多实例入口文案异常: ${m0.entryText}`)
+  // 多实例：点击入口不得立刻开新标签页，必须先弹窗让用户选
+  const early = ctx.waitForEvent('page', { timeout: 800 }).catch(() => null)
   await page.click('.comfy-entry')
-  await page.waitForSelector('.n-dropdown-menu', { timeout: 5000 }).catch(() => {})
-  const opts = await page.$$eval('.n-dropdown-option', (els) => els.map((e) => e.innerText.trim()))
-  console.log(`   选项(${opts.length}): ${JSON.stringify(opts)}`)
-  // 3 条配置里有 1 条 disabled，可选项应为 2
-  if (opts.length !== 2) fail(`可选项数 ${opts.length} ≠ 2（应排除已停用实例）`)
-  if (!opts.some((o) => o.includes(MULTI[0].base_url))) fail('缺少实例 1 地址')
-  if (opts.some((o) => o.includes(MULTI[2].base_url))) fail('已停用实例不应出现')
-  // 只截下拉浮层本身：固定 clip 会把浮层下方的页面内容一并截进来，
-  // 视觉复核时会误读成「下拉被搜索框/新建按钮穿透」。
-  // 注意 naive-ui 的 dropdown 根节点类名是 .n-dropdown-menu（不是 .n-popover）。
-  const pop = await page.$('.n-dropdown-menu')
-  if (pop) await pop.screenshot({ path: `${OUT}/dropdown__1440x900.png` })
-  // 浮层必须真的压在页面之上：第二项中心点的 elementFromPoint 必须落在浮层内，
-  // 且浮层底色不透明（半透明会被下方的搜索框/按钮透出来，读成层级 bug）。
-  const stack = await page.evaluate(() => {
-    const menu = document.querySelector('.n-dropdown-menu')
-    const r = menu.getBoundingClientRect()
-    const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height * 0.75)
-    const bg = getComputedStyle(menu).backgroundColor
-    const alpha = bg.startsWith('rgba') ? Number(bg.split(',')[3]) : 1
-    return { inside: menu.contains(hit), bg, opaque: alpha >= 0.95 }
+  if (await early) fail('多实例不应在点击瞬间打开新标签页')
+  await page.waitForSelector('.comfy-dialog', { timeout: 5000 }).catch(() => {})
+  const dlg = await page.evaluate(() => {
+    const el = document.querySelector('.comfy-dialog')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    const cs = getComputedStyle(el)
+    const bg = cs.backgroundColor
+    return {
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      radius: cs.borderRadius,
+      bg,
+      alpha: bg.startsWith('rgba') ? Number(bg.split(',')[3]) : 1,
+      role: el.getAttribute('role'),
+      ariaModal: el.getAttribute('aria-modal'),
+      labelledby: el.getAttribute('aria-labelledby'),
+      titleId: el.querySelector('.comfy-dialog-title')?.id ?? null,
+      title: el.querySelector('.comfy-dialog-title')?.textContent?.trim() ?? null,
+      opts: [...el.querySelectorAll('.comfy-option')].map((e) => e.innerText.trim()),
+      inViewport:
+        r.left >= -1 &&
+        r.right <= window.innerWidth + 1 &&
+        r.top >= -1 &&
+        r.bottom <= window.innerHeight + 1,
+    }
   })
-  console.log(`   浮层命中=${stack.inside} 底色=${stack.bg} 不透明=${stack.opaque}`)
-  if (!stack.inside) fail('下拉浮层被页面元素遮挡（层级错误）')
-  if (!stack.opaque) fail(`下拉底色半透明: ${stack.bg}`)
+  if (!dlg) fail('多实例点击后未出现选择弹窗')
+  else {
+    console.log(
+      `   弹窗 ${dlg.w}x${dlg.h} radius=${dlg.radius} 标题=${dlg.title} 选项(${dlg.opts.length}): ${JSON.stringify(dlg.opts)}`,
+    )
+    // 3 条配置里有 1 条 disabled，可选项应为 2
+    if (dlg.opts.length !== 2) fail(`可选项数 ${dlg.opts.length} ≠ 2（应排除已停用实例）`)
+    if (!dlg.opts.some((o) => o.includes(MULTI[0].base_url))) fail('缺少实例 1 地址')
+    if (dlg.opts.some((o) => o.includes(MULTI[2].base_url))) fail('已停用实例不应出现')
+    // 设计规范：容器圆角走 --radius-xl(20px)；底色必须不透明（半透明会把下方内容透出来读成层级 bug）
+    if (dlg.radius !== '20px') fail(`弹窗圆角 ${dlg.radius} ≠ 20px`)
+    if (dlg.alpha < 0.95) fail(`弹窗底色半透明: ${dlg.bg}`)
+    if (dlg.role !== 'dialog' || dlg.ariaModal !== 'true') fail('弹窗缺少 role=dialog / aria-modal=true')
+    if (!dlg.labelledby || dlg.labelledby !== dlg.titleId) fail('弹窗 aria-labelledby 未指向标题')
+    if (!dlg.title) fail('弹窗缺少标题')
+    if (!dlg.inViewport) fail('弹窗超出视口')
+    const shot = await page.$('.comfy-dialog')
+    if (shot) await shot.screenshot({ path: `${OUT}/dialog-choose__1440x900.png` })
+  }
+  // 弹窗必须真的压在页面之上：中心点的 elementFromPoint 必须落在弹窗内
+  const stack = await page.evaluate(() => {
+    const el = document.querySelector('.comfy-dialog')
+    if (!el) return { inside: false }
+    const r = el.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+    return { inside: el.contains(hit) }
+  })
+  console.log(`   弹窗命中=${stack.inside}`)
+  if (!stack.inside) fail('弹窗被页面元素遮挡（层级错误）')
   const popupPromise = ctx.waitForEvent('page', { timeout: 8000 }).catch(() => null)
-  await page.click(`.n-dropdown-option:has-text("${MULTI[1].base_url}")`)
+  await page.click(`.comfy-option:has-text("${MULTI[1].base_url}")`)
   const popup = await popupPromise
   if (!popup) fail('选择第 2 项后没有打开新标签页')
   else {
@@ -282,28 +315,52 @@ console.log('\n== 多实例：下拉选择 ==')
   await ctx.close()
 }
 
-/* ─────────── E：零实例 → 引导到设置页 ─────────── */
-console.log('\n== 零实例：引导配置 ==')
+/* ─────────── E：零实例 → 先弹窗提示，用户确认后再跳到设置页 ─────────── */
+console.log('\n== 零实例：弹窗提示并引导配置 ==')
 {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const page = await newPage(ctx, NONE)
-  // 注意：等待窗口要短。naive-ui 的 message 默认 3s 自动消失，
-  // 若这里等满 3s 才取文案，取到的必然是空（会被误判成「没有提示」）。
   const popupPromise = ctx.waitForEvent('page', { timeout: 1200 }).catch(() => null)
   await page.click('.comfy-entry')
   const popup = await popupPromise
   if (popup) fail('零实例不应打开新标签页')
-  await page.waitForTimeout(400)
-  const m = await page.evaluate(() => ({
+  await page.waitForSelector('.comfy-dialog', { timeout: 3000 }).catch(() => {})
+  const tip = await page.evaluate(() => {
+    const el = document.querySelector('.comfy-dialog')
+    if (!el) return null
+    return {
+      path: location.pathname + location.search,
+      title: el.querySelector('.comfy-dialog-title')?.textContent?.trim() ?? '',
+      desc: el.querySelector('.comfy-dialog-desc')?.textContent?.trim() ?? '',
+      buttons: [...el.querySelectorAll('.comfy-btn')].map((b) => (b.textContent ?? '').trim()),
+      hasList: !!el.querySelector('.comfy-dialog-list'),
+    }
+  })
+  if (!tip) fail('零实例点击后未出现提示弹窗')
+  else {
+    console.log(`   弹窗标题=${tip.title} 按钮=${JSON.stringify(tip.buttons)} path=${tip.path}`)
+    // 关键：弹窗出现时还不能跳走，必须等用户点确认 —— 否则点击像误触
+    if (tip.path.startsWith('/settings')) fail('弹窗出现时不应已跳转（需用户确认）')
+    if (tip.hasList) fail('零实例不应渲染实例列表')
+    if (!tip.desc) fail('提示弹窗缺少说明文案')
+    if (!tip.buttons.some((b) => b.includes('前往设置'))) fail('缺少「前往设置」按钮')
+    if (!tip.buttons.some((b) => b.includes('稍后'))) fail('缺少「稍后再说」按钮')
+    const shot = await page.$('.comfy-dialog')
+    if (shot) await shot.screenshot({ path: `${OUT}/dialog-none__1440x900.png` })
+  }
+  await page.click('.comfy-btn.is-primary')
+  await page.waitForTimeout(900)
+  const after = await page.evaluate(() => ({
     path: location.pathname,
-    toast:
-      document.querySelector('.n-message__content')?.textContent?.trim() ??
-      document.querySelector('[class*="n-message"]')?.textContent?.trim() ??
-      null,
+    search: location.search,
+    title: document.querySelector('.page-title')?.textContent?.trim() ?? null,
+    dialogGone: !document.querySelector('.comfy-dialog'),
   }))
-  console.log(`   path=${m.path} toast="${m.toast}"`)
-  if (!m.path.startsWith('/settings')) fail(`未跳转到设置页: ${m.path}`)
-  if (!m.toast) fail('缺少提示文案')
+  console.log(`   确认后 path=${after.path}${after.search} 面板标题=${after.title}`)
+  if (!after.path.startsWith('/settings')) fail(`未跳转到设置页: ${after.path}`)
+  if (!after.search.includes('tab=comfyui')) fail(`未带 tab=comfyui 参数: ${after.search}`)
+  if (after.title !== 'ComfyUI 配置') fail(`未落在 ComfyUI 面板: ${after.title}`)
+  if (!after.dialogGone) fail('跳转后弹窗未关闭')
   await ctx.close()
 }
 
