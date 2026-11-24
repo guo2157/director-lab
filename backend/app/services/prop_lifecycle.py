@@ -367,4 +367,57 @@ def validate_continuity(db: Session, project_id: str, prop_id: str) -> list[dict
                 "message": "道具被持有但无持有者记录",
                 "suggestion": "补充 picked_up/transferred 事件的 holder_after",
             })
+        # 持有者与镜头关系缺失：道具处于持有态且持有者已知，但该镜头既非持有者主镜，
+        # 提示词与对白也都没提到持有者 —— 要么该镜不该出现该道具，要么持有关系记错了
+        if st.interaction_state in ("held", "carried") and st.holder_id and shot is not None:
+            holder_name = char_names.get(st.holder_id)
+            holder_in_shot = (
+                shot.character_id == st.holder_id
+                or (bool(holder_name) and holder_name in (shot.image_prompt or ""))
+                or (bool(holder_name) and holder_name in (shot.dialogue or ""))
+            )
+            if not holder_in_shot:
+                issues.append({
+                    "code": "holder_not_in_shot",
+                    "shot_id": st.shot_id, "prop_id": prop_id,
+                    "message": (
+                        f"道具处于 {st.interaction_state} 状态，持有者为"
+                        f"「{holder_name or st.holder_id}」，但该镜头主角色不是他、"
+                        f"提示词与对白也未提及持有者"
+                    ),
+                    "suggestion": "确认该镜是否应出现持有者，或修正持有关系事件的 holder_after",
+                })
+
+    # 终态后仍有交互/再次引入事件但缺少 recovered：状态机此时无法回退，
+    # 属于「剧情写了、事件链没交代」的缺口，只报问题不改写数据。
+    events = _effective_events(db, project_id, prop_id)
+    if events:
+        ordered = sorted(
+            events,
+            key=lambda e: (e.episode, e.created_at or _now(), str(e.id)),
+        )
+        existence = "not_introduced"
+        for ev in ordered:
+            if existence in _TERMINAL_EXISTENCE:
+                if ev.event_type in _EVENT_TO_INTERACTION:
+                    issues.append({
+                        "code": "interaction_after_terminal",
+                        "shot_id": ev.shot_id, "prop_id": prop_id,
+                        "message": (
+                            f"道具已处于 {existence} 终态，但后续仍有 {ev.event_type} 交互事件"
+                        ),
+                        "suggestion": "补充 recovered 事件，或修正该交互事件的事件类型",
+                    })
+                elif ev.event_type == "introduced":
+                    issues.append({
+                        "code": "reintroduced_without_recovered",
+                        "shot_id": ev.shot_id, "prop_id": prop_id,
+                        "message": (
+                            f"道具已处于 {existence} 终态，却再次出现 introduced 事件且无 recovered"
+                        ),
+                        "suggestion": "将 reintroduced 改为 recovered，或在中间补一条 recovered 事件",
+                    })
+            new_ex = _EVENT_TO_EXISTENCE.get(ev.event_type)
+            if new_ex:
+                existence = new_ex
     return issues

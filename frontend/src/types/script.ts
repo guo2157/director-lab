@@ -27,13 +27,40 @@ export interface ScriptEstimate {
   user_confirmed: boolean
 }
 
+/** 准入判定单项 */
+export interface ParseGateItem {
+  category: string
+  severity: 'blocker' | 'warning' | 'info'
+  code: string
+  message: string
+  detail?: Record<string, unknown> | null
+}
+
+/** 准入判定结果 */
+export interface ParseGateResult {
+  level: 'BLOCKED' | 'NEEDS_REVIEW' | 'READY'
+  blocked: boolean
+  needs_review: boolean
+  items: ParseGateItem[]
+}
+
 /** 解析版本（parse 生成 candidate 候选版本，confirm 乐观锁） */
 export interface ParseVersion {
   parse_version_id: string
-  script_version_id: string
-  status: 'candidate' | 'confirmed' | 'superseded'
-  created_at: string
+  version: number
+  status: 'candidate' | 'current' | 'superseded'
+  diff_summary: Record<string, unknown> | null
+  gate?: ParseGateResult | null
+  script_version_id?: string
+  created_at?: string
   confirmed_at?: string | null
+  /** 批次完整性（P0-十 / Schema b3c7d1e5f9a2 独立列） */
+  completion_status?: 'complete' | 'partial' | 'unknown' | null
+  expected_episodes?: number | null
+  parsed_episodes?: number | null
+  successful_batches?: number | null
+  failed_batches?: number | null
+  coverage_status?: 'passed' | 'partial' | 'failed' | 'unknown' | null
 }
 
 /** 场景（ID 前缀 scn_） */
@@ -68,6 +95,8 @@ export interface Shot {
   duration: number
   character_id?: string | null
   speaker_id?: string | null
+  /** 本镜涉及道具名列表 */
+  props?: string[] | null
   keyframe_confirmed?: boolean
   current_assets?: ShotCurrentAssets
   consistency?: ShotConsistency
@@ -107,6 +136,10 @@ export interface Character {
   name: string
   description?: string
   portrait_asset_id?: string | null
+  /** P1-八：括号别名列表（如张三（三哥/张三丰）→ ['三哥', '张三丰']） */
+  aliases?: string[] | null
+  /** P1-八：individual 个体 / crowd 群体（如众人/村民们） */
+  character_type?: 'individual' | 'crowd' | null
   created_at: string
   updated_at: string
 }
@@ -143,6 +176,67 @@ export interface ParsePayload {
   episode_count?: number
   episode_end?: number
   replace_existing?: boolean
+}
+
+/** ── P1-九：三份独立报告 ── */
+
+/** 统一报告骨架 */
+export interface ReportBlock {
+  status: 'passed' | 'partial' | 'failed' | 'skipped'
+  summary: string
+  items: Record<string, unknown>
+}
+
+/** 剧本质量报告 */
+export interface QualityReport extends ReportBlock {
+  items: {
+    overall_score: number
+    issues_count: number
+    severity: { critical: number; major: number; minor: number }
+    strengths: { detail: string }[]
+    issues: { severity: string; detail: string }[]
+    suggestions: { suggestion: string }[]
+    plot_holes: { severity: string; detail: string }[]
+    summary_text: string
+  }
+}
+
+/** 解析完整性报告 */
+export interface IntegrityReport extends ReportBlock {
+  items: {
+    coverage: {
+      episodes: { source: number; parsed: number; missing: number[] }
+      scenes: { source: number; parsed: number; missing: unknown[] }
+      dialogues: { source: number; matched: number; missing: number; modified: number }
+      characters: { source: number; matched: number; missing: string[] }
+      props: { source: number; matched: number; missing: string[] }
+      overall: string
+    }
+    completion_status?: string | null
+    expected_episodes?: number | null
+    parsed_episodes?: number | null
+    successful_batches?: number | null
+    failed_batches?: number | null
+    gate?: ParseGateResult | null
+  }
+}
+
+/** 制作可行性报告 */
+export interface FeasibilityReport extends ReportBlock {
+  items: {
+    production_risks: { severity: string; detail: string }[]
+    dimensions: Record<string, Record<string, unknown>>
+    detail_items: { dimension: string; category: string; detail: unknown }[]
+    total_alerts: number
+    producibility_missing: string[]
+  }
+}
+
+/** 三份报告聚合（GET /api/projects/{id}/script-reports） */
+export interface ScriptReports {
+  quality_report: QualityReport
+  integrity_report: IntegrityReport
+  feasibility_report: FeasibilityReport
 }
 
 /** 集级解析记录（集数网格视图） */

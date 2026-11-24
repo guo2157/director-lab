@@ -330,7 +330,7 @@ def execute_script_agent_job(job_id: str) -> dict:
                     cancel_token=job_id,
                 )
                 _write_event(db, job, "agent.eval_info", {
-                    "score": evaluation.get("score"),
+                    "overall_score": evaluation.get("overall_score"),
                     "issues_count": len(evaluation.get("issues") or []),
                 })
                 db.commit()
@@ -962,8 +962,31 @@ def execute_script_agent_job(job_id: str) -> dict:
             _upsert_records(db, job.project_id, _bs, _be - _bs + 1, "succeeded",
                             asset_counts=per_episode_shots, parse_version_id=pv.id)
 
+        # ---- 覆盖率对账（基于 SourceIndex 与合并后的解析结果）----
+        coverage_report = None
+        try:
+            from app.services.source_index import build_source_index
+            from app.services.coverage import build_coverage_report
+            si = build_source_index(text, script_version_id=sv.id, version=sv.version)
+            coverage_report = build_coverage_report(si, merged).to_dict()
+        except Exception:
+            coverage_report = None
+            parse_warnings.append("coverage_report: 覆盖率报告生成失败")
+
         # diff_summary 增量合并（多批次共用同一 ParseVersion）
         prev_summary = pv.diff_summary or {}
+        # 批次完整性统计
+        total_batches = len(batches)
+        failed_batch_count = len(batch_errors)
+        successful_batch_count = len(batch_results)
+        # 解析集数：成功批次的集范围去重
+        parsed_episode_nos: set[int] = set()
+        for br in batch_results:
+            for ep in range(br["start"], br["end"] + 1):
+                parsed_episode_nos.add(ep)
+        parsed_episodes = len(parsed_episode_nos)
+        completion_status = "complete" if failed_batch_count == 0 else "partial"
+        cov_status = coverage_report.get("overall", "passed") if coverage_report else "unknown"
         pv.diff_summary = {
             "characters": len(merged.get("characters") or []),
             "props": len(merged.get("props") or []),
@@ -972,7 +995,22 @@ def execute_script_agent_job(job_id: str) -> dict:
             "episodes": total_episodes,
             "parse_warnings": len(parse_warnings),
             "review_issues": len(review_issues),
+            # 批次完整性字段（新增）
+            "completion_status": completion_status,
+            "expected_episodes": episode_count,
+            "parsed_episodes": parsed_episodes,
+            "successful_batches": successful_batch_count,
+            "failed_batches": failed_batch_count,
+            # 覆盖率状态
+            "coverage_status": cov_status,
         }
+        # 双写独立列（Schema 迁移过渡期）
+        pv.completion_status = completion_status
+        pv.expected_episodes = episode_count
+        pv.parsed_episodes = parsed_episodes
+        pv.successful_batches = successful_batch_count
+        pv.failed_batches = failed_batch_count
+        pv.coverage_status = cov_status
 
         # ---- 8. 终态 ----
         has_more = batch_end < total_episodes
@@ -994,6 +1032,13 @@ def execute_script_agent_job(job_id: str) -> dict:
             "next_episode_start": batch_end + 1 if has_more else None,
             "evaluation": evaluation,
             "parse_version_id": pv.id,
+            # 批次完整性标记（新增）：全部成功=complete，部分失败=partial
+            "completion_status": completion_status,
+            "successful_batches": successful_batch_count,
+            "failed_batches": failed_batch_count,
+            "parsed_episodes": parsed_episodes,
+            # 覆盖率报告（新增）
+            "coverage": coverage_report,
         }
         job.finished_at = _now()
         _write_event(db, job, "agent.succeeded", {

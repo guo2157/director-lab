@@ -288,7 +288,8 @@ def test_validate_omits_unchanged_fields_from_diff(client):
     assert "duration" not in fields
     assert "shot_kind" not in fields
     assert "dialogue" not in fields
-    assert fields == {"character_id", "props", "beats"}
+    # P1 聚合改造：beats 降级为派生只读视图，规划路径写入 aggregation_meta.source_beat_ids
+    assert fields == {"character_id", "props", "aggregation_meta"}
 
 
 def _post_apply(client: TestClient, context: dict, plan: dict):

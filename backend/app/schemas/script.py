@@ -123,6 +123,7 @@ class ParseVersionOut(BaseModel):
     version: int
     status: str
     diff_summary: dict | None
+    gate: dict | None = None
 
 
 # --- 合成 ---

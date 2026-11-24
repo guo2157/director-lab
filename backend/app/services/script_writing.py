@@ -13,6 +13,7 @@ import re
 
 from app.services.prompt_store import _register_default
 from app.services.script_chunker import SECTION_LINE_RE
+from app.services.dialogue_audit import extract_dialogues, audit_dialogues
 
 # 「人物名：台词」行，说话人限 1-10 字，避免把「第1集」误判为人物
 _DIALOGUE_RE = re.compile(r"^\s*([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_·]{0,9})\s*[:：]\s*(.+?)\s*$", re.M)
@@ -260,6 +261,11 @@ def verify_normalize_output(raw: dict, source_text: str) -> dict:
         level = int(raw.get("level") or 1)
     except (TypeError, ValueError):
         level = 1
+    # 对白对账：原文→规范化结果 逐条匹配（preserved/modified/missing/…）
+    src_dialogues = extract_dialogues(source_text)
+    dialogue_audit = audit_dialogues(src_dialogues, text)
+    # blocked 判定：人物丢失 或 对白有实质性缺失（missing/modified = 实质性变化）
+    dialogue_blocked = dialogue_audit.blocked
     return {
         "normalized_text": text,
         "level": level,
@@ -272,7 +278,7 @@ def verify_normalize_output(raw: dict, source_text: str) -> dict:
             "missing_dialogues": missing_dialogues,
             # 仅标点/空白差异的台词：仅提示，不阻断采用
             "punct_warnings": punct_warnings,
-            "blocked": bool(missing_chars or missing_dialogues),
+            "blocked": bool(missing_chars or missing_dialogues or dialogue_blocked),
             # 基准来源计数，便于排查「模型漏报」与「正则漏抽」
             "baseline": {
                 "regex_characters": len(regex_chars),
@@ -280,6 +286,8 @@ def verify_normalize_output(raw: dict, source_text: str) -> dict:
                 "llm_dialogues": len(llm_dialogues),
             },
         },
+        # 对白保真审计报告（新增）
+        "dialogue_audit": dialogue_audit.to_dict(),
         "original_chars": len(source_text),
         "normalized_chars": len(text),
     }

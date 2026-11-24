@@ -311,6 +311,46 @@ def _lint_name_uniqueness(items: list, label: str, key: str = "name") -> list[st
     return issues
 
 
+# 状态衔接检查参与比较的四项客观状态（pose/expression 属表演表达，不做硬衔接判定）
+_CONTINUITY_COMPARE_KEYS = ("holding", "costume", "injury", "position")
+
+
+def _norm_state_value(value) -> str:
+    """状态值归一化：仅用于比较，不回写数据。"""
+    return re.sub(r"[\s\u3000]+", "", str(value or "")).lower()
+
+
+def _lint_state_continuity(prev: dict, cur: dict) -> list[str]:
+    """镜头连续性检查（P1-七）：上一镜 end_state 与本镜 start_state 是否衔接。
+
+    只读、只留痕，绝不改写模型给出的剧情数据。判定规则：
+    - 本镜 time_jump=True 说明剧本明确跳跃时间/空间，不做衔接要求；
+    - 只比较 holding/costume/injury/position 四项客观状态；
+    - 任一侧该键缺失即跳过（信息不足时不臆造冲突）；
+    - 其余差异全部记为审核问题，交由人工判断是「漏交代」还是「有意转变」。
+    """
+    issues: list[str] = []
+    if cur.get("time_jump"):
+        return issues
+    prev_end = prev.get("end_state")
+    cur_start = cur.get("start_state")
+    if not isinstance(prev_end, dict) or not isinstance(cur_start, dict):
+        return issues
+    tag = f"镜头 ep{cur.get('episode')}/seq{cur.get('seq')}"
+    prev_tag = f"ep{prev.get('episode')}/seq{prev.get('seq')}"
+    for key in _CONTINUITY_COMPARE_KEYS:
+        prev_val = _norm_state_value(prev_end.get(key))
+        cur_val = _norm_state_value(cur_start.get(key))
+        if not prev_val or not cur_val:
+            continue
+        if prev_val != cur_val:
+            issues.append(
+                f"{tag} {key} 与上一镜（{prev_tag}）end_state「{prev_end.get(key)}」不一致："
+                f"本镜 start_state 为「{cur_start.get(key)}」，请确认剧本是否漏交代转变"
+            )
+    return issues
+
+
 def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
                            character_name_to_id: dict | None = None) -> NormalizeResult:
     """按归一化规则（PROMPTS.md §3.1，P0 强约束）处理语言模型输出。
@@ -361,6 +401,7 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
             warnings.append(f"道具事件 {pname or '?'}/{etype or '?'} 名称或类型非法，已忽略")
             continue
         if not _in_range(ev.get("episode")):
+            warnings.append(f"道具事件 {pname}/{etype} ep={ev.get('episode')} 越界，已丢弃")
             continue
         evidence = (ev.get("evidence") or "").strip()
         if not evidence:
@@ -371,7 +412,7 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
             "prop": pname,
             "episode": int(ev.get("episode")),
             "event_type": etype,
-            "evidence": evidence[:200],
+            "evidence": evidence,
             "scene_title": (ev.get("scene_title") or "").strip() or None,
             "shot_seq": ev.get("shot_seq"),
             "holder_after": (ev.get("holder_after") or "").strip() or None,
@@ -381,22 +422,35 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
                 item["shot_seq"], item["event_type"])
         if any((x["prop"], x["episode"], x["scene_title"], x["shot_seq"], x["event_type"]) == _key
                for x in _prop_events):
+            warnings.append(f"道具事件 {pname}/{etype} ep={item['episode']} 重复，已跳过")
             continue
         _prop_events.append(item)
     result.data["prop_events"] = _prop_events
-    # episodes 范围过滤
-    result.data["episodes"] = [
-        e for e in (raw.get("episodes") or []) if isinstance(e, dict) and _in_range(e.get("episode"))
-    ]
+    # episodes 范围过滤：越界的记 warning，不静默丢弃上下文
+    _episodes_all = raw.get("episodes") or []
+    _episodes_filtered = []
+    for e in _episodes_all:
+        if not isinstance(e, dict):
+            warnings.append("episodes 中存在非对象条目，已丢弃")
+            continue
+        if not _in_range(e.get("episode")):
+            warnings.append(f"集 ep={e.get('episode')} 越界（解析范围 {episode_start}-{ep_end}），已丢弃")
+            continue
+        _episodes_filtered.append(e)
+    result.data["episodes"] = _episodes_filtered
 
     # scenes + shots 归一化
     scenes_out = []
     for scene in raw.get("scenes") or []:
-        if not isinstance(scene, dict) or not _in_range(scene.get("episode")):
+        if not isinstance(scene, dict):
+            continue
+        if not _in_range(scene.get("episode")):
+            warnings.append(f"场景「{scene.get('title', '?')}」ep={scene.get('episode')} 越界（{episode_start}-{ep_end}），已丢弃")
             continue
         shots_out = []
         for shot in scene.get("shots") or []:
             if not isinstance(shot, dict):
+                warnings.append(f"场景「{scene.get('title', '?')}」中存在非对象分镜，已跳过")
                 continue
             s = dict(shot)
             # shot_kind 补齐
@@ -429,6 +483,7 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
                 norm_segs = []
                 for i, seg in enumerate(segs, 1):
                     if not isinstance(seg, dict):
+                        warnings.append(f"镜头 ep{s.get('episode')}/seq{s.get('seq')} 对白分段 {i} 非对象，已跳过")
                         continue
                     ns = dict(seg)
                     ns.setdefault("order", i)
@@ -444,18 +499,51 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
                         ns["emotion"] = s["emotion"]
                     norm_segs.append(ns)
                 s["dialogue_segments"] = norm_segs
-            # start_state / end_state 结构校验（六项枚举键，缺失记警告不阻断）
+            # start_state / end_state 结构校验（六项枚举键）+ 推断标记（P1-七）
+            # 设计约束：不改写模型剧情数据，缺项只留痕；整体缺失会使连续性无法校验，升级为审核问题。
             for sk in ("start_state", "end_state"):
                 st = s.get(sk)
-                if st is not None and not isinstance(st, dict):
+                if st is None:
+                    issues.append(
+                        f"镜头 ep{s.get('episode')}/seq{s.get('seq')} {sk} 缺失，"
+                        f"无法校验与相邻镜头的状态衔接"
+                    )
+                    continue
+                if not isinstance(st, dict):
                     s[sk] = None
                     warnings.append(f"镜头 ep{s.get('episode')}/seq{s.get('seq')} {sk} 结构非法，置空")
-            # beats 上限 3
+                    issues.append(
+                        f"镜头 ep{s.get('episode')}/seq{s.get('seq')} {sk} 结构非法，连续性无法校验"
+                    )
+                    continue
+                _missing_state_keys: list[str] = []
+                for _k in _STATE_KEYS:
+                    _v = st.get(_k)
+                    if _v is None or (isinstance(_v, str) and not _v.strip()):
+                        _missing_state_keys.append(_k)
+                if _missing_state_keys:
+                    warnings.append(
+                        f"镜头 ep{s.get('episode')}/seq{s.get('seq')} {sk} 缺 "
+                        f"{'/'.join(_missing_state_keys)}（推断或空缺，非剧本明写）"
+                    )
+            # beats 上限检查：不允许截断内容，超限标记 needs_split
             beats = s.get("beats")
             if isinstance(beats, list) and len(beats) > 3:
-                s["beats"] = beats[:3]
-                warnings.append(f"镜头 ep{s.get('episode')}/seq{s.get('seq')} beats 超上限，截断为 3")
+                truncated_beats = beats[3:]
+                truncated_desc = "；".join(
+                    (b.get("action") or str(b))[:40] for b in truncated_beats[:3]
+                )
+                issues.append(
+                    f"镜头 ep{s.get('episode')}/seq{s.get('seq')} beats 超上限（{len(beats)}>3），"
+                    f"保留全部 {len(beats)} 条，需拆镜。被截断的动作：{truncated_desc}"
+                )
             # 第 2 步：分镜可制作性检查（时长上限、台词长度），只留痕不改写剧情数据
+            # beats 超 3 但未拆镜时，额外提示拆分需求
+            if isinstance(beats, list) and len(beats) > 3:
+                issues.append(
+                    f"镜头 ep{s.get('episode')}/seq{s.get('seq')} "
+                    f"需拆分为 {len(beats)} 个动作节拍 → 建议 {min(len(beats), 3)} 个独立镜头"
+                )
             _lint_warns, _lint_issues = _lint_shot(s, s.get("dialogue_segments") or [])
             warnings.extend(_lint_warns)
             issues.extend(_lint_issues)
@@ -464,6 +552,20 @@ def normalize_parse_output(raw: dict, *, episode_start: int, episode_count: int,
         sc["shots"] = shots_out
         scenes_out.append(sc)
     result.data["scenes"] = scenes_out
+
+    # 第 2 步：镜头连续性检查（P1-七）。按集内出现顺序串起全部镜头，
+    # 比较「上一镜 end_state」与「本镜 start_state」；只记录审核问题，不改写数据。
+    _shots_by_episode: dict[int, list[dict]] = {}
+    for _sc in scenes_out:
+        for _sh in _sc.get("shots") or []:
+            try:
+                _ep_no = int(_sh.get("episode") or _sc.get("episode") or 0)
+            except (TypeError, ValueError):
+                continue
+            _shots_by_episode.setdefault(_ep_no, []).append(_sh)
+    for _ep_no, _ep_shots in _shots_by_episode.items():
+        for _prev_shot, _cur_shot in zip(_ep_shots, _ep_shots[1:]):
+            issues.extend(_lint_state_continuity(_prev_shot, _cur_shot))
 
     # 第 2 步：名称收敛检查。归一化后重名意味着别名未合并，同一对象会被建成多条
     # 资产并各自生成参考图，是角色/场景一致性问题的上游源头。
@@ -660,6 +762,7 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
     from app.models.audio import AudioSegment
     from app.models import ids as id_gen
     from app.services.prompt_compiler import normalize_clip_dialogue
+    from app.services.character_alias import build_alias_record
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -676,24 +779,45 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
         name = (c.get("name") or "").strip()
         if not name:
             continue
-        existing = char_map.get(name) or char_norm_map.get(normalize_entity_name(name))
+        # 括号别名与群体分类（P1-八）：主名用于归一化匹配，括号内容作为别名补齐检索；
+        # 『众人』『村民们』等群体词标记 crowd，避免为群体生成定妆图与配音。
+        _main, _aliases, _ctype = build_alias_record(name, c.get("character_type"))
+        existing = (char_map.get(name) or char_norm_map.get(normalize_entity_name(name))
+                    or char_map.get(_main) or char_norm_map.get(normalize_entity_name(_main)))
         if existing:
             existing.description = c.get("description") or existing.description
             _t = c.get("traits")
             existing.traits = (", ".join(_t) if isinstance(_t, list) else _t) or existing.traits
             existing.appearance = c.get("appearance") or existing.appearance
+            # 别名为增量合并：多轮解析补出的新别名不丢旧值
+            if _aliases:
+                _merged = list(existing.aliases or [])
+                for _a in _aliases:
+                    if _a not in _merged:
+                        _merged.append(_a)
+                existing.aliases = _merged
+            # 已有分类不覆盖，仅补空（人群判定由名称规则给出，人工可后续调整）
+            if not existing.character_type:
+                existing.character_type = _ctype
+            _char_obj = existing
         else:
             _t = c.get("traits")
             _traits = ", ".join(_t) if isinstance(_t, list) else _t
             new_c = Character(id=id_gen.character_id(), project_id=project.id, name=name,
                               normalized_name=normalize_entity_name(name),
                               description=c.get("description"), traits=_traits,
-                              appearance=c.get("appearance"))
+                              appearance=c.get("appearance"),
+                              aliases=_aliases or None, character_type=_ctype)
             db.add(new_c)
             db.flush()
             char_map[name] = new_c
             char_norm_map[new_c.normalized_name] = new_c
             stats["characters"] += 1
+            _char_obj = new_c
+        # 别名登记进映射：后续镜头/对白用别名指代时仍能命中同一角色
+        for _alias in _aliases:
+            char_map.setdefault(_alias, _char_obj)
+            char_norm_map.setdefault(normalize_entity_name(_alias), _char_obj)
 
     # 2. 道具按名幂等 upsert（精确名 → 归一化名二级匹配）
     prop_map = {p.name: p for p in db.query(Prop).filter(Prop.project_id == project.id).all()}
@@ -800,10 +924,11 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
             scene_norm_map[(scene.normalized_name, scene.episode)] = scene
             stats["scenes"] += 1
         elif not _reused_cross_ep:
-            # 同集重解析：描述随最新解析更新。
-            # 跨集复用则不覆盖——基准图是依据首集描述生成的，覆盖会让图与依据脱节；
-            # timestamp 相同说明 normalized_name 已一致，time_note 也无需改动。
-            scene.description = sc.get("description") or scene.description
+            # 同集重解析：仅当本集就是该场景的归属集时才更新项目级描述。
+            # 场景被多集复用时，scene.description 是基准图的依据，不能被某一集覆盖，
+            # 集级差异写入 scene_episode.description 单独留档。
+            if int(scene.episode or 1) == int(ep or 1):
+                scene.description = sc.get("description") or scene.description
             scene.time_note = sc.get("time_note") or scene.time_note
         # 登记本次解析涉及的场景（删除旧镜头的范围以此为准，见第 5 步）
         _touched_scene_ids.add(scene.id)
@@ -818,8 +943,12 @@ def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, e
                           .order_by(SceneEpisode.seq_in_episode.desc()).first())
                 db.add(SceneEpisode(id=id_gen.scene_episode_id(), scene_id=scene.id,
                                     episode=int(ep or 1),
-                                    seq_in_episode=(max_se[0] if max_se else 0) + 1))
+                                    seq_in_episode=(max_se[0] if max_se else 0) + 1,
+                                    description=sc.get("description")))
                 db.flush()
+            elif sc.get("description"):
+                # 集级描述随最新解析更新，不触碰项目级 scene.description
+                link.description = sc.get("description")
             _link_seen.add(_link_key)
 
         # 镜头 upsert

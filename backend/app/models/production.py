@@ -190,6 +190,13 @@ class ParseVersion(Base):
     # script-agent 口径锁定：首批解析成功后锁定总集数；script_hash 变化则口径失效
     total_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     script_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 批次完整性独立列（从 diff_summary JSON 提升，便于查询与准入判断）
+    completion_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    expected_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parsed_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    successful_batches: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed_batches: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    coverage_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

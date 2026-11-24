@@ -10,13 +10,14 @@ import {
   getParseStatus,
   getProject,
   getScriptAgentStatus,
+  getScriptReports,
   retryParse,
   runScriptAgent,
 } from '@/api/projects'
 import { listCharacters, listProps, listScenes } from '@/api/script'
 import { cancelJob, getJob, listJobs } from '@/api/jobs'
 import type { Job } from '@/types/job'
-import type { EpisodeParseStatusItem, Scene, Shot } from '@/types/script'
+import type { EpisodeParseStatusItem, ParseGateResult, Scene, ScriptReports, Shot } from '@/types/script'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,6 +33,33 @@ const projectId = computed(() => String(route.params.id ?? ''))
  */
 const parseJobId = ref<string | null>(null)
 const candidateVersionId = ref<string | null>(null)
+/** 确认后返回的生产准入结果，null=无报告/READY */
+const gateResult = ref<ParseGateResult | null>(null)
+
+/* -- P1-9: three independent reports -- */
+const scriptReports = ref<ScriptReports | null>(null)
+const reportsLoading = ref(false)
+async function fetchReports() {
+  if (!projectId.value) return
+  reportsLoading.value = true
+  try {
+    const res = await getScriptReports(projectId.value)
+    scriptReports.value = res.reports
+  } catch {
+    scriptReports.value = null
+  } finally {
+    reportsLoading.value = false
+  }
+}
+function reportStatusLabel(s: string): string {
+  const m: Record<string, string> = { passed: '通过', partial: '部分通过', failed: '未通过', skipped: '未评估' }
+  return m[s] ?? s
+}
+function reportStatusClass(s: string): string {
+  if (s === 'passed' || s === 'skipped') return 'status-pass'
+  if (s === 'partial') return 'status-warn'
+  return 'status-fail'
+}
 
 function errMsg(e: unknown): string {
   if (e && typeof e === 'object' && 'message' in e) {
@@ -977,6 +1005,7 @@ const shotsWithoutDetail = computed(
 function resetAfterConfirmParse() {
   parseJobId.value = null
   candidateVersionId.value = null
+  gateResult.value = null
 }
 /**
  * 已发起过确认的版本 ID 集合：防止「确认成功 → 状态轮询仍是 current 且 pending 未刷新 →
@@ -989,8 +1018,18 @@ const confirmedVersionIds = ref<Set<string>>(new Set())
 const { mutate: doConfirmParse } = useMutation({
   mutationFn: (parseVersionId: string) =>
     confirmParseVersion(projectId.value, parseVersionId, project.value?.current_parse_version_id),
-  onSuccess: () => {
-    message.success('解析结果已确认，场景/角色/道具已更新')
+  onSuccess: (data) => {
+    if (data?.gate) {
+      gateResult.value = data.gate as ParseGateResult
+    } else {
+      gateResult.value = null
+    }
+    void fetchReports()
+    if (gateResult.value?.needs_review) {
+      message.warning(`解析已确认，但存在 ${gateResult.value.items.filter(i => i.severity === 'warning').length} 条审核提醒，请查看准入报告`)
+    } else {
+      message.success('解析结果已确认，场景/角色/道具已更新')
+    }
     resetAfterConfirmParse()
     void queryClient.invalidateQueries({ queryKey: ['scenes', projectId.value] })
     void queryClient.invalidateQueries({ queryKey: ['characters', projectId.value] })
@@ -1636,6 +1675,88 @@ async function copyRawReport() {
               <span class="ov-value">{{ s.value }}</span>
               <span class="ov-label">{{ s.label }}</span>
             </div>
+          </div>
+
+          <!-- P1-9：三份独立报告卡片 -->
+          <div v-if="reportsLoading && !scriptReports" class="report-loading">
+            <span class="spinner"></span> 报告数据加载中...
+          </div>
+          <div v-if="scriptReports" class="report-cards">
+            <div class="report-card">
+              <div class="report-header">
+                <span class="report-title">📝 剧本质量</span>
+                <span class="report-status" :class="reportStatusClass(scriptReports.quality_report.status)">
+                  {{ reportStatusLabel(scriptReports.quality_report.status) }}
+                </span>
+              </div>
+              <div class="report-summary">{{ scriptReports.quality_report.summary }}</div>
+              <div v-if="scriptReports.quality_report.status !== 'skipped'" class="report-metrics">
+                <span>评分 {{ scriptReports.quality_report.items.overall_score }}/10</span>
+                <span>问题 {{ scriptReports.quality_report.items.issues_count }} 个</span>
+                <span v-if="scriptReports.quality_report.items.severity.critical" class="metric-critical">严重 {{ scriptReports.quality_report.items.severity.critical }}</span>
+              </div>
+            </div>
+            <div class="report-card">
+              <div class="report-header">
+                <span class="report-title">🔍 解析完整性</span>
+                <span class="report-status" :class="reportStatusClass(scriptReports.integrity_report.status)">
+                  {{ reportStatusLabel(scriptReports.integrity_report.status) }}
+                </span>
+              </div>
+              <div class="report-summary">{{ scriptReports.integrity_report.summary }}</div>
+              <div v-if="scriptReports.integrity_report.status !== 'skipped'" class="report-metrics">
+                <span v-if="scriptReports.integrity_report.items.completion_status" :class="scriptReports.integrity_report.items.completion_status === 'complete' ? 'metric-ok' : 'metric-warn'">
+                  完成度 {{ scriptReports.integrity_report.items.completion_status }}
+                </span>
+                <span v-if="scriptReports.integrity_report.items.parsed_episodes != null">
+                  解析 {{ scriptReports.integrity_report.items.parsed_episodes }}/{{ scriptReports.integrity_report.items.expected_episodes ?? '?' }} 集
+                </span>
+                <span v-if="scriptReports.integrity_report.items.successful_batches != null">
+                  成功批次 {{ scriptReports.integrity_report.items.successful_batches }}
+                </span>
+                <span v-if="scriptReports.integrity_report.items.failed_batches" class="metric-critical">失败批次 {{ scriptReports.integrity_report.items.failed_batches }}</span>
+                <span v-if="scriptReports.integrity_report.items.coverage?.dialogues">
+                  对白匹配 {{ scriptReports.integrity_report.items.coverage.dialogues.matched }}/{{ scriptReports.integrity_report.items.coverage.dialogues.source }}
+                </span>
+              </div>
+            </div>
+            <div class="report-card">
+              <div class="report-header">
+                <span class="report-title">🎬 制作可行性</span>
+                <span class="report-status" :class="reportStatusClass(scriptReports.feasibility_report.status)">
+                  {{ reportStatusLabel(scriptReports.feasibility_report.status) }}
+                </span>
+              </div>
+              <div class="report-summary">{{ scriptReports.feasibility_report.summary }}</div>
+              <div v-if="scriptReports.feasibility_report.items.total_alerts" class="report-metrics">
+                <span :class="scriptReports.feasibility_report.items.total_alerts > 5 ? 'metric-critical' : ''">
+                  风险项 {{ scriptReports.feasibility_report.items.total_alerts }} 条
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 生产准入报告：确认解析后若存在 NEES_REVIEW 等级则展示 -->
+          <div v-if="gateResult?.needs_review" class="gate-report">
+            <div class="gate-header">
+              <span class="gate-badge" :class="`is-${gateResult.level.toLowerCase()}`">
+                {{ gateResult.level === 'NEEDS_REVIEW' ? '需审核' : gateResult.level }}
+              </span>
+              <span class="gate-summary">
+                确认已完成，但存在 {{ gateResult.items.filter(i => i.severity !== 'info').length }} 条需关注的准入项
+              </span>
+            </div>
+            <ul class="gate-items">
+              <li
+                v-for="(item, idx) in gateResult.items.filter(i => i.severity !== 'info')"
+                :key="idx"
+                class="gate-item"
+                :class="`sev-${item.severity}`"
+              >
+                <span class="gate-item-tag">{{ item.severity === 'blocker' ? '阻塞' : item.severity === 'warning' ? '警告' : '' }}</span>
+                <span class="gate-item-msg">{{ item.message }}</span>
+              </li>
+            </ul>
           </div>
 
           <div class="result-body">

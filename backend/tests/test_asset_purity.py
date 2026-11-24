@@ -171,7 +171,7 @@ def test_quality_check_tiny_image_rejected(tmp_path):
 
 # ---------- P0：场景批量生成 @引用注入 ----------
 
-def test_scene_batch_generate_injects_media(client: TestClient):
+def test_scene_batch_generate_injects_media(client: TestClient, tmp_path):
     """场景批量生成 keyframe 时，提示词 @角色 的参考图随任务 params 携带。"""
     from app.core.database import SessionLocal
     from app.models import Asset, Character, Scene, Shot, Workflow, ids
@@ -181,9 +181,11 @@ def test_scene_batch_generate_injects_media(client: TestClient):
     try:
         # D-23 资产门禁：定妆图文件必须真实存在
         from pathlib import Path
-        Path("/tmp/x.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        # 用 tmp_path 隔离：共享 /tmp/x.png 可能被其他进程占用导致写入权限冲突
+        _headshot = tmp_path / "x.png"
+        _headshot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
         a = Asset(id=ids.asset_id(), project_id=pid, asset_type="character",
-                  name="小马", version=1, file_path="/tmp/x.png", validity="current")
+                  name="小马", version=1, file_path=str(_headshot), validity="current")
         db.add(a)
         db.flush()
         pony = Character(id=ids.character_id(), project_id=pid, name="小马",

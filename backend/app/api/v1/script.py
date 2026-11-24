@@ -25,6 +25,7 @@ from app.schemas.script import (
 from app.services import errors
 from app.services.script_parse import analyze_script_outline
 from app.services.source_index import build_source_index, validate_source_references
+from app.services.parse_gate import evaluate_parse_gate
 
 router = APIRouter(prefix="/api/projects", tags=["script"])
 
@@ -726,6 +727,63 @@ def retry_parse(project_id: str, db: Session = Depends(get_db)) -> ParseRetryOut
     return ParseRetryOut(job_id=job_ids[0] if job_ids else "", retried_episodes=episodes)
 
 
+def _aggregate_job_results(target_results: list[dict]) -> dict:
+    """聚合多个批次的 job.result 为单一评估输入。"""
+    if not target_results:
+        return {}
+    if len(target_results) == 1:
+        return target_results[0]
+
+    all_scenes: list = []
+    all_chars: list = []
+    all_episodes: list = []
+    all_warnings: list = []
+    all_issues: list = []
+    all_problems: list = []
+    merged_coverage: dict = {}
+    rejected = False
+    failed_ranges: list = []
+
+    for r in target_results:
+        all_scenes.extend(r.get("scenes") or [])
+        all_chars.extend(r.get("characters") or [])
+        all_episodes.extend(r.get("episodes") or [])
+        all_warnings.extend(r.get("parse_warnings") or [])
+        all_issues.extend(r.get("review_issues") or [])
+        all_problems.extend(r.get("problems") or [])
+        if r.get("rejected"):
+            rejected = True
+        for fr in (r.get("failed_ranges") or []):
+            if fr not in failed_ranges:
+                failed_ranges.append(fr)
+        cov = r.get("coverage") or {}
+        for k, v in cov.items():
+            if isinstance(v, dict):
+                existing = merged_coverage.setdefault(k, {})
+                for sub_k, sub_v in v.items():
+                    if isinstance(sub_v, (int, float)):
+                        existing[sub_k] = max(existing.get(sub_k, 0), sub_v)
+                    elif isinstance(sub_v, list):
+                        existing_list = existing.setdefault(sub_k, [])
+                        for item in sub_v:
+                            if item not in existing_list:
+                                existing_list.append(item)
+                    else:
+                        existing[sub_k] = sub_v
+
+    aggregated = dict(target_results[0])
+    aggregated["scenes"] = all_scenes
+    aggregated["characters"] = all_chars
+    aggregated["episodes"] = all_episodes
+    aggregated["parse_warnings"] = all_warnings
+    aggregated["review_issues"] = all_issues
+    aggregated["problems"] = all_problems
+    aggregated["rejected"] = rejected
+    aggregated["failed_ranges"] = failed_ranges
+    aggregated["coverage"] = merged_coverage
+    return aggregated
+
+
 @router.post("/{project_id}/parse-versions/{parse_version_id}/confirm")
 def confirm_parse_version(project_id: str, parse_version_id: str, payload: ParseVersionConfirm,
                           db: Session = Depends(get_db)) -> ParseVersionOut:
@@ -795,6 +853,34 @@ def confirm_parse_version(project_id: str, parse_version_id: str, payload: Parse
         raise errors.parse_version_conflict(
             "该解析版本还没有可应用的成功结果（解析任务可能仍在执行），请等待任务结束后重试"
         )
+    # 生产准入评估：综合批次完整性/覆盖率/哈希/校验/数据完整性判定
+    sv = db.get(ScriptVersion, pv.script_version_id) if pv.script_version_id else None
+    script_hash_current = sv.content_hash if sv else None
+    aggregated_result = _aggregate_job_results(target_results) if target_results else {}
+    # 独立完整性列（Schema 迁移后的权威来源）；旧数据为 None 时由 diff_summary 兜底
+    completion_cols = {
+        "completion_status": pv.completion_status,
+        "expected_episodes": pv.expected_episodes,
+        "parsed_episodes": pv.parsed_episodes,
+        "successful_batches": pv.successful_batches,
+        "failed_batches": pv.failed_batches,
+        "coverage_status": pv.coverage_status,
+    }
+    gate = evaluate_parse_gate(
+        job_result=aggregated_result,
+        parse_version_diff_summary=pv.diff_summary,
+        script_hash_current=script_hash_current,
+        script_hash_parse=pv.script_hash,
+        parse_version_completion=completion_cols,
+    )
+    if gate.blocked:
+        blocker_msgs = "; ".join(
+            i.message for i in gate.items if i.severity == "blocker"
+        )
+        raise errors.parse_version_conflict(
+            f"解析结果未通过生产准入检查（BLOCKED）: {blocker_msgs}"
+        )
+
     # 旧版本标记 superseded
     old_id = p.current_parse_version_id
     if old_id:
@@ -807,4 +893,75 @@ def confirm_parse_version(project_id: str, parse_version_id: str, payload: Parse
     db.commit()
     return ParseVersionOut(
         parse_version_id=pv.id, version=pv.version, status=pv.status, diff_summary=pv.diff_summary,
+        gate=gate.to_dict() if (gate and gate.needs_review) else None,
     )
+
+
+@router.get("/{project_id}/script-reports", status_code=200)
+def get_script_reports(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """P1-九：三份独立报告只读聚合接口。
+
+    返回 quality_report（剧本质量）/ integrity_report（解析完整性）/ feasibility_report（制作可行性）。
+    每份报告含 status（passed/partial/failed/skipped）、summary、items。
+    不需重新调 LLM，从已落库的最新数据中读取。
+    """
+    from app.services.report_bundle import to_reports_dict
+    from app.services.parse_gate import evaluate_parse_gate
+
+    p = _get_project(db, project_id)
+    if p.status == "archived":
+        raise errors.invalid_state_transition("已归档项目不可查看报告")
+
+    # 1. 评估结果：优先从最新 succeeded parse job 中取，其次回退 ScriptEstimate
+    evaluation = None
+    latest_job = (
+        db.query(Job)
+        .filter(Job.project_id == project_id, Job.task_type == "script_agent",
+                Job.status == "succeeded")
+        .order_by(Job.finished_at.desc())
+        .first()
+    )
+    if latest_job and isinstance(latest_job.result, dict):
+        evaluation = latest_job.result.get("evaluation")
+
+    # 2. 覆盖率：同样从 job.result 中取
+    coverage_report = None
+    if latest_job and isinstance(latest_job.result, dict):
+        coverage_report = latest_job.result.get("coverage")
+
+    # 3. ParseVersion 元信息（批次统计 + Gate）
+    parse_version_meta = None
+    gate_result = None
+    pv = db.get(ParseVersion, p.current_parse_version_id) if p.current_parse_version_id else None
+    if pv:
+        parse_version_meta = {
+            "completion_status": pv.completion_status,
+            "expected_episodes": pv.expected_episodes,
+            "parsed_episodes": pv.parsed_episodes,
+            "successful_batches": pv.successful_batches,
+            "failed_batches": pv.failed_batches,
+        }
+        # Gate 准入（读取最新脚本哈希校验）
+        sv = db.get(ScriptVersion, p.current_script_version_id) if p.current_script_version_id else None
+        script_hash_current = sv.content_hash if sv else None
+        gate = evaluate_parse_gate(
+            job_result=(latest_job.result if latest_job else None),
+            parse_version_diff_summary=pv.diff_summary,
+            script_hash_current=script_hash_current,
+            script_hash_parse=pv.script_hash,
+            parse_version_completion={
+                "completion_status": pv.completion_status,
+                "expected_episodes": pv.expected_episodes,
+                "parsed_episodes": pv.parsed_episodes,
+                "successful_batches": pv.successful_batches,
+                "failed_batches": pv.failed_batches,
+                "coverage_status": pv.coverage_status,
+            } if pv else None,
+        )
+        gate_result = gate._asdict() if hasattr(gate, '_asdict') else gate.to_dict() if hasattr(gate, 'to_dict') else None
+
+    reports = to_reports_dict(evaluation, coverage_report, parse_version_meta, gate_result)
+    return {
+        "project_id": project_id,
+        "reports": reports,
+    }

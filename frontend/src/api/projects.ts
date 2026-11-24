@@ -218,4 +218,11 @@ export function saveProjectStyleConfig(projectId: string, config: StyleConfig) {
   return put<SaveStyleConfigResponse>(`/projects/${projectId}/style-config`, { config })
 }
 
+/** P1-九：获取三份独立报告（只读，从已落库数据聚合） */
+export function getScriptReports(projectId: string) {
+  return get<{ project_id: string; reports: import('@/types/script').ScriptReports }>(
+    `/projects/${projectId}/script-reports`
+  )
+}
+
 

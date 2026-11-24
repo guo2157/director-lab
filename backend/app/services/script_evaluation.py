@@ -248,4 +248,11 @@ def evaluate_script(script_text: str, estimate_data: dict, config: dict, on_delt
     if not isinstance(score, (int, float)) or score < 1 or score > 10:
         result["overall_score"] = max(1, min(10, int(score) if score else 5))
 
+    # P1-九：三份独立报告聚合（保持原有顶层字段不动，新增 reports 子键）
+    # 三个调用方取值方式不变：script_agent 取 overall_score/issues，
+    # api/v1/script.py 返回整个 report，agent_tool_impls 同样返回 report
+    # —— 它们都不访问 result.reports，不影响既有行为。
+    from app.services.report_bundle import to_reports_dict  # noqa: E402
+    result["reports"] = to_reports_dict(result)
+
     return result

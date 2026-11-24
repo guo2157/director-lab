@@ -489,5 +489,15 @@ npm run build                     # vue-tsc 类型检查 + 产物构建
   列表视频 `preload="metadata"`
 - 顶栏入口：作品 / 设置（**任务中心已于 2026-11-19 下线**，任务进度改在分镜图/资产/解析页内联展示）；
   导演台入口有意移除，经右侧 AI 助手面板进入
+- 顶栏右侧 ComfyUI 快捷入口（**2026-11-24 新增，当日二次改版**）：把设置页配好的实例地址变成一次点击可达的外部链接，
+  按启用状态过滤并去重；**单实例点击直接在新标签页打开**，**多实例展开下拉由用户选**（下拉项 = 序号徽章 + 等宽地址），
+  零实例不留死按钮——提示并跳设置页。
+  规格：**品牌渐变标记 + 分色 wordmark**——`.comfy-mark`（`--brand-gradient` 圆角方块，内含两个输入节点
+  → 一个输出节点的直角连线，是 ComfyUI 的 node graph 语义；不用通用 `n-icon`，也不与「分享」图标撞形）、
+  文字 17px/700 大于品牌名 15px（需求「字体可以大一点」）、`Comfy` 走 `--text-primary` + `UI` 走
+  `--brand-primary`（分色是「彩色」的全部来源，不加整块品牌填充）。容器 40px 高、
+  `--bg-elevated` 底 + `--border-strong` 描边，悬停转 `--brand-line` + 1px 品牌描边环。
+  **窄屏必须保留 ComfyUI 文字**：≤480 降为 13px/700 + 20px 标记（导航内距 14→10 让出空间），
+  任何视口都不允许 `display:none` 藏掉 wordmark。
 - 顶栏形态：sticky 悬浮胶囊（`--radius-xl` + `--card-sheen`），
   `grid-template-columns: 1fr auto 1fr` 保证导航落在几何中心

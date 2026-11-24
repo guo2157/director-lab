@@ -1323,7 +1323,7 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
             )
     ref_duty_block = "\n".join(_duty_lines) or "- 无参考图绑定，全部按文字描述生成"
     # ── action_moment：只取起始瞬间，不带 end_pose ──
-    b0 = (beats or [{}])[0] if isinstance(beats, list) and beats else {}
+    b0 = (timeline or [{}])[0] if isinstance(timeline, list) and timeline else {}
     action_text = _text(b0.get("action") if isinstance(b0, dict) else action, "镜头动作未提供")
     start_pose = b0.get("start_pose", "") if isinstance(b0, dict) else ""
     action_moment = (
@@ -2113,6 +2113,8 @@ def compile_shot_video(db: Session, shot_id: str, *,
             "for the whole shot."
         )
 
+    # P1: shot_timeline accessor for timeline->beats fallback
+    from app.services.shot_timeline import shot_timeline as _tl
     mapping = {
         "shot_id": shot.id,
         "duration": f"{duration:g}",

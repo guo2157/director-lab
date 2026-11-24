@@ -83,6 +83,10 @@ class Character(TimestampMixin, Base):
     appearance: Mapped[str | None] = mapped_column(Text, nullable=True)
     voice_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     portrait_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 别名列表（来自名称括号即“张三（张三丰）”的括号别名）：JSON 数组，主名不重复收录
+    aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 角色类型：individual（个体）/ crowd（群体，如“众人”“村民们”“侍卫们”）
+    character_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 class Scene(TimestampMixin, Base):
@@ -118,6 +122,8 @@ class SceneEpisode(Base):
     scene_id: Mapped[str] = mapped_column(String(32), ForeignKey("scene.id"), nullable=False, index=True)
     episode: Mapped[int] = mapped_column(Integer, nullable=False)
     seq_in_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 集级独立描述：保留该集对该场景的具体描述，不覆盖项目级 scene.description
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Prop(TimestampMixin, Base):
