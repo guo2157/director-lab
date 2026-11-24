@@ -165,11 +165,14 @@ def resolve_shot_references(
     # 而整单 409（实测：小马问牛伯伯，牛伯伯的名字只出现在 dialogue 正文里，
     # 注入器据此判定「在镜内」并占 ref_character_2，门禁按主体角色集合判定泄漏）。
     #
-    # 权威来源 = shot_refs.shot_subject_characters（character_id + 对白说话人
-    # + 提示词显式 @引用）。刻意不含「名字出现在 dialogue 正文」的子串匹配：
+    # Phase 2 起权威来源 = ShotCast 单一出场清单（shot_cast.resolve_shot_cast）：
+    # 有 shot_plan 契约时以契约为准（画外声音不占身份槽位），无契约走旧口径
+    # （shot_subject_characters：character_id + 对白说话人 + @引用 + 动作文本）。
+    # 刻意不含「名字出现在 dialogue 正文」的子串匹配：
     # 台词里被谈论的人不等于在画面里，拿它去占身份槽就是拿脸部一致性做赌注。
-    from app.services.shot_refs import shot_subject_characters
-    subject_ids = {c.id for c in shot_subject_characters(db, shot)}
+    from app.services.shot_cast import resolve_shot_cast
+    cast = resolve_shot_cast(db, shot)
+    subject_ids = set(cast.character_ids)
     selected_chars: list[tuple[Character, Asset]] = []
     used_slots = 0
     for c in characters:
@@ -243,11 +246,24 @@ def resolve_shot_references(
         else:
             structured = {x.strip() for x in _raw_props.replace("，", ",").split(",") if x.strip()}
     props_to_resolve: list[tuple[Prop, PropShotState | None]] = []
-    for p in props:
-        st = next((s for s in states if s.prop_id == p.id), None)
-        in_shot = p.name in mentioned or p.name in structured or p.id in prop_ids_with_state
-        if in_shot:
-            props_to_resolve.append((p, st))
+    if cast.source == "shot_plan":
+        # 契约路径：道具集合以 visible_props 为准（ShotCast 已做生命周期保护性
+        # 合并：absent 剔除、offscreen/occluded 不注入），与提示词「只出现」清单
+        # 同一份出场清单（P0-4 修复：参考图与提示词道具集合不再各算一套）
+        state_by_prop = {st.prop_id: st for st in states}
+        for cp in cast.props:
+            if not cp.reference_required:
+                manifest.fallbacks.append(FallbackRecord(
+                    entity_id=cp.prop.id, kind="prop",
+                    reason="prop_offscreen", used="not_injected"))
+                continue
+            props_to_resolve.append((cp.prop, state_by_prop.get(cp.prop.id)))
+    else:
+        for p in props:
+            st = next((s for s in states if s.prop_id == p.id), None)
+            in_shot = p.name in mentioned or p.name in structured or p.id in prop_ids_with_state
+            if in_shot:
+                props_to_resolve.append((p, st))
 
     char_ids_in_shot = [c.id for c, _ in selected_chars]
     prop_slot_seq = 0

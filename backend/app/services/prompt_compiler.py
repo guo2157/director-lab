@@ -221,6 +221,7 @@ STORYBOARD_TEMPLATE = """任务：生成镜头 {shot_id} 的一张完整单帧�
 参考图职责：
 {ref_duty_block}
 目标画面：在场景「{scene}」中，{action_moment}。
+{plan_posture_block}
 角色站位（不可互换）：
 {position_specs}
 站位规则：
@@ -861,59 +862,33 @@ def compile_asset_image(db: Session, asset_type: str, entity_id: str, *,
 
 # ── 分镜图编译 ───────────────────────────────────────────────
 def _shot_characters(db: Session, shot: Shot) -> list[Character]:
-    """镜头出场角色 —— 委托给 shot_refs.shot_subject_characters（唯一口径）。
+    """镜头出场角色 —— 委托给 ShotCast 单一出场清单（Phase 2）。
 
     历史上这里和注入器、门禁各写了一份，三份定义逐渐分叉：本函数只认
     「主角 + 对白说话人」，注入器额外认「名字出现在 dialogue 正文」，
     门禁又只认前者，于是注入器放进去的配角被门禁判成换脸泄漏、整单 409。
-    现在统一为一份实现：character_id + 对白说话人 + 提示词显式 @引用。
+    Phase 2 起统一读 ShotCast：有 shot_plan 契约时以契约为准（画外声音
+    不占身份槽位、不计入人数约束），无契约走旧启发式兜底
+    （shot_subject_characters：character_id + 对白说话人 + @引用 + 动作文本）。
 
     多参考图工作流（4 个角色槽）依赖这里拿到全部出场角色，
     否则对白里出现第二个角色时，媒体注入了它、提示词却没绑定它。
     """
-    from app.services.shot_refs import shot_subject_characters
-    return shot_subject_characters(db, shot)
+    from app.services.shot_cast import resolve_shot_cast
+    return [cc.character for cc in resolve_shot_cast(db, shot).characters]
 
 
 def _shot_props(db: Session, shot: Shot, project_id: str) -> list[Prop]:
-    """本镜涉及的道具：优先用结构化字段 shot.props，提示词 @引用仅作兜底。
+    """本镜涉及道具 —— 委托给 ShotCast 单一出场清单（Phase 2，P0-4 修复）。
 
-    为什么不能只靠提示词正则（改造前行为）：解析阶段 LLM 在 image_prompt 里
-    写 @道具名，这里用 extract_refs 反向提取。两段式改造后 LLM 不再产出
-    image_prompt（由 STORYBOARD_TEMPLATE 渲染），正则就提取不到任何道具，
-    道具参考图会静默全部丢失。
-
-    Shot.props 是解析阶段就落库的结构化字段（实测库中为 ["帆布包"] 这种形态），
-    是道具关系的权威来源；提示词正则只在结构化字段为空时兜底，兼容历史数据。
+    有 shot_plan 契约时以契约 visible_props 为准（经生命周期保护性合并）；
+    无契约走旧口径（shot.props ∪ 提示词 @引用 ∪ PropShotState 记录）。
+    只返回 reference_required 的道具：offscreen/occluded 不进「只出现」清单，
+    与注入器（reference_resolver）的实际注入集合保持同一份出场清单——
+    改造前提示词说「只出现 A、B」而参考图只注入 A 的矛盾（P0-4）由此消除。
     """
-    from app.services.ref_inject import extract_refs
-
-    names: list[str] = []
-    raw = getattr(shot, "props", None)
-    if isinstance(raw, list):
-        names = [str(x).strip() for x in raw if str(x or "").strip()]
-    elif isinstance(raw, str) and raw.strip():
-        # 历史数据可能是 JSON 字符串或逗号分隔
-        import json as _json
-        try:
-            parsed = _json.loads(raw)
-            if isinstance(parsed, list):
-                names = [str(x).strip() for x in parsed if str(x or "").strip()]
-            elif isinstance(parsed, str):
-                names = [parsed.strip()]
-        except (ValueError, TypeError):
-            names = [x.strip() for x in raw.split(",") if x.strip()]
-
-    if not names:
-        # 兜底：结构化字段为空时按提示词 @引用提取（历史数据兼容）
-        try:
-            names = extract_refs(shot.image_prompt or "")
-        except Exception:  # noqa: BLE001
-            names = []
-    if not names or not project_id:
-        return []
-    rows = db.query(Prop).filter(Prop.project_id == project_id).all()
-    return [p for p in rows if p.name in names]
+    from app.services.shot_cast import resolve_shot_cast
+    return [cp.prop for cp in resolve_shot_cast(db, shot).props if cp.reference_required]
 
 
 def _append_slot(slots: list[dict], declared_param_map: dict, param: str, *,
@@ -995,9 +970,10 @@ def audit_reference_slots(db: Session, shot: Shot, media: dict | None) -> list[d
     portrait_owner = {c.portrait_asset_id: c for c in chars if c.portrait_asset_id}
     # 主体角色集合必须与注入器同一口径，否则注入器放入的身份槽会被本门禁判泄漏
     # （实测：配角只在提示词里被 @引用、或只在 dialogue_segments 说话，两边定义
-    # 不一致就会整单 409）。权威定义见 shot_refs.shot_subject_characters。
-    from app.services.shot_refs import shot_subject_characters
-    subject_ids = {c.id for c in shot_subject_characters(db, shot)}
+    # 不一致就会整单 409）。Phase 2 起统一读 ShotCast 单一出场清单：
+    # 有 shot_plan 契约时画外声音不占身份槽位，无契约走旧启发式口径。
+    from app.services.shot_cast import resolve_shot_cast
+    subject_ids = set(resolve_shot_cast(db, shot).character_ids)
     from app.services.ref_inject import is_character_slot
 
     for slot, path in media.items():
@@ -1265,8 +1241,10 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
                      blocking=blocking, asset_label="角色")
 
 
-    # 道具槽位：工作流不支持时降级为文字描述并显式告警（不静默丢图）
-    for prop in prop_rows:
+    # 道具槽位：Phase 3 扩展为 ref_prop/ref_prop_2 多道具池，工作流不支持时降级文字描述
+    # 且显式告警（不静默丢图）；index 越界=能力超限，不阻断仅告警避免整批出图被打断
+    prop_slot_pool = ["ref_prop", "ref_prop_2"]
+    for index, prop in enumerate(prop_rows):
         asset, issue = _approved_asset(db, prop.anchor_asset_id, project_id, ("prop",))
         if issue:
             blocking.append({**issue, "entity_id": prop.id, "entity_type": "prop"})
@@ -1274,10 +1252,10 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         if asset is None:
             warnings.append(f"prop_asset_missing: 道具 {prop.name} 无审核通过锚定图，仅以文字描述")
             continue
-        if "ref_prop" not in declared_map:
-            warnings.append(f"prop_reference_unsupported: 当前工作流无 ref_prop 槽位，道具 {prop.name} 仅文字描述")
+        if index >= len(prop_slot_pool) or prop_slot_pool[index] not in declared_map:
+            warnings.append(f"prop_reference_unsupported: 当前工作流无可用道具槽位（slot={index}），道具 {prop.name} 仅文字描述")
             continue
-        _append_slot(slots, declared_map, "ref_prop", entity_id=prop.id, entity_type="prop",
+        _append_slot(slots, declared_map, prop_slot_pool[index], entity_id=prop.id, entity_type="prop",
                      asset=asset, role="prop_identity_reference", blocking=blocking,
                      asset_label="道具")
 
@@ -1352,6 +1330,58 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         getattr(project, "width", None) if project is not None else None,
         getattr(project, "height", None) if project is not None else None,
     )
+    # ── 契约编译（Phase 3）：SHOT_PLAN_COMPILE 开启且 shot_plan 存在时，
+    # 站位/姿态/朝向/视线/构图以契约为准，否则保持旧口径（行为不变）──
+    plan = shot.shot_plan if isinstance(shot.shot_plan, dict) else None
+    plan_chars = (plan or {}).get("on_screen_characters") or []
+    plan_comp = (plan or {}).get("composition") or {}
+    if plan_comp and not isinstance(plan_comp, dict):
+        plan_comp = {}
+    _plan_char_map = {pc.get("character_id"): pc for pc in plan_chars if isinstance(pc, dict)}
+
+    contract_enabled = get_settings().shot_plan_compile and plan is not None
+    # 构图：契约 composition 字段优先，缺失回退旧 heuristic
+    if contract_enabled and plan_comp:
+        _contract_composition = "、".join(v for v in [
+            plan_comp.get("framing"), plan_comp.get("focus"),
+            plan_comp.get("relation_note")
+        ] if v) or "主体清晰、空间关系合理，前景中景背景层次分明"
+        _contract_shot_size = plan_comp.get("shot_size") or _text(shot.shot_type)
+        _contract_camera_angle = plan_comp.get("camera_angle") or _text(shot.camera_angle)
+    else:
+        _contract_composition = "主体清晰、空间关系合理，前景中景背景层次分明"
+        _contract_shot_size = _text(shot.shot_type)
+        _contract_camera_angle = _text(shot.camera_angle)
+
+    # 站位/朝向/视线提示：有契约时从 on_screen_characters 提取
+    _plan_posture_hints: list[str] = []
+    if contract_enabled:
+        for c in characters:
+            pc = _plan_char_map.get(c.id)
+            if not pc:
+                continue
+            parts: list[str] = [c.name]
+            if pc.get("posture"):
+                parts.append(f"姿态：{pc['posture']}")
+            if pc.get("facing"):
+                parts.append(f"朝向：{pc['facing']}")
+            if pc.get("gaze_target") and isinstance(pc["gaze_target"], dict):
+                gt = pc["gaze_target"]
+                if gt.get("target_character_id"):
+                    target_char = db.get(Character, gt["target_character_id"])
+                    if target_char:
+                        parts.append(f"视线：看向{target_char.name}")
+                elif gt.get("target_prop_id"):
+                    target_prop = db.get(Prop, gt["target_prop_id"])
+                    if target_prop:
+                        parts.append(f"视线：看向{target_prop.name}")
+                elif gt.get("description"):
+                    parts.append(f"视线：{gt['description']}")
+            if pc.get("action_at_start"):
+                parts.append(f"首帧动作：{pc['action_at_start']}")
+            _plan_posture_hints.append("；".join(parts))
+    _plan_posture_block = "\n".join(_plan_posture_hints) if _plan_posture_hints else ""
+
     mapping = {
         "shot_id": shot.id,
         "characters": "、".join(c.name for c in characters) or "无（空镜）",
@@ -1372,11 +1402,12 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         "standable_items": standable_items,
         "opening_blocking": opening_blocking,
         "gaze_targets": gaze_targets,
+        "plan_posture_block": _plan_posture_block,
         "prop_interaction": "道具只按镜头绑定关系出现在角色手中或环境里",
         "emotion": shot.emotion or "neutral",
-        "shot_size": _text(shot.shot_type),
-        "camera_angle": _text(shot.camera_angle),
-        "composition": "主体清晰、空间关系合理，前景中景背景层次分明",
+        "shot_size": _contract_shot_size,
+        "camera_angle": _contract_camera_angle,
+        "composition": _contract_composition,
         "camera_movement": _text(shot.camera_movement, "固定机位"),
         "lighting": (
             "光从左上方照下，投影落向右下，与场景板主光方向一致；"

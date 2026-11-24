@@ -16,7 +16,9 @@ from app.models import Character, Prop, Scene, Shot
 def collect_shot_characters(db: Session, shot: Shot) -> list[str]:
     """收集镜头实际出场角色名（去重保序）。
 
-    **委托给 shot_subject_characters（唯一口径）**，不再自己实现一份。
+    **委托给 ShotCast 单一出场清单（Phase 2）**：有 shot_plan 契约时以契约为准
+    （画外声音不注入 @引用、不占身份槽位），无契约走旧启发式兜底
+    （shot_subject_characters，行为不变）。
 
     2026-11-21 修复：本函数原本是独立的第二实现，只认
     ``character_id`` + ``dialogue_segments`` 说话人，与权威函数
@@ -33,7 +35,9 @@ def collect_shot_characters(db: Session, shot: Shot) -> list[str]:
     保留本函数名是因为 5 处调用方（regen_workspace / regeneration /
     build_shot_asset_manifest / inject_asset_refs）都用它，改名会扩大改动面。
     """
-    return [c.name for c in shot_subject_characters(db, shot) if c.name]
+    from app.services.shot_cast import resolve_shot_cast
+    return [cc.character.name for cc in resolve_shot_cast(db, shot).characters
+            if cc.character.name]
 
 
 def shot_subject_characters(db: Session, shot: Shot) -> list[Character]:
@@ -177,11 +181,16 @@ def build_shot_asset_manifest(db: Session, shot: Shot) -> dict:
     供任务快照与前端展示使用（镜头-资产可追踪引用关系）。
     """
     from app.services.ref_inject import extract_refs
+    from app.services.shot_cast import resolve_shot_cast
 
     scene = db.get(Scene, shot.scene_id)
     prompt_text = shot.image_prompt or ""
     prop_names: list[str] = []
-    if scene is not None and prompt_text:
+    cast = resolve_shot_cast(db, shot)
+    if cast.source == "shot_plan":
+        # 契约路径：可见道具以 shot_plan 为准（含 PropShotState 保护性合并结果）
+        prop_names = [cp.prop.name for cp in cast.props if cp.prop.name]
+    elif scene is not None and prompt_text:
         scene_title = scene.title or ""
         from app.models import Prop
         for ref in extract_refs(prompt_text):
@@ -240,7 +249,9 @@ def inject_asset_refs(db: Session, shot: Shot, prompt: str, *, with_qc: bool = F
     # 所属场景
     if scene is not None and scene.title and scene.title not in existing_refs and scene.baseline_asset_id:
         inject_names.append(scene.title)
-    # 道具注入：优先由生命周期状态（prop_shot_state）驱动，状态缺失时降级启发式
+    # 道具注入：有 shot_plan 契约时以 ShotCast 清单为准（与 reference_resolver 槽位
+    # 绑定口径对齐，避免注入与绑定不一致导致 409）；无契约走生命周期状态驱动，
+    # 状态缺失时降级启发式
     # - visible 且 reference_required → 注入 @引用 + 位置/交互/外观锁定约束
     #   （规格：道具可见必须传参考图 + 位置 + 交互 + 外观锁定）
     # - not_introduced/destroyed/consumed 且正文提及 → 写禁止生成约束（不传参考图）
@@ -254,7 +265,35 @@ def inject_asset_refs(db: Session, shot: Shot, prompt: str, *, with_qc: bool = F
         "carried": "由角色背负/携带在身上",
         "worn": "佩戴在角色身上",
     }
-    if scene is not None:
+    from app.services.shot_cast import resolve_shot_cast
+
+    cast = resolve_shot_cast(db, shot)
+    if cast.source == "shot_plan":
+        # 契约路径：可见道具完全以 shot_plan 为准（resolve_shot_cast 已完成
+        # PropShotState 保护性合并：absent 剔除、offscreen/occluded 不注入参考图）
+        for cp in cast.props:
+            prop = cp.prop
+            if not prop.name or not prop.anchor_asset_id:
+                continue
+            if not cp.reference_required:
+                # offscreen/occluded：保留在清单但不注入参考图与锁定约束
+                continue
+            if prop.name not in existing_refs:
+                inject_names.append(prop.name)
+            visible_props.append(prop.name)
+            if prop.name in existing_refs:
+                continue
+            # 位置：优先契约 position，其次按交互方式通用推导
+            desc = cp.position or _INTERACTION_DESC.get(cp.interaction)
+            if not desc and cp.interaction and cp.interaction != "none":
+                desc = cp.interaction
+            seg = f"@{prop.name} 外观须与其参考图一致"
+            if desc:
+                seg += f"，{desc}"
+            if cp.state is not None and cp.state.appearance_constraint:
+                seg += f"，{cp.state.appearance_constraint}"
+            constraint_lines.append(seg)
+    elif scene is not None:
         from app.models import PropShotState
 
         state_map = {
@@ -300,18 +339,18 @@ def inject_asset_refs(db: Session, shot: Shot, prompt: str, *, with_qc: bool = F
             elif prop.name in prompt and prop.name not in existing_refs:
                 # 降级路径：该道具尚无生命周期状态快照，维持正文提及启发式
                 inject_names.append(prop.name)
-        # 多道具独立身份约束（规格：每道具独立身份约束，禁用拼图）
-        if len(visible_props) >= 2:
-            constraint_lines.append(
-                "多个参考道具各自独立呈现，保持各自形状与颜色特征，禁止拼合为组合体或互相融合"
-            )
-        # 单 visible 道具（规格：道具可见时禁止添加其他道具）
-        # 注意：@引用 后必须加空格，否则紧随的汉字会被 @引用正则并入引用名
-        # （如『@麦袋外』触发 invalid_reference，2026-11-06 实测）
-        elif len(visible_props) == 1:
-            constraint_lines.append(
-                f"除@{visible_props[0]} 之外，画面中不得额外添加其他道具"
-            )
+    # 多道具独立身份约束（规格：每道具独立身份约束，禁用拼图）
+    if len(visible_props) >= 2:
+        constraint_lines.append(
+            "多个参考道具各自独立呈现，保持各自形状与颜色特征，禁止拼合为组合体或互相融合"
+        )
+    # 单 visible 道具（规格：道具可见时禁止添加其他道具）
+    # 注意：@引用 后必须加空格，否则紧随的汉字会被 @引用正则并入引用名
+    # （如『@麦袋外』触发 invalid_reference，2026-11-06 实测）
+    elif len(visible_props) == 1:
+        constraint_lines.append(
+            f"除@{visible_props[0]} 之外，画面中不得额外添加其他道具"
+        )
     if not inject_names and not constraint_lines and not negative_names:
         return prompt
     parts: list[str] = []

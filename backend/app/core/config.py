@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     # 镜内道具易手次数上限
     shot_max_prop_transfers: int = 2
 
+    # --- 分镜图生成改造（Phase 3：compiler 读契约）---
+    # 开关：True 时 compile_storyboard_image 读取 shot_plan 契约的
+    # 站位/姿态/朝向/视线/构图/首帧状态；False 或无契约时保持旧口径（行为不变）
+    shot_plan_compile: bool = False
+
     # --- Stable Audio（T-06：单次上限经验值约 47 秒） ---
     stable_audio_max_seconds: float = 47.0
 

@@ -1563,6 +1563,40 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                                             "asset_id": _a["asset_id"],
                                             "issues": _qr["issues"],
                                         })
+                            # 分镜图出图质检（Phase 4）：仅 keyframe 类型，委托 apply_keyframe_image_qc
+                            # 双层检查：提示词级（prompt_qc 降级告警）+ 图像级（多模态 vision 评图），失败不阻断
+                            if job.shot_id:
+                                _shot = db.get(Shot, job.shot_id)
+                                if _shot is not None:
+                                    _prompt = (job.params or {}).get("prompt") or ""
+                                    _plan_block = ""
+                                    _comp = (job.input_snapshot or {}).get("prompt_compilation") or {}
+                                    if isinstance(_comp, dict):
+                                        _plan_block = _comp.get("plan_posture_block") or ""
+                                    _kf_assets = [a for a in created_assets if a.get("asset_type") == "keyframe"]
+                                    for _kf in _kf_assets:
+                                        _kf_path = _kf.get("file_path")
+                                        if not _kf_path or not _prompt:
+                                            continue
+                                        try:
+                                            from app.services.keyframe_image_qc import apply_keyframe_image_qc
+                                            _kf_qc = apply_keyframe_image_qc(
+                                                db, _shot, _prompt, _kf_path, plan_posture_block=_plan_block,
+                                            )
+                                            if _kf_qc.issues:
+                                                _write_event(db, job, "job.quality_warning", {
+                                                    "asset_id": _kf.get("asset_id"),
+                                                    "qc_type": "keyframe_image_qc",
+                                                    "prompt_qc_ok": _kf_qc.prompt_qc_ok,
+                                                    "image_qc_ok": _kf_qc.image_qc_ok,
+                                                    "issues": [{"code": i.code, "message": i.message} for i in _kf_qc.issues],
+                                                })
+                                        except Exception as _kfe:  # noqa: BLE001
+                                            _write_event(db, job, "job.quality_warning", {
+                                                "asset_id": _kf.get("asset_id"),
+                                                "qc_type": "keyframe_image_qc",
+                                                "error": f"{type(_kfe).__name__}: {str(_kfe)[:200]}",
+                                            })
                             # 资产库 regenerate 原地覆盖闸口：引用镜头待重做 + 公共资产重置审核
                             if _regen_target is not None:
                                 _apply_regenerate_gates(db, job, _regen_target)
@@ -2326,6 +2360,40 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 _fail_job(db, job, "quality_check_failed",
                           f"图片质量检查不合格（已重试 {job.attempts} 次）: {_quality_failed}")
                 return {"ok": False, "reason": "quality_check_failed"}
+        # 6.6 分镜图出图质检（Phase 4）：仅 keyframe 类型，委托 apply_keyframe_image_qc
+        # 双层检查：提示词级（prompt_qc 降级告警）+ 图像级（多模态 vision 评图），失败不阻断
+        if job.shot_id:
+            _shot = db.get(Shot, job.shot_id)
+            if _shot is not None:
+                _prompt = (job.params or {}).get("prompt") or ""
+                _plan_block = ""
+                _comp = (job.input_snapshot or {}).get("prompt_compilation") or {}
+                if isinstance(_comp, dict):
+                    _plan_block = _comp.get("plan_posture_block") or ""
+                _kf_assets = [a for a in created_assets if a.get("asset_type") == "keyframe"]
+                for _kf in _kf_assets:
+                    _kf_path = _kf.get("file_path")
+                    if not _kf_path or not _prompt:
+                        continue
+                    try:
+                        from app.services.keyframe_image_qc import apply_keyframe_image_qc
+                        _kf_qc = apply_keyframe_image_qc(
+                            db, _shot, _prompt, _kf_path, plan_posture_block=_plan_block,
+                        )
+                        if _kf_qc.issues:
+                            _write_event(db, job, "job.quality_warning", {
+                                "asset_id": _kf.get("asset_id"),
+                                "qc_type": "keyframe_image_qc",
+                                "prompt_qc_ok": _kf_qc.prompt_qc_ok,
+                                "image_qc_ok": _kf_qc.image_qc_ok,
+                                "issues": [{"code": i.code, "message": i.message} for i in _kf_qc.issues],
+                            })
+                    except Exception as _kfe:  # noqa: BLE001
+                        _write_event(db, job, "job.quality_warning", {
+                            "asset_id": _kf.get("asset_id"),
+                            "qc_type": "keyframe_image_qc",
+                            "error": f"{type(_kfe).__name__}: {str(_kfe)[:200]}",
+                        })
         # 7. 成功终态
         print(f"[worker] 任务成功 {job.id} ({job.job_type}) shot={job.shot_id} assets={len(created_assets)}", flush=True)
         job.status = "succeeded"
