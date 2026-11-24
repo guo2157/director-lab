@@ -1588,6 +1588,79 @@ def _clone_tts_node_pack(dest):
     )
 
 
+def _pip_install(args, extra=(), check=True):
+    """pip install 封装：默认源失败时自动切备用源。
+
+    平台镜像（如阿里云 simple）缺 qwen-tts 这类新包，直接报
+    "Could not find a version that satisfies the requirement"，
+    不切源就会把整个节点安装流程判死。
+    """
+    base = [sys.executable, "-m", "pip", "install"] + list(args)
+    try:
+        return _run(base + list(extra), check=check)
+    except subprocess.CalledProcessError:
+        if not PIP_INDEX_FALLBACK:
+            raise
+        log("[节点] 默认源安装失败，改用备用源: " + PIP_INDEX_FALLBACK)
+        return _run(base + ["-i", PIP_INDEX_FALLBACK] + list(extra), check=check)
+
+
+def _python_snippet(code: str) -> str:
+    """在独立进程里执行一段 python，返回 stdout（失败返回空串）。"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=600
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _ensure_torchaudio() -> bool:
+    """qwen_tts 的 speech_vq 会 import torchaudio.compliance.kaldi，缺了节点直接加载失败。
+
+    torchaudio 必须与 torch 同版本、同 CUDA 构建，否则 import 即崩；这里用
+    --no-deps 且先走与 torch 匹配的官方 CUDA 索引，避免 pip 顺手换掉 torch。
+    """
+    if _python_snippet("import torchaudio; print(torchaudio.__version__)"):
+        log("[节点] torchaudio 已就绪")
+        return True
+
+    torch_ver = _python_snippet("import torch; print(torch.__version__)")
+    if not torch_ver:
+        log("[节点] 读不到 torch 版本，跳过 torchaudio 安装（TTS 节点会因缺 torchaudio 加载失败）")
+        return False
+    base = torch_ver.split("+")[0]
+    cuda_tag = torch_ver.split("+")[1] if "+" in torch_ver else ""
+
+    indexes = []
+    if cuda_tag.startswith("cu"):
+        indexes.append("https://download.pytorch.org/whl/" + cuda_tag)
+    if PIP_INDEX_FALLBACK:
+        indexes.append(PIP_INDEX_FALLBACK)
+
+    for index in indexes:
+        log("[节点] 安装 torchaudio==" + base + "（对齐 torch " + torch_ver + "，源: " + index + "）")
+        try:
+            _run(
+                [sys.executable, "-m", "pip", "install", "--no-deps",
+                 "torchaudio==" + base, "-i", index],
+                check=True,
+            )
+        except Exception as exc:
+            log("[节点] 该源安装失败: " + str(exc))
+            continue
+        if _python_snippet("import torchaudio; print(torchaudio.__version__)"):
+            log("[节点] torchaudio 安装成功")
+            return True
+
+    log("[节点] torchaudio 安装失败，可手动执行: " + sys.executable
+        + " -m pip install --no-deps torchaudio==" + base)
+    return False
+
+
 def _install_tts_node_requirements(target) -> bool:
     """装节点包的 requirements.txt；返回是否动了环境。"""
     requirements = target / "requirements.txt"
@@ -1602,8 +1675,9 @@ def _install_tts_node_requirements(target) -> bool:
         except Exception:
             major = 0
         if major >= 5:
-            log("[节点] 注意：当前 transformers " + str(before_tf) + " 会被 qwen-tts 降到 4.57.3")
-            log("[节点] 如果你的 Qwen3-VL / H3 节点依赖 5.x，先跳过依赖：")
+            log("[节点] transformers " + str(before_tf) + " -> 4.57.3（qwen-tts 强依赖，5.x 会报 check_model_inputs 缺 func）")
+            log("[节点] ComfyUI 内核只从 transformers 取 tokenizer 类，Qwen3-VL / H3 文本编码器是自研实现，降级已验证安全")
+            log("[节点] 若后续装了必须 5.x 的第三方节点，再单独评估；临时跳过装依赖：")
             log("       cs.ensure_qwen3_tts_node(install_deps=False)   # 或 COMFY_TTS_NODE_SKIP_DEPS=1")
     snapshot = WORK_DIR / "pip-freeze-before-tts-node.txt"
     try:
@@ -1628,15 +1702,15 @@ def _install_tts_node_requirements(target) -> bool:
         if shutil.which("sox") is None:
             log("[节点] 系统缺少 sox 命令，尝试 apt-get 安装（失败请手动: apt-get install -y sox）")
             _run(["apt-get", "install", "-y", "sox"], check=False)
-        _run([sys.executable, "-m", "pip", "install", "--no-deps", "qwen-tts"] + extra, check=True)
-        _run(
+        _pip_install(["--no-deps", "qwen-tts"], extra)
+        # speech_vq 还要 import torchaudio，且版本必须与 torch 严格对齐
+        _ensure_torchaudio()
+        _pip_install(
             [
-                sys.executable, "-m", "pip", "install",
-                "numpy", "safetensors", "soundfile", "accelerate", "librosa", "modelscope",
-                "sox", "transformers==4.57.3",
-            ]
-            + extra,
-            check=True,
+                "numpy", "safetensors", "soundfile", "accelerate==1.12.0", "librosa",
+                "modelscope", "sox", "transformers==4.57.3",
+            ],
+            extra,
         )
         ok = _probe_tts_node_import(target)
     except Exception as exc:
@@ -1644,10 +1718,11 @@ def _install_tts_node_requirements(target) -> bool:
 
     if not ok:
         log("[节点] 最小依赖不足，回退到 requirements.txt 全量安装（较慢、占内存）")
-        cmd = [sys.executable, "-m", "pip", "install", "-r", str(requirements)]
-        if TORCH_INDEX_URL:
-            cmd += ["--extra-index-url", TORCH_INDEX_URL]
-        _run(cmd, check=True)
+        # 全量安装会把 transformers 拉回 5.x，导致 qwen_tts 的 check_model_inputs 报错，
+        # 装完必须重新钉回 4.57.3。
+        _pip_install(["-r", str(requirements)], extra)
+        _pip_install(["transformers==4.57.3", "accelerate==1.12.0"], extra)
+        ok = _probe_tts_node_import(target)
 
     after_tf = _pkg_version("transformers")
     if before_tf and after_tf and before_tf != after_tf:
@@ -1701,7 +1776,8 @@ def _probe_tts_node_import(target) -> bool:
     """在子进程里 import 一遍依赖，确认不是装了个空壳。"""
     try:
         result = subprocess.run(
-            [sys.executable, "-c", "import qwen_tts, soundfile, accelerate; print('ok')"],
+            [sys.executable, "-c",
+             "import qwen_tts, soundfile, accelerate, torchaudio; print('ok')"],
             capture_output=True,
             text=True,
             timeout=600,
@@ -1710,7 +1786,7 @@ def _probe_tts_node_import(target) -> bool:
         log("[节点] 依赖自检异常: " + str(exc))
         return False
     if result.returncode == 0:
-        log("[节点] 依赖自检通过（qwen_tts / soundfile / accelerate）")
+        log("[节点] 依赖自检通过（qwen_tts / soundfile / accelerate / torchaudio）")
         return True
     lines = [line for line in (result.stderr or "").strip().splitlines() if line.strip()]
     log("[节点] 依赖自检失败: " + (lines[-1] if lines else "unknown"))
