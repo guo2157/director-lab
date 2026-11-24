@@ -340,6 +340,22 @@ def normalize(workflow_type: str, definition: dict,
     }
 
 
+def workflow_tier(capabilities: dict | None) -> str | None:
+    """读取工作流档位（std_5s / fast_5s / quality_5s / quality_10s）。
+
+    归一化产物把 tier 放在 ``source.tier``（见模块文档）；历史库记录是平铺的
+    ``tier``。两处都读，避免新老数据口径不一致导致档位判断整体失效。
+    """
+    caps = capabilities or {}
+    source = caps.get("source")
+    if isinstance(source, dict):
+        tier = source.get("tier")
+        if isinstance(tier, str) and tier:
+            return tier
+    tier = caps.get("tier")
+    return tier if isinstance(tier, str) and tier else None
+
+
 def missing_capabilities(capabilities: dict, required: dict) -> list[str]:
     """按 `{能力路径: 期望值}` 检查，返回缺失项的点路径（matcher 用）。
 

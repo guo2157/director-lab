@@ -493,14 +493,14 @@ PREVIEW_METHOD = os.environ.get("COMFY_PREVIEW", "auto")
 DOWNLOAD_GROUPS = ["h3", "qwen", "tts"]
 
 GROUPS = {
-    "h3": "MiniMax H3 / Ref2VA（视频+音频）",
+    "h3": "MiniMax H3 / Ref2VA（视频+音频，含 int8 视频 VAE 与 4 步 Turbo LoRA）",
     "qwen": "Qwen-Image-2.1 Turbo（图像编辑）",
     "tts": "Qwen3-TTS 1.7B CustomVoice（独立语音生成）",
-    # 下面两组是"出片提速"用的，默认不下载，用到时显式指定：
-    #   cs.download_models(['h3speed'])   # 4.8 GiB：int8 VAE + ref2v 4 步 LoRA
+    # 下面两组默认不下载，用到时显式指定：
     #   cs.download_models(['h3vram'])    # 15.7 GiB：nvfp4 文本编码器（省显存）
-    "h3speed": "H3 提速件：int8 视频 VAE + ref2v 4 步 Turbo LoRA",
+    #   cs.download_models(['h3legacy'])  # 5.2 GiB：fp16 视频 VAE（仅 _retired 旧工作流）
     "h3vram": "H3 省显存：32B 文本编码器 nvfp4（15.7 GiB，磁盘紧可不装）",
+    "h3legacy": "H3 旧版 fp16 视频 VAE（仅 _retired 工作流使用，默认不下载）",
 }
 
 TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -595,11 +595,11 @@ MODELS = (
         "Qwen3-VL-32B 文本编码器 INT8",
     ),
     ModelFile(
-        "h3",
+        "h3legacy",
         "Comfy-Org/MiniMax-H3",
         "vae/minimax_h3_video_vae_fp16.safetensors",
         5_207_808_496,
-        "H3 视频 VAE FP16",
+        "H3 视频 VAE FP16（仅 _retired 旧工作流使用）",
     ),
     ModelFile(
         "h3",
@@ -629,16 +629,16 @@ MODELS = (
         675_509_688,
         "Qwen-Image-2.1 VAE BF16",
     ),
-    # ---- 出片提速：H3 的 int8 VAE + ref2v 4 步 Turbo LoRA（约 4.8 GiB）----
+    # ---- 出片必备：H3 的 int8 VAE + ref2v 4 步 Turbo LoRA（约 4.8 GiB）----
     ModelFile(
-        "h3speed",
+        "h3",
         "Comfy-Org/MiniMax-H3",
         "vae/minimax_h3_video_vae_int8_convrot.safetensors",
         2_811_065_184,
         "H3 视频 VAE INT8（解码比 fp16 快，显存也小）",
     ),
     ModelFile(
-        "h3speed",
+        "h3",
         "Comfy-Org/MiniMax-H3",
         "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
         1_956_193_000,

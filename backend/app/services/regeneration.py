@@ -131,7 +131,9 @@ def tier_generation_params(wf: Workflow | None) -> dict:
     换档重新生成时必须用新档位的参数，不能沿用上一版任务快照里的
     width/height/length，否则选了 10s 档位仍按 5s 出片。
     """
-    if wf is None or not (wf.capabilities or {}).get("tier"):
+    from app.services.workflow.capabilities import workflow_tier
+
+    if wf is None or not workflow_tier(wf.capabilities):
         return {}
     for node in (wf.definition or {}).values():
         if not isinstance(node, dict) or node.get("class_type") != "MiniMaxH3ReferenceToVideo":

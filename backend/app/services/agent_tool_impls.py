@@ -872,9 +872,11 @@ def _match_generate_workflow(db: Session, target: str, *, speed: str | None = No
     wf_type = _GEN_TARGET_WF_TYPE.get(target)
     if wf_type is None:
         raise ToolError("tool_invalid_args", f"不支持的生成目标: {target}")
-    # 视频生成：按速度档位匹配工作流（capabilities.tier）
+    # 视频生成：按速度档位匹配工作流（capabilities.source.tier）
     if target == "clip" and speed:
-        tier_map = {"fast": "fast", "std": "std", "quality": "quality"}
+        from app.services.workflow.capabilities import workflow_tier
+
+        tier_map = {"fast": "fast_5s", "std": "std_5s", "quality": "quality_10s"}
         tier = tier_map.get(speed)
         if tier is None:
             raise ToolError("tool_invalid_args", f"不支持的速度档位: {speed}（可选 fast/std/quality）")
@@ -883,7 +885,7 @@ def _match_generate_workflow(db: Session, target: str, *, speed: str | None = No
             Workflow.is_default == True,  # noqa: E712
         ), (Workflow.workflow_type == wf_type,):
             for wf in db.scalars(select(Workflow).where(*cond)).all():
-                if (wf.capabilities or {}).get("tier") == tier:
+                if workflow_tier(wf.capabilities) == tier:
                     return wf
         raise ToolError(
             "no_matching_workflow",

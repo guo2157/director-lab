@@ -44,6 +44,15 @@ _BUILTIN_DESCRIPTIONS: dict[str, str] = {
     "wf_bgm_stable_audio": "背景音乐生成",
 }
 
+# 内置视频工作流的档位声明：normalize() 只读传入的 capabilities，不做名称推测，
+# 不显式给出时 source.tier 恒为 None，档位排序与「档位自带画幅」全部失效。
+_BUILTIN_TIERS: dict[str, str] = {
+    "wf_video_h3_ref2va_fast_5s": "fast_5s",
+    "wf_video_h3_ref2va_std_5s": "std_5s",
+    "wf_video_h3_ref2va_quality_5s": "quality_5s",
+    "wf_video_h3_ref2va_quality_10s": "quality_10s",
+}
+
 
 def load_json(p: Path):
     with open(p, "r", encoding="utf-8") as f:
@@ -155,8 +164,11 @@ def seed():
 
             # 自动生成能力声明（不再读 .meta.json）
             trigger = _detect_trigger(workflow_type, definition)
+            caps_override = None
+            if name in _BUILTIN_TIERS:
+                caps_override = {"tier": _BUILTIN_TIERS[name]}
             capabilities = normalize_capabilities(
-                workflow_type, definition, capabilities=None, trigger=trigger
+                workflow_type, definition, capabilities=caps_override, trigger=trigger
             )
 
             # 使用内置描述映射，兜底留空

@@ -1344,7 +1344,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     # 档位工作流（极速 480×864 / 标准 640×1120 / 质量 768×1344）自带画幅优先，
                     # 否则维持原逻辑：按项目宽高比注入
                     _tier_wh = None
-                    if (wf_record.capabilities or {}).get("tier"):
+                    from app.services.workflow.capabilities import workflow_tier
+
+                    if workflow_tier(wf_record.capabilities):
                         _tier_wh = _workflow_frame_size(wf_record.definition)
                     if _tier_wh is not None:
                         params["width"], params["height"] = _tier_wh

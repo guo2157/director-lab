@@ -48,7 +48,7 @@
         "35",
         0
       ],
-      "shift_video": 12.0,
+      "shift_video": 6.0,
       "shift_audio": 3.0
     }
   },
@@ -67,7 +67,7 @@
       "title": "采样器"
     },
     "inputs": {
-      "sampler_name": "res_multistep"
+      "sampler_name": "euler"
     }
   },
   "9": {
@@ -81,7 +81,7 @@
         0
       ],
       "scheduler": "simple",
-      "steps": 4,
+      "steps": 8,
       "denoise": 1.0
     }
   },
@@ -330,11 +330,11 @@
         "1",
         0
       ],
-      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "lora_name": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
       "strength_model": 1.0
     },
     "_meta": {
-      "title": "H3 ref2v 4步 Turbo LoRA"
+      "title": "H3 Ref2VA 8步 Turbo v1.0 LoRA"
     }
   },
   "36": {

@@ -18,7 +18,7 @@ from app.models import (Asset, AssetRef, Character, Job, JobEvent, Project, Prop
                        Shot, Workflow, ids)
 from app.services import errors
 from app.services.execution_verifier import find_active_job_by_request_key
-from app.services.workflow.capabilities import declared_reference_slots
+from app.services.workflow.capabilities import declared_reference_slots, workflow_tier
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -144,7 +144,7 @@ def _find_ref_capable_video_workflow(db: Session) -> Workflow | None:
         slots = declared_reference_slots(wf.capabilities)
         names = [item.get("param") if isinstance(item, dict) else item for item in slots]
         if "ref_image" in names:
-            tier = (wf.capabilities or {}).get("tier")
+            tier = workflow_tier(wf.capabilities)
             candidates.append((_VIDEO_TIER_ORDER.get(tier, 99), wf))
     if not candidates:
         return None
@@ -288,14 +288,43 @@ def _apply_compiled_media(compiled, params: dict) -> dict:
 
 
 def _finalize_negative(compiled, wf: Workflow, params: dict) -> dict:
-    """负向提示词仅在当前工作流真实绑定 negative 参数时注入，否则不假装生效。"""
+    """负向提示词仅在当前工作流真实绑定且实际生效时注入，并显式记录降级原因。
+
+    两种不生效场景都不再静默：
+    - 工作流没有 `$negative` 绑定（H3 的 BasicGuider 无负向分支）：直接剔除；
+    - 绑定了但 CFGGuider.cfg<=1（蒸馏模型）：负向被数学抵消，剔除并告警。
+    原因是此前静默 pop 会让用户以为负向约束已生效，实际模型从未收到。
+    """
     out = dict(params)
     if not compiled.negative_prompt:
         return out
-    if _workflow_binds_param(wf, "negative"):
-        out.setdefault("negative", compiled.negative_prompt)
-    else:
+
+    def _warn_once(code: str, message: str) -> None:
+        if not any(str(w).startswith(code + ":") for w in compiled.warnings):
+            compiled.warnings.append(message)
+
+    if not _workflow_binds_param(wf, "negative"):
         out.pop("negative", None)
+        _warn_once(
+            "negative_prompt_unsupported",
+            "negative_prompt_unsupported: 当前工作流未绑定 negative 参数，负向提示词仅存档不生效",
+        )
+        return out
+
+    from app.services.prompt_compiler import effective_cfg
+
+    _cfg = effective_cfg(getattr(wf, "definition", None))
+    if _cfg is not None and _cfg <= 1.05:
+        out.pop("negative", None)
+        _warn_once(
+            "negative_prompt_ineffective",
+            f"negative_prompt_ineffective: 当前工作流 CFGGuider.cfg={_cfg}，"
+            "负向分支在 cfg=1 时被数学抵消，负向提示词不会生效；"
+            "约束请改写为正向肯定句，或改用非蒸馏（cfg 4-7）工作流",
+        )
+        return out
+
+    out.setdefault("negative", compiled.negative_prompt)
     return out
 
 
@@ -486,7 +515,7 @@ def _apply_tier_frame_size(wf: Workflow, params: dict) -> dict:
     """
     if params.get("width") is not None and params.get("height") is not None:
         return params
-    if not (wf.capabilities or {}).get("tier"):
+    if not workflow_tier(wf.capabilities):
         return params
     size = _workflow_frame_size(wf.definition)
     if size is None:

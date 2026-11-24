@@ -473,16 +473,17 @@ python autodl_comfyui_qwen21_h3_setup.py log --lines 80
 | --- | --- | --- | --- |
 | `h3` | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | H3 Ref2VA 视频生成 | ≈ 20.97 GB |
 | `h3` | `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | H3 文本编码器 | ≈ 27.14 GB |
-| `h3` | `minimax_h3_video_vae_fp16.safetensors` / `minimax_h3_audio_vae_fp32.safetensors` | 视频 / 音频 VAE | ≈ 5.82 GB |
+| `h3` | `minimax_h3_video_vae_int8_convrot.safetensors` / `minimax_h3_audio_vae_fp32.safetensors` | 视频 / 音频 VAE | ≈ 3.42 GB |
+| `h3` | `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` | H3 Ref2V 4 步 Turbo LoRA | ≈ 1.96 GB |
 | `qwen` | `qwen_image_2.1_turbo_int8_convrot.safetensors` | Qwen-Image 2.1 图像生成 | ≈ 7.26 GB |
 | `qwen` | `qwen3vl_8b_int8_convrot.safetensors` | Qwen-Image 文本编码器 | ≈ 9.35 GB |
 | `tts` | `Qwen3-TTS-12Hz-1.7B-CustomVoice/` | 角色配音 | ≈ 3.5 GB+ |
 
-显存吃紧时可追加 `h3vram`（NVFP4 文本编码器），出片提速可追加 `h3speed`（INT8 视频 VAE + 4-step Turbo LoRA）：
+显存吃紧时可追加 `h3vram`（NVFP4 文本编码器）；如需运行 `_retired` 下的旧工作流，可追加 `h3legacy`（FP16 视频 VAE）：
 
 ```bash
-python autodl_comfyui_qwen21_h3_setup.py download --groups h3speed
 python autodl_comfyui_qwen21_h3_setup.py download --groups h3vram
+python autodl_comfyui_qwen21_h3_setup.py download --groups h3legacy
 ```
 
 ### 2. 启动后端
