@@ -24,14 +24,17 @@ from app.services.prompt_store import _register_default, get_prompt
 
 _VOICE_PROFILE_SYSTEM = _register_default("voice_profile_system", (
     "你是影视角色声音画像分析师。根据角色设定输出结构化声音画像 JSON，"
-    "不虚构角色设定中没有的信息。输出格式："
+    "不虚构角色设定中没有的信息。\n"
+    "\n"
+    "输出格式：\n"
     "{\"characters\":[{\"character_id\":\"…\","
     "\"gender_presentation\":\"male|female|unknown\","
     "\"perceived_age\":\"child|young|middle|mature|elder|unknown\","
     "\"pitch\":\"high|medium_high|medium|medium_low|low|unknown\","
     "\"timbre\":[…],\"personality\":[…],\"speaking_style\":[…],"
     "\"speaking_speed\":\"slow|medium|fast\",\"energy\":\"low|medium|high\","
-    "\"role_importance\":\"main|supporting|minor|extra\"}]}。"
+    "\"role_importance\":\"main|supporting|minor|extra\"}]}。\n"
+    "\n"
     "规则：剧本明确指定的声音性别/年龄/音调优先；性格只作参考（勇敢不代表低沉，"
     "温柔不代表女声）；不确定的字段输出 unknown，不要猜。"
 ))

@@ -2,7 +2,8 @@
 
 契约要点：
 - 会话创建返回 201；project_id 若提供须真实存在（404 project_not_found）
-- 会话删除为软删除（status=archived），消息保留，可恢复
+- 会话删除为物理删除：级联清理消息、任务、计划、审批等对话上下文，不可恢复
+- 会话归档为软删除（status=archived），消息保留，可从归档列表恢复
 - 消息追加：seq 会话内自增（max+1），并发安全由唯一索引 (session_id, seq) 兜底
 - 消息列表按 seq 升序分页，支持 after_seq 增量加载
 - 归档会话只读：追加消息返回 409 session_archived
@@ -11,10 +12,20 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models import AgentConfirmation, AgentMessage, AgentSession, AgentTask, Project
+from app.models import (
+    AgentConfirmation,
+    AgentExecutionLog,
+    AgentGoal,
+    AgentMessage,
+    AgentPlan,
+    AgentPlanStep,
+    AgentSession,
+    AgentTask,
+    Project,
+)
 from app.models.ids import agent_message_id, agent_session_id
 from app.schemas.agent import (
     AgentMessageCreate,
@@ -36,26 +47,29 @@ _DIRECTOR_SYSTEM_PROMPT = _register_default("director_system", (
     "【双栏工作台导航】你是 Agent 驱动的可视化导演工作台。当用户要求跳转到某个页面"
     "（如『去分镜页』『打开资产库』『切换到剧本』）时，你必须以自然语言简短确认并"
     "告知系统即将导航，不要长篇解释。导航动作由后端 `navigate_workspace` 实现，你只需"
-    "输出确认语句，系统会自动完成页面跳转。可导航页面：剧本/评估/解析/分镜图/分镜/"
-    "资产/合成导出/项目列表/设置/任务/系列/工作台。"
-    "你是 Director Lab 漫剧生产工作台的导演台助手，帮助用户完成短剧制作。"
-    "你可以：解答项目与制作流程问题、分析剧本、给出制作建议、解释任务状态与失败原因。"
-    "当前系统支持的制作阶段：剧本评估/解析 → 角色/场景/道具资产 → 分镜 → 视频片段 → 合成导出。"
-    "回答保持简洁专业；涉及具体项目时基于用户提供的上下文作答，不虚构不存在的资产或任务。"
-    "用户明确要求执行生成类操作时，说明需要通过对应页面或后续工具调用完成，不要虚构已执行。"
+    "输出确认语句，系统会自动完成页面跳转。\n"
+    "可导航页面：剧本/评估/解析/分镜图/分镜/资产/合成导出/项目列表/设置/任务/系列/工作台。\n"
+    "\n"
+    "你是 Director Lab 漫剧生产工作台的导演台助手，帮助用户完成短剧制作。\n"
+    "你可以：解答项目与制作流程问题、分析剧本、给出制作建议、解释任务状态与失败原因。\n"
+    "当前系统支持的制作阶段：剧本评估/解析 → 角色/场景/道具资产 → 分镜 → 视频片段 → 合成导出。\n"
+    "回答保持简洁专业；涉及具体项目时基于用户提供的上下文作答，不虚构不存在的资产或任务。\n"
+    "用户明确要求执行生成类操作时，说明需要通过对应页面或后续工具调用完成，不要虚构已执行。\n"
     "用户询问项目/生成「进度」时，直接依据系统提供的进度数据回答（总数、已完成、进行中、排队、"
-    "失败、预计剩余时间），不要反问要生成哪个镜头或实体——那是发起新生成时才需要的信息。"
+    "失败、预计剩余时间），不要反问要生成哪个镜头或实体——那是发起新生成时才需要的信息。\n"
     "需要用户补充信息时，先基于项目上下文思考可行方案，以编号选项形式让用户选择"
-    "（如镜头/实体清单），能选项的先让用户选，不要让用户自由输入。"
-    "【联网搜索规则】"
-    "1. 用户明确要求联网搜索时，系统会执行真实搜索并在上下文中提供搜索结果，只能基于该结果作答。"
-    "2. 不允许根据模型内部知识伪装联网搜索；未提供搜索结果时必须明确说明没有执行联网搜索。"
-    "3. 搜索结果为空时不能编造结果，应如实告知并建议调整关键词。"
-    "4. 只能根据实际返回的搜索结果总结，重要事实保留来源链接（URL）。"
-    "5. 搜索结果不完整时明确标记信息缺口，不隐瞒搜索或网页读取失败。"
-    "【任务状态纪律】"
-    "1. 任务（解析/生成/合成/导出）的进度、状态与结果只能引用系统提供的任务卡片数据（task_card）或事件流中的真实状态，不得编造或推测。"
-    "2. 未提供任务状态数据时，如实说明当前没有该任务的实时状态，建议用户稍后查看任务卡片，不要虚构进度或结果。"
+    "（如镜头/实体清单），能选项的先让用户选，不要让用户自由输入。\n"
+    "\n"
+    "【联网搜索规则】\n"
+    "1. 用户明确要求联网搜索时，系统会执行真实搜索并在上下文中提供搜索结果，只能基于该结果作答。\n"
+    "2. 不允许根据模型内部知识伪装联网搜索；未提供搜索结果时必须明确说明没有执行联网搜索。\n"
+    "3. 搜索结果为空时不能编造结果，应如实告知并建议调整关键词。\n"
+    "4. 只能根据实际返回的搜索结果总结，重要事实保留来源链接（URL）。\n"
+    "5. 搜索结果不完整时明确标记信息缺口，不隐瞒搜索或网页读取失败。\n"
+    "\n"
+    "【任务状态纪律】\n"
+    "1. 任务（解析/生成/合成/导出）的进度、状态与结果只能引用系统提供的任务卡片数据（task_card）或事件流中的真实状态，不得编造或推测。\n"
+    "2. 未提供任务状态数据时，如实说明当前没有该任务的实时状态，建议用户稍后查看任务卡片，不要虚构进度或结果。\n"
     "3. 任务失败时基于真实错误码与错误信息解释原因，不猜测未提供的失败细节。"
 ))
 
@@ -184,15 +198,60 @@ def update_session(
     return _session_out(db, s)
 
 
-@router.delete("/{session_id}")
+@router.post("/{session_id}/archive")
 def archive_session(session_id: str, db: Session = Depends(get_db)) -> dict:
-    """软删除（归档）：消息保留，不级联删除项目或产物。"""
+    """软删除（归档）：消息保留，不级联删除项目或产物，可从归档列表恢复。"""
     s = _get_session(db, session_id)
     if s.status == "archived":
         raise biz_error(code="session_archived", http=409, message="会话已归档")
     s.status = "archived"
     db.commit()
     return {"id": s.id, "status": s.status}
+
+
+@router.delete("/{session_id}")
+def delete_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+    """物理删除会话及其全部对话上下文，不可恢复。
+
+    清理范围：消息、意图任务与计划步骤、确认事项、目标/计划/执行日志。
+    项目、资产、生成产物等业务数据不级联删除（与归档语义保持一致）。
+    """
+    s = _get_session(db, session_id)
+
+    task_ids = list(
+        db.scalars(select(AgentTask.id).where(AgentTask.session_id == session_id))
+    )
+    goal_ids = list(
+        db.scalars(select(AgentGoal.id).where(AgentGoal.session_id == session_id))
+    )
+    plan_ids = (
+        list(db.scalars(select(AgentPlan.id).where(AgentPlan.goal_id.in_(goal_ids))))
+        if goal_ids
+        else []
+    )
+
+    # 确认事项：新数据带 session_id；历史数据仅经 task_id 关联，两种都要覆盖
+    confirm_where = AgentConfirmation.session_id == session_id
+    if task_ids:
+        confirm_where = or_(confirm_where, AgentConfirmation.task_id.in_(task_ids))
+    db.execute(delete(AgentConfirmation).where(confirm_where))
+
+    if task_ids:
+        db.execute(delete(AgentPlanStep).where(AgentPlanStep.task_id.in_(task_ids)))
+        db.execute(delete(AgentTask).where(AgentTask.id.in_(task_ids)))
+
+    if goal_ids:
+        log_where = [AgentExecutionLog.goal_id.in_(goal_ids)]
+        if plan_ids:
+            log_where.append(AgentExecutionLog.plan_id.in_(plan_ids))
+        db.execute(delete(AgentExecutionLog).where(or_(*log_where)))
+        db.execute(delete(AgentPlan).where(AgentPlan.goal_id.in_(goal_ids)))
+        db.execute(delete(AgentGoal).where(AgentGoal.id.in_(goal_ids)))
+
+    db.execute(delete(AgentMessage).where(AgentMessage.session_id == session_id))
+    db.delete(s)
+    db.commit()
+    return {"id": session_id, "status": "deleted"}
 
 
 @router.post("/{session_id}/restore")
