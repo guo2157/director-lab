@@ -45,7 +45,7 @@
 18. time_note：时段与天气，如清晨·薄雾、正午·晴。同一地点的不同时段视为不同场景，title 可加时段后缀区分。
 
 ════ 五、镜头 shots ════
-19. 每个 shot 含 episode、seq（同场景同集内唯一，从 1 连续）、scene_id、character_id（主说话角色名，可空）、props（道具名数组）、dialogue、dialogue_segments（每项 speaker/text/emotion/order，可选 start_time/end_time）、speaker（可空）、emotion（neutral/happy/sad/angry/fearful，取情绪曲线终点）、emotion_curve（from/trigger/turn_at/to/expression）、beats（上限 3 个，每项 action/start_pose/end_pose/duration）、start_state、end_state（六项枚举：pose/position/expression/holding/costume/injury）、image_prompt、video_prompt（可空）、shot_type、camera_angle、camera_movement、transition、shot_purpose、duration（秒，整数）、shot_kind（dialogue/narration/visual/transition）、time_jump（默认 false）、requires_prev_frame（默认 false）。
+19. 每个 shot 含 episode、seq（同场景同集内唯一，从 1 连续）、scene_id、character_id（主说话角色名，可空）、on_screen_characters（画内角色名数组：本镜画面里实际出现的角色，旁白/画外音角色不列入）、offscreen_speakers（画外说话人名数组：有台词但不在画面里的角色）、props（道具名数组）、dialogue、dialogue_segments（每项 speaker/text/emotion/order，可选 start_time/end_time）、speaker（可空）、emotion（neutral/happy/sad/angry/fearful，取情绪曲线终点）、emotion_curve（from/trigger/turn_at/to/expression）、beats（上限 3 个，每项 action/start_pose/end_pose/duration）、start_state、end_state（六项枚举：pose/position/expression/holding/costume/injury）、image_prompt、video_prompt（可空）、shot_type、camera_angle、camera_movement、transition、shot_purpose、duration（秒，整数）、shot_kind（dialogue/narration/visual/transition）、time_jump（默认 false）、requires_prev_frame（默认 false）。
 20. duration：单镜 3-10 秒。超过 10 秒的剧情必须拆成多个镜头，不得用长 duration 硬塞。
 21. 对白可制作性：
     - dialogue_segments 每段 text 不超过 40 字，超过必须拆成多段
@@ -61,8 +61,8 @@
 26. 单集节奏：保住开场钩子、冲突升级、情绪释放、结尾悬念四节拍。
 
 ════ 七、提示词字段 ════
-27. **不要输出 image_prompt 与 video_prompt**。这两项由系统按模板从你给出的结构化事实渲染，你只需把事实写准写全（尤其是 beats 的动作与姿态、start_state/end_state 六项、shot_purpose 一句话剧情、emotion、景别/角度/运镜）。多写一遍提示词只会拖长输出、导致 JSON 被中途截断，而且模板渲染结果比自由发挥更稳定、更符合下游工作流的槽位结构。
-28. 因此你的输出质量取决于事实精度：shot_purpose 要能让人只看这一句就知道画面在演什么；beats 的 action 必须是可拍摄的具体动作（不写"抱怨""开口""问话"这类说话类行为，说话只由 dialogue 表达）；start_state/end_state 的六项（pose/position/expression/holding/costume/injury）必须齐全且能衔接下一镜。
+27. **不要输出 image_prompt 与 video_prompt**。这两项由系统按模板从你给出的结构化事实渲染，你只需把事实写准写全（尤其是 beats 的动作与姿态、start_state/end_state 六项、shot_purpose 一句话剧情、emotion、景别/角度/运镜）。多写一遍提示词只会拖长输出、导致 JSON 被截断，且模板渲染结果比自由发挥更稳定。
+28. 因此你的输出质量取决于事实精度：shot_purpose 要能让人只看这一句就知道画面在演什么；beats 的 action 必须是可拍摄的具体动作（不写『抱怨』『开口』『问话』这类说话类行为，说话只由 dialogue 表达）；start_state/end_state 的六项（pose/position/expression/holding/costume/injury）必须齐全且能衔接下一镜。
 
 ════ 八、@引用规则 ════
 29. 提示词中引用角色、场景、道具一律写成 @名称，名称必须与本 JSON 中 name 或 title 完全一致，包括中间间隔号。

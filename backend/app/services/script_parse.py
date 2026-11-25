@@ -207,8 +207,8 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
     - 多人对白必须逐段给出 speaker，不得合并成一段
     - 3 人以上快速交替对白拆成多个镜头
     - 旁白与画外音用 shot_kind=narration，speaker 置空
-22. 动作节拍：复合动作拆成可独立拍摄的节拍，单镜最多 3 个，单节拍不超 2 秒。
-23. 情绪设计：每镜情绪曲线给出起点情绪、触发事件、转折秒数、终点情绪与外化表现，不只标情绪词。
+22. 动作节拍：复合动作拆成可独立拍摄的节拍，单镜最多 3 个，单节拍不超 2 秒。beats[].action 必须写明动作使用哪只手（左手/右手/双手）、涉及的道具及其数量，以及该节拍内道具持有者是否发生变化（如「右手从桌上拿起一枚铜钱」「左手把铜钱递给对方，铜钱由 A 转到 B」）；不为每拍标注手别与道具数量的镜头视为不合格。
+23. 情绪设计：每镜情绪曲线给出起点情绪、触发事件、转折秒数、终点情绪与外化表现，不只标情绪词。emotion_curve.expression、start_state.expression、end_state.expression 禁止只写「紧张」「害怕」「开心」等情绪标签，必须写成可观察、可拍摄的面部与身体动作（如「眉头轻皱、眼睛略睁、嘴唇微张，肩膀收紧，重心后移」），每项至少包含眼睛或眉部与身体姿态两处可见细节。
 24. 每镜必须能具象为单一画面。抽象心理、隐喻蒙太奇、无法落地的意象必须改写为可拍摄的具体动作与场景。
 
 ════ 六、分集规划 episodes ════
@@ -217,7 +217,7 @@ PARSE_SYSTEM_PROMPT = _register_default("parse_system", """你是专业短剧编
 
 ════ 七、提示词字段 ════
 27. **不要输出 image_prompt 与 video_prompt**。这两项由系统按模板从你给出的结构化事实渲染，你只需把事实写准写全（尤其是 beats 的动作与姿态、start_state/end_state 六项、shot_purpose 一句话剧情、emotion、景别/角度/运镜）。多写一遍提示词只会拖长输出、导致 JSON 被截断，且模板渲染结果比自由发挥更稳定。
-28. 因此你的输出质量取决于事实精度：shot_purpose 要能让人只看这一句就知道画面在演什么；beats 的 action 必须是可拍摄的具体动作；start_state/end_state 的六项（pose/position/expression/holding/costume/injury）必须齐全且能衔接下一镜。
+28. 因此你的输出质量取决于事实精度：shot_purpose 要能让人只看这一句就知道画面在演什么；beats 的 action 必须是可拍摄的具体动作（不写『抱怨』『开口』『问话』这类说话类行为，说话只由 dialogue 表达）；start_state/end_state 的六项（pose/position/expression/holding/costume/injury）必须齐全且能衔接下一镜。
 
 ════ 八、@引用规则 ════
 29. 提示词中引用角色、场景、道具一律写成 @名称，名称必须与本 JSON 中 name 或 title 完全一致，包括中间间隔号。
