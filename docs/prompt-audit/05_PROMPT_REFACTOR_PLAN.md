@@ -107,6 +107,18 @@
 
 优先级：低。前置条件：上述 A/B 基线。
 
+状态：预备分析已完成（2026-11-25，提交 6d320a9）。
+
+分析结论：
+
+1. director_system（940 字符 1 行）按语义拆为「导航段 / 角色说明段 / 联网搜索规则 / 任务状态纪律」四块 21 行，去换行后与原版逐字符一致（flat_diff=+0）。
+2. voice_profile_system（482 字符 1 行）拆为「角色说明 / JSON 格式 / 规则」三块 6 行，同样逐字符一致。
+3. session_title_system 仅 23 字符，无分段必要。
+
+两个分段方案的精确文本已保存至 docs/prompt-audit/reference/p33_*_segmented.txt，各含 UUID 锚点供 A/B 比对时引用。
+
+仍未做：实际修改 prompt_compiler.py / agent.py / voice_matching.py 中的模板定义。分段换行增加了 20+ 个换行符，这些字符会进入模型的 token 序列，按 H-8 必须在 A/B 基线就绪后执行，不能只凭字符级等价就声称无影响。
+
 ### P3-4 compile_shot_video 占位符守护强化（对应 02 的 Q-04）
 
 问题：compile_shot_video 有 24 个占位符、11 行，缺省值完全依赖编译侧 mapping，占位符密度全库最高。
