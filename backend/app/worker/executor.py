@@ -1107,6 +1107,40 @@ def execute_generate_job(job_id: str) -> dict:
     return result
 
 
+def _claim_job_for_execution(db: Session, job: Job) -> bool:
+    """原子抢占一个 queued / submission_unknown 任务，返回是否抢到。
+
+    attempts 只统计「真实提交/执行次数」，不统计「续跑轮询次数」（D-26）：
+    已提交到远端的任务在远端排队/执行期间，每轮调度都会被重新取到并重入队
+    （见 _execute_generate_job_once 的 remote_still_running 分支）。若每次认领都
+    attempts+1，一张 6 分钟的分镜图就能把 attempts 刷到 130+（实测
+    job_dc070be8b2db attempts=130）。后果不是日志难看，而是所有以 attempts 为闸口的
+    逻辑全部失效：job_max_attempts=3 的实例故障转移一上来就判死、图片质量重试
+    （`job.attempts < job_max_attempts`）永远不触发。
+    """
+    _resume_poll = bool((job.input_snapshot or {}).get("resume_prompt")) and (
+        job.submission_state == "submitted"
+    )
+    values: dict = {"status": "running"}
+    if not _resume_poll:
+        values["attempts"] = func.coalesce(Job.attempts, 0) + 1
+        # started_at 只在真实开始时写一次：续跑轮询每 3 秒一轮会把 started_at
+        # 刷成「最后一次轮询时间」，导致任务耗时统计（finished_at - started_at）
+        # 显示 3 秒、以及任何基于 started_at 的停滞回收判定永远不成立。
+        values["started_at"] = _now()
+    # 条件 UPDATE：调度器多线程取任务，同一 queued 任务可能被连续取到两次
+    # （工作线程尚未置 running 的窗口期），无条件赋值会让同一任务提交两次、
+    # 产出两个资产版本。
+    claimed = (
+        db.query(Job)
+        .filter(Job.id == job.id, Job.status.in_(("queued", "submission_unknown")))
+        .update(values, synchronize_session=False)
+    )
+    db.commit()
+    db.refresh(job)
+    return bool(claimed)
+
+
 def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dict:
     """单次执行一个生成类任务。exclude_instances 为本次尝试需排除的实例 base_url。"""
     settings = get_settings()
@@ -1121,25 +1155,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             return {"ok": False, "reason": f"invalid_status:{job.status}"}
 
         if job.status != "running":
-            # 认领必须原子：调度器按并发度（ComfyUI 实例数）多线程取任务，
-            # 同一 queued 任务可能被连续取到两次（工作线程尚未置 running 的窗口期），
-            # 无条件赋值会让同一任务提交两次、产出两个资产版本。此处用条件 UPDATE 抢占。
-            now = _now()
-            claimed = (
-                db.query(Job)
-                .filter(Job.id == job_id, Job.status.in_(("queued", "submission_unknown")))
-                .update(
-                    {
-                        "status": "running",
-                        "started_at": now,
-                        "attempts": func.coalesce(Job.attempts, 0) + 1,
-                    },
-                    synchronize_session=False,
-                )
-            )
-            db.commit()
-            db.refresh(job)
-            if not claimed:
+            if not _claim_job_for_execution(db, job):
                 # 已被其他执行线程认领，直接退出，避免重复提交
                 return {"ok": False, "reason": f"already_claimed:{job.status}"}
             _write_event(db, job, "job.started", {"attempt": job.attempts})
@@ -1709,12 +1725,19 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                     if job.submission_state == "submitted":
                         _snap = dict(job.input_snapshot or {})
                         _snap["resume_prompt"] = True
+                        # 每轮轮询都写事件会让单个任务刷出上百条 job.resume_deferred
+                        # （实测一张分镜图 130 条），事件流被噪声淹没。只在一次
+                        # 续跑连续段内记一条，真正恢复/失败时另有事件可查。
+                        _log_deferred = not _snap.get("resume_deferred_logged")
+                        if _log_deferred:
+                            _snap["resume_deferred_logged"] = True
                         job.input_snapshot = _snap
                         job.status = "queued"
-                        _write_event(db, job, "job.resume_deferred", {
-                            "reason": "remote_still_running",
-                            "prompt_id": job.prompt_id,
-                        })
+                        if _log_deferred:
+                            _write_event(db, job, "job.resume_deferred", {
+                                "reason": "remote_still_running",
+                                "prompt_id": job.prompt_id,
+                            })
                         db.commit()
                         return {"ok": False, "reason": "resume_deferred", "retriable": True}
                     # 非已提交任务（submission_unknown / resume_prompt）：降级走正常流程
