@@ -24,6 +24,7 @@ from app.schemas.agent import (
     AgentSessionUpdate,
 )
 from app.services.errors import biz_error
+from app.services.prompt_store import _register_default, get_prompt
 from app.integrations.llm import LLMClient, LLMError
 
 router = APIRouter(prefix="/api/agent/sessions", tags=["agent"])
@@ -31,7 +32,7 @@ router = APIRouter(prefix="/api/agent/sessions", tags=["agent"])
 # 聊天历史窗口：单次请求携带的最大历史消息数（上下文压缩的粗粒度保护）
 _CHAT_HISTORY_WINDOW = 40
 
-_DIRECTOR_SYSTEM_PROMPT = (
+_DIRECTOR_SYSTEM_PROMPT = _register_default("director_system", (
     "【双栏工作台导航】你是 Agent 驱动的可视化导演工作台。当用户要求跳转到某个页面"
     "（如『去分镜页』『打开资产库』『切换到剧本』）时，你必须以自然语言简短确认并"
     "告知系统即将导航，不要长篇解释。导航动作由后端 `navigate_workspace` 实现，你只需"
@@ -56,7 +57,7 @@ _DIRECTOR_SYSTEM_PROMPT = (
     "1. 任务（解析/生成/合成/导出）的进度、状态与结果只能引用系统提供的任务卡片数据（task_card）或事件流中的真实状态，不得编造或推测。"
     "2. 未提供任务状态数据时，如实说明当前没有该任务的实时状态，建议用户稍后查看任务卡片，不要虚构进度或结果。"
     "3. 任务失败时基于真实错误码与错误信息解释原因，不猜测未提供的失败细节。"
-)
+))
 
 
 def _session_out(db: Session, s: AgentSession) -> AgentSessionOut:
@@ -1635,7 +1636,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         try:
             search_reply = _SearchLLMClient().chat_messages(
                 [
-                    {"role": "system", "content": _DIRECTOR_SYSTEM_PROMPT},
+                    {"role": "system", "content": get_prompt("director_system")},
                     {
                         "role": "user",
                         "content": f"{payload.content}\n\n{search_context}",
@@ -1881,7 +1882,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # 审计要求（单 Agent 方案 §10/§16）：每次工具调用落一条 role=tool_event 消息，
     # payload 记录 tool_name/args/ok/error_code/duration_ms；tool_event 不进入对话上下文
     # （历史窗口仅取 user/assistant），仅作审计与追踪用途
-    system_prompt = _DIRECTOR_SYSTEM_PROMPT
+    system_prompt = get_prompt("director_system")
     tool_event_seq = max_seq + 1  # user 消息为 max_seq+1，tool_event 从 max_seq+2 起
     # 本轮可展示的资产引用（供前端气泡内渲染缩略图；只含 asset_id 等元数据，
     # 不含文件系统路径，前端经 /api/assets/{id}/file?thumb=true 取图）

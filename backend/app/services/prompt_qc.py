@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.services import errors
 from app.models import Character, Prop, PropShotState, Scene, Shot
+from app.services.prompt_store import _register_default, get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -209,11 +210,11 @@ def check_keyframe_prompt(db: Session, shot: Shot, prompt: str) -> list[dict[str
     return issues
 
 
-_SYSTEM = """你是分镜图提示词质检员。给定镜头信息与最终提示词，检查两项：
+_SYSTEM = _register_default("qc_keyframe_prompt", """你是分镜图提示词质检员。给定镜头信息与最终提示词，检查两项：
 1. 多角色站位：每个出场角色的画面位置是否明确且互不冲突（左右/前后/中景），是否可能被模型互换；
 2. 道具完整性：本镜可见道具是否都在参考图职责中出现并绑定图序，是否存在只写文字没有参考图的道具。
 只输出 JSON：{"ok": true/false, "issues": [{"code": "...", "detail": "..."}], "fixed_prompt": "修正后的完整提示词，无问题或无法修正时为空字符串"}。
-允许整段重写以彻底修正站位与道具引用，但必须保留：剧情内容、美术风格、必须保持/允许变化/禁止分段、参考图的图序与标签格式；不得新增或删除角色、道具。"""
+允许整段重写以彻底修正站位与道具引用，但必须保留：剧情内容、美术风格、必须保持/允许变化/禁止分段、参考图的图序与标签格式；不得新增或删除角色、道具。""")
 
 
 def llm_audit_keyframe_prompt(
@@ -236,7 +237,7 @@ def llm_audit_keyframe_prompt(
             f"镜头：第{shot.episode}集第{shot.seq}镜，景别 {shot.shot_type or '未标注'}\n"
             f"已知问题：{issues}\n资产清单：{manifest}\n\n提示词：\n{prompt}"
         )
-        data: dict[str, Any] = LLMClient().chat_json(_SYSTEM, user)
+        data: dict[str, Any] = LLMClient().chat_json(get_prompt("qc_keyframe_prompt"), user)
     except Exception as exc:  # noqa: BLE001 - LLM 异常不阻断出图
         logger.warning("prompt_qc llm audit skipped: %s", exc)
         return None
@@ -804,7 +805,7 @@ def check_prompt_structure(prompt: str) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
-_CLIP_SYSTEM = """你是分镜视频提示词质检员。视频提示词用于把已确认的分镜图延续成动态镜头。给定镜头信息、分镜图提示词、资产清单与待修正问题，输出修正后的完整视频提示词。
+_CLIP_SYSTEM = _register_default("qc_clip_prompt", """你是分镜视频提示词质检员。视频提示词用于把已确认的分镜图延续成动态镜头。给定镜头信息、分镜图提示词、资产清单与待修正问题，输出修正后的完整视频提示词。
 
 检查维度：
 1. 角色一致性：出场角色必须与分镜图完全一致，不得新增、删除、合并角色；
@@ -814,7 +815,7 @@ _CLIP_SYSTEM = """你是分镜视频提示词质检员。视频提示词用于�
 5. 时长与对白：保持原时长与对白文本不变；「对白与声音」段只保留 `<d>[Chinese] 台词原文</d>` 形式，禁止出现“台词：”“对白：”“第N段”等标签，环境声/音乐描述留在 <d> 外。
 
 只输出 JSON：{"ok": true/false, "issues": [{"code": "...", "detail": "..."}], "fixed_prompt": "完整视频提示词，无问题或无法修正时为空字符串"}。
-允许整段重写，但必须保留：任务抬头、镜头编号、剧情与动作、对白、时长、参考图标签格式（如 <Picture 1>）。"""
+允许整段重写，但必须保留：任务抬头、镜头编号、剧情与动作、对白、时长、参考图标签格式（如 <Picture 1>）。""")
 
 
 def _clip_cache_key(shot: Shot, prompt: str) -> str:
@@ -855,7 +856,7 @@ def llm_audit_clip_prompt(
             f"分镜图提示词：\n{shot.image_prompt or '（无）'}\n\n"
             f"待修正的视频提示词：\n{prompt}"
         )
-        data: dict[str, Any] = LLMClient().chat_json(_CLIP_SYSTEM, user)
+        data: dict[str, Any] = LLMClient().chat_json(get_prompt("qc_clip_prompt"), user)
     except Exception as exc:  # noqa: BLE001 - LLM 异常不阻断出视频
         logger.warning("clip prompt_qc llm audit skipped: %s", exc)
         return None

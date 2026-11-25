@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core import database as db_module
 from app.integrations.llm import LLMClient, LLMError
 from app.models.agent import AgentMessage, AgentSession
+from app.services.prompt_store import _register_default, get_prompt
 
 # 视为「未命名」的标题：与模型默认值、前端创建值保持一致
 DEFAULT_TITLES = {"", "新会话", "未命名会话", "新对话"}
@@ -23,7 +24,11 @@ DEFAULT_TITLES = {"", "新会话", "未命名会话", "新对话"}
 # 标题长度上限（字符）：下拉框宽度有限，超过 24 字在 392px 面板里会被截断
 MAX_TITLE_LEN = 24
 
-_NAMING_PROMPT = """你是一个会话命名器。根据下面这轮对话，给会话起一个简短标题。
+_NAMING_SYSTEM_PROMPT = _register_default(
+    "session_title_system", "你是一个精确的会话标题生成器，只输出标题文本。"
+)
+
+_NAMING_PROMPT = _register_default("session_title_naming", """你是一个会话命名器。根据下面这轮对话，给会话起一个简短标题。
 
 要求：
 1. 只输出标题本身，不要引号、不要书名号、不要句号、不要解释
@@ -32,7 +37,7 @@ _NAMING_PROMPT = """你是一个会话命名器。根据下面这轮对话，给
 4. 用中文，动词开头更自然（如「解析剧本」「排查生图失败」）
 
 用户：{user}
-助手：{assistant}"""
+助手：{assistant}""")
 
 
 def is_default_title(title: str | None) -> bool:
@@ -67,14 +72,14 @@ def _fallback_title(user_text: str) -> str:
 
 def _build_llm_title(user_text: str, assistant_text: str) -> str:
     """调 LLM 生成标题；任何异常都降级到本地摘要。"""
-    prompt = _NAMING_PROMPT.format(
+    prompt = get_prompt("session_title_naming").format(
         user=user_text[:600],
         assistant=(assistant_text or "")[:400],
     )
     try:
         # 标题很短，max_tokens 压到 64，避免浪费配额与延迟
         raw = LLMClient().chat(
-            "你是一个精确的会话标题生成器，只输出标题文本。",
+            get_prompt("session_title_system"),
             prompt,
             json_mode=False,
             max_tokens=64,

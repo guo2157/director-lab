@@ -39,12 +39,19 @@ def ensure_registered() -> None:
         return
     from app.services import (  # noqa: F401
         asset_prompts,
+        intent_router,
         prompt_compiler,
+        prompt_qc,
         scene_plate,
         script_evaluation,
         script_parse,
         script_writing,
+        session_memory,
+        session_title,
+        voice_matching,
     )
+    from app.services.series import episode_writing_service  # noqa: F401
+    from app.api.v1 import agent  # noqa: F401
     _registered = True
 
 

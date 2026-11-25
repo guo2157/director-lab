@@ -20,10 +20,11 @@ from app.models import ids
 from app.models.series_story import STORY_EVENT_TYPES
 
 from .narrative_continuity_service import check_script_version
+from app.services.prompt_store import _register_default, get_prompt
 
 PROMPT_TEMPLATE_VERSION = "episode_continue_v1"
 
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT = _register_default("episode_continue_system", (
     "你是长篇小说续写助手，为儿童成长类系列故事创作新一集剧本。\n"
     "必须遵守以下硬性规则：\n"
     "1. 不得改变已确认角色的身份、年龄与基础关系。\n"
@@ -40,7 +41,7 @@ SYSTEM_PROMPT = (
     '"description": string, "importance": 1-5, "involved_asset_names": [string]}], '
     '"plot_thread_updates": [{"title": string, "action": "advance|resolve", "note": string}], '
     '"self_check": {"identity_kept": bool, "prop_state_kept": bool, "notes": string}}'
-)
+))
 
 
 def _now() -> datetime:
@@ -112,7 +113,7 @@ def generate_draft(
     client = LLMClient()
     user_prompt = build_user_prompt(manifest)
     try:
-        raw = client.chat_json(SYSTEM_PROMPT, user_prompt)
+        raw = client.chat_json(get_prompt("episode_continue_system"), user_prompt)
     except LLMError as exc:
         raise LLMError(exc.code, exc.message) from exc
     except Exception as exc:  # 非 JSON 输出等

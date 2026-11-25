@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.integrations.llm import LLMClient, LLMError
 from app.models import AgentMessage, AgentSession
+from app.services.prompt_store import _register_default, get_prompt
 
 # 窗口外未摘要消息达到该数量时触发 LLM 压缩（避免每条消息都压缩，控制成本）
 SUMMARY_TRIGGER_THRESHOLD = 10
@@ -30,7 +31,7 @@ _SUMMARY_MSG_MAX_CHARS = 1000
 # 摘要最大字符数（LLM 输出超长时截断保护）
 _SUMMARY_MAX_CHARS = 4000
 
-_SUMMARY_SYSTEM_PROMPT = (
+_SUMMARY_SYSTEM_PROMPT = _register_default("agent_session_summary", (
     "你是会话摘要助手。请将提供的旧会话摘要（如有）与历史对话压缩为一份新的会话摘要，"
     "供后续对话作为长期记忆使用。要求：\n"
     "1. 保留关键事实：用户目标、项目/故事名称、已确认的决策（风格、画幅、剧本来源等）、"
@@ -38,7 +39,7 @@ _SUMMARY_SYSTEM_PROMPT = (
     "2. 丢弃寒暄、重复内容与无关细节\n"
     "3. 用简洁的中文条目式输出，不超过 600 字\n"
     "4. 只输出摘要正文，不要任何前后缀说明"
-)
+))
 
 
 def _load_unsummarized(
@@ -91,7 +92,7 @@ def maybe_compress_session(
         return False
     prompt = _build_summary_prompt(session.summary, pending)
     try:
-        summary = LLMClient().chat(_SUMMARY_SYSTEM_PROMPT, prompt, json_mode=False)
+        summary = LLMClient().chat(get_prompt("agent_session_summary"), prompt, json_mode=False)
     except LLMError:
         # 压缩失败不阻断对话：短期窗口照常工作，下次达到条件再重试
         return False
