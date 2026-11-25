@@ -53,7 +53,7 @@
 | session_title_naming | session_title | 1.0 | text | 10 | 169 | 2 | 0894be55 |
 | episode_continue_system | episode_writing | 1.0 | json | 11 | 686 | 1 | deacc3f9 |
 
-合计 27 个模板。最大 parse_system（4,618 字符 / 78 行），最小 session_title_system（23 字符 / 1 行）。占位符最多 compile_shot_video（24 个），12 个纯 system 指令模板占位符为 0。
+合计 27 个模板。最大 parse_system（4,618 字符 / 78 行），最小 session_title_system（23 字符 / 1 行）。占位符最多 compile_shot_video（24 个），占位符为 0 的纯 system 指令模板实测 8 个：agent_session_summary、director_system、parse_system、script_create_system、script_expand_system、script_normalize_system、script_outline_system、session_title_system。
 
 ---
 
