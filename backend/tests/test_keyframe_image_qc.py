@@ -433,6 +433,7 @@ class TestH_PlanPostureBlock:
         def _capture(system_prompt, keyframe_uri, ref_images):
             captured["system_prompt"] = system_prompt
             captured["uri_prefix"] = (keyframe_uri or "")[:22]
+            captured["uri_len"] = len(keyframe_uri or "")
             return {"pass": True, "issues": []}
 
         monkeypatch.setattr(
@@ -446,8 +447,11 @@ class TestH_PlanPostureBlock:
         )
 
         assert posture_block in captured["system_prompt"]
-        # 分镜图必须以 data URI 形式传入 vision
-        assert captured["uri_prefix"].startswith("data:image/png;base64,")
+        # 分镜图必须以 data URI 形式传入 vision，且已缩放成 JPEG
+        # （原样 PNG base64 后单张 3.2MB，一镜四张图请求体 ~13MB，
+        #   网关直接 429/超时 → 质检静默跳过，见 keyframe_image_qc 注释）
+        assert captured["uri_prefix"] == "data:image/jpeg;base64"
+        assert captured["uri_len"] < 400_000, f"data URI 过大：{captured['uri_len']} 字节"
 
     def test_empty_posture_block_falls_back(self, ctx, png_path, monkeypatch):
         """未传站位块时提示词使用占位文案，不出现 None。"""
