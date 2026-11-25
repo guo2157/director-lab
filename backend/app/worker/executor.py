@@ -2298,6 +2298,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 input_snapshot=job.input_snapshot,
             )
             db.add(asset)
+            db.flush()
             created_assets.append({
                 "asset_id": aid, "asset_type": asset_type,
                 "out_name": out_name, "file_path": str(stored_path),
