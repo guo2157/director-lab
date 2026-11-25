@@ -56,6 +56,7 @@ class CompiledPromptModel(BaseModel):
     entity_id: str = Field(min_length=1, max_length=64)
     template_id: str = Field(min_length=1, max_length=64)
     template_version: int = Field(ge=1)
+    content_hash: str = Field(default="", max_length=128)
     positive_prompt: str = Field(min_length=1, max_length=8000)
     negative_prompt: str = Field(default="", max_length=8000)
     reference_slots: list[ReferenceSlotModel] = Field(default_factory=list)

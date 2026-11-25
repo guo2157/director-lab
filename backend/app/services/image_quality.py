@@ -77,6 +77,16 @@ _SKIN_MAX_SPAN_RATIO = 0.75    # 外接框 宽或高 占网格比例上限：整
 # 真肤色饱和度低：实测程野 S 中位数 48、林夏 46、合成图 90；
 # 而黄铜钥匙 159、湿地面霓虹反光 165 —— 高饱和是材质/光源，不是皮肤。
 _SKIN_MAX_SATURATION_MEDIAN = 130
+# 覆盖度约束（2026-11-25 新增，第 4 处误报）：便利店/超市这类「整面暖色货架 + 木色柜台」
+# 的实景基准图，半个画面的格子都会落进肤色区间（实测 ast_03cd748345d4 便利店：
+# 肤色 38.5%、肤色格 130/256 = 50.8%），连通块被连成 7×11 的「人形」并通过前三条判据。
+# 人物只占画面一角，肤色格覆盖率超过此值说明是整体暖色调场景，不是人。
+_SKIN_MAX_HOT_CELL_RATIO = 0.40
+# 填充率约束（2026-11-25 新增，第 5 处误报）：道具「纸杯关东煮」的浅褐汤汁 + 白萝卜被
+# 连成 8×11 格、40 格的连通块（肤色 15.6%，未触及覆盖率上限），但块内填充率只有 45%
+# —— 人物是实心剪影（实测 storyboard_1 含人物：66 格 / 10×11 框 = 60% 填充），
+# 汤面反光、货架格挡形成的块是稀疏的。低于此值不判人物。
+_SKIN_MIN_BLOCK_FILL = 0.55
 _NO_PERSON_CHECK_TYPES = {"scene", "prop"}
 
 
@@ -184,6 +194,9 @@ def _detect_person(rgb) -> str | None:
     hot = {i for i, n in enumerate(cells) if n / per_cell >= _SKIN_CELL_RATIO}
     if len(hot) < _SKIN_MIN_BLOCK:
         return None
+    # 覆盖度约束：肤色格铺满近半画面 → 整体暖色调场景（暖色货架/木色柜台），不是人物
+    if len(hot) / (len(cells)) >= _SKIN_MAX_HOT_CELL_RATIO:
+        return None
 
     seen: set[int] = set()
     largest = 0
@@ -231,6 +244,9 @@ def _detect_person(rgb) -> str | None:
     aspect = box_h / box_w
     span = max(box_w, box_h) / _SKIN_GRID
     if aspect < _SKIN_MIN_ASPECT or span > _SKIN_MAX_SPAN_RATIO:
+        return None
+    # 填充率约束：稀疏块（汤面/货架格挡反光）不是实心人物剪影
+    if largest / (box_w * box_h) < _SKIN_MIN_BLOCK_FILL:
         return None
 
     return (

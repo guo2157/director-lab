@@ -223,6 +223,8 @@ def _attach_compilation(job: Job, compilation: dict | None) -> None:
     version.update({
         "template_id": compilation.get("template_id"),
         "template_version": compilation.get("template_version"),
+        # P2-1：实际生效模板内容指纹（外置优先），供历史任务追溯具体提示词版本
+        "template_content_hash": compilation.get("content_hash") or "",
     })
     snap["prompt_version"] = version
     job.input_snapshot = snap
@@ -1781,6 +1783,7 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
             409,
         )
     jobs = []
+    prepared: list[dict] = []
     slots = declared_reference_slots(wf.capabilities)
     for shot in shots:
         params = dict(payload.get("params") or {})
@@ -1831,20 +1834,33 @@ def generate_project(project_id: str, payload: dict, db: Session = Depends(get_d
         prev_frame_info = None
         if target == "clip" and chain_mode is None:
             prev_frame_info = _inject_prev_shot_frame(db, shot, target, params)
-        _job = _create_job(db, project_id, shot.id, target, shot_wf, params,
+        # 两阶段（P0，2026-11-25）：本循环只做预检/编译/参考图解析，不再建任务。
+        # 原实现边编译边建任务，第 N 镜因缺道具锚定图抛 409 时前 N-1 个任务已落库并在跑，
+        # 接口却返回失败且没有「哪些已提交」的清单（实测 9 镜批量只建了第 1、2 镜）。
+        prepared.append({
+            "shot": shot,
+            "wf": shot_wf,
+            "params": params,
+            "compilation": compilation,
+            "manifest": _reference_manifest,
+            "prev_frame": prev_frame_info,
+        })
+    for _item in prepared:
+        _prepared_shot = _item["shot"]
+        _job = _create_job(db, project_id, _prepared_shot.id, target, _item["wf"], _item["params"],
                            request_key=(
-                               f"{payload.get('idempotency_key')}/{shot.id}"
+                               f"{payload.get('idempotency_key')}/{_prepared_shot.id}"
                                if payload.get('idempotency_key') else None))
-        _attach_compilation(_job, compilation)
-        if _reference_manifest is not None:
+        _attach_compilation(_job, _item["compilation"])
+        if _item["manifest"] is not None:
             _snap = dict(_job.input_snapshot or {})
-            _snap["reference_manifest"] = _reference_manifest.to_dict()
+            _snap["reference_manifest"] = _item["manifest"].to_dict()
             _job.input_snapshot = _snap
         if target == "clip":
             _snap = dict(_job.input_snapshot or {})
-            _snap["scene_id"] = shot.scene_id
-            if prev_frame_info is not None:
-                _snap["prev_frame"] = prev_frame_info
+            _snap["scene_id"] = _prepared_shot.scene_id
+            if _item["prev_frame"] is not None:
+                _snap["prev_frame"] = _item["prev_frame"]
             _job.input_snapshot = _snap
         jobs.append(_job)
     # 生成方式标记：chained 仅首任务 queued，其余 chained_wait 等待前一任务成功后释放

@@ -602,6 +602,29 @@ def _persist_shot_last_frame(db: Session, job: Job, created_assets: list[dict]) 
     return bool(result.get("ok"))
 
 
+def _remove_file_if_unreferenced(db: Session, path: str | None) -> None:
+    """删除不再被任何资产行引用的旧产物文件。
+
+    跨项目同名保护：storyboard_N_img 历史上是平铺命名，多个项目的资产行可能指向
+    同一路径（实测 3 个项目共用 storyboard_1_img.png）。原地覆盖时直接 os.remove
+    会把别的项目仍在用的图删掉，因此先确认引用数为 0 再删。
+    """
+    import os
+
+    if not path or not os.path.exists(path):
+        return
+    try:
+        refs = db.query(Asset).filter(Asset.file_path == path).count()
+    except Exception:  # noqa: BLE001
+        return  # 查询失败时保守保留文件
+    if refs > 0:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _store_shot_keyframe(db: Session, job: Job, shot: Shot, content: bytes, ext: str) -> dict:
     """分镜图每镜唯一：命名 storyboard_{项目内全局镜号}_img，重新生成原地覆盖。
 
@@ -616,7 +639,11 @@ def _store_shot_keyframe(db: Session, job: Job, shot: Shot, content: bytes, ext:
     from app.services.thumbnail import make_thumb
 
     name = f"storyboard_{shot_global_index(db, shot)}_img"
-    pic_dir = os.path.join(str(get_settings().media_dir), "storyboards")
+    # 按项目分目录（2026-11-25 修复跨项目覆盖）：镜号是「项目内」全局序号，
+    # 平铺在 storyboards/ 下会让两个项目都写 storyboard_1_img.png，
+    # 后生成的项目直接覆盖前一个项目的图（实测 游乐场 / 末班地铁 / 本次测试项目
+    # 三行资产同时指向 data/media/storyboards/storyboard_1_img.png）。
+    pic_dir = os.path.join(str(get_settings().media_dir), "storyboards", str(job.project_id))
     os.makedirs(pic_dir, exist_ok=True)
     pic_path = os.path.join(pic_dir, f"{name}.{ext}")
 
@@ -666,15 +693,14 @@ def _store_shot_keyframe(db: Session, job: Job, shot: Shot, content: bytes, ext:
     asset.quality_status = None
     asset.updated_at = _now().replace(tzinfo=None)
     asset.input_snapshot = job.input_snapshot
+    db.flush()
     try:
         asset.thumb_path = make_thumb(pic_path, name)
     except Exception:  # noqa: BLE001
         asset.thumb_path = None
-    if old_path and old_path != pic_path and os.path.exists(old_path):
-        try:
-            os.remove(old_path)
-        except OSError:
-            pass
+    # 旧文件仅在无其他资产行引用时删除（跨项目同名保护）
+    if old_path and old_path != pic_path:
+        _remove_file_if_unreferenced(db, old_path)
     db.flush()
 
     # 清理同镜历史分镜图，只保留当前这一张
@@ -742,7 +768,8 @@ def _store_shot_clip(db: Session, job: Job, shot: Shot, content: bytes, ext: str
     from app.services.shot_chain import shot_global_index
 
     name = f"storyboard_{shot_global_index(db, shot)}_clip"
-    clip_dir = os.path.join(str(get_settings().media_dir), "storyboards")
+    # 按项目分目录，理由同 _store_shot_keyframe（镜号是项目内序号，平铺会跨项目覆盖）
+    clip_dir = os.path.join(str(get_settings().media_dir), "storyboards", str(job.project_id))
     os.makedirs(clip_dir, exist_ok=True)
     clip_path = os.path.join(clip_dir, f"{name}.{ext}")
 
@@ -793,11 +820,10 @@ def _store_shot_clip(db: Session, job: Job, shot: Shot, content: bytes, ext: str
     # 破前端缓存：前端以 v=updated_at 拉取文件，必须变化才能看到新视频
     asset.updated_at = _now().replace(tzinfo=None)
     asset.input_snapshot = job.input_snapshot
-    if old_path and old_path != clip_path and os.path.exists(old_path):
-        try:
-            os.remove(old_path)
-        except OSError:
-            pass
+    db.flush()
+    # 旧文件仅在无其他资产行引用时删除（跨项目同名保护）
+    if old_path and old_path != clip_path:
+        _remove_file_if_unreferenced(db, old_path)
     db.flush()
 
     # 清理同镜历史分镜视频，只保留当前这一份
@@ -830,6 +856,34 @@ def _store_shot_clip(db: Session, job: Job, shot: Shot, content: bytes, ext: str
     }
 
 
+def _requeue_for_quality_retry(db: Session, job: Job, failures: list[dict]) -> None:
+    """图片质检不合格 → 旧产物转 superseded，任务重新排队换 seed 重采。
+
+    必须同时清掉 prompt_id / submission_state，否则下次执行会命中执行器第 0 步的
+    「已提交远端 → 续跑下载」分支：把同一份不合格产物重新下载一遍，既没换 seed
+    也不消耗新算力，attempts 增加但产物字节完全相同。
+    实测（2026-11-25 job_95860fc75897 场景基准图）：attempt 1/2 产物 md5 均为
+    5063f8fa…，第二次事件是 job.reconciled 而非 job.submitted。
+
+    params 是普通 JSON 列，原地 pop 不会被 SQLAlchemy 标脏，必须整体重新赋值，
+    否则残留 seed 会让新一次提交生成完全相同的图。
+    """
+    for _qf in failures:
+        _bad = db.get(Asset, _qf["asset_id"])
+        if _bad is not None:
+            _bad.validity = "superseded"
+    job.prompt_id = None
+    # submission_state 是 NOT NULL 列（默认 not_submitted），不能用 None
+    job.submission_state = "not_submitted"
+    job.status = "queued"
+    if job.params:
+        job.params = {k: v for k, v in job.params.items() if k != "seed"}
+    _write_event(db, job, "job.quality_retry", {
+        "attempt": job.attempts, "failed": failures,
+    })
+    db.commit()
+
+
 def _store_entity_asset(
     db: Session, job: Job, asset_type: str, name: str, content: bytes, ext: str
 ) -> dict | None:
@@ -853,7 +907,23 @@ def _store_entity_asset(
         .first()
     )
     if existing is None:
+        # 质量重试会把不合格产物先置 superseded 再重新排队，此时没有任何 current 行；
+        # 若这里直接返回 None，调用方会新建一行，重试几次就多几行同内容资产
+        # （实测 2026-11-25 场景「便利店」出现 ast_6ca8…v1 / ast_03cd…v2 两条，
+        # md5 完全相同）。因此退化为「同名最新一行原地复用」，保证每实体只有一份。
+        existing = (
+            db.query(Asset)
+            .filter(
+                Asset.project_id == job.project_id,
+                Asset.asset_type == asset_type,
+                Asset.name == name,
+            )
+            .order_by(Asset.version.desc())
+            .first()
+        )
+    if existing is None:
         return None
+    existing.validity = "current"
 
     filepath = _overwrite_asset_file(existing, content)
     try:
@@ -2354,18 +2424,7 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             if _quality_failed:
                 _max_attempts = settings.job_max_attempts
                 if (job.attempts or 0) < _max_attempts:
-                    # 不合格产物转历史版本，换 seed 重新生成
-                    for _qf in _quality_failed:
-                        _bad = db.get(Asset, _qf["asset_id"])
-                        if _bad is not None:
-                            _bad.validity = "superseded"
-                    job.status = "queued"
-                    if job.params:
-                        job.params.pop("seed", None)
-                    _write_event(db, job, "job.quality_retry", {
-                        "attempt": job.attempts, "failed": _quality_failed,
-                    })
-                    db.commit()
+                    _requeue_for_quality_retry(db, job, _quality_failed)
                     return {"ok": False, "reason": "quality_check_failed", "retriable": True}
                 _fail_job(db, job, "quality_check_failed",
                           f"图片质量检查不合格（已重试 {job.attempts} 次）: {_quality_failed}")

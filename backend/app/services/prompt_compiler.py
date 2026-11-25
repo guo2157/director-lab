@@ -290,6 +290,8 @@ class CompiledPrompt:
     blocking_issues: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     canonical_snapshot: dict = field(default_factory=dict)
+    # 模板内容指纹（P2-1）：实际生效模板（外置优先）的 sha256 前 12 位，写入任务快照供追溯
+    content_hash: str = ""
 
     @property
     def status(self) -> str:
@@ -303,6 +305,7 @@ class CompiledPrompt:
             "entity_id": self.entity_id,
             "template_id": self.template_id,
             "template_version": self.template_version,
+            "content_hash": self.content_hash,
             "positive_prompt": self.positive_prompt,
             "negative_prompt": self.negative_prompt,
             "reference_slots": self.reference_slots,
@@ -311,6 +314,16 @@ class CompiledPrompt:
             "warnings": self.warnings,
             "canonical_snapshot": self.canonical_snapshot,
         }
+
+
+def _template_hash(meta: dict) -> str:
+    """当前生效模板内容的 hash（P2-1）：外置优先、内置回退，失败时返回空串不阻断编译。"""
+    from app.services.prompt_registry import template_content_hash
+
+    try:
+        return template_content_hash(str(meta.get("prompt_name") or ""))
+    except Exception:  # noqa: BLE001 - 指纹缺失不得阻断编译主链路
+        return ""
 
 
 # ── 基础工具 ────────────────────────────────────────────────
@@ -854,6 +867,7 @@ def compile_asset_image(db: Session, asset_type: str, entity_id: str, *,
         task_type=TASK_ASSET_IMAGE,
         template_id=template_id,
         template_version=int(meta["version"]),
+        content_hash=_template_hash(meta),
         entity_id=entity_id,
         asset_type=asset_type,
         positive_prompt=_prune_empty_fields(render_template(template_id, mapping)),
@@ -1435,6 +1449,7 @@ def compile_storyboard_image(db: Session, shot_id: str, *,
         task_type=TASK_STORYBOARD_IMAGE,
         template_id=TEMPLATE_STORYBOARD,
         template_version=int(meta["version"]),
+        content_hash=_template_hash(meta),
         entity_id=shot.id,
         asset_type="keyframe",
         positive_prompt=render_template(TEMPLATE_STORYBOARD, mapping),
@@ -2218,6 +2233,7 @@ def compile_shot_video(db: Session, shot_id: str, *,
         task_type=TASK_SHOT_VIDEO,
         template_id=TEMPLATE_VIDEO,
         template_version=int(meta["version"]),
+        content_hash=_template_hash(meta),
         entity_id=shot.id,
         asset_type="clip",
         positive_prompt=render_template(TEMPLATE_VIDEO, mapping),
