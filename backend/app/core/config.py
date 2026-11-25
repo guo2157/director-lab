@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""  # 凭据只走环境变量 DLAB_LLM_API_KEY，禁止写入代码与日志
     llm_model: str = ""
+    # 图像级质检（vision 评图）专用模型。文本模型的默认值（deepseek-v4.x）不接受
+    # image_url 内容，实测网关直接 400/502「上游未接受本次请求」，而异常被吞掉后
+    # 所有分镜图质检都静默降级为 passed（镜 9 期望 2 人只画出 1 人仍判通过）。
+    # glm-5.3-flash 实测可读图（同一张 79KB payload 正常返回）。留空时 _call_vision_qc
+    # 会回落到 glm-5.3-flash。
+    vision_model: str = ""
     # 多 LLM 实例配置（JSON 数组：[{id, name, provider, base_url, api_key, model, enabled}]），
     # 为空时回退单实例 llm_* 字段；同一时刻仅一个 enabled，后端实时调用启用中的模型
     llm_instances_json: str = ""
@@ -215,7 +221,7 @@ def clear_settings_cache() -> None:
 _PERSISTED_FIELDS = [
     "comfyui_base_url", "comfyui_instances_json",
     "comfyui_timeout_seconds", "comfyui_job_timeout_seconds",
-    "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "llm_instances_json", "llm_timeout_seconds",
+    "llm_provider", "llm_base_url", "llm_api_key", "llm_model", "vision_model", "llm_instances_json", "llm_timeout_seconds",
     "llm_max_tokens", "llm_disable_thinking",
     "llm_stream_idle_timeout_seconds",
     "llm_parse_max_tokens", "llm_parse_hard_max_tokens",

@@ -30,6 +30,9 @@ from app.models import Asset, Character, Prop, PropShotState, Scene, Shot
 
 logger = logging.getLogger(__name__)
 
+# 最近一次 vision 评图失败原因（供告警消息携带，见 _call_vision_qc）
+_LAST_VISION_ERROR = ""
+
 # ── 质检结果数据结构 ──────────────────────────────────────────
 
 
@@ -96,12 +99,19 @@ def _run_prompt_qc(db: Session, shot: Shot, prompt: str) -> tuple[bool, list[Key
 # ── 图像级质检（vision）────────────────────────────────────────
 
 
-def _image_to_data_uri(file_path: str) -> str | None:
-    """将本地图片文件转为 data URI。
+def _image_to_data_uri(file_path: str, max_edge: int = 768, quality: int = 82) -> str | None:
+    """将本地图片文件转为 data URI（先缩放 + 转 JPEG）。
 
     路径统一经 stored_path 归一化：历史资产 file_path 为 Windows 反斜杠形态
     （data\\media\\x.png），Linux 上 Path 不把反斜杠当分隔符，直接 exists() 恒为 False，
     会让参考图被全部丢弃、图像级质检静默降级成 reference_images_missing。
+
+    必须缩放（2026-11-25 修复）：1024×1792 的 PNG 原图 base64 后单张 3.2MB，
+    一镜「分镜图 + 3 张参考图」的评图请求体约 13MB。实测自定义网关直接
+    HTTP 429 / 超时，`_call_vision_qc` 吞掉异常返回 None，于是所有分镜图的
+    人物数量检查都退化成 vision_qc_unavailable 却仍标记 quality_status=passed
+    （镜 9 期望 2 人只画出 1 人，一路静默通过）。缩到长边 768、JPEG q82 后
+    单张约 60-90KB，请求体从 13MB 降到 ~300KB。
     """
     from app.core.config import stored_path
 
@@ -109,17 +119,32 @@ def _image_to_data_uri(file_path: str) -> str | None:
     if not path.exists():
         return None
     try:
-        with open(path, "rb") as f:
-            raw = f.read()
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            w, h = im.size
+            if max(w, h) > max_edge:
+                scale = max_edge / float(max(w, h))
+                im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+            buf = BytesIO()
+            im.save(buf, format="JPEG", quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception:  # noqa: BLE001  PIL 不可用或图片损坏时回退原图
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
         b64 = base64.b64encode(raw).decode("ascii")
-        suffix = path.suffix.lower()
         mime = {
             ".png": "image/png", ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg", ".webp": "image/webp",
-        }.get(suffix, "image/png")
+        }.get(path.suffix.lower(), "image/png")
         return f"data:{mime};base64,{b64}"
-    except OSError:
-        return None
 
 
 def _gather_reference_images(db: Session, shot: Shot) -> list[dict]:
@@ -166,7 +191,54 @@ def _gather_reference_images(db: Session, shot: Shot) -> list[dict]:
     return images
 
 
-def _build_image_qc_prompt(shot: Shot, plan_posture_block: str) -> str:
+def _person_count_rule(db: Session, shot: Shot) -> str:
+    """人物数量硬性检查项。
+
+    原先四项检查（身份/道具/构图/光线）不含人数断言，镜 9 期望「林小满、陈默」
+    两人却只画出林小满，vision 只报了光线和道具问题，人数缺失一路通过。
+
+    角色名单必须与「生成时实际绑定的人数」同源，否则质检和提示词各说一套：
+    - 首选 shot_cast.resolve_shot_cast —— 提示词编译器 _shot_characters 用的就是它，
+      有契约时以 shot_plan 为准（画外音不占人数）
+    - 兜底 shot_refs.shot_subject_characters —— 无契约时的旧启发式
+    实测镜 9：提示词写「必须等于 2 人（林小满、陈默）」，而只读 shot_subject_characters
+    得到 1 人，质检因此认为少人也没问题。不要用 shot.cast 关系：实测该关系为空。
+    """
+    names: list[str] = []
+    try:
+        from app.services.shot_cast import resolve_shot_cast
+
+        names = [
+            cc.character.name
+            for cc in resolve_shot_cast(db, shot).characters
+            if getattr(cc.character, "name", None)
+        ]
+    except Exception:  # noqa: BLE001
+        names = []
+    if not names:
+        try:
+            from app.services.shot_refs import shot_subject_characters
+
+            names = [c.name for c in shot_subject_characters(db, shot) if getattr(c, "name", None)]
+        except Exception:  # noqa: BLE001  关系未加载时退化为通用规则
+            names = []
+    if not names:
+        return (
+            "5. person_count: 数出画面中的真人数量；同一角色不得重复出现"
+            "（分身/镜像/重影），出现重复必须报 issue（code=person_count_mismatch）。"
+        )
+    uniq = list(dict.fromkeys(names))
+    listed = "、".join(uniq)
+    return (
+        f"5. person_count: 本镜必须出场的角色共 {len(uniq)} 位（{listed}）。"
+        "请逐一确认每位角色都真实出现在画面中（要有完整人物，不能只有局部/背影/倒影），"
+        "并数出画面中的真人总数。缺少任一角色、多出未声明人物、或同一角色重复出现"
+        "（分身/镜像/重影），都必须报 issue（code=person_count_mismatch），"
+        f"message 里写明「期望 {len(uniq)} 人，实际 M 人，缺 X」。"
+    )
+
+
+def _build_image_qc_prompt(db: Session, shot: Shot, plan_posture_block: str) -> str:
     """构造 vision 质检的系统提示词。"""
     plan = shot.shot_plan if isinstance(shot.shot_plan, dict) else None
     plan_comp = (plan or {}).get("composition") or {}
@@ -186,6 +258,7 @@ def _build_image_qc_prompt(shot: Shot, plan_posture_block: str) -> str:
             plan_comp.get("relation_note", "")
         ] if v).strip(),
         "4. lighting: 光线主方向是否从左上照入、投影落向右下（与场景基准图一致），无多光源或方向矛盾。",
+        _person_count_rule(db, shot),
         "",
         "输出格式（严格 JSON，不包含任何其他文本）：",
         '{"pass": true/false, "issues": [{"code": "...", "severity": "warn", "message": "...", "detail": {...}}]}',
@@ -243,7 +316,12 @@ def _call_vision_qc(
 
     try:
         from app.integrations.llm import LLMClient
-        client = LLMClient(base_url=base_url, api_key=api_key, model=settings.llm_model)
+        # 评图必须用支持 image_url 的模型：settings.llm_model 是文本模型
+        # （deepseek-v4.x），实测网关对带图请求返回 400/502「Trae 上游未接受本次请求」，
+        # 异常被吞后所有分镜图质检静默降级成 passed。vision_model 可配置，
+        # 留空回落到实测可读图的 glm-5.3-flash。
+        _vision_model = (getattr(settings, "vision_model", "") or "").strip() or "glm-5.3-flash"
+        client = LLMClient(base_url=base_url, api_key=api_key, model=_vision_model)
         # chat_messages 仅支持 json_mode / max_tokens（temperature 固定 0.3，
         # 超时由 LLMClient 构造函数 timeout 控制）。此前传 temperature/timeout_seconds
         # 会抛 TypeError 并被下方 except 吞掉，导致图像级质检从未真正执行。
@@ -261,6 +339,12 @@ def _call_vision_qc(
         text = text.strip()
         return json.loads(text) if text else None
     except Exception as exc:
+        # 不再只写 logger.warning：uvicorn 未配置 logging 时这条日志根本不会进
+        # journal，线上只能看到一句「vision_qc_unavailable」，无法定位是网关
+        # 429、超时还是模型不支持图片。把原因记到模块级变量，由 _run_image_qc
+        # 带进告警消息，前端事件流里直接可见。
+        global _LAST_VISION_ERROR
+        _LAST_VISION_ERROR = f"{type(exc).__name__}: {str(exc)[:300]}"
         logger.warning("vision QC call failed: %s", exc)
         return None
 
@@ -294,13 +378,16 @@ def _run_image_qc(
         ))
         return True, issues
 
-    system_prompt = _build_image_qc_prompt(shot, plan_posture_block)
+    system_prompt = _build_image_qc_prompt(db, shot, plan_posture_block)
     result = _call_vision_qc(system_prompt, keyframe_uri, ref_images)
 
     if result is None:
         issues.append(KeyframeQCIssue(
             code="vision_qc_unavailable",
-            message="多模态 vision 质检不可用（provider 不支持或调用失败），跳过图像级检查",
+            message=(
+                "多模态 vision 质检不可用（provider 不支持或调用失败），跳过图像级检查"
+                + (f"：{_LAST_VISION_ERROR}" if _LAST_VISION_ERROR else "")
+            ),
             entity_id=shot.id,
             entity_type="shot",
         ))
