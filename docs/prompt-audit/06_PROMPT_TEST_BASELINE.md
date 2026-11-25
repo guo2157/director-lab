@@ -28,7 +28,10 @@
 | --- | ---: | --- |
 | P0-4 修复时点 | 1394 通过 | 项目历史基线 |
 | P2-1 注册表落地后 | 1406 收集 | 新增 test_prompt_registry 6 项、防漂移 3 项等 |
-| 本轮最终 | 1411 收集 | 累计结果 |
+| 本轮最终（两次全量运行） | 1411 收集 | 2 failed → 1 failed，失败项均已定性 |
+| P3 守护测试落地后 | 1428 收集 | 新增 P3-5（5）+ P3-4（6）+ P3-1（6）共 17 项 |
+
+> 当前仓库实际 collect 为 1432 项，差额 4 项来自工作区未跟踪的 tests/test_prompt_qc_positions.py（外部会话产出，不属本轮范围），故本轮口径按 1428 项计。
 
 ### 2.2 本轮完整运行记录
 
@@ -80,7 +83,7 @@
 
 ---
 
-## 四、提示词专项测试清单（116 项）
+## 四、提示词专项测试清单（133 项）
 
 按文件统计实际收集用例数（collect-only 直读）：
 
@@ -96,7 +99,10 @@
 | test_multichar_prompt_and_slots.py | 6 | 多角色与槽位 |
 | test_prompt_empty_fill.py | 5 | 空值填充 |
 | test_prompt_store_consistency.py | 3 | 内置与外置一致性 |
-| 合计 | 116 | — |
+| test_video_prompt_sync.py | 5 | 视频首镜/续镜模板同步演进（P3-5） |
+| test_shot_video_mapping.py | 6 | 编译映射对模板占位符覆盖（P3-4） |
+| test_script_prompt_common.py | 6 | 剧本创作/扩写公共规范一致（P3-1 方案 2） |
+| 合计 | 133 | — |
 
 ---
 
@@ -106,8 +112,11 @@
 | --- | ---: | --- | --- |
 | tests/test_prompt_registry.py | 6 | 203f53a | 注册表覆盖 27 模板、无孤儿、元数据完整、input_vars 与占位符一致、指纹随模板变更、快照形状 |
 | 内置外置防漂移测试 | 3 | 76a2770 | 5 个曾漂移模板的内外一致性 |
+| tests/test_video_prompt_sync.py | 5 | 2d0daf2 | 12 条共享规则双向存在、身份约束核心句式、首镜无 Picture 2、续镜双参考职责不可对调、模板未被合并 |
+| tests/test_shot_video_mapping.py | 6 | 62a1527 | 视频/分镜图/三类资产映射对模板占位符的覆盖关系、映射键必须为字符串字面量 |
+| tests/test_script_prompt_common.py | 6 | a95ee66 | 剧本创作/扩写 4 条共享规范、人物名一致性、职责边界、专属规则不互相串入 |
 
-新增测试全部通过，且与既有 116 项专项测试不重复。
+新增测试全部通过，且与既有 116 项专项测试不重复：新增 17 项与既有 116 项合并运行共 133 项全部通过（16.04s），无状态污染。三项新增守护测试均做了反向验证（见第九节），注入模拟漂移后测试如实失败，证明不是永远通过的无效守护。
 
 ---
 
@@ -151,4 +160,38 @@
 ## 八、回归执行手册
 
 日常改动提示词后的最小验证集：
+
+第一步，提示词专项回归（133 项，约 16 秒）。在 backend 目录下运行 pytest，参数为 13 个提示词相关测试文件并追加 -q：test_prompt_registry、test_prompt_store_consistency、test_prompt_compiler、test_prompt_docs_sync、test_prompt_ref_consistency、test_asset_prompt_hardening、test_prompt_reform、test_prompt_and_ref、test_multichar_prompt_and_slots、test_prompt_empty_fill、test_video_prompt_sync、test_shot_video_mapping、test_script_prompt_common。
+
+第二步，全量回归（1428 项，约 6 分钟）。在 backend 目录下运行 pytest tests -q，输出重定向至 /tmp/pytest_run.log，结束后查看末尾 5 行确认摘要。
+
+注意事项：
+
+1. 全量运行前必须确认工作区无并发写入（无其他 pytest 进程、无外部会话改文件），否则静态源码断言类测试会误报（本轮已实测，见 3.2 节）。
+2. 失败项须先定性（断言过时 / 环境干扰 / 真实回归）再修，不得直接改测试让其通过。
+3. 本轮基线结论：提示词机制相关测试 133 项全部通过；全量两次运行分别为 2 failed 与 1 failed，失败项均已定性为断言过时与环境并发写入，无代码回归。
+
+---
+
+## 九、守护测试的反向验证记录
+
+新增的三项守护测试均执行了「注入漂移后断言必须失败」的反向验证，避免写出永远通过的无效测试。全部在内存内 monkeypatch 完成，未修改任何模板或业务代码文件。
+
+| 测试文件 | 注入的漂移 | 是否捕获 | 失败信息 |
+| --- | --- | --- | --- |
+| test_video_prompt_sync.py | 续镜模板删除一条共享规则 | 是 | 共享规则漂移 |
+| test_video_prompt_sync.py | 首镜模板误加 Picture 2 | 是 | 首镜不应出现 Picture 2 |
+| test_video_prompt_sync.py | 两份模板合并为同一文本 | 是 | H3 参考图职责会失效 |
+| test_shot_video_mapping.py | 视频模板新增未同步占位符 | 是 | mapping 未覆盖占位符 |
+| test_shot_video_mapping.py | 分镜图模板新增未同步占位符 | 是 | mapping 未覆盖占位符 |
+| test_shot_video_mapping.py | 角色资产映射漏字段 | 是 | _character_mapping 未覆盖占位符 |
+| test_script_prompt_common.py | 扩写模板删除一条共享规范 | 是 | 通用规范漂移 |
+| test_script_prompt_common.py | 创作模板串入扩写专属约束 | 是 | 不应包含扩写专属约束 |
+| test_script_prompt_common.py | 两份模板合并 | 是 | 扩写模板缺少扩写语义 |
+
+结论：9 项模拟漂移全部被捕获，三项守护测试有效。
+
+
+
+
 
