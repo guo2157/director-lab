@@ -79,7 +79,7 @@
 
 结论：这是测试隔离与并发写入问题，不是本次提示词审计引入的回归，也不是业务代码缺陷。
 
-改进建议（列入 05 的计划范畴）：静态源码断言类测试（inspect.getsource）应改为行为断言，或至少改为从模块对象属性检查而非文本匹配，避免对文件内容变化敏感。
+后续处置（已完成，R-05）：已按该建议把 test_media_normalized_before_upload 从 inspect.getsource 文本匹配改为 ast.parse 直读磁盘的结构断言（提交 3626277）。新写法定位 _execute_generate_job_once 函数节点，断言 app.core.config 的 stored_path 以 _norm_stored_path 别名导入、存在 _norm_stored_path 调用、且该调用行号早于 upload_image，不再依赖 linecache 行号缓存，因此不受并发写入影响。验证：test_media_path_normalization.py 5 项全部通过（1.19s）；另做反向验证，正常结构通过、缺少归一化导入与归一化晚于上传两种漂移均被捕获。
 
 ---
 
