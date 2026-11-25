@@ -64,7 +64,7 @@
 
 优先级：中。前置条件：06 文档 A/B 基线建立完成。
 
-状态：方案 2 已完成（2026-11-25，提交 a95ee66）。新增 tests/test_script_prompt_common.py 6 项，守护 4 条实测共享规范、人物名一致性（两份措辞不同，分别断言不强行统一）、职责边界、专属规则不互相串入；含 3 项模拟漂移反向验证。方案 1（抽公共段）仍待 A/B 基线。
+状态：方案 2 已完成（2026-11-25，提交 a95ee66）。新增 tests/test_script_prompt_common.py 6 项，守护 4 条实测共享规范、人物名一致性（两份措辞不同，分别断言不强行统一）、职责边界、专属规则不互相串入；含 3 项模拟漂移反向验证。方案 1（抽公共段）代码修改已完成（2026-11-26，提交 b50acd1）：新增 _SCRIPT_COMMON_FORMAT / _SCRIPT_COMMON_EPISODE / _SCRIPT_COMMON_CONSTRAINTS / _SCRIPT_COMMON_OUTPUT 四个共享常量，两个模板改为括号拼接引用；get_prompt 返回值与原版逐字符一致（create 296 字符、expand 266 字符），test_script_writing / test_script_prompt_common 共 11 项通过。A/B 对比（H-8）仍待执行。
 
 ### P3-2 历史负向词层清理（对应 03 的 C-03）
 
