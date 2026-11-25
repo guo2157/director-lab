@@ -10,9 +10,10 @@
 
 修复口径：统一经 app.core.config.stored_path 归一回正斜杠。
 """
-import inspect
+import ast
 import struct
 import zlib
+from pathlib import Path
 
 
 def _png_bytes() -> bytes:
@@ -62,14 +63,46 @@ class TestExecutorNormalizesMediaPaths:
     """executor 必须在 upload_image 之前完成反斜杠归一化。"""
 
     def test_media_normalized_before_upload(self):
-        from app.worker import executor
+        """用 AST 检查源码结构，而不是 inspect.getsource 文本匹配。
 
-        src = inspect.getsource(executor._execute_generate_job_once)
-        assert "stored_path as _norm_stored_path" in src, "缺少 stored_path 归一化导入"
-        assert "_norm_stored_path(_v)" in src, "media_files 未做反斜杠归一化"
-        norm_at = src.index("_norm_stored_path(_v)")
-        upload_at = src.index("client.upload_image")
-        assert norm_at < upload_at, "归一化必须发生在 upload_image 之前"
+        改用原因（06 文档 R-05）：inspect.getsource 依赖 linecache，模块导入后
+        若磁盘文件被并发改写，会按旧行号读到相邻函数体，导致断言误报。
+        ast.parse 每次直读磁盘文本，不依赖行号缓存，不受并发写入影响。
+        """
+        src_path = Path(__file__).resolve().parents[1] / "app" / "worker" / "executor.py"
+        tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+        fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_execute_generate_job_once":
+                fn = node
+                break
+        assert fn is not None, "未找到 _execute_generate_job_once"
+
+        # 1. 必须存在 from app.core.config import stored_path as _norm_stored_path
+        aliases = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.ImportFrom) and node.module == "app.core.config":
+                for alias in node.names:
+                    if alias.name == "stored_path":
+                        aliases.append(alias.asname)
+        assert "_norm_stored_path" in aliases, "缺少 stored_path 归一化导入"
+
+        # 2. 归一化调用必须存在，且早于 upload_image（顺序决定是否真的生效）
+        norm_lines = []
+        upload_lines = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "_norm_stored_path":
+                norm_lines.append(node.lineno)
+            if isinstance(func, ast.Attribute) and func.attr == "upload_image":
+                upload_lines.append(node.lineno)
+
+        assert norm_lines, "media_files 未做反斜杠归一化"
+        assert upload_lines, "未找到 upload_image 调用"
+        assert min(norm_lines) < min(upload_lines), "归一化必须发生在 upload_image 之前"
 
     def test_stored_path_normalizes_backslash(self):
         from app.core.config import stored_path
