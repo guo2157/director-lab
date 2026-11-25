@@ -577,6 +577,12 @@ class ModelFile:
     path: str
     size: int
     note: str = ""
+    # 仓库内路径；与 ComfyUI 内路径不一致时填写（例如仓库根目录的 LoRA 要落到 models/loras/）
+    src: str = ""
+
+    @property
+    def remote_path(self) -> str:
+        return self.src or self.path
 
 
 MODELS = (
@@ -643,6 +649,15 @@ MODELS = (
         "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
         1_956_193_000,
         "H3 Ref2V 4 步 Turbo LoRA（20 步 -> 4 步）",
+    ),
+    # quality 档（5s/10s）用 8 步 LoRA：官方只发在 lightx2v 仓库根目录，下载后落到 loras/
+    ModelFile(
+        "h3",
+        "lightx2v/Minimax-h3-Turbo",
+        "loras/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+        1_956_193_000,
+        "H3 Ref2V 8 步 Turbo LoRA（quality 档，1344×768 横屏训练）",
+        src="minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
     ),
     # ---- 省显存：32B 文本编码器 nvfp4 版（15.7 GiB，比 int8 小 11.5 GiB）----
     ModelFile(
@@ -757,7 +772,7 @@ def _public_hits(items):
         for item in items:
             if item.path in hits:
                 continue
-            candidate = base / item.repo / item.path
+            candidate = base / item.repo / item.remote_path
             try:
                 if candidate.is_file() and candidate.stat().st_size == item.size:
                     hits[item.path] = str(candidate)
@@ -2396,6 +2411,30 @@ def _download_tts(workers: int) -> None:
     raise RuntimeError("TTS 模型下载失败: " + str(last_error))
 
 
+def _download_single(repo: str, item, workers: int = 1) -> None:
+    """下载单个文件并落到 ComfyUI 内路径（仓库内路径与本地路径不一致时用）。"""
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception as exc:
+        raise RuntimeError("缺少 huggingface_hub，请先 pip install huggingface_hub（" + str(exc) + "）")
+
+    target_dir = MODELS_DIR / Path(item.path).parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    wanted = [
+        ("repo_id", repo),
+        ("filename", item.remote_path),
+        ("local_dir", str(target_dir)),
+    ]
+    if HF_TOKEN:
+        wanted.append(("token", HF_TOKEN))
+    params = inspect.signature(hf_hub_download).parameters
+    kwargs = {key: value for key, value in wanted if key in params}
+    kwargs["repo_id"] = repo
+    turbo = turbo_available() and _endpoint_is_official()
+    with network_turbo(turbo):
+        _run_with_watchdog(lambda: hf_hub_download(**kwargs), repo)
+
+
 def download_models(groups=None, workers=None, force=False, ask_token=None, reuse=True) -> None:
     """按组下载模型，已完整存在的文件自动跳过，支持断点续传。
 
@@ -2489,14 +2528,20 @@ def download_models(groups=None, workers=None, force=False, ask_token=None, reus
         by_repo.setdefault(item.repo, []).append(item)
 
     for repo, repo_items in by_repo.items():
-        patterns = [m.path for m in repo_items]
-        log("[下载] " + repo + " -> " + str(len(patterns)) + " 个文件")
-        _download_repo(
-            repo,
-            patterns,
-            int(workers or HF_MAX_WORKERS),
-            expected={m.path: m.size for m in repo_items},
-        )
+        same = [m for m in repo_items if m.remote_path == m.path]
+        if same:
+            log("[下载] " + repo + " -> " + str(len(same)) + " 个文件")
+            _download_repo(
+                repo,
+                [m.remote_path for m in same],
+                int(workers or HF_MAX_WORKERS),
+                expected={m.path: m.size for m in same},
+            )
+        for item in repo_items:
+            if item.remote_path == item.path:
+                continue
+            log("[下载] " + repo + " -> " + item.path)
+            _download_single(repo, item)
 
     if "tts" in selected and not tts_ready:
         log("[下载] " + TTS_REPO + " -> 完整模型目录")
@@ -2530,7 +2575,7 @@ def verify_models(groups=None, check_hash=False):
             if ok and check_hash:
                 want = None
                 try:
-                    want = _repo_tree(item.repo).get(item.path)
+                    want = _repo_tree(item.repo).get(item.remote_path)
                 except Exception as exc:  # 离线时退回只比大小
                     log("[校验] 取不到官方 sha256（" + str(exc)[:80] + "），只比大小")
                 if want:
