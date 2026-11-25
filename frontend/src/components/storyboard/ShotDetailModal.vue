@@ -13,7 +13,6 @@ import type { Character, Prop, Scene, Shot } from '@/types/script'
 import { useShotDetail } from './useShotDetail'
 import type { Asset } from '@/types/asset'
 import { listAssets, uploadAsset } from '@/api/assets'
-import DependencyImpactPanel from '@/components/ui/DependencyImpactPanel.vue'
 import JobSnapshotPanel from './JobSnapshotPanel.vue'
 
 type StatusKind = 'pending' | 'running' | 'succeeded' | 'failed' | 'generating' | 'locked' | 'stale'
@@ -302,19 +301,6 @@ async function uploadRefImage(file: File) {
           </template>
 
 
-        </div>
-
-        <!-- 依赖影响（只读预演） -->
-        <div class="dg-sec">
-          <div class="dg-label">
-            依赖影响
-            <span class="dg-hint">（只读预演，不会自动重做）</span>
-          </div>
-          <DependencyImpactPanel
-            :project-id="props.projectId"
-            node-type="shot"
-            :node-id="props.shotId"
-          />
         </div>
 
         <!-- 生成快照（只读，手动加载） -->

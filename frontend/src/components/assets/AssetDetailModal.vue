@@ -8,7 +8,6 @@ import { NButton, NImage, NModal } from 'naive-ui'
 import StatusTag from '@/components/ui/StatusTag.vue'
 import PromptEditor from '@/components/ui/PromptEditor.vue'
 import { saveAssetRegeneratePrompt } from '@/api/assets'
-import DependencyImpactPanel from '@/components/ui/DependencyImpactPanel.vue'
 import { assetImgUrl } from './assetMedia'
 import type { Asset } from '@/types/asset'
 
@@ -118,18 +117,6 @@ async function regenerateWithPrompt() {
           :disabled="!canRegenerate"
           @copy="(v: string) => emit('copy', v)"
         />
-
-        <div v-if="asset.project_id" class="detail-section">
-          <div class="detail-section-head">
-            <span class="detail-section-title">依赖影响</span>
-            <span class="detail-section-hint">只读预演，不会自动重做</span>
-          </div>
-          <DependencyImpactPanel
-            :project-id="asset.project_id"
-            node-type="asset"
-            :node-id="asset.id"
-          />
-        </div>
 
         <div class="detail-actions">
           <n-button size="small" @click="emit('replace')">上传替换</n-button>

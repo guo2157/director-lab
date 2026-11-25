@@ -14,13 +14,11 @@ import { listAssetPlans, generateFromPlans } from '@/api/assetPlans'
 import { getClipGenerationProgress } from '@/api/generation'
 import { useGenerationProgress } from '@/composables/useGenerationProgress'
 import type { Scene, Shot, ShotKind } from '@/types/script'
-import { buildShotImpactMap, IMPACT_SHOT_LABEL, getWorkflowImpact, WORKFLOW_IMPACT_LABEL } from '@/api/dependencies'
-import type { DependencyChangeStatus, DependencyProjectImpactPreview, WorkflowImpactItem } from '@/api/dependencies'
+import { getWorkflowImpact, WORKFLOW_IMPACT_LABEL } from '@/api/dependencies'
+import type { WorkflowImpactItem } from '@/api/dependencies'
 import type { ClipGenerationJob, ClipGenerationProgress } from '@/types/generation'
 import ShotDetailModal from '@/components/storyboard/ShotDetailModal.vue'
-import StoryboardPlanImportDialog from '@/components/storyboard/StoryboardPlanImportDialog.vue'
 import StageCard from '@/components/ui/StageCard.vue'
-import DependencyImpactOverview from '@/components/ui/DependencyImpactOverview.vue'
 import WorkflowSelector from '@/components/workflow/WorkflowSelector.vue'
 import StageTransitionDialog from '@/components/project/StageTransitionDialog.vue'
 import { useStageTransition } from '@/composables/useStageTransition'
@@ -63,18 +61,6 @@ async function loadSceneShots(sceneId: string, episode: number) {
 }
 
 
-
-// --- 分镜规划导入（Phase 2）：校验只读，写入为显式安全 upsert ---
-const planDialogVisible = ref(false)
-
-/** 规划写入后刷新场景与当前集镜头，保持看板与库内一致 */
-async function refreshStoryboard() {
-  await scenesQuery.refetch()
-  for (const scene of filteredScenes.value) {
-    const ep = (scene.episodes ?? [])[0]
-    if (ep !== undefined) await loadSceneShots(scene.id, ep)
-  }
-}
 
 // --- Drag & drop (same scene only) ---
 const dragShotId = ref<string | null>(null)
@@ -527,19 +513,6 @@ async function handlePromptsSaved(shot: Shot) {
   await loadSceneShots(shot.scene_id, shot.episode)
 }
 
-// --- 依赖影响 → 镜头卡片常驻标记（Phase 3 / 7，只读） ---
-// 卡三「检查依赖影响」手动触发后，把待处理清单派生为 shotId → 状态映射，
-// 受影响镜头在缩略图左上角常驻警示角标，直到下次检查结果更新或刷新页面。
-// 保持与后端只读策略一致：只提示、不推断依赖、不提供自动重做入口。
-const shotImpactByShotId = ref<Map<string, DependencyChangeStatus>>(new Map())
-function handleImpactLoaded(data: DependencyProjectImpactPreview) {
-  shotImpactByShotId.value = buildShotImpactMap(data)
-}
-function shotImpactLabel(shotId: string): string {
-  const status = shotImpactByShotId.value.get(shotId)
-  return (status && IMPACT_SHOT_LABEL[status]) || ''
-}
-
 // --- 工作流版本影响（Phase 3 / 6.5，只读） ---
 // 已生成任务使用的工作流版本落后于当前版本（或工作流已停用）时，
 // 在镜头缩略图左下角提示；只提示、不自动重做，重做仍走既有生成入口。
@@ -572,30 +545,10 @@ function workflowImpactLabel(shotId: string): string {
   return `${name}：v${item.job_workflow_version} → ${current}（${WORKFLOW_IMPACT_LABEL[item.change_status]}）`
 }
 
-// --- 按依赖状态筛选镜头（Phase 3 / 7，纯前端只读） ---
-// 数据只来自卡三最近一次「检查依赖影响」，没有检查结果时不显示筛选条，
-// 也不在本地推断依赖；筛选只影响看板显示，不改选中集合与任何后端状态。
-const impactFilter = ref<'all' | 'affected'>('all')
-const impactFilterActive = computed(() => shotImpactByShotId.value.size > 0)
-const affectedShotCount = computed(
-  () => allShots.value.filter((s) => shotImpactByShotId.value.has(s.id)).length,
-)
-const displayScenes = computed(() => {
-  if (impactFilter.value === 'all') return filteredScenes.value
-  return filteredScenes.value.filter((scene) => {
-    if (loadingShots.value[scene.id]) return true
-    return (shotsMap.value[scene.id] || []).some((s) => shotImpactByShotId.value.has(s.id))
-  })
-})
-function visibleShots(sceneId: string): Shot[] {
-  const shots = shotsMap.value[sceneId] || []
-  if (impactFilter.value === 'all') return shots
-  return shots.filter((s) => shotImpactByShotId.value.has(s.id))
+/** 读取某场次已加载的镜头列表（缓存未命中时返回空数组） */
+function sceneShots(sceneId: string): Shot[] {
+  return shotsMap.value[sceneId] || []
 }
-// 新一轮检查若已无受影响镜头，自动回到「全部镜头」，避免看板空白被误读为没有镜头
-watch(impactFilterActive, (active) => {
-  if (!active && impactFilter.value === 'affected') impactFilter.value = 'all'
-})
 
 /** 详情里提交生成任务后：刷新列表与任务，并启动进度轮询 */
 function handleDetailSubmitted() {
@@ -895,22 +848,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       </template>
     </StageCard>
 
-    <!-- 卡三：依赖影响（只读）。放在批量出视频之后：
-         它回答「已经产出的东西是否因上游变化需要重做」，
-         属于批量生成前的核对信息，而不是执行进度本身。 -->
-    <StageCard label="依赖影响">
-      <DependencyImpactOverview :project-id="projectId" @loaded="handleImpactLoaded" />
-    </StageCard>
-
-    <!-- 卡四：分镜规划导入（Phase 2）。校验只读；写入为显式安全 upsert，
-         不覆盖锁定镜头、不删除旧镜头、不触发生成。 -->
-    <StageCard label="分镜规划">
-      <n-button secondary @click="planDialogVisible = true">导入规划 JSON</n-button>
-      <template #meta>
-        <span class="gen-state">校验只读；写入不覆盖锁定镜头、不删除旧镜头、不触发生成</span>
-      </template>
-    </StageCard>
-
     <!-- Loading -->
     <n-spin v-if="scenesQuery.isLoading.value" class="page-loading" />
 
@@ -929,27 +866,14 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 
     <!-- Scenes -->
     <div v-else class="scenes-container">
-      <!-- 依赖影响筛选：仅在有检查结果时出现，避免常驻无效控件 -->
-      <div v-if="impactFilterActive" class="impact-filter-bar">
-        <span class="impact-filter-label">依赖影响</span>
-        <n-radio-group v-model:value="impactFilter" size="small">
-          <n-radio value="all">全部镜头</n-radio>
-          <n-radio value="affected">仅受影响（{{ affectedShotCount }}）</n-radio>
-        </n-radio-group>
-        <span class="impact-filter-hint">来自卡三最近一次检查结果，仅影响显示</span>
-      </div>
-
-      <div v-for="scene in displayScenes" :key="scene.id" class="scene-group">
+      <div v-for="scene in filteredScenes" :key="scene.id" class="scene-group">
         <div class="scene-header">
           <span class="scene-seq">#{{ scene.seq }}</span>
           <span class="scene-title">{{ scene.title }}</span>
           <n-tag v-if="scene.episodes?.length" size="tiny" round>
             第 {{ scene.episodes.join(', ') }} 集
           </n-tag>
-          <span v-if="impactFilter === 'affected'" class="shot-count">
-            {{ visibleShots(scene.id).length }} / {{ scene.shot_count ?? 0 }} 镜头
-          </span>
-          <span v-else class="shot-count">{{ scene.shot_count ?? 0 }} 镜头</span>
+          <span class="shot-count">{{ scene.shot_count ?? 0 }} 镜头</span>
         </div>
 
         <div
@@ -967,7 +891,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
           <n-spin v-if="loadingShots[scene.id]" size="small" />
           <template v-else>
             <div
-              v-for="shot in visibleShots(scene.id)"
+              v-for="shot in sceneShots(scene.id)"
               :key="shot.id"
               class="shot-card-wrapper"
               draggable="true"
@@ -993,13 +917,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
                   <div v-else class="thumb-placeholder">
                     <span>{{ shotKindLabels[shot.shot_kind] }}</span>
                   </div>
-                  <!-- 依赖影响角标（只读提示）：来自卡三「检查依赖影响」结果，点击卡片打开详情可查看影响面板 -->
-                  <div
-                    v-if="shotImpactByShotId.has(shot.id)"
-                    class="impact-badge"
-                    :class="`is-${shotImpactByShotId.get(shot.id)}`"
-                    :title="shotImpactLabel(shot.id)"
-                  >!</div>
                   <!-- 工作流版本影响角标（只读提示）：执行时版本落后或工作流已停用 -->
                   <div
                     v-if="workflowImpactByShot.has(shot.id)"
@@ -1056,12 +973,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
       @submitted="handleDetailSubmitted"
       @prompts-saved="handlePromptsSaved"
       @rebase="handleRebase"
-    />
-    <!-- 分镜规划导入：粘贴 JSON → 校验预览 → 显式写入 -->
-    <StoryboardPlanImportDialog
-      v-model:show="planDialogVisible"
-      :project-id="projectId"
-      @applied="refreshStoryboard"
     />
     <!-- 批量出视频方式选择弹窗：独立并行（不依赖上一镜尾帧）/ 链式串行（逐镜衔接） -->
     <n-modal
@@ -1167,24 +1078,6 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
 }
 .scene-group {
   background: transparent;
-}
-.impact-filter-bar {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--bg-panel);
-}
-.impact-filter-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-.impact-filter-hint {
-  font-size: 11px;
-  color: var(--text-tertiary);
 }
 .scene-header {
   display: flex;
@@ -1355,30 +1248,7 @@ async function submitClipsByPlans(picked: Shot[], mode: 'independent' | 'chained
   color: var(--text-on-brand);
   white-space: nowrap;
 }
-/* 依赖影响角标：缩略图左上角常驻，区别于右下角的生产状态徽章。
-   位置避开左上角的选择框（.shot-check 挂在卡片层，z-index 更低不会重叠）。 */
-.impact-badge {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  z-index: 2;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--text-on-brand);
-  background: var(--state-warning);
-  cursor: help;
-}
-.impact-badge.is-redo_required {
-  background: var(--state-danger);
-}
-/* 工作流版本影响角标：缩略图左下角，文字型提示，避免与左上依赖角标和右下状态徽章重叠 */
+/* 工作流版本影响角标：缩略图左下角，文字型提示，避开左上角选择框与右下角状态徽章 */
 .workflow-badge {
   position: absolute;
   left: 6px;
