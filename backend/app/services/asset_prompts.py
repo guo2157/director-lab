@@ -73,24 +73,7 @@ def _require_identity(*values: str, asset_label: str) -> None:
             f"{asset_label}的名称、外观描述与简介均为空，无法构建资产图提示词"
         )
 
-# 角色资产负面约束（第八节模板）
-CHARACTER_NEGATIVE = (
-    "第二个人物、重复角色、人物剪影、镜中人物、背景人物、额外肢体、"
-    "身体结构错误、裁切主体、杂乱背景、无关物品、手持无关道具、文字、"
-    "水印、边框、拼贴、多视图、风格混杂、模糊、严重变形"
-)
-
-# 场景资产负面约束
-SCENE_NEGATIVE = (
-    "人物、动物、人物剪影、人体局部、无关道具、文字、水印、边框、"
-    "拼贴、多场景组合、重复建筑、空间结构错误、背景杂乱、严重模糊"
-)
-
-# 道具资产负面约束
-PROP_NEGATIVE = (
-    "多个重复物品、无关物品、人物、手部、杂乱背景、文字、水印、"
-    "边框、拼贴、结构变形、主体裁切、模糊"
-)
+# 历史 P1 负向词已收编至 prompt_compiler._LEGACY_NEGATIVE（P1-2 单一事实源），此处不再重复定义。
 
 
 def build_character_prompt(
@@ -151,9 +134,10 @@ def build_prop_prompt(
 
 
 def negative_for_asset_type(asset_type: str) -> str:
-    """按资产类型返回负面约束文本（供工作流声明 negative_prompt 槽位时注入）。"""
-    return {
-        "character": CHARACTER_NEGATIVE,
-        "scene": SCENE_NEGATIVE,
-        "prop": PROP_NEGATIVE,
-    }.get(asset_type, "")
+    """按资产类型返回负面约束文本（供工作流声明 negative_prompt 槽位时注入）。
+
+    P1-2 起委托给 prompt_compiler.negative_for：通用层 + 类型层 + 历史层合并去重，
+    与编译器链路输出一致；函数内惰性导入避免与 prompt_compiler 循环依赖。
+    """
+    from app.services.prompt_compiler import negative_for
+    return negative_for(asset_type)

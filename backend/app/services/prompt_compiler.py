@@ -113,10 +113,24 @@ _NEGATIVE_BY_TYPE = {
     "clip": VIDEO_NEGATIVE,
 }
 
+# ── 历史 P1 负向词层（原 asset_prompts 内联定义，P1-2 收编为单一事实源）──
+_LEGACY_CHARACTER_NEGATIVE = (
+    "第二个人物、重复角色、人物剪影、镜中人物、背景人物、额外肢体、"
+    "身体结构错误、裁切主体、杂乱背景、无关物品、手持无关道具、文字、"
+    "水印、边框、拼贴、多视图、风格混杂、模糊、严重变形"
+)
+_LEGACY_SCENE_NEGATIVE = (
+    "人物、动物、人物剪影、人体局部、无关道具、文字、水印、边框、"
+    "拼贴、多场景组合、重复建筑、空间结构错误、背景杂乱、严重模糊"
+)
+_LEGACY_PROP_NEGATIVE = (
+    "多个重复物品、无关物品、人物、手部、杂乱背景、文字、水印、"
+    "边框、拼贴、结构变形、主体裁切、模糊"
+)
 _LEGACY_NEGATIVE = {
-    "character": asset_prompts.CHARACTER_NEGATIVE,
-    "scene": asset_prompts.SCENE_NEGATIVE,
-    "prop": asset_prompts.PROP_NEGATIVE,
+    "character": _LEGACY_CHARACTER_NEGATIVE,
+    "scene": _LEGACY_SCENE_NEGATIVE,
+    "prop": _LEGACY_PROP_NEGATIVE,
 }
 
 # ── 提示词模板（外置文件缺失时使用；docs/prompts 下保持同名同内容）──────
