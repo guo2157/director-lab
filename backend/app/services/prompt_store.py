@@ -19,6 +19,9 @@ PROMPT_DIR = Path(__file__).resolve().parents[2] / "workspace" / "prompts"
 # 内置默认提示词（与 workspace 文件缺失时的回退值保持一致）
 DEFAULT_PROMPTS: dict[str, str] = {}
 
+# 集中注册状态：惰性注册会导致提示词列表/编辑端点行为依赖模块导入时机（P0-4 修复）
+_registered = False
+
 
 def _register_default(name: str, content: str) -> str:
     """注册内置默认提示词（由定义模块在 import 时调用）。"""
@@ -26,8 +29,28 @@ def _register_default(name: str, content: str) -> str:
     return content
 
 
+def ensure_registered() -> None:
+    """集中注册全部内置默认模板，保证行为与模块导入顺序无关。
+
+    惰性导入注册模块（函数内导入避免循环依赖；幂等，重复调用无副作用）。
+    """
+    global _registered
+    if _registered:
+        return
+    from app.services import (  # noqa: F401
+        asset_prompts,
+        prompt_compiler,
+        scene_plate,
+        script_evaluation,
+        script_parse,
+        script_writing,
+    )
+    _registered = True
+
+
 def list_prompts() -> list[dict]:
     """列出全部提示词：名称、是否已外置、内容哈希前 8 位。"""
+    ensure_registered()
     import hashlib
 
     result = []
@@ -49,6 +72,7 @@ def list_prompts() -> list[dict]:
 
 def get_prompt(name: str) -> str:
     """读取提示词：外置文件优先，缺失回退内置默认值。"""
+    ensure_registered()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise ValueError(f"非法提示词名: {name}")
     path = PROMPT_DIR / f"{name}.md"
@@ -61,6 +85,7 @@ def get_prompt(name: str) -> str:
 
 def write_prompt(name: str, content: str) -> dict:
     """写入提示词文件（创建或覆盖），写入前备份当前版本。"""
+    ensure_registered()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise ValueError(f"非法提示词名: {name}")
     if name not in DEFAULT_PROMPTS:
@@ -82,6 +107,7 @@ def write_prompt(name: str, content: str) -> dict:
 
 def reset_prompt(name: str) -> dict:
     """重置提示词为内置默认值（删除外置文件）。"""
+    ensure_registered()
     if name not in DEFAULT_PROMPTS:
         raise FileNotFoundError(f"提示词不存在: {name}")
     path = PROMPT_DIR / f"{name}.md"
