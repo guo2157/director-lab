@@ -117,7 +117,9 @@
 
 两个分段方案的精确文本已保存至 docs/prompt-audit/reference/p33_*_segmented.txt，各含 UUID 锚点供 A/B 比对时引用。
 
-仍未做：实际修改 prompt_compiler.py / agent.py / voice_matching.py 中的模板定义。分段换行增加了 20+ 个换行符，这些字符会进入模型的 token 序列，按 H-8 必须在 A/B 基线就绪后执行，不能只凭字符级等价就声称无影响。
+代码修改已完成（2026-11-25，提交 d644bc6）：agent.py 的 _DIRECTOR_SYSTEM_PROMPT（940 字符 1 行 → 22 行）与 voice_matching.py 的 _VOICE_PROFILE_SYSTEM（482 字符 1 行 → 6 行）已按 reference 目录分段方案完成语义换行。验证：get_prompt 返回文本去换行后与修改前逐字符一致（flat_diff=+0），133 项提示词专项测试全部通过（17.05s）。
+
+仍未做：分段换行增加了 20+ 个换行符，这些字符会进入模型的 token 序列，按 H-8 必须在 A/B 基线就绪后执行，不能只凭字符级等价就声称无影响。
 
 ### P3-4 compile_shot_video 占位符守护强化（对应 02 的 Q-04）
 
