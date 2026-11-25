@@ -356,6 +356,32 @@ class TestF_ImageIssuesDetected:
         result = apply_keyframe_image_qc(db, shot, "prompt", png_path)
         assert any(i.code == "vision_qc_issue" for i in result.issues)
 
+    def test_vision_issue_type_description_fields(self, ctx, png_path, monkeypatch):
+        """vision 用 type/description 而非 code/message 时也要能解析出内容。
+
+        真实供应商（实测 custom 网关多模态模型）会按自己的习惯返回
+        type/description，只认 code/message 会把告警解析成空消息，
+        前端看到一条无名 issue 等于没告警。此处锁死双向兼容。
+        """
+        db = ctx["db"]
+        shot = db.get(Shot, ctx["shot_id"])
+
+        _patch_prompt_qc_ok(monkeypatch)
+        _patch_refs(monkeypatch, _refs_available())
+        _patch_vision(monkeypatch, {
+            "issues": [
+                {"type": "blank_image", "description": "图像全白，没有可见内容"},
+            ],
+        })
+
+        from app.services.keyframe_image_qc import apply_keyframe_image_qc
+
+        result = apply_keyframe_image_qc(db, shot, "prompt", png_path)
+        vision_issues = [i for i in result.issues if i.entity_type == "keyframe"]
+        assert len(vision_issues) == 1, f"实际 {[i.code for i in result.issues]}"
+        assert vision_issues[0].code == "blank_image"
+        assert vision_issues[0].message == "图像全白，没有可见内容"
+
 
 # ══════════════════════════════════════════════════════════════════════
 # G. 无参考图
@@ -571,6 +597,9 @@ class TestIntegration:
                 llm_base_url="https://api.example.com/v1",
                 llm_api_key="sk-test",
                 llm_model="vision-model",
+                # 必须显式声明：MagicMock 的属性默认是 truthy 的 Mock 对象，
+                # 不写会让 render_mock 守卫误判为开启并直接返回 None。
+                render_mock=False,
             ),
         )
 
@@ -611,6 +640,7 @@ class TestIntegration:
                 llm_base_url="https://api.example.com/v1",
                 llm_api_key="sk-test",
                 llm_model="m",
+                render_mock=False,  # 同上：确保本用例校验的是 provider 判定分支
             ),
         )
 

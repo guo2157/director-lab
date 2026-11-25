@@ -92,12 +92,23 @@ def _workflow(client: TestClient, name: str, wf_type: str, definition: dict) -> 
 
 @pytest.fixture()
 def mock_render(monkeypatch, tmp_path):
-    """mock 渲染必须落在临时 media_dir，禁止写真实 backend/data/media。"""
+    """mock 渲染必须落在临时 media_dir，禁止写真实 backend/data/media。
+
+    同时要把 keyframe_image_qc 的 get_settings 也 patch 掉：它从
+    app.core.config 直接导入，不共享 executor 模块的同名引用。
+    否则 render_mock 守卫读到的仍是真实配置（tests/conftest.py 强制
+    DLAB_RENDER_MOCK=false），占位图会被送去真实多模态评图，
+    单个用例挂起 150s 以上（实测 6 个用例总耗时 153.88s）。
+    """
+    import app.services.keyframe_image_qc as qc_mod
     import app.worker.executor as ex_mod
     from app.core.config import Settings
-    monkeypatch.setattr(
-        ex_mod, "get_settings", lambda: Settings(render_mock=True, media_dir=tmp_path / "media")
-    )
+
+    def _settings():
+        return Settings(render_mock=True, media_dir=tmp_path / "media")
+
+    monkeypatch.setattr(ex_mod, "get_settings", _settings)
+    monkeypatch.setattr(qc_mod, "get_settings", _settings)
 
 
 def test_clip_blocked_without_keyframe(client: TestClient, mock_render):

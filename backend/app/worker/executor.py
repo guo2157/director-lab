@@ -1708,6 +1708,15 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
                 _fail_job(db, job, e.code, e.message)
                 return {"ok": False, "reason": e.code}
 
+        # 兼容历史 Windows 落库的反斜杠路径（data\media\x.png）：
+        # stored_path 统一归一为正斜杠；否则 Linux 上 open 会按字面反斜杠解析并报 ENOENT，
+        # 所有参考图上传都会退化为 comfy_execution_error（本机 136 个资产均为该形态）。
+        # 注意：本函数后段存在同名局部变量 stored_path（产物落盘 Path），
+        # 直接引用模块级同名函数会触发 UnboundLocalError，故用别名局部导入。
+        from app.core.config import stored_path as _norm_stored_path
+        media_files = {
+            _k: (str(_norm_stored_path(_v)) if _v else _v) for _k, _v in media_files.items()
+        }
         # 1. 上传媒体（事务外；Mock 模式跳过）
         uploaded = {}
         if not settings.render_mock:

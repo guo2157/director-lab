@@ -37,6 +37,50 @@ def _bypass_runtime_config_check(monkeypatch):
     monkeypatch.setattr(projects_mod, "_check_runtime_config", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _block_real_vision_qc(monkeypatch):
+    """测试套件内禁止发起真实多模态评图请求。
+
+    背景（2026-11-25 实测）：走过 executor 关键帧成功路径的用例会触发
+    ``apply_keyframe_image_qc``，它用 ``app.core.config.get_settings()`` 读真实
+    配置（本文件强制 DLAB_RENDER_MOCK=false），于是把 mock 渲染出的占位图
+    送去真实 vision 接口。表现是用例不报错但挂起 100s 以上直到超时，
+    曾导致整组回归卡死、只能 SIGINT 中断。
+
+    这里只把 ``keyframe_image_qc`` 模块内的 get_settings 指向 render_mock=True，
+    让 ``_call_vision_qc`` 走既有守卫直接返回 None（降级为 vision_qc_unavailable
+    告警）。需要校验真实 vision 逻辑的用例自带 monkeypatch，会覆盖本夹具。
+    """
+    import app.services.keyframe_image_qc as qc_mod
+    from app.core.config import Settings
+
+    monkeypatch.setattr(qc_mod, "get_settings", lambda: Settings(render_mock=True))
+
+
+@pytest.fixture(autouse=True)
+def _block_real_scene_plate_llm(monkeypatch):
+    """测试套件内禁止场景板编译发起真实 LLM 请求。
+
+    背景（2026-11-25 实测）：``build_asset_plans`` 会为每个场景调用
+    ``compile_scene_plate``，后者命中不到 plate_text 缓存时直接
+    ``LLMClient().chat_json``。测试库里的场景都是新建的、没有 plate_text，
+    于是每个用例都要等真实 LLM 往返 + 失败重试，单个用例耗时约 37 秒，
+    4 个槽位用例累计 110 秒以上，表现为「回归卡住」。
+
+    这里让 ``_call_llm`` 直接抛 LLMError，走既有的规则兜底分支
+    （persist_fallback=False → source=rules_transient），与「LLM 未配置」
+    的生产行为一致。专门校验场景板 LLM 行为的用例（test_asset_prompt_hardening
+    / test_pipeline_e2e）自己会 monkeypatch ``_call_llm``，覆盖本夹具。
+    """
+    import app.services.scene_plate as plate_mod
+    from app.integrations.llm import LLMError
+
+    def _no_llm(*args, **kwargs):
+        raise LLMError("llm_unconfigured", "测试环境不发起真实场景板 LLM 请求")
+
+    monkeypatch.setattr(plate_mod, "_call_llm", _no_llm)
+
+
 def seed_scene_baseline_asset(db, scene, media_dir) -> str:
     """为场景构造真实基准图资产（D-23 资产就绪门禁通过所需）。
 

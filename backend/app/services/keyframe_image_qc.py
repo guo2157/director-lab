@@ -97,8 +97,15 @@ def _run_prompt_qc(db: Session, shot: Shot, prompt: str) -> tuple[bool, list[Key
 
 
 def _image_to_data_uri(file_path: str) -> str | None:
-    """将本地图片文件转为 data URI。"""
-    path = Path(file_path)
+    """将本地图片文件转为 data URI。
+
+    路径统一经 stored_path 归一化：历史资产 file_path 为 Windows 反斜杠形态
+    （data\\media\\x.png），Linux 上 Path 不把反斜杠当分隔符，直接 exists() 恒为 False，
+    会让参考图被全部丢弃、图像级质检静默降级成 reference_images_missing。
+    """
+    from app.core.config import stored_path
+
+    path = stored_path(file_path)
     if not path.exists():
         return None
     try:
@@ -195,6 +202,12 @@ def _call_vision_qc(
 ) -> dict | None:
     """调用多模态 LLM 评图，返回解析后的 JSON dict 或 None。"""
     settings = get_settings()
+
+    # mock 渲染产出的只是占位图，送去评图既无意义，又会白跑一次真实 LLM 请求
+    # （实测：render_mock 的用例会卡在真实 vision 请求上直到超时 99s）。
+    if getattr(settings, "render_mock", False):
+        logger.info("vision QC skipped: render_mock enabled")
+        return None
 
     # 检查 vision 可用性：provider 已配置且模型支持多模态
     provider = (settings.llm_provider or "").strip()
@@ -296,9 +309,14 @@ def _run_image_qc(
     if isinstance(result, dict):
         for item in result.get("issues") or []:
             if isinstance(item, dict):
+                # 字段兼容：提示词约定 code/message，但真实供应商（实测 deepseek 网关）
+                # 会返回 type/description。只认 code/message 会把告警解析成空消息，
+                # 前端看到一条无名 issue 等于没告警，因此两种写法都要接。
+                code = item.get("code") or item.get("type") or "vision_qc_issue"
+                message = item.get("message") or item.get("description") or ""
                 issues.append(KeyframeQCIssue(
-                    code=item.get("code", "vision_qc_issue"),
-                    message=item.get("message", ""),
+                    code=code,
+                    message=message,
                     severity="warn",
                     entity_id=shot.id,
                     entity_type="keyframe",
