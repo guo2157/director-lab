@@ -231,8 +231,10 @@ def _call_vision_qc(
     try:
         from app.integrations.llm import LLMClient
         client = LLMClient(base_url=base_url, api_key=api_key, model=settings.llm_model)
-        result = client.chat_messages(messages, json_mode=True, temperature=0.0,
-                                      max_tokens=4096, timeout_seconds=120.0)
+        # chat_messages 仅支持 json_mode / max_tokens（temperature 固定 0.3，
+        # 超时由 LLMClient 构造函数 timeout 控制）。此前传 temperature/timeout_seconds
+        # 会抛 TypeError 并被下方 except 吞掉，导致图像级质检从未真正执行。
+        result = client.chat_messages(messages, json_mode=True, max_tokens=4096)
         text = ""
         if isinstance(result, dict):
             text = result.get("content") or result.get("message") or ""

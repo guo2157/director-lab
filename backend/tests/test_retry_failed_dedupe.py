@@ -61,21 +61,27 @@ def _seed(session_factory, shot_id: str, attempts: int, jid: str, status: str = 
             )
             db.commit()
         if db.get(Shot, shot_id) is None:
-            # seq 在 (scene_id, episode) 内唯一：按已有镜头数顺延，避免不同镜头撞号
-            used = (
-                db.query(Shot)
-                .filter(Shot.scene_id == "scn_retrytest", Shot.episode == 1)
-                .count()
-            )
+            # seq 在 (scene_id, episode) 内唯一：数字后缀直接取用，其余（如 sht_x / sht_y）
+            # 按场景内已有镜头数顺延，避免都落到 seq=1 撞 uq_shot_scene_episode_seq。
+            suffix = shot_id.rsplit("_", 1)[-1]
+            if suffix.isdigit():
+                seq = int(suffix)
+            else:
+                seq = (
+                    db.query(Shot)
+                    .filter(Shot.scene_id == "scn_retrytest", Shot.episode == 1)
+                    .count()
+                    + 1
+                )
             db.add(
                 Shot(
                     id=shot_id,
                     scene_id="scn_retrytest",
                     episode=1,
-                    seq=used + 1,
+                    seq=seq,
                     # shot_kind / duration 为 NOT NULL 且无默认值，建行时必须显式给值
                     shot_kind="visual",
-                    duration=5,
+                    duration=3,
                 )
             )
             db.commit()

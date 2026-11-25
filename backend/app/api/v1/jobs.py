@@ -319,25 +319,31 @@ def retry_failed_jobs(project_id: str, payload: dict, db: Session = Depends(get_
             inflight.add(key)
         retried.append({"source_job_id": j.id, "new_job_id": new_job.id})
     # 已达上限的失败任务单独列出（前端提示不可重试原因）
-    capped = (
-        db.query(Job)
-        .filter(
-            Job.project_id == project_id,
-            Job.status.in_(["failed", "lost"]),
-            Job.attempts >= settings.job_max_attempts,
-        )
-        .all()
+    capped_q = db.query(Job).filter(
+        Job.project_id == project_id,
+        Job.status.in_(["failed", "lost"]),
+        Job.attempts >= settings.job_max_attempts,
     )
+    if job_ids:
+        # 与主查询保持一致：显式指定 job_ids 时，capped 明细也只统计这些任务
+        capped_q = capped_q.filter(Job.id.in_(job_ids))
+    capped = capped_q.all()
     capped_ids = [j.id for j in capped]
+    for j in capped:
+        # 已达重试上限的失败任务对调用方而言同样是「跳过」，计入 skipped 并标注原因，
+        # 否则 skipped_count 会漏掉这部分，前端与测试都无法感知不可重试任务。
+        skipped.append({"source_job_id": j.id, "reason": "attempts_capped"})
     db.commit()
     return {
         "retried": retried,
         "retried_count": len(retried),
-        # skipped_capped 只放「已达重试上限」的任务 ID；skipped_count 是全部跳过数
-        # （在途/批内重复 + 已达上限），与 D-14「已达上限的单独返回」口径一致。
+        # skipped_capped 只放「已达重试上限」的任务 ID（保持 D-14「已达上限单独返回」口径）；
+        # skipped 是全部跳过明细（在途 / 批内重复 / attempts_capped），
+        # 因此 skipped_count 直接取 len(skipped) 即可覆盖两类跳过，不再额外累加 capped。
         "skipped_capped": capped_ids,
         "skipped": skipped,
-        "skipped_count": len(skipped) + len(capped_ids),
+        "skipped_count": len(skipped),
+        "capped_job_ids": capped_ids,
     }
 
 
