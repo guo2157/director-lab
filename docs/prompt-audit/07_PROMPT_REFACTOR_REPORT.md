@@ -140,17 +140,17 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 
 | 优先级 | 事项 | 前置条件 |
 | --- | --- | --- |
-| 高 | P3-6 提交粒度纪律（禁止 git add -A） | 无 |
-| 中 | P3-5 视频双模板同步守护（纯测试） | 无 |
-| 中 | P3-4 compile_shot_video 占位符 mapping 覆盖测试（纯测试） | 无 |
-| 中 | P3-1 方案 2：create/expand 公共段一致性测试 | 无 |
-| 中 | 静态源码断言测试（inspect.getsource）改为行为断言 | 无 |
+| 高 | P3-6 提交粒度纪律（禁止 git add -A） | 已在本周期执行，五次单文件提交均合规 |
+| 中 | P3-5 视频双模板同步守护（纯测试） | 已完成（2d0daf2），5 项 + 3 项反向验证 |
+| 中 | P3-4 compile_shot_video 占位符 mapping 覆盖测试（纯测试） | 已完成（62a1527），6 项 + 3 项反向验证 |
+| 中 | P3-1 方案 2：create/expand 公共段一致性测试 | 已完成（a95ee66），6 项 + 3 项反向验证 |
+| 中 | 静态源码断言测试（inspect.getsource）改为行为断言 | 已完成（3626277），改 AST 结构检查 + 2 项反向验证 |
 | 待定 | P3-1 方案 1 / P3-2 历史负向词清理 / P3-3 单行模板格式化 | 必须先在 06 文档的 A/B 基线就绪 |
 | 待定 | 10 类剧本回归实跑（S-01 至 S-10） | 需要真实 LLM 与生成资源 |
 
 ---
 
-## 三、变更清单（14 个提交）
+## 三、变更清单（20 个提交）
 
 | # | 提交 | 内容 | 类别 |
 | ---: | --- | --- | --- |
@@ -168,6 +168,12 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 | 12 | 0b61dc5 | 01 资产盘点清单 | P2 文档 |
 | 13 | 203f53a | 注册表模块 + content_hash 追溯 + 6 项测试 | P2 建设 |
 | 14 | 3a3ccf4 | 修正 data URI 断言为 JPEG | 测试修正 |
+| 15 | 2d0daf2 | P3-5 视频首镜/续镜模板同步演进守护（5 项） | P3 测试 |
+| 16 | 62a1527 | P3-4 编译模板占位符与映射覆盖守护（6 项） | P3 测试 |
+| 17 | a95ee66 | P3-1 剧本创作/扩写公共规范一致性守护（6 项） | P3 测试 |
+| 18 | a77a984 | 06 基线同步（133 项专项、1428 收集、反向验证） | P3 文档 |
+| 19 | 3626277 | R-05 静态源码断言改用 AST 结构检查 | 测试加固 |
+| 20 | 9db7c25 | 05 计划执行进展同步 | P3 文档 |
 
 代码资产变更统计（累计）：
 
@@ -191,8 +197,11 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 | 占位符与声明一致 | test_template_input_vars_match_actual_placeholders | 通过 |
 | 指纹随模板变更 | test_content_hash_tracks_template_change | 通过 |
 | 快照形状 | test_registry_snapshot_shape | 通过 |
-| 提示词专项回归 | 10 个测试文件 116 项 | 全部通过 |
-| 全量回归 | pytest tests（1411 收集） | 1410 通过 + 1 环境性失败（已定性，见 06 文档 3.2） |
+| 提示词专项回归 | 13 个测试文件 133 项 | 全部通过（16.04s） |
+| 全量回归（本轮两次） | pytest tests（1411 收集时点） | 1410 通过 + 1 环境性失败（已定性，见 06 文档 3.2） |
+| 全量收集（守护测试落地后） | pytest tests --collect-only | 1428 项（另有 4 项来自外部会话未跟踪文件，不计入本轮） |
+| 三项守护测试反向验证 | 注入 9 种模拟漂移 | 9/9 全部被捕获，非永远通过 |
+| R-05 AST 改造反向验证 | 正常结构 + 2 种漂移 | 正常通过、2 种漂移均被捕获 |
 | 调用图 | 29 处调用点 + 2 处动态派发直读 | 27/27 有调用方 |
 | 冲突扫描 | 351 对相似度比较 + diff | 0 真实冲突 |
 
@@ -206,7 +215,7 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 | R-02 | dc89ed7 同样混入范围外文件（存储测试、任务认领改动） | 流程问题 | 同上 |
 | R-03 | 工作区存在外部会话遗留的 executor.py / prompt_qc.py 等未提交改动 | 环境问题 | 非本轮范围，需由对应负责人单独提交 |
 | R-04 | 生成质量指标未实测 | 验证缺口 | 执行 06 文档的 10 类剧本回归 |
-| R-05 | inspect.getsource 类静态断言测试对并发写入敏感 | 测试健壮性 | 改为行为断言（已列入 Q13） |
+| R-05 | inspect.getsource 类静态断言测试对并发写入敏感 | 测试健壮性 | 已修复（3626277）：改用 ast.parse 直读磁盘，不依赖行号缓存；正向 5 项通过，反向 2 种漂移均被捕获 |
 | R-06 | script_create/expand 结构重复未治理 | 可维护性 | 待 A/B 基线后执行 P3-1 |
 
 ---
@@ -219,9 +228,9 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 | 02_PROMPT_QUALITY_AUDIT.md | 质量审计（27 模板全量指标与问题定性 Q-01~Q-07） | 132 |
 | 03_PROMPT_CONFLICT_MATRIX.md | 冲突矩阵（351 对扫描，C-01~C-06，0 真实冲突） | 162 |
 | 04_PROMPT_CALL_GRAPH.md | 调用图（29 调用点、2 动态派发、27 模板覆盖表） | 205 |
-| 05_PROMPT_REFACTOR_PLAN.md | 重构计划（P3-1~P3-6，含风险与回滚） | 176 |
-| 06_PROMPT_TEST_BASELINE.md | 测试基线（全量记录、116 项专项、A/B 设计） | 154 |
-| 07_PROMPT_REFACTOR_REPORT.md | 本报告（13 问回答） | 243 |
+| 05_PROMPT_REFACTOR_PLAN.md | 重构计划（P3-1~P3-6，含风险与回滚、执行进展） | 188 |
+| 06_PROMPT_TEST_BASELINE.md | 测试基线（全量记录、133 项专项、A/B 设计、反向验证） | 197 |
+| 07_PROMPT_REFACTOR_REPORT.md | 本报告（13 问回答、P3 执行结果、反向验证） | 252 |
 
 ---
 
