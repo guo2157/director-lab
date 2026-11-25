@@ -169,6 +169,12 @@ def update_session(
             from app.services import context_manager
 
             context_manager.clear_on_project_switch(s)
+            # P0-1 项目切换摘要隔离（2026-11-25）：历史消息完整保留，
+            # 但旧项目摘要与摘要检查点重置——摘要无法按项目 scope 可靠分段时，
+            # 不将旧项目摘要注入新项目执行上下文（新项目事实经只读工具实时查询）
+            if s.summary or s.summary_upto_seq:
+                s.summary = None
+                s.summary_upto_seq = None
         s.project_id = payload.project_id
     # 显式传 null 表示清空会话级模型、回落到配置默认模型；未携带该字段则不变更
     if "model" in payload.model_fields_set:
@@ -483,32 +489,16 @@ def _try_create_generate_approval(
     from app.services.generate_intent import resolve_entity, resolve_shot, resolve_target
 
     if not session.project_id:
-        # 未关联项目时自动创建，避免用户需要手动到前端操作
-        from app.services.pipeline_tools import tool_create_project
-        import re as _re
-        # 尝试从消息中提取项目名称（如『生成一部科幻视频』→『科幻项目』）
-        m = _re.search(r'(?:生成|制作|做)(?:一部|个)?(.+?)(?:视频|短片|动画|影片)', text)
-        project_name = (m.group(1) + "项目") if m else "新项目"
-        try:
-            create_data = tool_create_project(
-                db,
-                name=project_name,
-                aspect_ratio="9:16",
-                creation_type="novel",
-            )
-        except Exception as e:
-            return (
-                f"自动创建项目失败：{e}。请先在右侧关联项目后再发起。",
-                None,
-            )
-        new_project_id = create_data["project_id"]
-        session.project_id = new_project_id
-        db.commit()
+        # P0-1 修复（2026-11-25）：移除『未关联项目时默认名自动创建项目』路径——
+        # 此前会以『新项目』为默认名、默认 9:16 画幅静默建项目并绑定会话，
+        # 违反『只有用户明确表达创建意图且项目名称明确时才创建正式项目』的规则。
+        # 现在如实说明阻塞原因，引导用户先创建或关联项目，不越权代建。
         return (
-            f"已为您自动创建项目『{project_name}』（画幅 9:16，项目 ID: {new_project_id}）。\n"
-            "项目已就绪，接下来请提供剧本内容，我会帮您保存并分析剧本，"
-            "然后就可以生成分镜图和视频了。",
-            {"ok": True, "auto_created_project": True, "project_id": new_project_id},
+            "当前会话还没有关联项目，暂时无法提交生成申请。\n"
+            "您可以：\n"
+            "1. 告诉我您想创建的项目名称，我帮您创建新项目（名称需您明确提供）；\n"
+            "2. 或在右侧把本会话关联到已有项目。",
+            {"ok": False, "error_code": "no_project", "requires_project": True},
         )
 
     # 实体目标优先：消息中给出明确的实体 ID（chr_/scn_/prp_）时按公共资产生成处理
@@ -1809,12 +1799,18 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
         # Parent Agent 任务状态流转（Phase 3）：本轮同步分支结束时按结果落终态
         if task is not None:
             if action == NextAction.GUIDE and approval_info:
-                # 生成请求落地为审批申请：成功则任务完成（后续由审批流接管），
+                # 生成请求落地为审批申请（P0 状态语义修复 2026-11-25）：
+                # 申请提交成功只代表『等待人工审批』，任务置 waiting_approval，
+                # 不再误标 completed（审批裁决/执行结果由 approvals 链路回写）；
                 # 提交失败则任务标 failed（摘要与事实一致，不虚报成功）
                 if approval_info.get("ok"):
-                    parent_agent.complete_task(db, task, "已创建生成审批申请，等待人工审批")
+                    parent_agent.transition_task(db, task, "waiting_approval", result_summary="已创建生成审批申请，等待人工审批")
                     if unified_task is not None:
-                        task_orchestrator.complete_task(db, unified_task, summary="已创建生成审批申请，等待人工审批")
+                        task_orchestrator.set_task_step(
+                            db, unified_task,
+                            step="waiting_approval",
+                            message="已创建生成审批申请，等待人工审批",
+                        )
                 else:
                     parent_agent.fail_task(db, task, str(reply)[:2000])
                     if unified_task is not None:

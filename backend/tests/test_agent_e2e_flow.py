@@ -385,17 +385,36 @@ def test_e2e_stage_gate_blocks_early_generate(client, project_env):
 
 
 def test_e2e_no_project_session(client, project_env):
-    """未关联项目的会话：生成请求自动创建项目并引导下一步。"""
+    """未关联项目的会话（P0-1 修复 2026-11-25）：生成请求不再自动创建项目，
+    而是如实说明阻塞原因并引导用户创建或关联项目——禁止默认名静默建项目。"""
+    # 记录聊天前项目数（project_env 夹具可能已建项目），验证聊天后项目数不增
+    import app.core.database as db_mod
+    from app.models import Project
+    session = db_mod.SessionLocal()
+    try:
+        count_before = session.query(Project).count()
+    finally:
+        session.close()
     sid = _make_session(client)
     resp = _chat(client, sid, "为第 1 镜生成关键帧")
     assistant = resp["assistant_message"]
     payload = assistant.get("payload") or {}
     approval = payload.get("approval")
-    # 自动创建项目后返回引导消息，approval 字段携带 auto_created_project 标记
+    # 不再自动创建项目：approval 标记 no_project，引导用户明确操作
     assert approval is not None
-    assert approval.get("auto_created_project") is True
-    assert approval.get("project_id", "").startswith("prj_")
-    assert "已为您自动创建项目" in assistant["content"]
+    assert approval.get("ok") is False
+    assert approval.get("error_code") == "no_project"
+    assert approval.get("requires_project") is True
+    assert "还没有关联项目" in assistant["content"]
+    # 验证未创建任何新项目记录（聊天前后项目数不变）
+    session = db_mod.SessionLocal()
+    try:
+        count_after = session.query(Project).count()
+        assert count_after == count_before, (
+            f"无项目会话不应自动创建项目，聊天前 {count_before} 个，聊天后 {count_after} 个"
+        )
+    finally:
+        session.close()
 
 
 def test_e2e_foreign_entity_rejected(client, project_env):

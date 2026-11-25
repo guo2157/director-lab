@@ -38,6 +38,12 @@ _POSITION_TOKENS = (
     "画面左", "画面右", "左侧", "右侧", "左边", "右边", "偏左", "偏右", "居左", "居右",
     "中部", "中央", "正中", "前景", "背景", "上方", "下方", "角落", "边缘",
     "画左", "画右", "左上", "右上", "左下", "右下",
+    # 场景相对站位（2026-11-25 补）：真实提示词大量使用「位于收银台后方」「窗边」
+    # 「柜台后」这类以场景物件为锚点的位置描述，原词表只认画面相对方位（左/右/
+    # 中央），于是镜 9「林小满：位于收银台后方」被判「未给出站位」→ LLM 改写或
+    # 直接 409 阻断。实测该镜最终只画出 1 人（期望 2 人：林小满、陈默）。
+    "后方", "前方", "内侧", "外侧", "一侧", "深处", "近处", "中景", "远景", "后景",
+    "窗边", "门口", "入口", "台后", "柜台后", "收银台后", "吧台后", "桌后", "床侧",
 )
 
 _SECTION_RE = re.compile(
@@ -170,6 +176,29 @@ def _sentence_around(text: str, name: str) -> str:
     return ""
 
 
+def _position_sentences(text: str, name: str) -> list[str]:
+    """取所有提到该角色的句子（裸名或 @引用），剔除「参考资产」清单句。
+
+    原实现只认 ``@名称``，而站位句用的是裸名（「林小满：画面左侧中景，站在收银台
+    后方」），于是镜 7/9 明明写清了站位仍被判 ``character_position_missing``：
+    唯一命中的 ``@名称`` 句是提示词首行的「参考资产：@林小满 @陈默 @便利店」，
+    那里当然没有位置词。误判代价是触发一次 LLM 改写（白烧一次请求），改写失败则
+    409 阻断出图。
+    """
+    token = f"@{name}"
+    out: list[str] = []
+    for seg in re.split(r"[；;。\n]", text):
+        if not seg.strip():
+            continue
+        if token not in seg and name not in seg:
+            continue
+        # 参考资产清单行只声明注入了哪些图，不含画面站位
+        if "参考资产" in seg:
+            continue
+        out.append(seg)
+    return out
+
+
 def check_keyframe_prompt(db: Session, shot: Shot, prompt: str) -> list[dict[str, str]]:
     """确定性校验：道具锚定图缺失（硬错误）+ 多角色站位缺失（可修复问题）。"""
     issues: list[dict[str, str]] = []
@@ -198,8 +227,8 @@ def check_keyframe_prompt(db: Session, shot: Shot, prompt: str) -> list[dict[str
             if m:
                 target = prompt[m.end():]
             for name in used:
-                seg = _sentence_around(target or bounds_text, name)
-                if not seg or not any(tok in seg for tok in _POSITION_TOKENS):
+                segs = _position_sentences(target or bounds_text, name)
+                if not any(any(tok in seg for tok in _POSITION_TOKENS) for seg in segs):
                     issues.append(
                         {
                             "code": "character_position_missing",

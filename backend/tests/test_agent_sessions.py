@@ -72,9 +72,17 @@ def test_message_append_and_seq(client: TestClient):
         assert r.status_code == 201, r.text
         assert r.json()["seq"] == i + 1
 
+    # P0-4 API 输入安全（2026-11-25）：外部追加消息仅允许 user 角色；
+    # assistant/system/tool_event/approval 为服务端内部角色，客户端伪造应被 422 拒绝
     r = client.post(
         f"/api/agent/sessions/{sid}/messages",
         json={"role": "assistant", "content": "回复", "payload": {"tool": "none"}},
+    )
+    assert r.status_code == 422
+    # 再次以 user 角色追加，seq 应继续递增为 4
+    r = client.post(
+        f"/api/agent/sessions/{sid}/messages",
+        json={"role": "user", "content": "消息3"},
     )
     assert r.status_code == 201
     assert r.json()["seq"] == 4
@@ -263,3 +271,78 @@ def test_chat_asset_refs_gated_by_keywords(client: TestClient, monkeypatch):
     # tool_event 不进入对话上下文（仅 user/assistant 参与）
     roles = {m["role"] for m in msgs}
     assert "tool_event" in roles
+
+
+def test_project_switch_resets_summary(client: TestClient):
+    """P0-1 项目切换摘要隔离（2026-11-25）：切换 project_id 后，旧项目摘要与
+    摘要检查点被重置（不注入新项目执行上下文），历史消息完整保留。"""
+    from datetime import datetime
+    import app.core.database as db_mod
+    from app.models import AgentSession, Project
+    from app.models import ids
+
+    # 造两个真实项目（关联校验要求项目存在）
+    now = datetime.now()
+    db = db_mod.SessionLocal()
+    try:
+        for pid, name in (("prj_switcha00001", "项目A"), ("prj_switchb00001", "项目B")):
+            db.add(Project(
+                id=pid, name=name, aspect_ratio="9:16", creation_type="script",
+                status="active", created_at=now, updated_at=now,
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+    # 建会话并关联项目A
+    r = client.post("/api/agent/sessions", json={"title": "切换测试", "project_id": "prj_switcha00001"})
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+
+    # 直接落库摘要与检查点（模拟项目A上下文已压缩）
+    db = db_mod.SessionLocal()
+    try:
+        s = db.get(AgentSession, sid)
+        s.summary = "项目A摘要：角色小红帽，风格写实"
+        s.summary_upto_seq = 5
+        db.commit()
+    finally:
+        db.close()
+
+    # 切换到项目B：摘要与检查点应被重置
+    r = client.patch(f"/api/agent/sessions/{sid}", json={"project_id": "prj_switchb00001"})
+    assert r.status_code == 200, r.text
+    db = db_mod.SessionLocal()
+    try:
+        s = db.get(AgentSession, sid)
+        assert s.project_id == "prj_switchb00001"
+        assert s.summary is None, "切换项目后旧项目摘要不得保留"
+        assert s.summary_upto_seq is None, "切换项目后摘要检查点不得保留"
+    finally:
+        db.close()
+
+    # 历史消息完整保留（切换项目不删除对话记录）
+    r = client.post(f"/api/agent/sessions/{sid}/messages", json={"role": "user", "content": "历史消息"})
+    assert r.status_code == 201
+    r = client.get(f"/api/agent/sessions/{sid}/messages")
+    assert len(r.json()["items"]) >= 1
+
+    # 取消关联（project_id=null）同样触发重置
+    db = db_mod.SessionLocal()
+    try:
+        s = db.get(AgentSession, sid)
+        s.summary = "项目B摘要"
+        s.summary_upto_seq = 8
+        db.commit()
+    finally:
+        db.close()
+    r = client.patch(f"/api/agent/sessions/{sid}", json={"project_id": None})
+    assert r.status_code == 200, r.text
+    db = db_mod.SessionLocal()
+    try:
+        s = db.get(AgentSession, sid)
+        assert s.project_id is None
+        assert s.summary is None
+        assert s.summary_upto_seq is None
+    finally:
+        db.close()

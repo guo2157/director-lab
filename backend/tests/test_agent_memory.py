@@ -97,3 +97,45 @@ def test_memory_tools_registered_and_executable(db):
     # 非法类型经 Schema/服务校验拒绝
     r4 = execute_tool(db, "add_memory", content="x", memory_type="bad")
     assert not r4.ok
+
+
+def test_global_session_isolated_from_project_memories(db):
+    """P0-1 记忆隔离（2026-11-25）：Global 会话（project_id=None）只能读全局记忆，
+    不得返回任何项目记忆——此前无过滤，全库项目记忆会泄漏进无项目会话。"""
+    _add(db, "项目A角色设定", memory_type="project", project_id="prj_A")
+    _add(db, "项目B场景设定", memory_type="project", project_id="prj_B")
+    _add(db, "用户喜欢竖屏", memory_type="preference", project_id=None)
+
+    rows = memory_svc.list_memories(db, project_id=None)
+    contents = [m.content for m in rows]
+    assert "用户喜欢竖屏" in contents, "全局偏好应对 Global 会话可见"
+    assert "项目A角色设定" not in contents, "Global 会话不得读取项目A记忆"
+    assert "项目B场景设定" not in contents, "Global 会话不得读取项目B记忆"
+    # 所有返回条目的 project_id 必须为 None（纯全局记忆）
+    assert all(m.project_id is None for m in rows)
+
+    # build_memory_context 注入同样不得泄漏
+    ctx = memory_svc.build_memory_context(db, None)
+    assert ctx is not None
+    assert "用户喜欢竖屏" in ctx
+    assert "项目A角色设定" not in ctx
+    assert "项目B场景设定" not in ctx
+
+
+def test_project_sessions_isolated_from_each_other(db):
+    """P0-1 记忆隔离（2026-11-25）：项目A会话不得读取项目B记忆，反之亦然。"""
+    _add(db, "项目A角色设定", memory_type="project", project_id="prj_A")
+    _add(db, "项目B场景设定", memory_type="project", project_id="prj_B")
+    _add(db, "全局偏好", memory_type="preference", project_id=None)
+
+    rows_a = memory_svc.list_memories(db, project_id="prj_A")
+    contents_a = [m.content for m in rows_a]
+    assert "项目A角色设定" in contents_a
+    assert "全局偏好" in contents_a, "项目会话应包含全局偏好"
+    assert "项目B场景设定" not in contents_a, "项目A会话不得读取项目B记忆"
+
+    rows_b = memory_svc.list_memories(db, project_id="prj_B")
+    contents_b = [m.content for m in rows_b]
+    assert "项目B场景设定" in contents_b
+    assert "全局偏好" in contents_b
+    assert "项目A角色设定" not in contents_b, "项目B会话不得读取项目A记忆"

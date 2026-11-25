@@ -76,6 +76,11 @@ def list_memories(
             (AgentMemory.project_id == project_id)
             | (AgentMemory.project_id.is_(None))
         )
+    else:
+        # P0-1 记忆隔离修复（2026-11-25）：Global 会话（project_id=None）只能读取
+        # 全局记忆（project_id IS NULL），不得注入任何项目记忆——此前无此过滤，
+        # 全库项目记忆会泄漏进无项目会话（实证见 docs/agent/agent-2.0-current-code-audit.md §7）
+        conds.append(AgentMemory.project_id.is_(None))
     if memory_type is not None:
         conds.append(AgentMemory.memory_type == memory_type)
     if conds:

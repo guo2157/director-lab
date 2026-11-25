@@ -116,7 +116,9 @@ def find_approved(
             AgentTask.session_id == session_id,
             AgentConfirmation.tool_name == tool_name,
             AgentConfirmation.status == "approved",
-            AgentTask.status != "completed",  # 已执行完毕的不再匹配，防止重复消费
+            # P0 状态语义修复（2026-11-25）：已进入终态（completed/cancelled/failed 且无重试）
+            # 的任务不再匹配，防止同一审批被重复消费；waiting_approval 属活跃态可正常匹配
+            AgentTask.status.notin_(("completed", "cancelled")),
         )
         .order_by(AgentConfirmation.created_at.asc())
     ).all()
@@ -247,13 +249,21 @@ def resolve_confirmation(
 
 
 def mark_task_finished(db: Session, confirmation_id: str, summary: str) -> None:
-    """执行结束后回写任务状态，保留审批链路可追溯。"""
+    """执行结束后回写任务状态，保留审批链路可追溯。
+    P0 状态语义修复（2026-11-25）：不再直接赋值 task.status，统一经 parent_agent
+    状态机流转——此前绕过门禁的裸赋值是双重状态写入口径之一。
+    """
     confirmation = db.get(AgentConfirmation, confirmation_id)
     if confirmation is None:
         return
     task = db.get(AgentTask, confirmation.task_id)
     if task is None:
         return
-    task.status = "completed"
-    task.result_summary = summary[:2000]
+    from app.services.parent_agent import transition_task as _tt
+    ok = _tt(db, task, "completed", result_summary=summary[:2000])
+    if not ok:
+        _log.warning(
+            "mark_task_finished: transition_task(%s→completed) 被门禁拒绝，当前 task.status=%s",
+            task.id, task.status,
+        )
     db.commit()

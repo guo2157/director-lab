@@ -65,11 +65,12 @@ const SERIES_ROUTE_NAMES = ['series-list', 'series-create', 'series-detail', 'se
 /** 导演台为固定视口布局：页面级滚动条不滚动，改由页面内部面板各自滚动 */
 const isFixedViewport = computed(() => route.name === 'director')
 
-/** 全局导航入口：作品（含单集项目与系列）| 设置；导演台入口有意移除，经右侧 AI 助手面板进入。
+/** 全局导航入口：作品（含单集项目与系列）| 导演台 | 设置。导演台入口于 2026-11-25 恢复顶栏直达。
  *  任务中心已下线（2026-11-19）：任务进度改为在产出它的页面内联展示（分镜图/资产/剧本页自带进度），
  *  不再需要一个独立的全局任务列表页。 */
 const topMenuOptions = [
   { label: '作品', key: 'projects' },
+  { label: '导演台', key: 'director' },
   { label: '设置', key: 'settings' },
 ]
 
@@ -722,14 +723,6 @@ function chooseComfy(url: string) {
   flex: 1 1 auto;
   min-width: 0;
   overflow-x: hidden;
-}
-/*
- * 右下角有 position:fixed 的「AI 助手」浮钮（bottom 24 + 高约 36）。
- * 可滚动页面必须预留避让，否则页面最后一个可点元素会被浮钮压住；
- * 固定视口页面（is-fixed）自己管理内部滚动区，不叠加，避免把内容挤窄。
- */
-.app-content:not(.is-fixed) .content-main {
-  padding-bottom: 72px;
 }
 /* 助手面板展开时：面板占据自身宽度，主内容只收缩可用部分，左侧轨道与起始位置保持不变 */
 .content-body.is-agent-docked .content-main {

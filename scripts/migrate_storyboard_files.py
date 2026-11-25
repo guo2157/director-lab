@@ -100,8 +100,19 @@ def migrate(db, project_id: str | None, dry_run: bool) -> dict:
         if not dry_run:
             a.file_path = str(rel_dest)
             thumb = getattr(a, "thumb_path", None)
-            if thumb and Path(thumb).name.startswith(src.stem):
-                a.thumb_path = str(Path(rel_dest).parent / Path(thumb).name)
+            if thumb:
+                thumb_src = _resolve_src(thumb)
+                if thumb_src.exists():
+                    # 缩略图必须一起搬：只改 thumb_path 不复制文件，前端卡片会
+                    # 全部变成黑色破图占位（实测 9 张分镜图 8 张破图，状态却是
+                    # 「已生成 9/9 100%」——数据说完成、画面是坏的）。
+                    thumb_dest_dir = dest_dir
+                    thumb_dest = thumb_dest_dir / Path(thumb).name
+                    rel_thumb = Path(rel_dest).parent / Path(thumb).name
+                    if not thumb_dest.exists():
+                        thumb_dest_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(thumb_src, thumb_dest)
+                    a.thumb_path = str(rel_thumb)
         stats["migrated"] += 1
         stats["projects"].add(a.project_id)
 

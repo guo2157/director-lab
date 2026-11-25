@@ -1107,6 +1107,11 @@ def execute_generate_job(job_id: str) -> dict:
     return result
 
 
+def _is_resume_poll(job: Job) -> bool:
+    """该任务是否处于「已提交远端、本地只在轮询结果」的状态。"""
+    return job.submission_state == "submitted"
+
+
 def _claim_job_for_execution(db: Session, job: Job) -> bool:
     """原子抢占一个 queued / submission_unknown 任务，返回是否抢到。
 
@@ -1118,9 +1123,10 @@ def _claim_job_for_execution(db: Session, job: Job) -> bool:
     逻辑全部失效：job_max_attempts=3 的实例故障转移一上来就判死、图片质量重试
     （`job.attempts < job_max_attempts`）永远不触发。
     """
-    _resume_poll = bool((job.input_snapshot or {}).get("resume_prompt")) and (
-        job.submission_state == "submitted"
-    )
+    # 只要已经提交到远端（submission_state=submitted），本次认领就是「续跑轮询」
+    # 而不是「新一次尝试」：不看 resume_prompt 标记，因为提交成功后第一轮认领
+    # 还没打上该标记（实测 job_8a8d8b387559 因此多算了一次 attempt）。
+    _resume_poll = job.submission_state == "submitted"
     values: dict = {"status": "running"}
     if not _resume_poll:
         values["attempts"] = func.coalesce(Job.attempts, 0) + 1
@@ -1158,7 +1164,10 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             if not _claim_job_for_execution(db, job):
                 # 已被其他执行线程认领，直接退出，避免重复提交
                 return {"ok": False, "reason": f"already_claimed:{job.status}"}
-            _write_event(db, job, "job.started", {"attempt": job.attempts})
+            # 续跑轮询不重复写 job.started（实测单个任务刷出 89 条 attempt 相同的
+            # started 事件），只在真正开始/重试时记一条
+            if not _is_resume_poll(job):
+                _write_event(db, job, "job.started", {"attempt": job.attempts})
             # 镜头状态流转：进入生成中（§3.2）
             if job.shot_id:
                 _shot = db.get(Shot, job.shot_id)

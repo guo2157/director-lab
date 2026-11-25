@@ -291,23 +291,10 @@ function onHotkey(e: KeyboardEvent) {
 </script>
 
 <template>
-  <!-- 悬浮入口：右下角贴边停靠，低权重次级样式（深色面 + 发丝描边 + 品牌色图标） -->
-  <button
-    v-if="!expanded"
-    type="button"
-    class="agent-fab"
-    aria-label="打开 AI 助手"
-    title="AI 助手"
-    @click="agent.openPanel()"
-  >
-    <NIcon class="agent-fab-icon" :component="SparklesOutline" :size="16" />
-    <span class="agent-fab-label">AI 助手</span>
-    <span class="agent-fab-key" aria-hidden="true">⌘K</span>
-  </button>
-
-  <!-- 展开态：参与文档流的右侧面板，占据自身宽度而非覆盖主内容 -->
+  <!-- 助手面板：参与文档流的右侧面板，默认收起。固定浮钮已于 2026-11-25 移除，
+       经 ⌘K / Ctrl+K 快捷键或顶栏「导演台」入口使用助手能力。 -->
   <aside
-    v-else
+    v-if="expanded"
     class="agent-drawer"
     :style="{ width: agent.panelWidth + 'px' }"
   >
@@ -485,63 +472,7 @@ function onHotkey(e: KeyboardEvent) {
 </template>
 
 <style scoped>
-/* ── 悬浮入口：次级按钮形态 ──
-   深色面 + 发丝描边 + 品牌色图标，不再用大面积实心品牌色。
-   理由（DESIGN.md §5/§8）：圆角上限 6px、青色只做点缀、卡片层级靠边框不靠阴影。
-   视觉重量必须低于页面主 CTA（如「新建作品」），它是辅助入口。 */
-.agent-fab {
-  position: fixed;
-  right: var(--sp-6);
-  bottom: var(--sp-6);
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  box-shadow: none;
-  font-family: var(--font-ui);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.5;
-  transition: color var(--transition-fast), border-color var(--transition-fast),
-    background var(--transition-fast);
-}
-
-.agent-fab:hover {
-  color: var(--text-primary);
-  background: var(--bg-elevated);
-  border-color: var(--brand-line);
-}
-
-.agent-fab:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.agent-fab-icon {
-  flex-shrink: 0;
-  color: var(--brand-primary);
-}
-
-.agent-fab-label {
-  white-space: nowrap;
-}
-
-/* 快捷键提示：弱化到三级文字，仅在宽屏显示 */
-.agent-fab-key {
-  padding-left: var(--sp-2);
-  margin-left: var(--sp-1);
-  border-left: 1px solid var(--border-subtle);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.02em;
-  color: var(--text-tertiary);
-}
+/* AI 助手固定浮钮已于 2026-11-25 移除：面板经 ⌘K / Ctrl+K 快捷键打开 */
 
 /* ── 展开面板（flex 子项，不覆盖主内容） ── */
 .agent-drawer {
@@ -1023,16 +954,6 @@ function onHotkey(e: KeyboardEvent) {
 }
 
 @media (max-width: 768px) {
-  .agent-fab {
-    right: var(--sp-3);
-    bottom: var(--sp-4);
-  }
-
-  /* 窄屏只留图标 + 文字，收起快捷键提示 */
-  .agent-fab-key {
-    display: none;
-  }
-
   /* 窄屏改为全屏浮层，避免挤压主内容 */
   .agent-drawer {
     position: fixed;
@@ -1050,7 +971,6 @@ function onHotkey(e: KeyboardEvent) {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-fab,
   .agent-icon-btn,
   .agent-starter {
     transition: none;

@@ -4,6 +4,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # 消息角色白名单（与 models/agent.py 注释一致）
 AGENT_MESSAGE_ROLES = {"user", "assistant", "system", "tool_event", "approval"}
+# P0-4 API 输入安全（2026-11-25）：外部 append_message 接口允许的角色白名单。
+# assistant / system / tool_event / approval 属内部审计消息，只能由服务端写入；
+# 此前外部接口接受全部角色，客户端可伪造工具执行审计与助手回复。
+CLIENT_MESSAGE_ROLES = {"user"}
 
 
 class AgentSessionCreate(BaseModel):
@@ -42,8 +46,12 @@ class AgentMessageCreate(BaseModel):
     @field_validator("role")
     @classmethod
     def _check_role(cls, v: str) -> str:
-        if v not in AGENT_MESSAGE_ROLES:
-            raise ValueError(f"role 须为 {sorted(AGENT_MESSAGE_ROLES)} 之一")
+        # 外部追加消息仅允许 user 角色（P0-4 修复）；内部角色由服务端各业务路径写入
+        if v not in CLIENT_MESSAGE_ROLES:
+            raise ValueError(
+                f"外部追加消息仅允许 role={sorted(CLIENT_MESSAGE_ROLES)}；"
+                "assistant/system/tool_event/approval 为服务端内部角色"
+            )
         return v
 
 

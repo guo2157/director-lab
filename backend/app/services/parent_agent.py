@@ -3,7 +3,9 @@
 - 意图识别不等于任务规划：意图识别回答『用户想做什么』，
   任务规划回答『需要执行哪些步骤』
 - 模型只负责识别与解释，任务创建与状态流转由确定性业务代码执行
-- 任务状态机：pending → running → completed / failed / cancelled
+- 任务状态机：pending → running / waiting_approval → completed / failed / cancelled
+- waiting_approval（P0 状态语义修复 2026-11-25）：生成审批申请已提交、等待人工裁决；
+  此后『审批申请提交成功』不再误标 completed——completed 仅用于真正执行完毕
 - 任务由结构化意图识别结果创建（goal/risk_level/confidence 快照落库）
 - 任务完成时记录 result_summary；失败时记录错误信息
 - 任务与消息关联（message_id），支持审计追溯
@@ -25,8 +27,9 @@ TASK_INTENTS = {"generate_request", "pipeline_action"}
 # 任务状态机合法流转（completed/cancelled 为终态不可变更；
 # failed 允许重试回 running，与统一 Task 层 job.retry 的重试能力对齐）
 _TASK_TRANSITIONS = {
-    "pending": {"running", "completed", "failed", "cancelled"},
-    "running": {"completed", "failed", "cancelled"},
+    "pending": {"running", "waiting_approval", "completed", "failed", "cancelled"},
+    "running": {"waiting_approval", "completed", "failed", "cancelled"},
+    "waiting_approval": {"running", "completed", "failed", "cancelled"},
     "completed": set(),
     "failed": {"running"},
     "cancelled": set(),
