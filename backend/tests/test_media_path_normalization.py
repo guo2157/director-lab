@@ -39,7 +39,8 @@ class TestImageToDataUriBackslashPath:
 
         out = _image_to_data_uri("data\\media\\frame.png")
         assert out is not None, "反斜杠路径未被归一化，参考图会被静默丢弃"
-        assert out.startswith("data:image/png;base64,")
+        # 实现按 keyframe_image_qc 注释有意输出 JPEG（PNG base64 会撑爆评图请求体）
+        assert out.startswith("data:image/jpeg;base64,")
 
     def test_forward_slash_path_unchanged(self, tmp_path, monkeypatch):
         media = tmp_path / "data" / "media"
