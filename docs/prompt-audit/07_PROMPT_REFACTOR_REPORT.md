@@ -214,6 +214,8 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 | P3-2 历史层差集分析 | 三层逐词比对（类型层/通用层/历史层） | 历史层含 23 个独有词（character 11 / scene 7 / prop 5），原「整层删除」前提不成立 |
 | P3-2 合并方案等价性 | 内存模拟「独有词并入类型层 + 删历史层」 | 去重后词集合等价（82/67/70/70/62 词），但 character/scene/prop 三类输出字符串不一致（词序改变），方案不可用 |
 | P3-2 零影响精简（c119c45） | 删除 6 个永不下发的重复词 | 五种类型输出长度 422/337/337/364/311 与修改前逐字符一致；79 项相关测试全部通过（16.14s） |
+| P3-3 director 分段等价性 | 语义分段版本（940 字符 1 行 → 21 行）与原文去换行后比对 | flat_diff=+0，逐字符一致 |
+| P3-3 voice 分段等价性 | 语义分段版本（482 字符 1 行 → 6 行）与原文去换行后比对 | flat_diff=+0，逐字符一致 |
 | 调用图 | 29 处调用点 + 2 处动态派发直读 | 27/27 有调用方 |
 | 冲突扫描 | 351 对相似度比较 + diff | 0 真实冲突 |
 
@@ -243,6 +245,8 @@ content_hash 由 203f53a 引入：prompt_compiler 的 CompiledPrompt 新增 cont
 | 05_PROMPT_REFACTOR_PLAN.md | 重构计划（P3-1~P3-6，含风险与回滚、执行进展） | 188 |
 | 06_PROMPT_TEST_BASELINE.md | 测试基线（全量记录、133 项专项、A/B 设计、反向验证） | 197 |
 | 07_PROMPT_REFACTOR_REPORT.md | 本报告（13 问回答、P3 执行结果、反向验证） | 252 |
+| reference/p33_director_segmented.txt | P3-3 director 语义分段方案（待 A/B 基线） | 26 |
+| reference/p33_voice_segmented.txt | P3-3 voice 语义分段方案（待 A/B 基线） | 11 |
 
 ---
 
