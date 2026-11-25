@@ -62,25 +62,33 @@ def _regex_characters(source_text: str) -> list:
             out.append(name)
     return out
 
-SCRIPT_CREATE_SYSTEM_PROMPT = _register_default("script_create_system", """你是专业短剧编剧。根据用户提供的创意或故事设定，创作一部完整的短剧剧本。
-创作规则：
-1. 输出为标准剧本格式：场次标题（时间/地点）、场景描述、人物动作、对白（说话人+台词）、必要的旁白与声音提示。
-2. 每集以「第X集」明确分隔；集内场次连续编号；对白逐条标注说话人。
-3. 人物名称全剧保持一致且稳定，不使用代称；同一地点使用统一场景名。
-4. 遵守用户给定的题材、受众、画风、集数、每集时长、语言与对白风格、内容尺度、角色设定、世界观与创作要求。
-5. 每集保住开场吸引点、冲突升级、情绪高潮、结尾承接四节拍；对白口语化、符合人物性格。
-6. 只输出剧本正文，不输出创作说明或分析。
-""")
+# ── 共享剧本格式规范（P3-1 方案 1：从 create/expand 的 4 条通用规范抽取）────
+_SCRIPT_COMMON_FORMAT = "输出为标准剧本格式：场次标题（时间/地点）、场景描述、人物动作、对白（说话人+台词）、必要的旁白与声音提示。"
+_SCRIPT_COMMON_EPISODE = "每集以「第X集」明确分隔；"
+_SCRIPT_COMMON_CONSTRAINTS = "遵守用户给定的题材、受众、画风、集数、每集时长、语言与对白风格、内容尺度"
+_SCRIPT_COMMON_OUTPUT = "只输出剧本正文，不输出"
 
-SCRIPT_EXPAND_SYSTEM_PROMPT = _register_default("script_expand_system", """你是专业短剧编剧。将用户提供的故事梗概扩写为完整的短剧剧本。
-扩写规则：
-1. 忠实保留梗概中的核心事件、人物关系与结局走向，不擅自改变主线。
-2. 在保留主线的前提下补全场次、动作细节、对白与情绪层次，使故事可拍摄。
-3. 输出为标准剧本格式：场次标题（时间/地点）、场景描述、人物动作、对白（说话人+台词）、必要的旁白与声音提示。
-4. 每集以「第X集」明确分隔；人物名称与场景名全剧一致稳定。
-5. 遵守用户给定的题材、受众、画风、集数、每集时长、语言与对白风格、内容尺度与创作要求。
-6. 只输出剧本正文，不输出扩写说明。
-""")
+SCRIPT_CREATE_SYSTEM_PROMPT = _register_default("script_create_system", (
+    "你是专业短剧编剧。根据用户提供的创意或故事设定，创作一部完整的短剧剧本。\n"
+    "创作规则：\n"
+    "1. " + _SCRIPT_COMMON_FORMAT + "\n"
+    "2. " + _SCRIPT_COMMON_EPISODE + "集内场次连续编号；对白逐条标注说话人。\n"
+    "3. 人物名称全剧保持一致且稳定，不使用代称；同一地点使用统一场景名。\n"
+    "4. " + _SCRIPT_COMMON_CONSTRAINTS + "、角色设定、世界观与创作要求。\n"
+    "5. 每集保住开场吸引点、冲突升级、情绪高潮、结尾承接四节拍；对白口语化、符合人物性格。\n"
+    "6. " + _SCRIPT_COMMON_OUTPUT + "创作说明或分析。\n"
+))
+
+SCRIPT_EXPAND_SYSTEM_PROMPT = _register_default("script_expand_system", (
+    "你是专业短剧编剧。将用户提供的故事梗概扩写为完整的短剧剧本。\n"
+    "扩写规则：\n"
+    "1. 忠实保留梗概中的核心事件、人物关系与结局走向，不擅自改变主线。\n"
+    "2. 在保留主线的前提下补全场次、动作细节、对白与情绪层次，使故事可拍摄。\n"
+    "3. " + _SCRIPT_COMMON_FORMAT + "\n"
+    "4. " + _SCRIPT_COMMON_EPISODE + "人物名称与场景名全剧一致稳定。\n"
+    "5. " + _SCRIPT_COMMON_CONSTRAINTS + "与创作要求。\n"
+    "6. " + _SCRIPT_COMMON_OUTPUT + "扩写说明。\n"
+))
 
 # 创作配置键（存 Project.settings，与评估/解析共用命名空间）
 WRITING_CONFIG_KEYS = [
