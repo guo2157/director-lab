@@ -130,6 +130,8 @@ def test_templates_render_without_residual_placeholders():
         "continuity_lock": "This video must continue the approved storyboard reference image.",
         "spatial_lock": "Spatial layout is derived from the storyboard reference image.",
         "screen_geography": "小马 stays in the exact position defined by the storyboard reference image.",
+        # 分镜图模板 v3：编译器从 shot_plan.on_screen_characters 注入的站位姿态提示块
+        "plan_posture_block": "- 小马：站姿，面向南方",
     }
     for template_id in TEMPLATE_REGISTRY:
         rendered = render_template(template_id, mapping)
