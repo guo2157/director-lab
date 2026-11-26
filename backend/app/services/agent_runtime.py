@@ -37,6 +37,7 @@ from app.services.goal_manager import (
     complete_goal,
     fail_goal,
     get_active_goal,
+    get_goal_by_id,
     get_or_create_goal,
     Goal,
 )
@@ -356,6 +357,86 @@ def abort_goal(db: Session, goal_id: str, *, reason: str | None = None) -> None:
 _MAX_LOOP_ITERATIONS = 50  # 防止死循环
 
 
+def _derive_loop_status(steps: list[dict]) -> str:
+    """按步骤真实状态推导 Loop 终态（A10，集中一处便于测试）。
+
+    规则（优先级从上到下）：
+    1. 全部 succeeded/skipped → completed
+    2. 存在 waiting_user → waiting_user
+    3. 存在 waiting_approval → waiting_approval
+    4. 存在 waiting_job → waiting_job
+    5. 有 pending/ready/running → running（还可继续推进）
+    6. 无可执行步骤：有失败且有成功 → partially_completed；全部失败 → failed
+    """
+    if not steps:
+        return "failed"
+    statuses = [s.get("status") for s in steps]
+    if all(st in ("succeeded", "skipped") for st in statuses):
+        return "completed"
+    for waiting in ("waiting_user", "waiting_approval", "waiting_job"):
+        if waiting in statuses:
+            return waiting
+    if any(st in ("pending", "ready", "running") for st in statuses):
+        return "running"
+    if "failed" in statuses or "cancelled" in statuses:
+        if any(st == "succeeded" for st in statuses):
+            return "partially_completed"
+        return "failed"
+    return "failed"
+
+
+def _skip_steps_with_failed_upstream(db: Session, plan_id: str) -> list[str]:
+    """把依赖链上游已 failed/cancelled 的 pending 步骤标记为 skipped（A10）。
+
+    返回被跳过的步骤 id 列表。
+    """
+    from app.models.agent import AgentPlanStep
+    from sqlalchemy import select
+
+    rows = db.scalars(
+        select(AgentPlanStep).where(AgentPlanStep.plan_id == plan_id)
+    ).all()
+    by_id = {r.id: r for r in rows}
+    dead = {r.id for r in rows if r.status in ("failed", "cancelled")}
+    if not dead:
+        return []
+
+    changed: list[str] = []
+    # 依赖是 DAG，按 step_index 顺序单遍传播即可覆盖整条下游链
+    for row in sorted(rows, key=lambda r: r.step_index or 0):
+        if row.status not in ("pending", "ready"):
+            continue
+        deps = row.depends_on or []
+        if any(d in dead for d in deps):
+            row.status = "skipped"
+            row.error_code = "upstream_failed"
+            row.error_message = "上游步骤失败，本步骤已跳过"
+            dead.add(row.id)
+            changed.append(row.id)
+    if changed:
+        db.flush()
+    return changed
+
+
+def _sync_plan_goal_status(db: Session, goal_id: str, plan_id: str, loop_status: str) -> None:
+    """按 Loop 终态同步 plan.status 与 goal.status（A10）。"""
+    from app.models.agent import AgentPlan
+
+    plan_row = db.get(AgentPlan, plan_id)
+    if plan_row is not None:
+        if loop_status == "completed":
+            plan_row.status = "completed"
+        elif loop_status in ("failed", "partially_completed"):
+            plan_row.status = "failed"
+    db.flush()
+
+    if loop_status == "completed":
+        finalize_goal(db, goal_id)
+    elif loop_status == "failed":
+        fail_goal(db, goal_id)
+    # partially_completed：goal 保持 active（用户可以继续补做）
+
+
 def run_agent_loop(
     db: Session,
     *,
@@ -395,9 +476,34 @@ def run_agent_loop(
     result = AgentLoopResult()
 
     # ── A. Goal 解析 ──
-    from app.services.goal_manager import get_active_goal as _get_active_goal
+    from app.services.goal_manager import (
+        compute_fingerprint,
+        derive_target_stage,
+    )
 
-    resumed = _get_active_goal(db, session_id) is not None
+    # A10：resumed 判定按指纹——同会话中同指纹的 active 或 completed 目标都算「恢复」
+    # （completed 目标会在 get_or_create_goal 中被重新激活，见该函数注释）
+    from app.models.agent import AgentGoal as _AgentGoal
+    from sqlalchemy import and_ as _and_, select as _select
+
+    _fingerprint = compute_fingerprint(
+        project_id=project_id,
+        goal_type=goal_type or "user_request",
+        target_stage=derive_target_stage(description),
+        scope=str((constraints or {}).get("scope") or ""),
+    )
+    resumed = (
+        db.scalars(
+            _select(_AgentGoal.id).where(
+                _and_(
+                    _AgentGoal.session_id == session_id,
+                    _AgentGoal.fingerprint == _fingerprint,
+                    _AgentGoal.status.in_(("active", "completed")),
+                )
+            )
+        ).first()
+        is not None
+    )
     goal = start_or_resume_goal(
         db,
         session_id=session_id,
@@ -457,12 +563,11 @@ def run_agent_loop(
         return result
 
     # ── D. Goal 完成度判定 ──
+    # A8/A10：即使上一版计划已全部完成，本次同指纹请求也应当生成新的 Plan revision
+    # （用户再次提出同一目标 = 再执行一次），因此这里不再提前短路返回「已完成」。
+    # 具体「是否复用旧计划 / 生成新 revision」由 _get_or_create_plan 统一判定。
+    # 记录判定结果（供日志/排查），不改变控制流
     completion = check_goal_completion(db, goal.goal_id)
-    if completion["is_complete"]:
-        finalize_goal(db, goal.goal_id)
-        result.status = "completed"
-        result.message = "目标已完成（无需新 Plan）"
-        return result
 
     # ── E. Plan 获取或生成 ──
     plan = _get_or_create_plan(
@@ -528,11 +633,8 @@ def run_agent_loop(
         ),
     )
 
-    # 终态处理
-    if result.status == "completed":
-        finalize_goal(db, goal.goal_id)
-    elif result.status == "failed":
-        fail_goal(db, goal.goal_id)
+    # 终态处理（A10：按步骤真实状态同步 plan / goal，partially_completed 保持 goal active）
+    _sync_plan_goal_status(db, goal.goal_id, plan.plan_id, result.status)
 
     return result
 
@@ -564,7 +666,11 @@ def _get_or_create_plan(
     - 有 active Plan 但所有步骤都已终态 → 生成新 revision（previous_plan=旧计划），
       不再把「上次已跑完」当成「本次已完成」
     """
-    from app.services.planner import build_and_save_plan, get_latest_plan
+    from app.services.planner import (
+        build_and_save_plan,
+        get_latest_plan,
+        get_latest_plan_any,
+    )
 
     existing = get_latest_plan(db, goal_id)
     previous = None
@@ -572,6 +678,12 @@ def _get_or_create_plan(
         if not _plan_all_terminal(db, existing.plan_id):
             return existing
         previous = existing
+    else:
+        # A10：目标完成后旧 plan.status=completed，get_latest_plan 取不到；
+        # 再次执行同一目标时要基于它递增 revision，而不是回到 revision=1。
+        latest_any = get_latest_plan_any(db, goal_id)
+        if latest_any is not None:
+            previous = latest_any
 
     plan, report = build_and_save_plan(
         db,
@@ -710,6 +822,16 @@ def _run_plan_loop(
         # 1. 获取下一步待执行步骤
         pending = get_next_pending_steps(db, current_plan.plan_id)
         if not pending:
+            # A10：先把「上游失败导致依赖无法满足」的 pending 标为 skipped(upstream_failed)，
+            # 再判定终态——否则会误报成「N 个步骤待执行（可能被阻塞）」。
+            skipped_ids = _skip_steps_with_failed_upstream(db, current_plan.plan_id)
+            if skipped_ids:
+                skipped += len(skipped_ids)
+                db.commit()
+                pending = get_next_pending_steps(db, current_plan.plan_id)
+                if pending:
+                    continue  # 跳过后又有可执行步骤（依赖是 skipped 视为满足）
+
             # 检查是否全部完成
             from app.services.verifier import verify_plan_completion
 
@@ -738,8 +860,11 @@ def _run_plan_loop(
                     "next_action": "pending",
                     "errors": errors,
                 }
-            # 有失败且无可执行步骤：有成功 → partially_completed；全失败 → failed
-            if plan_status.get("partial"):
+            from app.services.planner import get_plan_steps
+
+            all_steps = get_plan_steps(db, current_plan.plan_id)
+            loop_status = _derive_loop_status(all_steps)
+            if loop_status == "partially_completed":
                 return {
                     "status": "partially_completed",
                     "message": f"部分步骤完成（{completed} 成功 / {failed} 失败）",
@@ -750,9 +875,21 @@ def _run_plan_loop(
                     "next_action": "none",
                     "errors": errors,
                 }
+            if loop_status == "failed":
+                return {
+                    "status": "failed",
+                    "message": "无可执行步骤，且存在失败步骤",
+                    "total_steps": total_steps,
+                    "completed_steps": completed,
+                    "failed_steps": failed,
+                    "skipped_steps": skipped,
+                    "next_action": "none",
+                    "errors": errors,
+                }
+            # 理论上不会到这里（有 pending 但依赖不满足 → 已在上一步标 skipped）
             return {
-                "status": "failed",
-                "message": "无可执行步骤，且存在失败步骤",
+                "status": loop_status,
+                "message": f"无可执行步骤（{loop_status}）",
                 "total_steps": total_steps,
                 "completed_steps": completed,
                 "failed_steps": failed,
@@ -1181,40 +1318,91 @@ def resume_after_approval(
 
 # ── Runtime 状态查询 ─────────────────────────────────────────────────
 
-def get_goal_status(db: Session, session_id: str) -> dict:
-    """获取当前会话的目标执行状态。供前端 Agent Workbench 展示。"""
-    goal = get_active_goal(db, session_id)
+def _goal_payload(goal: Goal, loop_status: str) -> dict:
+    """Goal 对外载荷（A10：partially_completed 通过 loop_status 展示，goal.status 保持 active）。"""
+    payload = goal.to_dict()
+    payload["loop_status"] = loop_status
+    return payload
+
+
+def get_goal_status_by_id(db: Session, goal_id: str, *, log_limit: int = 20) -> dict:
+    """按 goal_id 查询目标执行状态（A10 / P0-12）。
+
+    返回：
+    {
+      "has_active_goal": bool,        # 兼容旧调用方
+      "goal": {..., "loop_status": ...},
+      "completion": {...},
+      "latest_plan": {"plan_id", "revision", "status", "parent_plan_id"},
+      "steps": [{"id", "step_index", "step_key", "tool_name", "status", "job_id",
+                 "confirmation_id", "error_code", "error_message"}],
+      "loop_status": "completed|failed|partially_completed|waiting_*|running|unknown",
+      "execution_logs": [...]
+    }
+    """
+    from app.models.agent import AgentPlan
+
+    goal = get_goal_by_id(db, goal_id)
     if goal is None:
-        return {"has_active_goal": False}
+        return {"has_active_goal": False, "goal_id": goal_id, "loop_status": "unknown"}
 
-    completion = check_goal_completion(db, goal.goal_id)
+    from sqlalchemy import select
 
-    plan_info: dict[str, Any] = {}
-    try:
-        from sqlalchemy import select
-        from app.models.agent import AgentPlan
+    from app.services.planner import get_plan_steps
 
-        plan_row = db.scalars(
-            select(AgentPlan)
-            .where(AgentPlan.goal_id == goal.goal_id)
-            .order_by(AgentPlan.created_at.desc())
-            .limit(1)
-        ).first()
-        if plan_row:
-            plan_info = {
-                "plan_id": plan_row.id,
-                "revision": plan_row.revision,
-                "status": plan_row.status,
+    plan_row = db.scalars(
+        select(AgentPlan)
+        .where(AgentPlan.goal_id == goal_id)
+        .order_by(AgentPlan.revision.desc())
+        .limit(1)
+    ).first()
+
+    plan_info: dict[str, Any] | None = None
+    steps: list[dict] = []
+    loop_status = "unknown"
+    if plan_row is not None:
+        plan_info = {
+            "plan_id": plan_row.id,
+            "revision": plan_row.revision,
+            "status": plan_row.status,
+            "parent_plan_id": getattr(plan_row, "parent_plan_id", None),
+        }
+        all_steps = get_plan_steps(db, plan_row.id)
+        steps = [
+            {
+                "id": s["id"],
+                "step_index": s["step_index"],
+                "step_key": s.get("step_key"),
+                "tool_name": s["tool_name"],
+                "status": s["status"],
+                "requires_approval": s.get("requires_approval"),
+                "job_id": s.get("job_id"),
+                "confirmation_id": s.get("confirmation_id"),
+                "error_code": s.get("error_code"),
+                "error_message": (s.get("error_message") or "")[:200],
             }
-    except Exception:
-        pass
+            for s in all_steps
+        ]
+        loop_status = _derive_loop_status(all_steps)
 
     return {
-        "has_active_goal": True,
-        "goal": goal.to_dict(),
-        "completion": completion,
-        "latest_plan": plan_info or None,
+        "has_active_goal": goal.status == "active",
+        "goal_id": goal_id,
+        "goal": _goal_payload(goal, loop_status),
+        "completion": check_goal_completion(db, goal_id),
+        "latest_plan": plan_info,
+        "steps": steps,
+        "loop_status": loop_status,
+        "execution_logs": get_execution_logs(db, goal_id=goal_id, limit=log_limit),
     }
+
+
+def get_goal_status(db: Session, session_id: str) -> dict:
+    """获取当前会话的目标执行状态（保留旧签名，内部转调 get_goal_status_by_id）。"""
+    goal = get_active_goal(db, session_id)
+    if goal is None:
+        return {"has_active_goal": False, "loop_status": "unknown"}
+    return get_goal_status_by_id(db, goal.goal_id)
 
 
 def get_execution_logs(

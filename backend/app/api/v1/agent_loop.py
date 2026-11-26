@@ -171,14 +171,18 @@ async def get_loop_status(
     goal_id: str,
     db: Session = Depends(get_db),
 ) -> dict:
-    """查询指定 Goal 的执行状态（非流式）。"""
-    from app.services.agent_runtime import get_goal_status
-    from app.services.goal_manager import get_goal_by_id
+    """查询指定 Goal 的执行状态（非流式）。
 
-    goal = get_goal_by_id(db, goal_id)
-    if not goal:
+    A10 / P0-12：按 goal_id 直接查询，不再经 get_active_goal(session_id) 中转（旧实现恒 404）。
+    返回 goal（含 fingerprint）、最新 plan、steps（状态 / job_id / confirmation_id / error_code）、
+    最近 20 条 execution_log，以及 loop_status（partially_completed 等展示语义）。
+    """
+    from app.services.agent_runtime import get_goal_status_by_id
+
+    status = get_goal_status_by_id(db, goal_id)
+    if not status.get("goal"):
         raise HTTPException(
             status_code=404,
             detail={"code": "goal_not_found", "message": f"Goal {goal_id} 不存在"},
         )
-    return get_goal_status(db, goal.session_id)
+    return status

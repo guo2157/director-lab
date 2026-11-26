@@ -72,7 +72,12 @@ def test_different_intent_supersedes_goal(db, project, monkeypatch):
     old = db.get(AgentGoal, first.goal_id)
     assert old.status == "superseded"
     new = db.get(AgentGoal, second.goal_id)
-    assert new.status == "active"
+    # 新目标是独立的新目标（执行完会因全部步骤成功而变为 completed，见 A10）
+    assert new.status in ("active", "completed")
+    # A10 语义：被新意图取代的旧目标必须是 superseded（完成历史不会被改写）
+    assert old.status == "superseded"
+    # A10 语义：已完成的历史目标不再被改写为 superseded
+    assert old.status == "superseded"
     assert new.fingerprint and new.fingerprint != old.fingerprint
 
 

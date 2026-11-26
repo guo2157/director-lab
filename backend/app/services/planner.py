@@ -750,6 +750,27 @@ def get_latest_plan(db: Session, goal_id: str) -> Plan | None:
     return Plan.from_json(goal_id, row.plan_json)
 
 
+def get_latest_plan_any(db: Session, goal_id: str) -> Plan | None:
+    """获取 Goal 的最新执行计划（不区分状态）。
+
+    A10：目标完成时 plan.status 会被置为 completed，此时 get_latest_plan 取不到；
+    但「再次执行同一目标」仍需要以它为 previous_plan 递增 revision，因此提供本函数。
+    """
+    from app.models.agent import AgentPlan
+
+    row = db.scalars(
+        select(AgentPlan)
+        .where(AgentPlan.goal_id == goal_id)
+        .order_by(AgentPlan.revision.desc())
+        .limit(1)
+    ).first()
+
+    if row is None or row.plan_json is None:
+        return None
+
+    return Plan.from_json(goal_id, row.plan_json)
+
+
 def get_plan_steps(db: Session, plan_id: str) -> list[dict]:
     """获取 Plan 的所有步骤（按 step_index 排序）。"""
     from app.models.agent import AgentPlanStep
@@ -765,6 +786,7 @@ def get_plan_steps(db: Session, plan_id: str) -> list[dict]:
             "id": r.id,
             "step_index": r.step_index,
             "step_type": r.step_type,
+            "step_key": r.step_key,
             "tool_name": r.tool_name,
             "description": r.description,
             "args": r.args,
@@ -773,6 +795,11 @@ def get_plan_steps(db: Session, plan_id: str) -> list[dict]:
             "requires_approval": r.requires_approval,
             "retry_count": r.retry_count,
             "result": r.result,
+            # A10：状态接口与恢复逻辑需要按步骤反查 Job / 审批
+            "job_id": r.job_id,
+            "confirmation_id": r.confirmation_id,
+            "error_code": r.error_code,
+            "error_message": r.error_message,
         }
         for r in rows
     ]

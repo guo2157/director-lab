@@ -26,7 +26,10 @@ GOAL_TYPES = {"user_request", "system_continuation", "recovery"}
 GOAL_TRANSITIONS: dict[str, set[str]] = {
     "active": {"paused", "completed", "failed", "cancelled", "superseded"},
     "paused": {"active", "completed", "failed", "cancelled"},
-    "completed": set(),
+    # completed → superseded：同一会话里用户换了新目标时，旧的已完成目标标记为被取代
+    # completed → active：同一会话同一意图再次请求时复用已完成目标（A8），
+    # 完成事实记录在 constraints["completion_history"]。
+    "completed": {"superseded", "active"},
     "failed": {"active"},
     "cancelled": set(),
     "superseded": set(),
@@ -185,6 +188,35 @@ def get_or_create_goal(
         )
     ).first()
 
+    if existing is None:
+        # A10 与 A8 的衔接：目标全部完成后 status=completed（终态），
+        # 但同一会话的同一意图再次请求时应当复用该目标并生成新的 Plan revision，
+        # 而不是新开一个碎片化目标。因此把「最近一个 completed 且指纹相同」的目标重新激活。
+        # 这是 Agent 自主决定（待用户复核），记录在 docs/DECISIONS.md。
+        recent = db.scalars(
+            select(AgentGoal)
+            .where(
+                and_(
+                    AgentGoal.session_id == session_id,
+                    AgentGoal.status == "completed",
+                    AgentGoal.fingerprint == fingerprint,
+                )
+            )
+            .order_by(AgentGoal.updated_at.desc())
+            .limit(1)
+        ).first()
+        if recent is not None:
+            # 同一意图再次请求：复用该目标并生成新的 Plan revision（A8）。
+            # 目标需要回到 active 才能继续推进；完成事实先写入 completion_history，
+            # 不会丢失（Phase F 指标按它统计完成次数）。
+            constraints_history = dict(recent.constraints or {})
+            completions = list(constraints_history.get("completion_history") or [])
+            completions.append((recent.updated_at or datetime.now()).isoformat())
+            constraints_history["completion_history"] = completions[-20:]
+            recent.constraints = constraints_history
+            if transition_goal_status(db, recent.id, "active"):
+                existing = recent
+
     if existing is not None:
         existing_fp = getattr(existing, "fingerprint", None)
         if existing_fp is None:
@@ -214,6 +246,40 @@ def get_or_create_goal(
         existing.status = "superseded"
         existing.updated_at = datetime.now()
         db.flush()
+    else:
+        # 没有可复用的目标：把同会话里仍在进行（active/paused）的旧目标标记为 superseded，
+        # 保证同一会话同时只有一个「当前目标」，避免碎片化。
+        stale = db.scalars(
+            select(AgentGoal).where(
+                and_(
+                    AgentGoal.session_id == session_id,
+                    AgentGoal.status.in_(("active", "paused")),
+                )
+            )
+        ).all()
+        # 已完成但意图不同的目标也被新目标取代（A8：新目标替代旧目标 → superseded），
+        # 但先把「曾经完成」的事实写入 completion_history，避免 Phase F 指标丢数据。
+        completed_old = db.scalars(
+            select(AgentGoal).where(
+                and_(
+                    AgentGoal.session_id == session_id,
+                    AgentGoal.status == "completed",
+                    AgentGoal.fingerprint.is_not(None),
+                    AgentGoal.fingerprint != fingerprint,
+                )
+            )
+        ).all()
+        for row in list(stale) + list(completed_old):
+            if row.status == "completed":
+                row_constraints = dict(row.constraints or {})
+                completions = list(row_constraints.get("completion_history") or [])
+                completions.append((row.updated_at or datetime.now()).isoformat())
+                row_constraints["completion_history"] = completions[-20:]
+                row.constraints = row_constraints
+            row.status = "superseded"
+            row.updated_at = datetime.now()
+        if stale or completed_old:
+            db.flush()
 
     new_constraints = dict(constraints or {})
     new_constraints.setdefault("history", [description])
@@ -314,24 +380,46 @@ def check_goal_completion(
     if row is None:
         return {"is_complete": False, "progress": "unknown", "blockers": ["goal_not_found"]}
 
-    # 查询关联 Plan
+    # 查询关联 Plan（A10：按 revision 取最新，与 status 接口口径一致）
     plans = db.scalars(
-        select(AgentPlan).where(AgentPlan.goal_id == goal_id_str).order_by(AgentPlan.created_at.desc())
+        select(AgentPlan).where(AgentPlan.goal_id == goal_id_str).order_by(AgentPlan.revision.desc())
     ).all()
 
     if not plans:
         return {"is_complete": False, "progress": "no_plan", "blockers": []}
 
     latest_plan = plans[0]
-    if latest_plan.status == "completed":
-        return {"is_complete": True, "progress": "plan_completed", "blockers": []}
-    if latest_plan.status == "failed":
-        return {"is_complete": False, "progress": "plan_failed", "blockers": ["plan_execution_failed"]}
+
+    # A10：完成判定以步骤真实状态为准（不再只读 plan.status，那个字段以前从未被置位）
+    from app.models.agent import AgentPlanStep
+    from app.services.agent_runtime import _derive_loop_status
+
+    steps = db.scalars(
+        select(AgentPlanStep).where(AgentPlanStep.plan_id == latest_plan.id)
+    ).all()
+    if not steps:
+        return {
+            "is_complete": False,
+            "progress": latest_plan.status,
+            "blockers": [],
+            "loop_status": "unknown",
+        }
+
+    step_dicts = [{"status": s.status} for s in steps]
+    loop_status = _derive_loop_status(step_dicts)
+    blockers: list[str] = []
+    if loop_status == "failed":
+        blockers.append("plan_execution_failed")
+    elif loop_status == "partially_completed":
+        blockers.append("partial_failure")
 
     return {
-        "is_complete": False,
-        "progress": latest_plan.status,
-        "blockers": [],
+        "is_complete": loop_status == "completed",
+        "progress": loop_status,
+        "loop_status": loop_status,
+        "blockers": blockers,
+        "plan_id": latest_plan.id,
+        "revision": latest_plan.revision,
     }
 
 

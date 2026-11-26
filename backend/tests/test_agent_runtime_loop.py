@@ -62,7 +62,9 @@ def test_scenario2_same_session_reuses_goal(db, project):
 
     from app.models.agent import AgentGoal
 
-    assert db.get(AgentGoal, first.goal_id).status == "superseded"
+    # 旧目标被新目标取代（A8）；A10 之后「全部步骤成功」的目标可能先变为 completed，
+    # 两种终态都表示它已不是当前目标。
+    assert db.get(AgentGoal, first.goal_id).status in ("superseded", "completed")
 
 
 def test_scenario3_analysis_intent_has_more_steps(db, project):
