@@ -74,7 +74,9 @@ class ReplanAction(Enum):
 ERROR_CODE_ACTIONS: dict[str, ReplanAction] = {
     # 瞬态：可重试
     "tool_internal_error": ReplanAction.RETRY,
-    "job_failed": ReplanAction.REPLAN,
+    # 生成类 Job 失败：Phase B 不自动重新提交生成（Worker 内部已有重试与熔断），
+    # 交给用户决定 → waiting_user
+    "job_failed": ReplanAction.WAIT_USER,
     "job_cancelled": ReplanAction.FAIL,
     # 规则计划无法自动修正：直接失败，避免「生成同样的计划 → 同样失败」重复 3 次
     "tool_invalid_args": ReplanAction.FAIL,
@@ -146,8 +148,10 @@ def classify_error(ctx: ErrorContext) -> ReplanAction:
     code = ctx.error_code or ""
     msg = (ctx.error_message or "").lower()
 
-    if code in ERROR_CODE_ACTIONS:
-        action = ERROR_CODE_ACTIONS[code]
+    # 复合错误码（如 job_failed:oom）按前缀映射到基础分类
+    base_code = code.split(":", 1)[0]
+    if base_code in ERROR_CODE_ACTIONS:
+        action = ERROR_CODE_ACTIONS[base_code]
         if action == ReplanAction.RETRY and ctx.retry_count >= ctx.max_retries:
             return ReplanAction.FAIL
         return action

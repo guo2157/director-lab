@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase B · 最小可用版本（进行中：B2 完成） |
-| 下一个任务 | B3 Job 终态 → 恢复标记 |
-| 最近提交 | A12b（本提交）、`57149be` 交接文档、`3cc9490` A11、`5e335b1` A10 |
-| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（基线 1445 passed / 1 failed，2026-11-26） |
-| 更新时间 | 2026-11-26 19:10（Asia/Shanghai） |
+| 当前阶段 | Phase B · 最小可用版本（进行中：B3 完成） |
+| 下一个任务 | B4 审批闭环：自动申请、裁决后恢复、自动执行 |
+| 最近提交 | B3（本提交）、`66c3cd6` B2、`4f75a3a` B1、`f3d97e4` B0 |
+| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线；B3 后 Runtime + Phase B 子集 124 passed / 1 xfailed） |
+| 更新时间 | 2026-11-26 21:05（Asia/Shanghai） |
 | 工作区 | 干净（每次任务一个本地提交，不推送） |
 
 > 本文件替换 Phase 0 时期的旧版 implementation-plan.md。
@@ -73,9 +73,9 @@
 - 任务说明：[plan/phase-b-agent-prompts.md](plan/phase-b-agent-prompts.md)
 
 - [x] **B0** 迁移与事件白名单（`a1b2c3d4e5fb`）
-- [ ] **B1** 抽出 `tick`：幂等的单次推进
-- [x] **B2** Agent 事件发布（给前端看的事实流）
-- [ ] **B3** Job 终态 → 恢复标记
+- [x] **B1** 抽出 `tick`：幂等的单次推进（`4f75a3a`）
+- [x] **B2** Agent 事件发布（给前端看的事实流）（`66c3cd6`）
+- [x] **B3** Job 终态 → 恢复标记（本提交）
 - [ ] **B4** 审批闭环：自动申请、裁决后恢复、自动执行
 - [ ] **B5** Worker 中的 agent-resume 线程与兜底扫描
 - [ ] **B6** `/chat` 接入 Runtime（开关后面）

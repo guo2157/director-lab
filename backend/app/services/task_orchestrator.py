@@ -423,6 +423,30 @@ _TERMINAL_JOB_EVENTS = {
     "job.cancelled": "cancelled",
 }
 
+def mark_agent_steps_for_job(db: Session, job_id: str, *, reason: str = "job_terminal") -> int:
+    """Job 进入终态时给关联的 Agent 步骤打恢复标记（B3）。
+
+    - 只打 waiting_job 且尚无标记的步骤，条件 UPDATE 保证幂等
+    - 与 bridge_job_event 的业务写入同一事务（只 flush，不 commit）
+    - 即使 Job 没有关联 TaskStage 也必须打标记，所以调用点在 stages 提前 return 之前
+    """
+    from sqlalchemy import update
+
+    from app.models.agent import AgentPlanStep
+
+    stmt = (
+        update(AgentPlanStep)
+        .where(
+            AgentPlanStep.job_id == job_id,
+            AgentPlanStep.status == "waiting_job",
+            AgentPlanStep.resume_requested_at.is_(None),
+        )
+        .values(resume_requested_at=datetime.now(), resume_reason=reason)
+    )
+    rowcount = int(db.execute(stmt).rowcount or 0)
+    db.flush()
+    return rowcount
+
 
 def bridge_job_event(
     db: Session,
@@ -440,6 +464,11 @@ def bridge_job_event(
     - job.retry / job.quality_retry → task.stage_progress（透传进度信息）
     返回桥接的事件数（0 表示该 Job 不属于任何任务）。
     """
+    # B3：Job 终态 → 给 Agent 步骤打恢复标记（必须在 stages 提前 return 之前，
+    # 否则没有 TaskStage 的 Job 永远等不到恢复）
+    if event_type in _TERMINAL_JOB_EVENTS:
+        mark_agent_steps_for_job(db, job_id)
+
     stages = db.query(TaskStage).filter(TaskStage.job_id == job_id).all()
     if not stages:
         return 0

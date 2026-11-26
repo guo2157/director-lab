@@ -1290,7 +1290,7 @@ def _resume_marked_steps(db: Session, goal: Goal) -> list[str]:
         step.resume_requested_at = None
         step.resume_reason = None
         if reason == "job_terminal":
-            _resume_step_after_job(db, step)
+            _resume_step_after_job(db, step, goal=goal)
         elif reason == "approval_resolved":
             _resume_step_after_approval(db, step)
         handled.append(step.id)
@@ -1298,31 +1298,94 @@ def _resume_marked_steps(db: Session, goal: Goal) -> list[str]:
     return handled
 
 
-def _resume_step_after_job(db: Session, step) -> None:
-    """Job 终态后的步骤收敛（B3 会补充多 Job / 失败分支细节）。"""
+def _step_job_ids(step) -> list[str]:
+    """步骤关联的 Job id 列表（单 Job 用 job_id，批量工具用 result.job_ids）。"""
+    ids: list[str] = []
+    if step.job_id:
+        ids.append(str(step.job_id))
+    result = step.result if isinstance(step.result, dict) else {}
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    for source in (result, data):
+        raw = (source or {}).get("job_ids")
+        if isinstance(raw, list):
+            for jid in raw:
+                if jid and str(jid) not in ids:
+                    ids.append(str(jid))
+    return ids
+
+
+def _resume_step_after_job(db: Session, step, *, goal=None) -> None:
+    """Job 终态后的步骤收敛（B3）。
+
+    - 全部关联 Job 已 succeeded → 用 Verifier 的 state 维度复核（Phase A：Job succeeded 才算通过）
+    - 任一 Job failed / cancelled → 步骤 waiting_user，error_code = "job_failed:<code>"，
+      不自动重新提交生成（通用约束 4），由用户决定
+    - 仍有 queued / running → 保持 waiting_job（标记已清除，等待下一次终态事件或兜底扫描）
+    """
     from app.models import Job
 
     if step.status != "waiting_job":
         return
-    job = db.get(Job, step.job_id) if step.job_id else None
-    if job is None:
+    job_ids = _step_job_ids(step)
+    if not job_ids:
         step.status = "failed"
         step.error_code = "job_not_found"
         step.error_message = "恢复时找不到步骤关联的 Job"
         step.completed_at = datetime.now()
+        db.flush()
         return
-    if job.status == "succeeded":
-        step.status = "succeeded"
-        step.completed_at = datetime.now()
-        step.error_code = None
-        step.error_message = None
-    elif job.status in ("failed", "cancelled"):
+
+    jobs = [db.get(Job, jid) for jid in job_ids]
+    if any(j is None for j in jobs):
         step.status = "failed"
-        step.error_code = f"job_failed:{job.error_code or job.status}"
-        step.error_message = job.error_msg or f"Job {job.id} 状态为 {job.status}"
+        step.error_code = "job_not_found"
+        step.error_message = "恢复时找不到步骤关联的 Job"
         step.completed_at = datetime.now()
-    else:
+        db.flush()
+        return
+
+    # 多 Job（批量）：全部终态才判定
+    if any(j.status not in ("succeeded", "failed", "cancelled") for j in jobs):
         step.status = "waiting_job"
+        db.flush()
+        return
+
+    failed_jobs = [j for j in jobs if j.status != "succeeded"]
+    result = dict(step.result or {})
+    if failed_jobs:
+        first = failed_jobs[0]
+        result["failed_job_ids"] = [j.id for j in failed_jobs]
+        step.result = result
+        step.status = "waiting_user"
+        step.error_code = f"job_failed:{first.error_code or first.status}"
+        step.error_message = first.error_msg or f"Job {first.id} 状态为 {first.status}"
+        step.completed_at = datetime.now()
+        step.lock_owner = None
+        db.flush()
+        return
+
+    # 全部 succeeded：先落 succeeded，再用 state 维度复核 Job 归属与终态
+    step.status = "succeeded"
+    step.completed_at = datetime.now()
+    step.error_code = None
+    step.error_message = None
+    db.flush()
+
+    from app.services.verifier import verify_step
+
+    verification = verify_step(
+        db,
+        step_id=step.id,
+        project_id=getattr(goal, "project_id", None),
+        dimensions=["state"],
+    )
+    if not verification.verified:
+        issue = verification.issues[0] if verification.issues else {}
+        step.status = "failed"
+        step.error_code = "verification_failed"
+        step.error_message = (issue.get("reason") or "Job 终态复核未通过")[:1000]
+        step.completed_at = datetime.now()
+    db.flush()
 
 
 def _resume_step_after_approval(db: Session, step) -> None:
@@ -1402,11 +1465,13 @@ def _tick_locked(
     from app.services.planner import get_plan_steps as _get_steps
 
     result.plan_id = plan.plan_id
+
+    # B2：状态确实变化才发 agent.step.updated（执行前快照，执行后比对）。
+    # 快照必须早于恢复标记处理，否则 Job / 审批恢复造成的状态变化不会发事件。
+    status_before = {s["id"]: s["status"] for s in _get_steps(db, plan.plan_id)}
+
     _resume_marked_steps(db, goal)
     db.flush()
-
-    # B2：状态确实变化才发 agent.step.updated（执行前快照，执行后比对）
-    status_before = {s["id"]: s["status"] for s in _get_steps(db, plan.plan_id)}
 
     loop_result = _execute_plan_loop(
         db,
