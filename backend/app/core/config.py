@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     database_url: str = "sqlite:///./data/director_lab.db"
 
+    # --- Agent Runtime 调试接口（Phase A A2） ---
+    # /api/agent/loop/run 仅作调试用途，默认关闭；关闭时返回 404。
+    # 唯一用户入口仍是 /api/agent/{session_id}/chat（Phase B 接入 Runtime）。
+    agent_loop_debug_enabled: bool = False
+
     # --- Mock 渲染（D-11：开启后跳过 ComfyUI 交互，生成占位产物，用于无 ComfyUI 环境的演示与端到端测试） ---
     render_mock: bool = False
     # --- ComfyUI 集成（远端渲染底座） ---

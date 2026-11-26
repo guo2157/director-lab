@@ -1,26 +1,46 @@
-"""Agent Loop SSE 端点：客户端通过 POST /api/agent/loop/run 发起编排请求，
-服务端在独立线程中执行 run_agent_loop，通过 asyncio.Queue 将进度事件推送为 SSE。
+"""Agent Loop SSE 调试端点（默认关闭）。
+
+POST /api/agent/loop/run 在后台线程中执行 Runtime，并通过 SSE 推送进度事件。
+Phase A A2 修复：
+- 路由函数不再接收请求作用域的 Session；后台执行改用 asyncio.to_thread +
+  run_agent_loop_in_new_session，Session 在后台线程内自建自关。
+- 回调在主线程取到的 event loop 上用 call_soon_threadsafe 入队，事件不再丢失。
+- 每个事件入队时就分配单调递增的 seq，SSE 的 id 直接使用它。
+- 后台结束（成功或异常）必定推送终止事件，sse_generator 收到后结束。
+- 该接口是调试用途：agent_loop_debug_enabled 关闭时 POST /run 返回 404。
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 
 logger = logging.getLogger("director-lab.agent-loop")
 
 router = APIRouter(prefix="/api/agent/loop", tags=["agent-loop"])
 
+# 终止事件集合：收到即结束 SSE 流
+TERMINAL_EVENTS = frozenset(
+    {
+        "completed",
+        "failed",
+        "blocked",
+        "waiting",
+        "waiting_approval",
+        "waiting_job",
+        "waiting_user",
+        "paused",
+        "cancelled",
+    }
+)
 
-# ── 请求/响应模型 ───────────────────────────────────────────────────────
 
 class AgentLoopRunRequest(BaseModel):
     """Agent Loop 执行请求。"""
@@ -44,122 +64,108 @@ class AgentLoopRunRequest(BaseModel):
 
 
 class AgentLoopEventOut(BaseModel):
-    """SSE 事件外发模型。"""
+    """SSE 事件外发模型（seq 在入队时分配）。"""
 
+    seq: int
     event_type: str
     payload: dict
 
 
-# ── 路由实现 ────────────────────────────────────────────────────────────
+def _debug_enabled() -> bool:
+    return bool(getattr(get_settings(), "agent_loop_debug_enabled", False))
+
 
 @router.post("/run")
 async def run_agent_loop_sse(
     request: AgentLoopRunRequest,
-    db: Session = Depends(get_db),
+    http_request: Request,
 ) -> StreamingResponse:
-    """启动 Agent Loop 并以 SSE 流式返回进度事件。
+    """启动 Agent Loop 并以 SSE 流式返回进度事件（调试接口）。"""
+    if not _debug_enabled():
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_loop_debug_disabled", "message": "调试接口未启用"},
+        )
 
-    推送事件类型：
-    - goal_created
-    - plan_generated
-    - step_started
-    - step_completed
-    - step_failed
-    - step_skipped
-    - completed / failed / waiting / waiting_approval / waiting_job / blocked
+    main_loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[AgentLoopEventOut | None] = asyncio.Queue()
+    seq = [0]
 
-    事件格式（SSE）：
-        id: <seq>
-        data: {"event_type": "...", "payload": {...}}
-    """
-    queue: asyncio.Queue[AgentLoopEventOut] = asyncio.Queue()
-    seq_counter = [0]  # mutable to increment in callback
+    def _enqueue(event_type: str, payload: dict | None) -> None:
+        seq[0] += 1
+        queue.put_nowait(
+            AgentLoopEventOut(seq=seq[0], event_type=event_type, payload=payload or {})
+        )
 
     def on_progress(event_type: str, payload: dict) -> None:
-        """同步回调：将事件放入 asyncio 队列。
-
-        此回调在 run_agent_loop 的 DB 线程中执行，
-        通过 call_soon_threadsafe 安全桥接到事件循环。
-        """
+        """同步回调：在 Runtime 线程中执行，通过主 loop 安全入队。"""
         try:
-            seq_counter[0] += 1
-            loop = asyncio.get_event_loop()
-            if payload is None:
-                payload = {}
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                AgentLoopEventOut(event_type=event_type, payload=payload),
-            )
+            main_loop.call_soon_threadsafe(_enqueue, event_type, payload)
         except RuntimeError:
-            # 事件循环已关闭，静默丢弃
-            pass
+            logger.debug("event loop closed, dropping event %s", event_type)
 
     async def sse_generator():
-        """异步生成器：从队列读取事件并序列化为 SSE。"""
-        loop_completed = False
-        # 输出第一个心跳，让客户端确认连接
         yield ": start\n\n"
-        while not loop_completed:
+        while True:
             try:
-                event: AgentLoopEventOut = await asyncio.wait_for(
-                    queue.get(), timeout=30.0
-                )
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
             except asyncio.TimeoutError:
+                if await http_request.is_disconnected():
+                    return
                 yield ": heartbeat\n\n"
                 continue
 
-            seq = seq_counter[0] - queue.qsize()
-            data_str = event.model_dump_json()
-            yield f"id: {seq}\ndata: {data_str}\n\n"
-
-            if event.event_type in (
-                "completed", "failed", "blocked",
-                "waiting_approval", "waiting_job",
-            ):
-                loop_completed = True
-                yield ": done\n\n"
-
-        # 等待队列清空（最多再等 5 秒）
-        for _ in range(5):
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                seq = seq_counter[0]
-                data_str = event.model_dump_json()
-                yield f"id: {seq}\ndata: {data_str}\n\n"
-            except asyncio.TimeoutError:
+            if event is None:
+                break
+            yield f"id: {event.seq}\ndata: {event.model_dump_json()}\n\n"
+            if event.event_type in TERMINAL_EVENTS:
                 break
 
-    async def run_in_background():
-        """在独立线程中执行 run_agent_loop，完成后关闭 DB session。"""
-        try:
-            from app.services.agent_runtime import run_agent_loop
+        yield ": done\n\n"
 
-            result = run_agent_loop(
-                db,
+    async def _run() -> None:
+        from app.services.agent_runtime import run_agent_loop_in_new_session
+
+        try:
+            result = await asyncio.to_thread(
+                run_agent_loop_in_new_session,
                 session_id=request.session_id,
                 description=request.description,
                 project_id=request.project_id,
                 constraints=request.constraints,
                 progress_callback=on_progress,
             )
-        except Exception as exc:
+            # Runtime 自己会发终止事件；若状态异常或事件缺失，这里补一个，保证流一定结束
+            if result.status not in TERMINAL_EVENTS:
+                main_loop.call_soon_threadsafe(
+                    _enqueue,
+                    "failed",
+                    {"status": result.status, "message": result.message},
+                )
+            else:
+                main_loop.call_soon_threadsafe(
+                    _enqueue,
+                    result.status,
+                    {
+                        "goal_id": result.goal_id,
+                        "plan_id": result.plan_id,
+                        "status": result.status,
+                        "message": result.message,
+                        "completed": result.completed_steps,
+                        "failed": result.failed_steps,
+                        "total": result.total_steps,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
             logger.exception("run_agent_loop failed")
-            seq_counter[0] += 1
-            loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                AgentLoopEventOut(
-                    event_type="failed",
-                    payload={"error": str(exc)[:500]},
-                ),
-            )
+            main_loop.call_soon_threadsafe(_enqueue, "failed", {"error": str(exc)[:500]})
         finally:
-            pass  # Session 由 FastAPI 依赖注入管理，不在此处关闭
+            # 无论成功/异常，都保证推一个终止事件，避免客户端挂起
+            main_loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    # 启动后台线程
-    import threading
-    t = threading.Thread(target=asyncio.run, args=(run_in_background(),), daemon=True)
-    t.start()
+    # 持有引用，避免任务被 GC 提前回收
+    background_task = asyncio.create_task(_run())
+    background_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     return StreamingResponse(
         sse_generator(),
@@ -179,9 +185,12 @@ async def get_loop_status(
 ) -> dict:
     """查询指定 Goal 的执行状态（非流式）。"""
     from app.services.agent_runtime import get_goal_status
-    from app.services.goal_manager import get_active_goal
+    from app.services.goal_manager import get_goal_by_id
 
-    goal = get_active_goal(db, goal_id)
+    goal = get_goal_by_id(db, goal_id)
     if not goal:
-        raise HTTPException(status_code=404, detail={"code": "goal_not_found", "message": f"Goal {goal_id} 不存在"})
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "goal_not_found", "message": f"Goal {goal_id} 不存在"},
+        )
     return get_goal_status(db, goal.session_id)

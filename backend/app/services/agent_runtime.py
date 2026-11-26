@@ -442,6 +442,7 @@ def run_agent_loop(
         session_id=session_id,
         project_id=project_id,
         approved=approved,
+        progress_callback=progress_callback,
     )
 
     # ── G. 汇总结果 ──
