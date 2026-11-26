@@ -673,6 +673,33 @@ assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用�
 - **ToolBudget 预算控制**：单轮工具调用上限 `max_calls=12`、`max_total_duration_ms=30000`、`max_context_chars=24000`；超限安全降级（跳过后续工具调用），违规记录进 `violations` 供审计；上下文超限时从尾部丢弃低优先级行。
 - **evaluate_tool_policy 策略引擎**：`requires_approval=True` 且未获批 → `REQUIRE_CONFIRMATION`；`risk_level=high` 且未获批 → `REQUIRE_CONFIRMATION`；其余 → `ALLOW`。
 
+### Agent Runtime 目标状态（Phase B）
+
+`agent_runtime_chat_enabled`（`DLAB_AGENT_RUNTIME_CHAT_ENABLED`，默认 false）打开后，
+批量生产类请求由 Agent Runtime 执行；状态全部来自数据库，刷新页面不丢。
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/agent/{session_id}/goal` | 当前 active Goal 的完整状态；没有则返回 `{"goal": null}` |
+| `GET /api/agent/{session_id}/goals` | 该会话历史 Goal（`page` / `page_size`，按 `updated_at` 倒序） |
+| `GET /api/agent/goals/{goal_id}` | 按 goal_id 查询同一份载荷 |
+
+`goal` 载荷字段：`goal_id`、`description`、`goal_type`、`status`、`lifecycle_state`
+（planning / running / waiting_job / waiting_approval / waiting_user / paused /
+partially_completed / completed / failed / cancelled）、`fingerprint`、`loop_status`；
+同响应含 `latest_plan`（revision/status/parent_plan_id）、`steps`（status / job_id /
+confirmation_id / error_code）与最近 20 条 `execution_logs`。
+
+命中 Runtime 的助手消息 `payload` 额外包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `route_action` | 固定为 `agent_runtime` |
+| `goal_id` / `plan_id` | 本次目标与计划（可空） |
+| `lifecycle_state` | 本次推进后的生命周期 |
+| `tick` | 单次推进明细（advanced_steps / waiting / failed / counts） |
+| `source` | 仅 Worker 主动写的进度消息带 `"agent_runtime"` |
+
 ### Agent 任务/计划/审批表（B 档）
 - `agent_task`：结构化意图识别结果落库（intent/intent_goal/risk_level/confidence/success_criteria/status）。
 - `agent_plan_step`：任务执行计划步骤（step_type=tool_call/clarification/reply，模型提议、代码裁决）。

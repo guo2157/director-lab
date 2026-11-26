@@ -21,6 +21,7 @@ from app.api.v1 import (
     audio,
     voice_matching,
     agent,
+    agent_goals,
     agent_loop,
     analysis,
     asset_plans,
@@ -202,6 +203,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title=cfg.app_name, debug=cfg.debug, lifespan=lifespan)
     app.include_router(projects.router)
     app.include_router(agent.router)
+    app.include_router(agent_goals.router)
     app.include_router(agent_loop.router)
     app.include_router(assets.router)
     app.include_router(asset_plans.router)

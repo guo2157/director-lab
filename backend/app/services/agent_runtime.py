@@ -1811,6 +1811,57 @@ def _tick_locked(
     return result
 
 
+def _post_lifecycle_message(db: Session, goal: Goal, result: "TickResult") -> None:
+    """生命周期变化时向会话写一条 assistant 消息（B8，Worker tick 用）。
+
+    只在 lifecycle_state 发生变化时写；内容由确定性模板渲染，payload 带
+    goal_id 与 source=agent_runtime。seq 取 max+1，(session_id, seq) 冲突重试一次。
+    """
+    from sqlalchemy import func as _func
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
+
+    from app.models.agent import AgentMessage
+    from app.models.ids import agent_message_id
+    from app.services.agent_reply import render_tick_reply
+    from app.services.planner import get_plan_steps
+
+    plan_steps = get_plan_steps(db, result.plan_id) if result.plan_id else []
+    reply = render_tick_reply(result, goal=goal, plan_steps=plan_steps)
+
+    for _attempt in range(2):
+        seq = (
+            db.scalar(
+                _func.max(AgentMessage.seq).where(
+                    AgentMessage.session_id == goal.session_id
+                )
+            )
+            or 0
+        ) + 1
+        db.add(
+            AgentMessage(
+                id=agent_message_id(),
+                session_id=goal.session_id,
+                role="assistant",
+                content=reply,
+                payload={
+                    "route_action": "agent_runtime",
+                    "goal_id": goal.goal_id,
+                    "plan_id": result.plan_id,
+                    "lifecycle_state": result.lifecycle_state,
+                    "source": "agent_runtime",
+                },
+                seq=seq,
+                created_at=datetime.now(),
+            )
+        )
+        try:
+            db.flush()
+            return
+        except _IntegrityError:
+            db.rollback()
+            continue
+
+
 def tick(
     session_factory: Callable[[], Session] | None = None,
     goal_id: str | None = None,
@@ -1882,6 +1933,7 @@ def tick(
             ),
         )
 
+        previous_lifecycle = goal.lifecycle_state
         plan = get_latest_plan(db, goal_id) or get_latest_plan_any(db, goal_id)
         result = _tick_locked(
             db,
@@ -1893,6 +1945,14 @@ def tick(
             progress_callback=progress_callback,
         )
         db.commit()
+        # B8：Worker 推进导致生命周期变化时，向会话写一条确定性进度消息。
+        # trigger="chat" 由 /chat 自己写回复，避免同一轮出现两条助手消息。
+        if trigger != "chat" and result.lifecycle_state != previous_lifecycle:
+            try:
+                _post_lifecycle_message(db, goal, result)
+                db.commit()
+            except Exception:  # noqa: BLE001 - 进度消息失败不影响推进结果
+                db.rollback()
         return result
     except Exception as exc:  # noqa: BLE001 - tick 不向调用方抛异常
         db.rollback()

@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase B · 最小可用版本（进行中：B7 完成） |
-| 下一个任务 | B8 确定性回复与状态查询接口 |
-| 最近提交 | B7（本提交）、`76c6795` B6、`7ca4668` B5、`8ffa690` B4 |
-| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线）；B7 后 tests/test_agent_*.py = 314 passed / 1 xfailed |
-| 更新时间 | 2026-11-26 23:40（Asia/Shanghai） |
+| 当前阶段 | Phase B · 最小可用版本（进行中：B8 完成） |
+| 下一个任务 | B9 暂停、继续、取消 |
+| 最近提交 | B8（本提交）、`84a47fb` B7、`76c6795` B6、`7ca4668` B5 |
+| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线）；B8 后 tests/test_agent_*.py = 318 passed / 1 xfailed |
+| 更新时间 | 2026-11-27 00:05（Asia/Shanghai） |
 | 工作区 | 干净（每次任务一个本地提交，不推送） |
 
 > 本文件替换 Phase 0 时期的旧版 implementation-plan.md。
@@ -80,7 +80,7 @@
 - [x] **B5** Worker 中的 agent-resume 线程与兜底扫描（本提交）
 - [x] **B6** `/chat` 接入 Runtime（开关后面）（本提交）
 - [x] **B7** 最小计划模板：资产生成与分镜图生成（本提交）
-- [ ] **B8** 确定性回复与状态查询接口
+- [x] **B8** 确定性回复与状态查询接口（本提交）
 - [ ] **B9** 暂停、继续、取消
 - [ ] **B10** 端到端 MVP 验收测试
 - [ ] **B11** 收尾：文档、开关策略、清理

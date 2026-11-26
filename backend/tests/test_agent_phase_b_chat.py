@@ -291,6 +291,16 @@ def test_runtime_route_creates_goal_and_replies(
 
     db = _db()
     try:
+        # /chat 自己写一条回复；run_agent_loop 走 _tick_locked，不应再额外写进度消息
+        from app.models.agent import AgentMessage
+
+        messages = db.scalars(
+            select(AgentMessage).where(
+                AgentMessage.session_id == sid, AgentMessage.role == "assistant"
+            )
+        ).all()
+        assert len(messages) == 1, [m.content for m in messages]
+
         goal = db.get(AgentGoal, payload["goal_id"])
         assert goal is not None
         assert goal.agent_task_id, "Goal 必须绑定到 /chat 创建的 AgentTask"
