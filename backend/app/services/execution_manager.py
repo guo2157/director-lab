@@ -134,6 +134,137 @@ def _release_step_lock(
     db.flush()
 
 
+# ── 结果分流（A5 / P0-6）──────────────────────────────────────────────
+
+def _ensure_task_stage_for_job(
+    db: Session,
+    *,
+    step,
+    job_id: str,
+    session_id: str | None,
+    project_id: str | None,
+):
+    """把步骤产生的 Job 挂成统一 Task 的阶段，让 bridge_job_event 能闭环。
+
+    幂等：同一 job_id 已有 TaskStage 时直接复用，不重复建 Task。
+    """
+    from sqlalchemy import select
+
+    from app.models.task import TaskStage
+    from app.services import task_orchestrator
+
+    existing = db.scalars(select(TaskStage).where(TaskStage.job_id == job_id)).first()
+    if existing is not None:
+        return existing
+
+    title = (step.description or step.tool_name or "Agent 步骤")[:200]
+    task = task_orchestrator.create_task(
+        db,
+        session_id=session_id,
+        task_type="agent_step",
+        title=title,
+        project_id=project_id,
+    )
+    return task_orchestrator.attach_job_stage(
+        db,
+        task,
+        job_id=job_id,
+        stage_key=(step.step_key or step.tool_name or "agent_step")[:64],
+        stage_name=title,
+    )
+
+
+def _route_job_result(
+    db: Session,
+    *,
+    step,
+    job_id: str,
+    result_payload: dict,
+    session_id: str | None,
+    project_id: str | None,
+) -> str:
+    """Job 结果 → 步骤状态。Job 创建成功只代表进入 waiting_job（除非已终态）。
+
+    返回最终写入的 step.status。
+    """
+    from app.models import Job
+
+    step.job_id = job_id
+    _ensure_task_stage_for_job(
+        db,
+        step=step,
+        job_id=job_id,
+        session_id=session_id,
+        project_id=project_id,
+    )
+
+    job = db.get(Job, job_id)
+    now = datetime.now()
+    if job is None:
+        step.status = "failed"
+        step.error_code = "job_not_found"
+        step.error_message = f"工具返回的 Job {job_id} 不存在"
+        step.completed_at = now
+        step.result = result_payload
+        db.flush()
+        return step.status
+
+    if job.status == "succeeded":
+        step.status = "succeeded"
+        step.completed_at = now
+    elif job.status in ("failed", "cancelled"):
+        step.status = "failed"
+        step.error_code = "job_failed" if job.status == "failed" else "job_cancelled"
+        step.error_message = f"Job {job_id} 状态为 {job.status}"
+        step.completed_at = now
+    else:
+        step.status = "waiting_job"
+    step.result = result_payload
+    db.flush()
+    return step.status
+
+
+def _route_confirmation_result(
+    db: Session,
+    *,
+    step,
+    data: dict,
+    result_payload: dict,
+) -> str | None:
+    """工具返回 confirmation_id 时进入 waiting_approval（审批与执行分离）。
+
+    批量工具可能返回 confirmation_ids：全部存入 result，step.confirmation_id 取第一个。
+    返回写入的 step.status，未命中返回 None。
+    """
+    from app.models.agent import AgentConfirmation
+
+    ids: list[str] = []
+    raw_ids = data.get("confirmation_ids")
+    if isinstance(raw_ids, list):
+        ids.extend([str(i) for i in raw_ids if i])
+    single = data.get("confirmation_id")
+    if single:
+        ids.append(str(single))
+    if not ids:
+        return None
+
+    pending = [
+        cid
+        for cid in ids
+        if (db.get(AgentConfirmation, cid) is not None
+            and db.get(AgentConfirmation, cid).status == "pending")
+    ]
+    if not pending:
+        return None
+
+    result_payload["confirmation_ids"] = ids
+    step.confirmation_id = ids[0]
+    step.status = "waiting_approval"
+    step.result = result_payload
+    db.flush()
+    return step.status
+
+
 # ── Task 映射 ─────────────────────────────────────────────────────────
 
 # ── Tool Selection ────────────────────────────────────────────────────
@@ -224,7 +355,10 @@ def execute_step(
     spec = _get_tool_spec(tool_name) or {}
     decision = evaluate_tool_policy(spec, approved=approved)
     if decision == PolicyDecision.REQUIRE_CONFIRMATION:
-        _release_step_lock(db, step_id, status="waiting_approval")
+        # A5(c)：工具需要审批但当前没有可用批准记录 → waiting_approval + approval_required
+        _release_step_lock(
+            db, step_id, status="waiting_approval", error_code="approval_required"
+        )
         return {
             "success": False,
             "step_id": step_id,
@@ -291,20 +425,49 @@ def execute_step(
     }
 
     if tool_result.ok:
-        _release_step_lock(db, step_id, status="succeeded", result=result_payload)
+        data = tool_result.data if isinstance(tool_result.data, dict) else {}
+        routed_status = None
+
+        # a. 产生 Job → waiting_job（Job 已终态则直接收敛）
+        job_id = data.get("job_id")
+        if job_id:
+            step.result = result_payload
+            routed_status = _route_job_result(
+                db,
+                step=step,
+                job_id=str(job_id),
+                result_payload=result_payload,
+                session_id=session_id,
+                project_id=project_id,
+            )
+        else:
+            # b. 产生审批记录 → waiting_approval
+            routed_status = _route_confirmation_result(
+                db, step=step, data=data, result_payload=result_payload
+            )
+            if routed_status is None:
+                # d. 其他同步工具 → succeeded
+                step.status = "succeeded"
+                step.completed_at = datetime.now()
+                step.result = result_payload
+                db.flush()
+                routed_status = "succeeded"
+
+        is_waiting = routed_status in ("waiting_job", "waiting_approval")
         log_step_end(
             db,
             goal_id=goal_id or "",
             plan_id=plan_id,
             step_id=step_id,
             tool_name=tool_name,
-            result=StepResult.SUCCESS,
+            result=StepResult.WAITING if is_waiting else StepResult.SUCCESS,
             output_data=result_payload,
             started_at=started_at,
         )
         return {
-            "success": True,
+            "success": routed_status == "succeeded",
             "step_id": step_id,
+            "step_status": routed_status,
             "task_id": None,
             "log_id": log_id,
             "result": result_payload,

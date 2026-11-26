@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.services.execution_manager import execute_step
-from tests.agent_runtime_fixtures import fake_tool, mk_project
+from tests.agent_runtime_fixtures import fake_tool, mk_job, mk_project
 from tests.test_agent_runtime_tx import _fixed_plan
 
 
@@ -128,3 +128,154 @@ def test_sync_step_creates_no_task(db, project, monkeypatch):
     result = execute_step(db, step_id=step.id, plan_id=plan.plan_id, goal_id=goal.goal_id)
     assert result["success"] is True
     assert db.scalar(select(Task.id).limit(1)) == before
+
+
+# ── A5 / P0-6：结果分流（Job → waiting_job，审批 → waiting_approval）───────
+
+def _plan_steps(db, plan):
+    from app.models.agent import AgentPlanStep
+
+    return db.scalars(
+        select(AgentPlanStep)
+        .where(AgentPlanStep.plan_id == plan.plan_id)
+        .order_by(AgentPlanStep.step_index)
+    ).all()
+
+
+def test_job_result_enters_waiting_job(db, project, monkeypatch):
+    from app.models.task import TaskStage
+
+    job = mk_job(db, project.id, status="queued")
+    fake_tool(monkeypatch, "fake_job", returns={"job_id": job.id})
+    goal, plan = _plan_with(db, monkeypatch, ["fake_job"], project)
+    step = _first_step(db, plan)
+
+    result = execute_step(db, step_id=step.id, plan_id=plan.plan_id, goal_id=goal.goal_id)
+    assert step.status == "waiting_job", result
+    assert step.job_id == job.id
+    stage = db.scalars(select(TaskStage).where(TaskStage.job_id == job.id)).first()
+    assert stage is not None, "Job 必须挂到 TaskStage 上，bridge_job_event 才能闭环"
+
+
+def test_job_already_succeeded_converges(db, project, monkeypatch):
+    job = mk_job(db, project.id, status="succeeded")
+    fake_tool(monkeypatch, "fake_job_done", returns={"job_id": job.id})
+    goal, plan = _plan_with(db, monkeypatch, ["fake_job_done"], project)
+    step = _first_step(db, plan)
+
+    execute_step(db, step_id=step.id, plan_id=plan.plan_id, goal_id=goal.goal_id)
+    assert step.status == "succeeded"
+
+
+def test_confirmation_result_enters_waiting_approval(db, project, monkeypatch):
+    from app.models.agent import AgentConfirmation
+
+    confirmation = AgentConfirmation(
+        id="acf_a5pending0000000000000001",
+        task_id=None,
+        tool_name="fake_confirm",
+        args={},
+        status="pending",
+        session_id="a5",
+        project_id=project.id,
+    )
+    db.add(confirmation)
+    db.flush()
+
+    fake_tool(monkeypatch, "fake_confirm", returns={"confirmation_id": confirmation.id})
+    goal, plan = _plan_with(db, monkeypatch, ["fake_confirm"], project)
+    step = _first_step(db, plan)
+
+    execute_step(db, step_id=step.id, plan_id=plan.plan_id, goal_id=goal.goal_id)
+    assert step.status == "waiting_approval"
+    assert step.confirmation_id == confirmation.id
+
+
+def test_batch_confirmation_ids_all_stored(db, project, monkeypatch):
+    from app.models.agent import AgentConfirmation
+
+    ids = ["acf_a5batch00000000000000001", "acf_a5batch00000000000000002"]
+    for cid in ids:
+        db.add(
+            AgentConfirmation(
+                id=cid, task_id=None, tool_name="fake_batch", args={},
+                status="pending", session_id="a5", project_id=project.id,
+            )
+        )
+    db.flush()
+
+    fake_tool(monkeypatch, "fake_batch", returns={"confirmation_ids": list(ids)})
+    goal, plan = _plan_with(db, monkeypatch, ["fake_batch"], project)
+    step = _first_step(db, plan)
+
+    execute_step(db, step_id=step.id, plan_id=plan.plan_id, goal_id=goal.goal_id)
+    assert step.status == "waiting_approval"
+    assert step.confirmation_id == ids[0]
+    assert step.result["confirmation_ids"] == ids
+
+
+def test_approval_required_maps_to_waiting_approval(db, project, monkeypatch):
+    fake_tool(
+        monkeypatch, "fake_needs_approval", returns={"ok": 1},
+        spec_overrides={"requires_approval": True},
+    )
+    goal, plan = _plan_with(db, monkeypatch, ["fake_needs_approval"], project)
+    step = _first_step(db, plan)
+
+    execute_step(db, step_id=step.id, plan_id=plan.plan_id, goal_id=goal.goal_id)
+    assert step.status == "waiting_approval"
+    assert step.error_code == "approval_required"
+
+
+def test_parallel_branch_not_blocked(db, project, monkeypatch):
+    """A 返回 job_id，B 是同步工具：循环返回 waiting_job 时 B 必须已经 succeeded。"""
+    from app.services.agent_runtime import run_agent_loop
+    from tests.test_agent_runtime_tx import _fixed_plan
+    from app.services import planner as planner_mod
+
+    job = mk_job(db, project.id, status="queued")
+    fake_tool(monkeypatch, "fake_par_job", returns={"job_id": job.id})
+    fake_tool(monkeypatch, "fake_par_sync", returns={"ok": 1})
+
+    def _build(db_, *, goal_id, description, project_id=None, previous_plan=None):
+        plan = planner_mod.Plan(
+            plan_id=planner_mod.agent_plan_id(),
+            goal_id=goal_id,
+            revision=(previous_plan.revision + 1) if previous_plan else 1,
+            metadata={"description": description, "project_id": project_id},
+        )
+        plan.steps.append(
+            planner_mod.PlanStep(
+                step_key="a", tool_name="fake_par_job", description="并行 A",
+                args={}, estimated_timeout=30,
+            )
+        )
+        plan.steps.append(
+            planner_mod.PlanStep(
+                step_key="b", tool_name="fake_par_sync", description="并行 B",
+                args={}, estimated_timeout=30,
+            )
+        )
+        report = planner_mod.validate_plan(plan, project_id=project_id)
+        if report.passed:
+            planner_mod.save_plan(db_, plan, supersede_previous=True)
+            planner_mod.save_plan_steps(db_, plan)
+        return plan, report
+
+    monkeypatch.setattr(planner_mod, "build_and_save_plan", _build)
+
+    result = run_agent_loop(
+        db, session_id="a5par", description="并行分支测试", project_id=project.id
+    )
+    assert result.status == "waiting_job", (result.status, result.message, result.errors)
+
+    from app.models.agent import AgentPlanStep
+
+    steps = {
+        s.tool_name: s
+        for s in db.scalars(
+            select(AgentPlanStep).where(AgentPlanStep.plan_id == result.plan_id)
+        ).all()
+    }
+    assert steps["fake_par_job"].status == "waiting_job"
+    assert steps["fake_par_sync"].status == "succeeded", "等待的分支不能阻塞无关的就绪分支"

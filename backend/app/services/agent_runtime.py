@@ -724,6 +724,7 @@ def _run_plan_loop(
             }
 
         # 2. 逐步骤执行
+        waiting_hit: dict | None = None  # A5：本批出现的等待态（不阻塞同批其他分支）
         for step_info in pending:
             step_id = step_info["id"]
             tool_name = step_info.get("tool_name", "")
@@ -741,24 +742,29 @@ def _run_plan_loop(
                 approved=approved,
             )
 
-            # 2b. 审批等待
-            if exec_result.get("policy") == "REQUIRE_CONFIRMATION":
-                db.commit()  # waiting_approval 状态必须持久化
+            # 2b. 等待态（A5 / P0-6）：Job 或审批 → 记录后继续执行同批其他可执行分支
+            step_status = exec_result.get("step_status")
+            if step_status in ("waiting_job", "waiting_approval") or (
+                exec_result.get("policy") == "REQUIRE_CONFIRMATION"
+            ):
+                waiting_kind = (
+                    step_status
+                    if step_status in ("waiting_job", "waiting_approval")
+                    else "waiting_approval"
+                )
+                db.commit()  # 等待态必须持久化，否则新连接看不到
                 _emit(
                     LoopEvent.STEP_WAITING.value,
-                    {"step_id": step_id, "tool_name": tool_name, "waiting": "approval"},
+                    {"step_id": step_id, "tool_name": tool_name,
+                     "waiting": "job" if waiting_kind == "waiting_job" else "approval"},
                 )
-                return {
-                    "status": "waiting_approval",
-                    "message": f"步骤 '{tool_name}' 需要人工审批",
-                    "total_steps": total_steps,
-                    "completed_steps": completed,
-                    "failed_steps": failed,
-                    "skipped_steps": skipped,
-                    "next_action": "wait_approval",
-                    "wait_step_id": step_id,
-                    "errors": errors,
-                }
+                if waiting_hit is None:
+                    waiting_hit = {
+                        "kind": waiting_kind,
+                        "step_id": step_id,
+                        "tool_name": tool_name,
+                    }
+                continue
 
             # 2c. 验证
             verification = verify_step(
@@ -841,6 +847,26 @@ def _run_plan_loop(
                 })
                 db.commit()  # 失败状态必须落库，否则新连接看不到
                 continue
+
+        # 2e. 本批有等待态：其他分支已推进完毕，返回等待
+        if waiting_hit is not None:
+            kind = waiting_hit["kind"]
+            is_job = kind == "waiting_job"
+            return {
+                "status": kind,
+                "message": (
+                    f"步骤 '{waiting_hit['tool_name']}' 已提交生成任务，等待 Job 完成"
+                    if is_job
+                    else f"步骤 '{waiting_hit['tool_name']}' 需要人工审批"
+                ),
+                "total_steps": total_steps,
+                "completed_steps": completed,
+                "failed_steps": failed,
+                "skipped_steps": skipped,
+                "next_action": "wait_job" if is_job else "wait_approval",
+                "wait_step_id": waiting_hit["step_id"],
+                "errors": errors,
+            }
 
         # 如果 Plan 被替换，继续外层循环
         continue
