@@ -515,10 +515,56 @@ def run_agent_loop(
     )
     result.goal_id = goal.goal_id
     db.commit()  # A1：Goal 创建/复用立即落库，后续崩溃不会丢目标
+
+    # A11：Goal 级锁——同一 Goal 并发调用时只有一个能推进，其余返回 busy 且不执行任何步骤
+    from app.services.execution_manager import _acquire_goal_lock, _release_goal_lock
+
+    if not _acquire_goal_lock(db, goal.goal_id):
+        db.commit()
+        result.status = "busy"
+        result.message = f"Goal {goal.goal_id} 正在由其他执行者推进，请稍后重试"
+        result.next_action = "retry_later"
+        return result
+
     _emit(
         LoopEvent.GOAL_RESUMED.value if resumed else LoopEvent.GOAL_CREATED.value,
         {"goal_id": goal.goal_id, "description": goal.description},
     )
+
+    try:
+        return _run_agent_loop_locked(
+            db,
+            result=result,
+            goal=goal,
+            session_id=session_id,
+            description=description,
+            project_id=project_id,
+            resumed=resumed,
+            progress_callback=progress_callback,
+            emit=_emit,
+        )
+    finally:
+        _release_goal_lock(db, goal.goal_id)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
+def _run_agent_loop_locked(
+    db: Session,
+    *,
+    result: AgentLoopResult,
+    goal: Goal,
+    session_id: str,
+    description: str,
+    project_id: str | None,
+    resumed: bool,
+    progress_callback: Callable[[str, dict], None] | None,
+    emit: Callable[[str, dict], None],
+) -> AgentLoopResult:
+    """run_agent_loop 在持有 Goal 锁后的主体（A11 抽出，便于 try/finally 释放锁）。"""
+    _emit = emit
 
     # 记录 Goal 创建/恢复日志
     log_execution(

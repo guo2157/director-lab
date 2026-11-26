@@ -153,6 +153,8 @@ class AgentPlanStep(Base, TimestampMixin):
     job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     # 计划内语义 key（原先只在 plan_json 中，落库后按它复用已完成步骤）
     step_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 执行锁持有者（A11）：条件 UPDATE 抢锁时写入，释放时校验，防止跨线程误释放
+    lock_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class AgentConfirmation(Base, TimestampMixin):
@@ -276,6 +278,8 @@ class AgentGoal(Base, TimestampMixin):
     )
     # 目标指纹（Phase A A8）：project_id + target_stage + scope 的稳定哈希
     fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Goal 级执行锁（A11）：条件 UPDATE 设置 locked_until，防止同一 Goal 并发推进
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AgentPlan(Base, TimestampMixin):

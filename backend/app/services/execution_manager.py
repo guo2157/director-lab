@@ -18,9 +18,10 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
+import uuid
 
 from sqlalchemy.orm import Session
 
@@ -78,33 +79,34 @@ def _get_tool_spec(tool_name: str) -> dict | None:
 
 # ── 执行锁 ────────────────────────────────────────────────────────────
 
-def _acquire_step_lock(db: Session, step_id: str) -> bool:
-    """获取步骤执行锁（CAS：只有 pending → running 才成功）。
+def _acquire_step_lock(db: Session, step_id: str) -> str | None:
+    """原子获取步骤执行锁（A11：条件 UPDATE，不再「读状态 → 判断 → 写」）。
 
-    超过 EXECUTION_LOCK_TIMEOUT_SECONDS 的死锁自动释放。
+    只有 status ∈ (pending, ready) 时才能把状态置为 running 并写入 lock_owner；
+    以 rowcount == 1 判定抢锁成功。返回 lock_owner（失败返回 None）。
+
+    超时回收不在抢锁路径里做：由 reclaim_stale_steps() 显式调用，
+    避免把仍在运行的同步工具误判为死锁并改成 failed。
     """
+    from sqlalchemy import update
+
     from app.models.agent import AgentPlanStep
 
-    step = db.get(AgentPlanStep, step_id)
-    if step is None:
-        return False
-
-    # 死锁检测
-    if step.status == "running" and step.started_at:
-        elapsed = (datetime.now() - step.started_at).total_seconds()
-        if elapsed > EXECUTION_LOCK_TIMEOUT_SECONDS:
-            step.status = "failed"
-            step.error_message = f"执行锁超时 ({int(elapsed)}s)，自动释放"
-            db.flush()
-            return False
-
-    if step.status not in ("pending", "ready"):
-        return False
-
-    step.status = "running"
-    step.started_at = datetime.now()
+    owner = str(uuid.uuid4())
+    now = datetime.now()
+    result = db.execute(
+        update(AgentPlanStep)
+        .where(
+            AgentPlanStep.id == step_id,
+            AgentPlanStep.status.in_(("pending", "ready")),
+        )
+        .values(status="running", started_at=now, lock_owner=owner)
+    )
+    if result.rowcount != 1:
+        db.flush()
+        return None
     db.flush()
-    return True
+    return owner
 
 
 def _release_step_lock(
@@ -115,22 +117,127 @@ def _release_step_lock(
     result: dict | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
-) -> None:
-    """释放步骤执行锁并更新状态。"""
+    lock_owner: str | None = None,
+) -> bool:
+    """释放步骤执行锁并更新状态。
+
+    传入 lock_owner 时校验持有者，防止 A 线程释放 B 线程的锁（返回 False 表示不是持有者）。
+    """
+    from sqlalchemy import update
+
     from app.models.agent import AgentPlanStep
 
-    step = db.get(AgentPlanStep, step_id)
-    if step is None:
-        return
-
-    step.status = status
-    step.completed_at = datetime.now()
+    values: dict[str, Any] = {
+        "status": status,
+        "completed_at": datetime.now(),
+        "lock_owner": None,
+    }
     if result is not None:
-        step.result = result
+        values["result"] = result
     if error_code is not None:
-        step.error_code = error_code
+        values["error_code"] = error_code
     if error_message is not None:
-        step.error_message = error_message
+        values["error_message"] = error_message
+
+    stmt = update(AgentPlanStep).where(AgentPlanStep.id == step_id)
+    if lock_owner is not None:
+        stmt = stmt.where(AgentPlanStep.lock_owner == lock_owner)
+    res = db.execute(stmt.values(**values))
+    db.flush()
+    return res.rowcount == 1
+
+
+def reclaim_stale_steps(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    timeout_seconds: int | None = None,
+) -> dict:
+    """回收超时的 running 步骤（A11）。
+
+    规则：
+    - running 超过 timeout_seconds × 2（默认 1800s × 2）→ 回到 pending，retry_count + 1
+    - retry_count 达到 max_retries → failed(error_code="lock_timeout")
+
+    Phase A 只提供函数与测试，不接入调度（Phase B 由 Worker 调用）。
+    返回 {"reclaimed": [...], "failed": [...]}。
+    """
+    from sqlalchemy import select
+
+    from app.models.agent import AgentPlanStep
+
+    now = now or datetime.now()
+    base_timeout = timeout_seconds or EXECUTION_LOCK_TIMEOUT_SECONDS
+    rows = db.scalars(
+        select(AgentPlanStep).where(AgentPlanStep.status == "running")
+    ).all()
+
+    reclaimed: list[str] = []
+    failed: list[str] = []
+    for step in rows:
+        if step.started_at is None:
+            continue
+        step_timeout = (step.timeout_seconds or base_timeout) * 2
+        elapsed = (now - step.started_at).total_seconds()
+        if elapsed <= step_timeout:
+            continue
+
+        retry_count = (step.retry_count or 0) + 1
+        step.retry_count = retry_count
+        step.lock_owner = None
+        max_retries = step.max_retries if step.max_retries is not None else 3
+        if retry_count >= max_retries:
+            step.status = "failed"
+            step.error_code = "lock_timeout"
+            step.error_message = f"执行锁超时 ({int(elapsed)}s)，已达最大重试次数 {max_retries}"
+            failed.append(step.id)
+        else:
+            step.status = "pending"
+            step.started_at = None
+            reclaimed.append(step.id)
+    if reclaimed or failed:
+        db.flush()
+    return {"reclaimed": reclaimed, "failed": failed}
+
+
+# ── Goal 级锁（A11）────────────────────────────────────────────────────
+
+GOAL_LOCK_TTL_SECONDS = 300
+
+
+def _acquire_goal_lock(db: Session, goal_id: str, *, ttl_seconds: int = GOAL_LOCK_TTL_SECONDS) -> bool:
+    """原子获取 Goal 级执行锁（条件 UPDATE）。
+
+    只有 locked_until 为空或已过期时才能写入新的 locked_until；
+    拿不到锁返回 False（调用方应返回 status="busy"，不执行任何步骤）。
+    """
+    from sqlalchemy import and_, or_, update
+
+    from app.models.agent import AgentGoal
+
+    now = datetime.now()
+    locked_until = now + timedelta(seconds=ttl_seconds)
+    result = db.execute(
+        update(AgentGoal)
+        .where(
+            AgentGoal.id == goal_id,
+            or_(AgentGoal.locked_until.is_(None), AgentGoal.locked_until < now),
+        )
+        .values(locked_until=locked_until)
+    )
+    db.flush()
+    return result.rowcount == 1
+
+
+def _release_goal_lock(db: Session, goal_id: str) -> None:
+    """释放 Goal 级执行锁。"""
+    from sqlalchemy import update
+
+    from app.models.agent import AgentGoal
+
+    db.execute(
+        update(AgentGoal).where(AgentGoal.id == goal_id).values(locked_until=None)
+    )
     db.flush()
 
 
@@ -257,6 +364,8 @@ def _route_job_result(
     else:
         step.status = "waiting_job"
     step.result = result_payload
+    # A11：步骤已离开 running（进入终态或等待态），释放执行锁
+    step.lock_owner = None
     db.flush()
     return step.status
 
@@ -377,8 +486,10 @@ def execute_step(
 
     tool_name = step.tool_name or ""
 
-    # 1. 获取执行锁
-    if not _acquire_step_lock(db, step_id):
+    # 1. 获取执行锁（A11：条件 UPDATE，rowcount==1 才算拿到；失败直接返回，不执行工具）
+    lock_owner = _acquire_step_lock(db, step_id)
+    if not lock_owner:
+        db.refresh(step)
         return {
             "success": False,
             "step_id": step_id,
@@ -393,7 +504,11 @@ def execute_step(
     if _step_needs_approval(spec, step) and not step_approved:
         # 需要审批但当前没有绑定到本步骤的可用批准 → waiting_approval
         _release_step_lock(
-            db, step_id, status="waiting_approval", error_code="approval_required"
+            db,
+            step_id,
+            status="waiting_approval",
+            error_code="approval_required",
+            lock_owner=lock_owner,
         )
         return {
             "success": False,
@@ -407,7 +522,7 @@ def execute_step(
     if budget:
         violation = budget.check_before(tool_name)
         if violation:
-            _release_step_lock(db, step_id, status="failed", error_message=f"预算超限: {violation}")
+            _release_step_lock(db, step_id, status="failed", error_message=f"预算超限: {violation}", lock_owner=lock_owner)
             return {
                 "success": False,
                 "step_id": step_id,
@@ -480,6 +595,7 @@ def execute_step(
                 step.status = "succeeded"
                 step.completed_at = datetime.now()
                 step.result = result_payload
+                step.lock_owner = None
                 db.flush()
                 routed_status = "succeeded"
 
@@ -515,6 +631,7 @@ def execute_step(
             result=result_payload,
             error_code="approval_required",
             error_message=tool_result.error_message,
+            lock_owner=lock_owner,
         )
         log_step_end(
             db,
@@ -546,6 +663,7 @@ def execute_step(
         result=result_payload,
         error_code=tool_result.error_code,
         error_message=tool_result.error_message,
+        lock_owner=lock_owner,
     )
     log_step_end(
         db,

@@ -13,11 +13,23 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-NEW_COLUMNS = {
+# A0（a1b2c3d4e5f9）新增列
+PHASE_A_COLUMNS = {
     "agent_plan_step": {"confirmation_id", "job_id", "step_key"},
     "agent_goal": {"fingerprint"},
     "agent_plan": {"parent_plan_id"},
 }
+# A11（a1b2c3d4e5fa）新增锁字段
+A11_COLUMNS = {
+    "agent_plan_step": {"lock_owner"},
+    "agent_goal": {"locked_until"},
+}
+NEW_COLUMNS = {
+    table: PHASE_A_COLUMNS.get(table, set()) | A11_COLUMNS.get(table, set())
+    for table in set(PHASE_A_COLUMNS) | set(A11_COLUMNS)
+}
+PHASE_A_HEAD = "a1b2c3d4e5f9"
+HEAD = "a1b2c3d4e5fa"
 
 
 def _config(db_url: str) -> Config:
@@ -72,7 +84,15 @@ def test_phase_a_columns_upgrade_and_downgrade(tmp_db):
     cols = _columns(db_url)
     for table, expected in NEW_COLUMNS.items():
         assert expected <= cols[table], f"{table} missing {expected - cols[table]}"
-    assert _alembic_version(db_url) == "a1b2c3d4e5f9"
+    assert _alembic_version(db_url) == HEAD
+
+    # 先回退 A11（锁字段），再回退 A0（Phase A 列）
+    command.downgrade(cfg, PHASE_A_HEAD)
+    cols = _columns(db_url)
+    for table, expected in A11_COLUMNS.items():
+        assert not (expected & cols[table]), f"{table} still has {expected & cols[table]}"
+    for table, expected in PHASE_A_COLUMNS.items():
+        assert expected <= cols[table], f"{table} 回退 A11 后不应丢失 A0 列"
 
     command.downgrade(cfg, "-1")
     cols = _columns(db_url)

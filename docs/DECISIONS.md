@@ -94,3 +94,6 @@
 | AG-06 | `_derive_loop_status` 的等待优先级为 `waiting_user > waiting_approval > waiting_job`；`partially_completed` 时 `goal.status` 保持 `active`，仅通过 `loop_status` 字段对外展示 | 用户可处理的等待优先暴露；部分完成时目标应允许继续补做，不应进入终态 | `backend/app/services/agent_runtime.py` |
 | AG-07 | `get_goal_status_by_id` 返回 `loop_status` 与 `execution_logs`（默认 20 条），`get_goal_status(session_id)` 保留并内部转调 | 兼容既有调用方，同时满足 A10 的按 goal_id 查询需求 | `backend/app/services/agent_runtime.py`、`backend/app/api/v1/agent_loop.py` |
 | AG-08 | 接手时发现上一个 Codex 会话仍在写仓库：按用户指示观察 3 次（无变化）后，在本机终止该会话进程树（22 个进程，根 PID 61716 → 41248 → 55852），服务器上未 kill 任何进程 | 避免两个会话并发改写同一工作区导致提交互相覆盖；旧会话已自行提交 A9，A10 半成品经审阅后接手 | 无（操作记录） |
+| AG-09 | 步骤锁用条件 UPDATE（`status IN (pending, ready)` → `running` + `lock_owner`），以 rowcount==1 判定抢锁成功；超时回收独立为 `reclaim_stale_steps()`，不在抢锁路径里把 running 步骤改成 failed | 避免「读状态 → 判断 → 写」的竞态；也不误伤仍在运行的同步工具 | `backend/app/services/execution_manager.py` |
+| AG-10 | Goal 级锁 TTL 默认 300s（`GOAL_LOCK_TTL_SECONDS`），`run_agent_loop` 拿不到锁返回 `status="busy"`、`next_action="retry_later"`，不执行任何步骤 | 同一 Goal 并发调用时只允许一个推进；TTL 防止进程崩溃后永久锁死 | `backend/app/services/agent_runtime.py`、`backend/app/services/execution_manager.py` |
+| AG-11 | 迁移 `a1b2c3d4e5fa` 新增 `agent_plan_step.lock_owner` 与 `agent_goal.locked_until`（均可空，带 downgrade） | 锁状态必须持久化才能跨 Session/进程生效；只加可空列符合迁移约束 | `backend/alembic/versions/a1b2c3d4e5fa_agent_runtime_lock_fields.py` |
