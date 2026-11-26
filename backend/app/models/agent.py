@@ -103,13 +103,17 @@ class AgentPlanStep(Base, TimestampMixin):
 
     - step_type：tool_call（工具调用）/ clarification（向用户澄清）/ reply（生成回复）
     - 工具调用步骤须引用 TOOL_REGISTRY 中已注册工具名
-    - status：pending / running / succeeded / failed / skipped
+    - status：pending / ready / running / waiting_job / waiting_approval / waiting_user /
+      succeeded / failed / skipped / cancelled
+      （Phase A 起统一词表，不再用 "completed" 表示步骤成功；"completed" 只用于 Plan/Goal 的终态）
+    - step_key：计划内语义 key，Replan 时按它识别"同一件事"并复用已完成步骤
     """
 
     __tablename__ = "agent_plan_step"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     # 外键指向 agent_task.id（前缀 agt_），而非统一 task.id（前缀 task_）。
+    # Runtime 步骤（plan_id 非空）task_id 恒为 ""，与 AgentTask 的关联通过 agent_goal / agent_task.goal_id。
     # V2 修正注记：不能直接 db.get(Task, plan_step.task_id)——ID 前缀不同会静默返回 None。
     # 跨表查询应通过 agent_task_id 反查 Task：select(Task).where(Task.agent_task_id == plan_step.task_id)。
     task_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -121,7 +125,7 @@ class AgentPlanStep(Base, TimestampMixin):
     tool_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 步骤入参（JSON，经 input_model 校验后落库）
     args: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # pending / running / succeeded / failed / skipped
+    # 见类 docstring 的状态词表（Phase A 起含 waiting_job / waiting_approval / waiting_user / cancelled）
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     # 执行结果摘要（错误码/耗时等）
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -141,6 +145,14 @@ class AgentPlanStep(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Agent Runtime Phase A 扩展列 ──
+    # 步骤绑定的 AgentConfirmation（审批按步骤绑定，一次审批只放行它绑定的步骤）
+    confirmation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # 步骤产生的 Job（Phase B 恢复时按它反查）
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # 计划内语义 key（原先只在 plan_json 中，落库后按它复用已完成步骤）
+    step_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AgentConfirmation(Base, TimestampMixin):
@@ -244,7 +256,8 @@ class AgentGoal(Base, TimestampMixin):
     - 每个 session 同一时间只有一个 active 目标
     - 目标类型：user_request / system_continuation / recovery
     - 约束与成功标准以 JSON 存储，供 Constraint Manager 与 Verifier 消费
-    - 状态机：active → paused/completed/failed/cancelled；failed 可恢复为 active
+    - 状态机：active → paused/completed/failed/cancelled/superseded；failed 可恢复为 active
+    - superseded：同一 session 出现不同指纹的新目标时，旧目标置为 superseded（保留审计）
     """
 
     __tablename__ = "agent_goal"
@@ -261,6 +274,8 @@ class AgentGoal(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active", index=True
     )
+    # 目标指纹（Phase A A8）：project_id + target_stage + scope 的稳定哈希
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class AgentPlan(Base, TimestampMixin):
@@ -280,6 +295,8 @@ class AgentPlan(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
+    # Replan 来源计划（Phase A A9）：revision > 1 时指向上一版计划
+    parent_plan_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class AgentExecutionLog(Base, TimestampMixin):

@@ -14,7 +14,7 @@
 - 验收门禁：A12b 回归汇总：每个 P0 缺陷一条命名回归用例
 - 任务说明：[plan/phase-a-agent-prompts.md](plan/phase-a-agent-prompts.md)
 
-- [ ] **A0** 数据模型补丁（一次迁移，为后续任务铺路）
+- [x] **A0** 数据模型补丁（一次迁移，为后续任务铺路）
 - [ ] **A12a** 测试基建：Runtime 专用夹具（先于 A1 完成）
 - [ ] **A1** 事务边界：Runtime 入口自管 Session 与提交（P0-1）
 - [ ] **A2** 调试接口的线程与 SSE 桥接（P0-2、P0-3）

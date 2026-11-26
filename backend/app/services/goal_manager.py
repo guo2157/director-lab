@@ -19,15 +19,16 @@ from app.models.ids import agent_goal_id
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 
-GOAL_STATUSES = {"active", "paused", "completed", "failed", "cancelled"}
+GOAL_STATUSES = {"active", "paused", "completed", "failed", "cancelled", "superseded"}
 GOAL_TYPES = {"user_request", "system_continuation", "recovery"}
 
 GOAL_TRANSITIONS: dict[str, set[str]] = {
-    "active": {"paused", "completed", "failed", "cancelled"},
+    "active": {"paused", "completed", "failed", "cancelled", "superseded"},
     "paused": {"active", "completed", "failed", "cancelled"},
     "completed": set(),
     "failed": {"active"},
     "cancelled": set(),
+    "superseded": set(),
 }
 
 
