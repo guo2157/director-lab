@@ -2,7 +2,23 @@
 
 > 适用于 Codex / Claude Code / 其他编码 Agent。基线为 `guo2157/director-lab` HEAD（tree `1df9fe8b`）。行号以该版本为准，如有偏移请按函数名定位。
 > 用法：每次会话先粘贴 **〇、通用上下文**，再粘贴**一个**任务（A0、A1……）。一个任务对应一个 PR / 提交，不要合并。
-> 执行顺序：**A0 → A12a（测试夹具）→ A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8 → A9 → A10 → A11 → A12b（回归汇总）**
+> 执行顺序：**A00（测试隔离）→ A0 → A12a（测试夹具）→ A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8 → A9 → A10 → A11 → A12b（回归汇总）**
+>
+> ⚠️ 2026-11-26 实际执行中发现：`backend/alembic/env.py` 会用 `get_settings().database_url` 覆盖 Alembic Config 中的地址，
+> 而 `conftest.py` 只重定向了数据目录、没有重定向数据库地址（默认值 `sqlite:///./data/director_lab.db` 在 backend/ 下运行时就是真实库）。
+> 按原 A0 写法运行迁移测试会**直接修改真实库**。因此新增 A00，必须最先完成；只核对主库文件哈希不能发现问题（改动会先写进 WAL）。
+
+---
+
+## A00 · 测试隔离：数据库地址强制指向临时库（必须最先完成）
+
+```text
+1. backend/tests/conftest.py 最顶部、导入任何 app 模块之前：把 DLAB_DATABASE_URL 设为与 DLAB_DATA_DIR 同一临时根目录下的 SQLite 文件，并清空 Settings 缓存。
+2. 增加 session 级 autouse 夹具：get_settings().database_url 解析后指向 backend/data/director_lab.db（按绝对路径比较）或不在临时目录下时，立即让整个测试会话失败。
+3. 所有迁移测试通过环境变量 DLAB_DATABASE_URL 指向 tmp 库并清空配置缓存（只设置 alembic Config 无效），并断言迁移实际连接的地址就是 tmp 库。
+4. 真实库核对改为只读比较：alembic_version，以及 SELECT sql FROM sqlite_master ORDER BY name 的结果哈希；不再以主文件哈希作为依据。
+验收：tests/test_test_isolation.py——故意把 DLAB_DATABASE_URL 改回真实路径时，守卫夹具会使会话失败（用子进程运行 pytest 验证）。
+```
 
 ---
 
@@ -70,7 +86,8 @@
 验收：
 - `alembic upgrade head` 和 `alembic downgrade -1` 在一个空库和一个已执行到当前 head 的库上都能成功。
 - 新增 tests/test_agent_runtime_migration.py：在 tmp 库上执行 upgrade → 检查 5 个新列存在 → downgrade → 列消失。
-  （可参考仓库中已有的迁移测试写法；如无，用 alembic.command + Config 指向 tmp 库。）
+  **数据库地址必须通过环境变量 DLAB_DATABASE_URL 指向 tmp 库并清空配置缓存**——alembic/env.py 会覆盖 Config 中设置的 URL，
+  只设置 Config 会让迁移落到真实库（见文件开头的说明，依赖 A00）。
 - 现有 agent 相关测试不受影响。
 ```
 

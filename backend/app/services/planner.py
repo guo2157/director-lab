@@ -653,9 +653,56 @@ def save_plan_steps(
             status="pending",
             max_retries=3,
             timeout_seconds=step.estimated_timeout,
+            step_key=step.step_key or None,
         )
         db.add(ps)
     db.flush()
+
+
+def carry_over_steps(db: Session, old_plan_id: str, new_plan: Plan) -> list[str]:
+    """把旧计划中已 succeeded 且 step_key 相同、工具与参数一致的步骤直接带过来（A9）。
+
+    被带过来的步骤：status=succeeded，result 复制并标记 carried_over_from=<old_step_id>，
+    不再重新执行。返回被带过来的新步骤 id 列表。
+    """
+    from app.models.agent import AgentPlanStep
+
+    old_steps = db.scalars(
+        select(AgentPlanStep).where(AgentPlanStep.plan_id == old_plan_id)
+    ).all()
+    by_key = {
+        (s.step_key or ""): s
+        for s in old_steps
+        if s.step_key and s.status == "succeeded"
+    }
+    if not by_key:
+        return []
+
+    new_steps = db.scalars(
+        select(AgentPlanStep).where(AgentPlanStep.plan_id == new_plan.plan_id)
+    ).all()
+    plan_by_key = {p.step_key: p for p in new_plan.steps}
+
+    carried: list[str] = []
+    for row in new_steps:
+        key = row.step_key or ""
+        old = by_key.get(key)
+        spec = plan_by_key.get(key)
+        if old is None or spec is None:
+            continue
+        # 工具与参数必须完全一致，否则视为「同一件事但做法变了」，需要重新执行
+        if (old.tool_name or "") != (spec.tool_name or ""):
+            continue
+        if (old.args or {}) != (spec.args or {}):
+            continue
+        result = dict(old.result or {})
+        result["carried_over_from"] = old.id
+        row.status = "succeeded"
+        row.result = result
+        row.completed_at = datetime.now()
+        carried.append(row.id)
+    db.flush()
+    return carried
 
 
 def build_and_save_plan(

@@ -885,6 +885,25 @@ def _run_plan_loop(
                     "errors": errors,
                 }
 
+            elif decision.action == ReplanAction.WAIT_USER:
+                db.commit()
+                _emit(
+                    LoopEvent.STEP_WAITING.value,
+                    {"step_id": step_id, "tool_name": tool_name, "waiting": "user",
+                     "reason": decision.reason},
+                )
+                return {
+                    "status": "waiting_user",
+                    "message": decision.suggestion or decision.reason,
+                    "total_steps": total_steps,
+                    "completed_steps": completed,
+                    "failed_steps": failed,
+                    "skipped_steps": skipped,
+                    "next_action": "wait_user",
+                    "wait_step_id": step_id,
+                    "errors": errors,
+                }
+
             elif decision.action == ReplanAction.SKIP:
                 skipped += 1
                 db.commit()

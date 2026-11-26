@@ -145,13 +145,25 @@ def test_verifier_runs_on_step_and_plan(db, goal, plan):
 
 
 def test_replanner_error_classification():
+    """A9 后的分类语义：优先按 error_code 映射，重试耗尽即失败。
+
+    旧断言（ToolNotFound → REPLAN、重试耗尽 → REPLAN）固化了 A9 要修的行为：
+    规则计划对 tool_not_found 无法自动修正，重试耗尽后再 Replan 只会重复失败。
+    """
     from app.services.replanner import ErrorContext, ReplanAction, classify_error
 
-    assert classify_error(ErrorContext(step_id="fake", error_code="TimeoutError", retry_count=1)) == ReplanAction.RETRY
-    assert classify_error(ErrorContext(step_id="fake", error_code="ToolNotFound")) == ReplanAction.REPLAN
+    assert classify_error(
+        ErrorContext(step_id="fake", error_code="TimeoutError", retry_count=1)
+    ) == ReplanAction.RETRY
+    assert classify_error(
+        ErrorContext(step_id="fake", error_code="tool_not_found")
+    ) == ReplanAction.FAIL
     assert classify_error(
         ErrorContext(step_id="fake", error_code="TimeoutError", retry_count=5)
-    ) == ReplanAction.REPLAN
+    ) == ReplanAction.FAIL
+    assert classify_error(
+        ErrorContext(step_id="fake", error_code="precondition_failed")
+    ) == ReplanAction.WAIT_USER
 
 
 def test_goal_status_query(db, project, goal):
