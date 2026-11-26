@@ -27,13 +27,13 @@ def project(db):
 
 def _goal_and_plan(db, monkeypatch, tools, project, *, session="a6"):
     from app.services.goal_manager import get_or_create_goal
-    from app.services.planner import build_and_save_plan
 
     goal = get_or_create_goal(
         db, session_id=session, description="验证器测试", project_id=project.id
     )
+    # 先打补丁再取模块属性，避免绑定原始函数
     _fixed_plan(monkeypatch, "", tools)
-    plan, report = build_and_save_plan(
+    plan, report = planner_mod.build_and_save_plan(
         db, goal_id=goal.goal_id, description="验证器测试", project_id=project.id
     )
     assert report.passed, report.errors

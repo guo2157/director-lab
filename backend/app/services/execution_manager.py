@@ -134,6 +134,43 @@ def _release_step_lock(
     db.flush()
 
 
+# ── 审批粒度（A7 / P0-8）──────────────────────────────────────────────
+
+# 被视为高风险的等级（与 agent_governance.evaluate_tool_policy 保持一致）
+_HIGH_RISK = "high"
+
+
+def _step_needs_approval(spec: dict, step) -> bool:
+    """步骤是否需要审批：工具 spec 要求 OR 高风险 OR 计划中显式声明（取 OR）。"""
+    return bool(
+        spec.get("requires_approval")
+        or spec.get("risk_level") == _HIGH_RISK
+        or getattr(step, "requires_approval", False)
+    )
+
+
+def _step_is_approved(db: Session, step) -> tuple[bool, str | None]:
+    """步骤是否已获得绑定到它的、尚未被消费的审批。
+
+    返回 (approved, confirmation_id)。判定条件：
+    - step.confirmation_id 非空
+    - 对应 AgentConfirmation.status == "approved"
+    - 该审批尚未被本步骤消费过（step.result["executed_confirmation_id"] 不等于它）
+    """
+    from app.models.agent import AgentConfirmation
+
+    confirmation_id = getattr(step, "confirmation_id", None)
+    if not confirmation_id:
+        return False, None
+    confirmation = db.get(AgentConfirmation, confirmation_id)
+    if confirmation is None or confirmation.status != "approved":
+        return False, None
+    result = step.result if isinstance(step.result, dict) else {}
+    if result.get("executed_confirmation_id") == confirmation_id:
+        return False, None
+    return True, confirmation_id
+
+
 # ── 结果分流（A5 / P0-6）──────────────────────────────────────────────
 
 def _ensure_task_stage_for_job(
@@ -316,7 +353,6 @@ def execute_step(
     session_id: str | None = None,
     project_id: str | None = None,
     agent_task_id: str | None = None,
-    approved: bool = False,
     budget: ToolBudget | None = None,
     timeout_override: int | None = None,
 ) -> dict:
@@ -324,7 +360,7 @@ def execute_step(
 
     流程：
     1. 获取执行锁（CAS: pending/ready → running）
-    2. PolicyDecision 权限检查
+    2. 审批门禁（按步骤绑定的 AgentConfirmation）
     3. 预算检查
     4. 映射为 Task + TaskStage
     5. 写 agent_execution_log（started）
@@ -351,31 +387,22 @@ def execute_step(
             "error": f"无法获取执行锁，当前状态: {step.status}",
         }
 
-    # 2. PolicyDecision
+    # 2. 审批门禁（A7 / P0-8）：按步骤绑定的审批判定，不再接收循环级 approved 布尔值
     spec = _get_tool_spec(tool_name) or {}
-    decision = evaluate_tool_policy(spec, approved=approved)
-    if decision == PolicyDecision.REQUIRE_CONFIRMATION:
-        # A5(c)：工具需要审批但当前没有可用批准记录 → waiting_approval + approval_required
+    step_approved, bound_confirmation_id = _step_is_approved(db, step)
+    if _step_needs_approval(spec, step) and not step_approved:
+        # 需要审批但当前没有绑定到本步骤的可用批准 → waiting_approval
         _release_step_lock(
             db, step_id, status="waiting_approval", error_code="approval_required"
         )
         return {
             "success": False,
             "step_id": step_id,
+            "step_status": "waiting_approval",
             "result": {},
             "policy": "REQUIRE_CONFIRMATION",
             "error": f"工具 '{tool_name}' 需要人工审批",
         }
-    if decision == PolicyDecision.DENY:
-        _release_step_lock(db, step_id, status="failed")
-        return {
-            "success": False,
-            "step_id": step_id,
-            "result": {},
-            "policy": "DENY",
-            "error": f"工具 '{tool_name}' 被策略拒绝",
-        }
-
     # 3. 预算检查
     if budget:
         violation = budget.check_before(tool_name)
@@ -411,7 +438,7 @@ def execute_step(
     )
 
     # 6. 执行（唯一合法入口：agent_tools.execute_tool）
-    tool_result = execute_tool(db, tool_name, approved=approved, **args)
+    tool_result = execute_tool(db, tool_name, approved=step_approved, **args)
     duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
     if budget:
         budget.record(duration_ms)
@@ -423,6 +450,9 @@ def execute_step(
         "error_message": tool_result.error_message,
         "duration_ms": tool_result.duration_ms,
     }
+    # A7：记录本步骤消费过的审批，保证同一审批不会被重复使用
+    if step_approved and bound_confirmation_id:
+        result_payload["executed_confirmation_id"] = bound_confirmation_id
 
     if tool_result.ok:
         data = tool_result.data if isinstance(tool_result.data, dict) else {}
@@ -551,7 +581,6 @@ def execute_pending_steps(
     session_id: str | None = None,
     project_id: str | None = None,
     agent_task_id: str | None = None,
-    approved: bool = False,
 ) -> list[dict]:
     """批量执行 Plan 中所有可执行的 pending steps（按并行组）。
 
@@ -572,7 +601,6 @@ def execute_pending_steps(
             session_id=session_id,
             project_id=project_id,
             agent_task_id=agent_task_id,
-            approved=approved,
             budget=budget,
         )
         results.append(result)

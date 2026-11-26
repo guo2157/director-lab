@@ -365,7 +365,6 @@ def run_agent_loop(
     goal_type: str = "user_request",
     constraints: dict | None = None,
     success_criteria: list | None = None,
-    approved: bool = False,
     progress_callback: Callable[[str, dict], None] | None = None,
 ) -> AgentLoopResult:
     """Agent Loop 完整编排入口。
@@ -499,7 +498,6 @@ def run_agent_loop(
         plan=plan,
         session_id=session_id,
         project_id=project_id,
-        approved=approved,
         progress_callback=progress_callback,
     )
 
@@ -581,7 +579,6 @@ def _execute_plan_loop(
     plan: Any,
     session_id: str,
     project_id: str | None = None,
-    approved: bool = False,
     progress_callback: Callable[[str, dict], None] | None = None,
 ) -> dict:
     """执行 Plan 步骤循环（崩溃隔离包装）。
@@ -596,7 +593,6 @@ def _execute_plan_loop(
             plan=plan,
             session_id=session_id,
             project_id=project_id,
-            approved=approved,
             progress_callback=progress_callback,
         )
     except Exception as exc:  # noqa: BLE001 - 崩溃隔离
@@ -636,7 +632,6 @@ def _run_plan_loop(
     plan: Any,
     session_id: str,
     project_id: str | None = None,
-    approved: bool = False,
     progress_callback: Callable[[str, dict], None] | None = None,
 ) -> dict:
     """执行 Plan 步骤循环主体。每个步骤的「执行 → 验证 → 重规划」结束后提交一次。"""
@@ -751,7 +746,6 @@ def _run_plan_loop(
                 goal_id=goal.goal_id,
                 session_id=session_id,
                 project_id=project_id,
-                approved=approved,
             )
 
             # 2b. 等待态（A5 / P0-6）：Job 或审批 → 记录后继续执行同批其他可执行分支
@@ -1014,79 +1008,125 @@ def resume_after_approval(
     db: Session,
     *,
     goal_id: str,
-    plan_id: str,
     step_id: str,
-    approved: bool = True,
+    confirmation_id: str,
     project_id: str | None = None,
     session_id: str | None = None,
-) -> AgentLoopResult:
+) -> dict:
     """审批完成后恢复 Agent Loop（bridge_approval_resolved 回调）。
 
-    由 Human Gate 通过审批事件触发调用。
-    直接重新进入 run_agent_loop 推进下一步骤。
+    A7 / P0-8：审批按步骤绑定，裁决结果直接读 AgentConfirmation.status，
+    不再接收「一次审批放行整个循环」的 approved 布尔值。
+
+    - step.confirmation_id != confirmation_id → {"resumed": False, "error": "confirmation_mismatch"}
+    - 审批 approved → step 重置为 pending（保留 requires_approval）
+    - 审批 rejected / revision_requested → step=waiting_user, error_code="approval_rejected"
+    - 审批仍为 pending → {"resumed": False, "error": "confirmation_pending"}
+    - 否则继续推进循环（不传 approved，后续步骤各自按自己的绑定审批判定）
+
+    返回 dict（便于 Phase B 的 Worker 消费）：
+    {"resumed": bool, "error": str|None, "status": str, "goal_id", "plan_id", ...}
     """
-    from app.models.agent import AgentPlanStep
+    from app.models.agent import AgentConfirmation, AgentPlanStep
 
     step = db.get(AgentPlanStep, step_id)
-    if step and step.status == "waiting_approval":
-        if approved:
-            step.status = "pending"
-            step.requires_approval = False
-        else:
-            step.status = "cancelled"
-            step.error_message = "审批被拒绝"
-        db.flush()
+    if step is None:
+        return {"resumed": False, "error": "step_not_found", "goal_id": goal_id}
+
+    if step.confirmation_id != confirmation_id:
+        return {
+            "resumed": False,
+            "error": "confirmation_mismatch",
+            "goal_id": goal_id,
+            "step_id": step_id,
+            "expected_confirmation_id": step.confirmation_id,
+            "confirmation_id": confirmation_id,
+        }
+
+    confirmation = db.get(AgentConfirmation, confirmation_id)
+    if confirmation is None:
+        return {"resumed": False, "error": "confirmation_not_found", "goal_id": goal_id}
+
+    if confirmation.status == "pending":
+        return {"resumed": False, "error": "confirmation_pending", "goal_id": goal_id}
+
+    if step.status != "waiting_approval":
+        # 幂等：已经推进过（或已被其他路径处理），不重复执行
+        return {
+            "resumed": False,
+            "error": "step_not_waiting",
+            "goal_id": goal_id,
+            "step_id": step_id,
+            "step_status": step.status,
+        }
+
+    if confirmation.status == "approved":
+        step.status = "pending"
+        step.error_code = None
+        step.error_message = None
+    else:  # rejected / revision_requested / expired / cancelled
+        step.status = "waiting_user"
+        step.error_code = "approval_rejected"
+        step.error_message = confirmation.comment or f"审批结果：{confirmation.status}"
+    db.flush()
 
     log_execution(
         db,
         ExecutionRecord(
             goal_id=goal_id,
-            plan_id=plan_id,
             step_id=step_id,
             tool_name="bridge_approval_resolved",
-            status=f"approval_{'approved' if approved else 'rejected'}",
+            status=f"approval_{confirmation.status}",
         ),
     )
-
     db.commit()  # A1：审批裁决带来的步骤状态变化先落库
 
-    # 继续推进（按 goal_id 查询，A7 会移除 session_id 依赖）
+    if confirmation.status != "approved":
+        return {
+            "resumed": True,
+            "error": None,
+            "status": "waiting_user",
+            "goal_id": goal_id,
+            "step_id": step_id,
+            "message": f"步骤 {step_id} 审批未通过（{confirmation.status}），等待用户处理",
+        }
+
     from app.services.goal_manager import get_goal_by_id
 
     goal = get_goal_by_id(db, goal_id)
     if goal is None:
-        return AgentLoopResult(status="failed", goal_id=goal_id, message="目标不存在")
+        return {"resumed": False, "error": "goal_not_found", "goal_id": goal_id}
 
-    # 获取当前 Plan
     from app.services.planner import get_latest_plan
 
     plan = get_latest_plan(db, goal_id)
     if plan is None:
-        return AgentLoopResult(status="failed", goal_id=goal_id, message="Plan 不存在")
+        return {"resumed": False, "error": "plan_not_found", "goal_id": goal_id}
 
-    # 继续执行循环
     loop_result = _execute_plan_loop(
         db,
         goal=goal,
         plan=plan,
         session_id=session_id or "",
         project_id=project_id,
-        approved=approved,
     )
 
     db.commit()  # A1：循环内的写入已按步提交，这里兜底提交收尾状态
-    return AgentLoopResult(
-        status=loop_result["status"],
-        goal_id=goal_id,
-        plan_id=plan_id,
-        total_steps=loop_result["total_steps"],
-        completed_steps=loop_result["completed_steps"],
-        failed_steps=loop_result["failed_steps"],
-        skipped_steps=loop_result["skipped_steps"],
-        message=loop_result["message"],
-        next_action=loop_result["next_action"],
-        wait_step_id=loop_result.get("wait_step_id"),
-    )
+    return {
+        "resumed": True,
+        "error": None,
+        "status": loop_result["status"],
+        "goal_id": goal_id,
+        "plan_id": plan.plan_id,
+        "step_id": step_id,
+        "message": loop_result["message"],
+        "total_steps": loop_result["total_steps"],
+        "completed_steps": loop_result["completed_steps"],
+        "failed_steps": loop_result["failed_steps"],
+        "skipped_steps": loop_result["skipped_steps"],
+        "next_action": loop_result["next_action"],
+        "wait_step_id": loop_result.get("wait_step_id"),
+    }
 
 
 # ── Runtime 状态查询 ─────────────────────────────────────────────────
