@@ -1825,6 +1825,159 @@ def get_attachment(session_id: str, file_name: str, db: Session = Depends(get_db
     )
 
 
+def _handle_agent_runtime_route(
+    db: Session,
+    s: AgentSession,
+    session_id: str,
+    user_msg: AgentMessage,
+    *,
+    task,
+    unified_task,
+    route,
+    content: str,
+    intent,
+    resolved,
+) -> dict | None:
+    """把「多步生产类请求」交给 Agent Runtime（Phase B B6，开关后面）。
+
+    返回 None 表示未接管（调用方继续原有 /chat 分支）。
+    命中时同步执行第一次 tick（遇到等待态立即返回，受 MAX_STEPS 与 60 秒上限约束），
+    并用确定性模板生成回复；助手消息 payload 携带 route_action="agent_runtime"
+    以及 goal_id / plan_id / lifecycle_state / tick。
+    """
+    from app.services import agent_reply, agent_runtime
+    from app.services.agent_runtime_router import RuntimeRoute
+    from app.services.goal_manager import get_active_goal, get_goal_by_id
+    from app.services.planner import get_plan_steps
+
+    assert isinstance(route, RuntimeRoute)
+
+    goal_id: str | None
+    plan_id: str | None
+    if route.goal_type == "continue":
+        # 继续上次的任务：不生成新计划，只推进当前 active Goal
+        active = get_active_goal(db, session_id)
+        if active is None:
+            return None
+        db.commit()
+        tick_result = agent_runtime.tick(None, active.goal_id, trigger="chat", db=db)
+        goal_id, plan_id = active.goal_id, tick_result.plan_id
+        tick_view = tick_result
+    else:
+        import time as _time
+
+        settings = get_settings()
+        loop_result = agent_runtime.run_agent_loop(
+            db,
+            session_id=session_id,
+            description=content,
+            project_id=s.project_id,
+            goal_type=route.goal_type,
+            constraints={"scope": route.scope} if route.scope else None,
+            success_criteria=[{"target_stage": route.target_stage, "scope": route.scope}],
+            agent_task_id=task.id if task is not None else None,
+            task_id=unified_task.id if unified_task is not None else None,
+            max_steps=int(getattr(settings, "agent_max_steps_per_tick", 10) or 10),
+            deadline=_time.monotonic()
+            + float(getattr(settings, "agent_tick_timeout_seconds", 60.0) or 60.0),
+        )
+        goal_id, plan_id = loop_result.goal_id, loop_result.plan_id
+        tick_view = loop_result
+
+    if goal_id is None:
+        return None
+
+    lifecycle = getattr(tick_view, "lifecycle_state", "") or getattr(tick_view, "status", "")
+    tick_payload = tick_view.to_dict()
+
+    # 步骤列表供确定性回复列出实体/镜头名称（只读事实，不调 LLM）
+    plan_steps = get_plan_steps(db, plan_id) if plan_id else []
+    goal_obj = get_goal_by_id(db, goal_id)
+    reply = agent_reply.render_tick_reply(tick_view, goal=goal_obj, plan_steps=plan_steps)
+
+    # 任务状态流转：只按真实结果流转（与现有 GUIDE 分支口径一致）
+    from app.services import parent_agent, task_orchestrator
+
+    if task is not None:
+        if lifecycle == "completed":
+            parent_agent.complete_task(db, task, reply[:2000])
+        elif lifecycle == "failed":
+            parent_agent.fail_task(db, task, reply[:2000])
+        elif lifecycle == "cancelled":
+            parent_agent.cancel_task(db, task, "agent_runtime_cancelled")
+        elif lifecycle == "waiting_approval":
+            parent_agent.transition_task(db, task, "waiting_approval", result_summary=reply[:2000])
+        elif task.status == "pending":
+            parent_agent.transition_task(db, task, "running", result_summary=reply[:2000])
+    if unified_task is not None:
+        if lifecycle == "completed":
+            task_orchestrator.complete_task(db, unified_task, summary=reply[:2000])
+        elif lifecycle == "failed":
+            task_orchestrator.fail_task(
+                db, unified_task, error_code="agent_runtime_failed", error_msg=reply[:2000]
+            )
+        elif lifecycle == "cancelled":
+            task_orchestrator.cancel_task(db, unified_task, reason="agent_runtime_cancelled")
+        else:
+            task_orchestrator.set_task_step(
+                db, unified_task, step=lifecycle or "running", message=reply[:500]
+            )
+
+    # 本分支可能已写入审批/工具审计消息占用 seq，助手回复按当前最大值取号
+    _assistant_seq = (
+        db.scalar(select(func.max(AgentMessage.seq)).where(AgentMessage.session_id == session_id))
+        or 0
+    ) + 1
+    assistant_msg = AgentMessage(
+        id=agent_message_id(),
+        session_id=session_id,
+        role="assistant",
+        content=reply,
+        payload=_build_assistant_payload(
+            {
+                "intent": intent.intent,
+                "intent_reason": intent.reason,
+                "intent_classified": intent.classified,
+                "route_action": "agent_runtime",
+                "intent_goal": intent.goal,
+                "risk_level": intent.risk_level,
+                "confidence": intent.confidence,
+                "intent_subcategory": intent.subcategory,
+                "confidence_tier": intent.confidence_tier,
+                "route_exit": intent.route_exit,
+                "approval": None,
+                "intent_resolution": {
+                    "resolution_path": resolved.resolution_path,
+                    "target": resolved.target,
+                    "requires_clarification": resolved.requires_clarification,
+                    "clarification_code": resolved.clarification_code,
+                    "subcategory": resolved.subcategory,
+                    "confidence_tier": resolved.confidence_tier,
+                },
+                "task_id": task.id if task is not None else None,
+                "task_status": task.status if task is not None else None,
+                # Agent Runtime 载荷（B8：前端据此展示目标卡片与计划步骤）
+                "goal_id": goal_id,
+                "plan_id": plan_id,
+                "lifecycle_state": lifecycle,
+                "tick": tick_payload,
+            },
+            unified_task=unified_task,
+            db=db,
+        ),
+        seq=_assistant_seq,
+        created_at=datetime.now(),
+    )
+    db.add(assistant_msg)
+    s.updated_at = datetime.now()
+    db.commit()
+    db.refresh(assistant_msg)
+    return {
+        "user_message": AgentMessageOut.model_validate(user_msg).model_dump(mode="json"),
+        "assistant_message": AgentMessageOut.model_validate(assistant_msg).model_dump(mode="json"),
+    }
+
+
 @router.post("/{session_id}/chat")
 def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -> dict:
     """导演台聊天：用户消息持久化 → LLM 多轮对话 → 助手回复持久化。
@@ -2187,6 +2340,32 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # 纯参考图消息（只上传图片、无文字）：按图生图直接出图，不要求用户再描述
     if attachments and not payload.content.strip():
         action = NextAction.GUIDE
+    # Phase B B6：多步生产类请求交给 Agent Runtime（开关后面）。
+    # should_use_runtime 在 agent_runtime_chat_enabled=False 时恒返回 None，
+    # 因此开关关闭时本段不改变任何既有行为。
+    from app.services.agent_runtime_router import should_use_runtime
+
+    _rt_route = None
+    if not resolved.requires_clarification and _nav_action != "navigate_workspace":
+        _rt_route = should_use_runtime(
+            intent, resolved, payload.content, project_id=s.project_id
+        )
+    if _rt_route is not None:
+        _rt_response = _handle_agent_runtime_route(
+            db,
+            s,
+            session_id,
+            user_msg,
+            task=task,
+            unified_task=unified_task,
+            route=_rt_route,
+            content=payload.content,
+            intent=intent,
+            resolved=resolved,
+        )
+        if _rt_response is not None:
+            return _rt_response
+
     # 生成请求预解析：定位不到目标时不落固定文案，回落主对话由大模型结合上下文兜底
     guide_reply, guide_approval = None, None
     quick_generation = False

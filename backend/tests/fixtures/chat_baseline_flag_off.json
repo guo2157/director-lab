@@ -1,0 +1,18 @@
+{
+  "这个项目现在什么进度？": {
+    "content": "这是助手的普通回复",
+    "route_action": "chat"
+  },
+  "去分镜页": {
+    "content": "这是助手的普通回复",
+    "route_action": "chat"
+  },
+  "为第 1 镜生成关键帧": {
+    "content": "生成申请提交失败：当前制作阶段为 characters，生成 keyframe 需项目进入 assets_review 阶段；请先完成当前阶段的操作（含人工审核）后再发起",
+    "route_action": "guide"
+  },
+  "帮我生成这个项目所有角色资产": {
+    "content": "这是助手的普通回复",
+    "route_action": null
+  }
+}

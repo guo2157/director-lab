@@ -166,6 +166,12 @@ class AgentLoopResult:
     context_snapshot: dict | None = None
     next_action: str | None = None    # pending / wait_approval / wait_job / none
     wait_step_id: str | None = None
+    # Phase B B6：与 TickResult 对齐的字段（/chat 的 tick 载荷与确定性回复共用）
+    lifecycle_state: str = ""
+    advanced_steps: list[str] = field(default_factory=list)
+    waiting: dict = field(default_factory=dict)
+    failed: list[dict] = field(default_factory=list)
+    counts: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -181,6 +187,11 @@ class AgentLoopResult:
             "context_snapshot": self.context_snapshot,
             "next_action": self.next_action,
             "wait_step_id": self.wait_step_id,
+            "lifecycle_state": self.lifecycle_state,
+            "advanced_steps": self.advanced_steps,
+            "waiting": self.waiting,
+            "failed": self.failed,
+            "counts": self.counts,
         }
 
 
@@ -505,6 +516,10 @@ def run_agent_loop(
     constraints: dict | None = None,
     success_criteria: list | None = None,
     progress_callback: Callable[[str, dict], None] | None = None,
+    agent_task_id: str | None = None,
+    task_id: str | None = None,
+    max_steps: int | None = None,
+    deadline: float | None = None,
 ) -> AgentLoopResult:
     """Agent Loop 完整编排入口。
 
@@ -523,6 +538,10 @@ def run_agent_loop(
     event_type: goal_created | plan_generated | step_started | step_completed |
                 step_failed | step_skipped | loop_completed | loop_failed |
                 waiting_approval | waiting_job | blocked
+
+    Phase B B6：/chat 传入 agent_task_id / task_id，把 Goal 绑定到已有 AgentTask 与
+    统一 Task（Job 阶段都挂同一个 Task）；max_steps / deadline 用于把单次推进限制在
+    agent_max_steps_per_tick 与 agent_tick_timeout_seconds 之内（默认不限，调试接口行为不变）。
     """
     def _emit(ev_type: str, payload: dict) -> None:
         if progress_callback:
@@ -572,6 +591,19 @@ def run_agent_loop(
         success_criteria=success_criteria,
     )
     result.goal_id = goal.goal_id
+    # B6：把 Goal 绑定到 /chat 已创建的 AgentTask 与统一 Task（幂等：已有绑定不覆盖）
+    if agent_task_id or task_id:
+        from app.models.agent import AgentGoal as _GoalRow
+
+        _row = db.get(_GoalRow, goal.goal_id)
+        if _row is not None:
+            if agent_task_id and not _row.agent_task_id:
+                _row.agent_task_id = agent_task_id
+            if task_id and not _row.task_id:
+                _row.task_id = task_id
+            goal.agent_task_id = _row.agent_task_id
+            goal.task_id = _row.task_id
+            db.flush()
     db.commit()  # A1：Goal 创建/复用立即落库，后续崩溃不会丢目标
 
     # A11：Goal 级锁——同一 Goal 并发调用时只有一个能推进，其余返回 busy 且不执行任何步骤
@@ -611,6 +643,8 @@ def run_agent_loop(
             resumed=resumed,
             progress_callback=progress_callback,
             emit=_emit,
+            max_steps=max_steps,
+            deadline=deadline,
         )
     finally:
         _release_goal_lock(db, goal.goal_id)
@@ -631,6 +665,8 @@ def _run_agent_loop_locked(
     resumed: bool,
     progress_callback: Callable[[str, dict], None] | None,
     emit: Callable[[str, dict], None],
+    max_steps: int | None = None,
+    deadline: float | None = None,
 ) -> AgentLoopResult:
     """run_agent_loop 在持有 Goal 锁后的主体（A11 抽出，便于 try/finally 释放锁）。"""
     _emit = emit
@@ -723,8 +759,8 @@ def _run_agent_loop_locked(
         goal=goal,
         plan=plan,
         trigger="manual",
-        max_steps=None,
-        deadline=None,
+        max_steps=max_steps,
+        deadline=deadline,
         progress_callback=progress_callback,
     )
 
@@ -738,6 +774,11 @@ def _run_agent_loop_locked(
     result.next_action = tick_result.next_action
     result.wait_step_id = tick_result.wait_step_id
     result.errors = tick_result.errors
+    result.lifecycle_state = tick_result.lifecycle_state
+    result.advanced_steps = list(tick_result.advanced_steps or [])
+    result.waiting = dict(tick_result.waiting or {})
+    result.failed = list(tick_result.failed or [])
+    result.counts = dict(tick_result.counts or {})
     _emit(result.status, result.to_dict())
 
     # 记录 Loop 完成日志
@@ -1668,10 +1709,12 @@ def tick(
     *,
     trigger: str = "manual",
     progress_callback: Callable[[str, dict], None] | None = None,
+    db: Session | None = None,
 ) -> TickResult:
-    """幂等单次推进：自建 Session、抢 Goal 锁、认领恢复标记、最多推进 N 步。
+    """幂等单次推进：抢 Goal 锁、认领恢复标记、最多推进 N 步。
 
     trigger 取值：chat / worker_resume / worker_sweep / debug / manual（写入执行日志）。
+    db：调用方已有 Session 时传入（/chat 同步推进）；为 None 时自建并在结束时关闭。
     """
     from app.core.config import get_settings
     from app.services.execution_manager import _acquire_goal_lock, _release_goal_lock
@@ -1695,7 +1738,9 @@ def tick(
     import time as _time
 
     deadline = _time.monotonic() + timeout_seconds
-    db = session_factory()
+    own_session = db is None
+    if db is None:
+        db = session_factory()
     lock_held = False
     try:
         goal = get_goal_by_id(db, goal_id)
@@ -1770,7 +1815,8 @@ def tick(
                 db.commit()
             except Exception:  # noqa: BLE001
                 db.rollback()
-        db.close()
+        if own_session:
+            db.close()
 
 
 def run_agent_loop_in_new_session(

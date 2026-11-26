@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase B · 最小可用版本（进行中：B5 完成） |
-| 下一个任务 | B6 `/chat` 接入 Runtime（开关后面） |
-| 最近提交 | B5（本提交）、`8ffa690` B4、`e7ad13d` B3、`66c3cd6` B2 |
-| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线；B5 后 tests/test_agent_*.py + Runtime + Phase B 共 313 passed / 1 xfailed） |
-| 更新时间 | 2026-11-26 22:25（Asia/Shanghai） |
+| 当前阶段 | Phase B · 最小可用版本（进行中：B6 完成） |
+| 下一个任务 | B7 最小计划模板：资产生成与分镜图生成 |
+| 最近提交 | B6（本提交）、`7ca4668` B5、`8ffa690` B4、`e7ad13d` B3 |
+| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线）；B6 后 tests/test_agent_*.py = 309 passed / 1 xfailed |
+| 更新时间 | 2026-11-26 23:05（Asia/Shanghai） |
 | 工作区 | 干净（每次任务一个本地提交，不推送） |
 
 > 本文件替换 Phase 0 时期的旧版 implementation-plan.md。
@@ -78,7 +78,7 @@
 - [x] **B3** Job 终态 → 恢复标记（`e7ad13d`）
 - [x] **B4** 审批闭环：自动申请、裁决后恢复、自动执行（`8ffa690`）
 - [x] **B5** Worker 中的 agent-resume 线程与兜底扫描（本提交）
-- [ ] **B6** `/chat` 接入 Runtime（开关后面）
+- [x] **B6** `/chat` 接入 Runtime（开关后面）（本提交）
 - [ ] **B7** 最小计划模板：资产生成与分镜图生成
 - [ ] **B8** 确定性回复与状态查询接口
 - [ ] **B9** 暂停、继续、取消
