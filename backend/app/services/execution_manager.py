@@ -1,9 +1,9 @@
 """Execution Manager：Agent Runtime 步骤执行编排（Phase 2.2）。
 
 职责：
-- Step 执行：PlanStep → Task + TaskStage → 调用 Tool → 回写结果
+- Step 执行：PlanStep → 服务端参数注入 → agent_tools.execute_tool → 回写结果
 - Tool Selection：根据 Pipeline Stage/权限/前置条件动态筛选可用工具
-- Policy Gate：集成 agent_governance.PolicyDecision，ALLOW 才执行
+- Policy Gate：工具审批 / 高风险门禁统一由 execute_tool 内的策略引擎判定
 - 执行锁：plan_step 级别的并发控制（防止重复执行）
 - 超时 + Retry：每 Step 独立 timeout_seconds + max_retries
 - 执行日志：每次执行写 agent_execution_log（started/succeeded/failed）
@@ -11,8 +11,10 @@
 
 设计约束：
 - 模型只负责选择与解释，工具调用由确定性代码执行
-- 未经 PolicyDecision.ALLOW 不允许执行
-- 所有工具调用必须在 Task/TaskStage 框架内执行
+- 工具执行只能走 agent_tools.execute_tool，禁止直接调用注册表里的 fn
+  （直接调用会跳过 input_model 校验、preconditions 与错误分类）
+- 同步步骤不再创建 Task/TaskStage：AgentPlanStep 是计划状态，
+  Task/TaskStage/Job 只在真正产生生产任务（Job）时由 task_orchestrator 关联
 """
 from __future__ import annotations
 
@@ -22,7 +24,6 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.ids import task_id, task_stage_id
 from app.services.agent_governance import (
     PolicyDecision,
     ToolBudget,
@@ -48,7 +49,6 @@ class ExecutionStatus(Enum):
     WAITING_JOB = "waiting_job"
     WAITING_APPROVAL = "waiting_approval"
     WAITING_USER = "waiting_user"
-    COMPLETED = "completed"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -69,13 +69,6 @@ def _get_tool_registry() -> dict:
         return TOOL_REGISTRY
     except ImportError:
         return {}
-
-
-def _get_tool_fn(tool_name: str):
-    """获取工具执行函数。"""
-    registry = _get_tool_registry()
-    spec = registry.get(tool_name, {})
-    return spec.get("fn")
 
 
 def _get_tool_spec(tool_name: str) -> dict | None:
@@ -142,89 +135,6 @@ def _release_step_lock(
 
 
 # ── Task 映射 ─────────────────────────────────────────────────────────
-
-def _map_step_to_task(
-    db: Session,
-    *,
-    step_id: str,
-    plan_id: str,
-    goal_id: str | None = None,
-    session_id: str | None = None,
-    project_id: str | None = None,
-    step_index: int = 0,
-    tool_name: str = "",
-    step_description: str = "",
-    agent_task_id: str | None = None,
-) -> str:
-    """将 PlanStep 映射为 Task + TaskStage，返回 task_id。
-
-    复用现有 task/task_stage 编排层模型。
-    """
-    from app.models.task import Task, TaskStage
-
-    # 创建 Task
-    t = Task(
-        id=task_id(),
-        session_id=session_id,
-        project_id=project_id,
-        agent_task_id=agent_task_id,
-        task_type="custom",
-        title=step_description or f"执行: {tool_name}",
-        status="running",
-        progress=0,
-        current_step=tool_name,
-        current_message=step_description,
-        started_at=datetime.now(),
-    )
-    db.add(t)
-    db.flush()
-
-    # 创建 TaskStage
-    ts = TaskStage(
-        id=task_stage_id(),
-        task_id=t.id,
-        stage_index=0,
-        stage_key=tool_name or "execute",
-        stage_name=step_description or "Agent 步骤执行",
-        status="running",
-        progress=0,
-    )
-    db.add(ts)
-    db.flush()
-
-    return t.id
-
-
-def _complete_task_stage(
-    db: Session,
-    *,
-    task_id_str: str,
-    success: bool,
-    result: dict | None = None,
-    job_id: str | None = None,
-    error_code: str | None = None,
-    error_message: str | None = None,
-) -> None:
-    """完成 Task 及其 TaskStage 的状态更新。"""
-    from app.models.task import Task, TaskStage
-
-    task = db.get(Task, task_id_str)
-    if task:
-        task.status = "completed" if success else "failed"
-        task.error_code = error_code
-        task.error_msg = error_message
-        task.progress = 100 if success else task.progress
-
-    stages = db.query(TaskStage).filter(TaskStage.task_id == task_id_str).all()
-    for s in stages:
-        s.status = "succeeded" if success else "failed"
-        if result is not None:
-            s.result = result
-        if job_id:
-            s.job_id = job_id
-
-    db.flush()
-
 
 # ── Tool Selection ────────────────────────────────────────────────────
 
@@ -345,18 +255,14 @@ def execute_step(
                 "error": f"预算超限: {violation}",
             }
 
-    # 4. 映射为 Task
-    task_id_str = _map_step_to_task(
-        db,
-        step_id=step_id,
-        plan_id=plan_id or "",
-        goal_id=goal_id,
+    # 4. 服务端参数注入 + 只走网关执行（A4/P0-5）
+    from app.services.agent_tools import execute_tool, inject_server_args
+
+    args = inject_server_args(
+        spec,
+        step.args,
         session_id=session_id,
         project_id=project_id,
-        step_index=step.step_index or 0,
-        tool_name=tool_name,
-        step_description=step.description or "",
-        agent_task_id=agent_task_id,
     )
 
     # 5. 写执行日志（started）
@@ -367,33 +273,25 @@ def execute_step(
         plan_id=plan_id,
         step_id=step_id,
         tool_name=tool_name,
-        input_data=step.args,
+        input_data=args,
     )
 
-    # 6. 调用 Tool
-    try:
-        tool_fn = _get_tool_fn(tool_name)
-        if tool_fn is None:
-            raise ValueError(f"工具 '{tool_name}' 不存在于注册表中")
+    # 6. 执行（唯一合法入口：agent_tools.execute_tool）
+    tool_result = execute_tool(db, tool_name, approved=approved, **args)
+    duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+    if budget:
+        budget.record(duration_ms)
 
-        args = step.args or {}
-        result_data = tool_fn(db, **args)
+    result_payload = {
+        "ok": bool(tool_result.ok),
+        "data": tool_result.data,
+        "error_code": tool_result.error_code,
+        "error_message": tool_result.error_message,
+        "duration_ms": tool_result.duration_ms,
+    }
 
-        # Tool 返回可能是 ToolResult 对象
-        if hasattr(result_data, "to_dict"):
-            result_data = result_data.to_dict()
-        elif hasattr(result_data, "__dict__"):
-            result_data = {"data": str(result_data)}
-
-        duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
-
-        # 预算记账
-        if budget:
-            budget.record(duration_ms)
-
-        # 7. 释放锁 + 完成
-        _release_step_lock(db, step_id, status="succeeded", result=result_data)
-        _complete_task_stage(db, task_id_str=task_id_str, success=True, result=result_data)
+    if tool_result.ok:
+        _release_step_lock(db, step_id, status="succeeded", result=result_payload)
         log_step_end(
             db,
             goal_id=goal_id or "",
@@ -401,38 +299,29 @@ def execute_step(
             step_id=step_id,
             tool_name=tool_name,
             result=StepResult.SUCCESS,
-            output_data=result_data,
+            output_data=result_payload,
             started_at=started_at,
         )
-
         return {
             "success": True,
             "step_id": step_id,
-            "task_id": task_id_str,
+            "task_id": None,
             "log_id": log_id,
-            "result": result_data,
+            "result": result_payload,
             "policy": "ALLOW",
             "duration_ms": duration_ms,
             "error": None,
         }
 
-    except Exception as exc:
-        duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
-        error_msg = str(exc)[:500]
-
+    # 失败分流：审批等待 / 其余一律 failed，错误码原样写入
+    if tool_result.error_code == "approval_required":
         _release_step_lock(
             db,
             step_id,
-            status="failed",
-            error_code=type(exc).__name__,
-            error_message=error_msg,
-        )
-        _complete_task_stage(
-            db,
-            task_id_str=task_id_str,
-            success=False,
-            error_code=type(exc).__name__,
-            error_message=error_msg,
+            status="waiting_approval",
+            result=result_payload,
+            error_code="approval_required",
+            error_message=tool_result.error_message,
         )
         log_step_end(
             db,
@@ -440,21 +329,53 @@ def execute_step(
             plan_id=plan_id,
             step_id=step_id,
             tool_name=tool_name,
-            result=StepResult.FAILED,
-            error_code=type(exc).__name__,
-            error_message=error_msg,
+            result=StepResult.WAITING,
+            output_data=result_payload,
+            error_code="approval_required",
+            error_message=tool_result.error_message,
             started_at=started_at,
         )
-
         return {
             "success": False,
             "step_id": step_id,
-            "task_id": task_id_str,
-            "result": {},
-            "policy": "ALLOW",
+            "task_id": None,
+            "log_id": log_id,
+            "result": result_payload,
+            "policy": "REQUIRE_CONFIRMATION",
             "duration_ms": duration_ms,
-            "error": error_msg,
+            "error": tool_result.error_message or "需要人工审批",
         }
+
+    _release_step_lock(
+        db,
+        step_id,
+        status="failed",
+        result=result_payload,
+        error_code=tool_result.error_code,
+        error_message=tool_result.error_message,
+    )
+    log_step_end(
+        db,
+        goal_id=goal_id or "",
+        plan_id=plan_id,
+        step_id=step_id,
+        tool_name=tool_name,
+        result=StepResult.FAILED,
+        output_data=result_payload,
+        error_code=tool_result.error_code,
+        error_message=tool_result.error_message,
+        started_at=started_at,
+    )
+    return {
+        "success": False,
+        "step_id": step_id,
+        "task_id": None,
+        "log_id": log_id,
+        "result": result_payload,
+        "policy": "ALLOW",
+        "duration_ms": duration_ms,
+        "error": tool_result.error_message or tool_result.error_code,
+    }
 
 
 # ── 批量执行 ──────────────────────────────────────────────────────────

@@ -678,6 +678,27 @@ def tool_specs() -> list[dict]:
     ]
 
 
+def inject_server_args(
+    spec: dict,
+    args: dict | None,
+    *,
+    session_id: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    """服务端参数注入：会话 / 项目由服务端覆盖，忽略调用方（计划）传入的同名值。
+
+    只有工具的 input_model 声明了对应字段时才注入，避免给不需要的工具塞多余参数。
+    """
+    out = dict(args or {})
+    input_model = spec.get("input_model") if spec else None
+    fields = set(getattr(input_model, "model_fields", {}) or {})
+    if session_id is not None and "session_id" in fields:
+        out["session_id"] = session_id
+    if project_id is not None and "project_id" in fields:
+        out["project_id"] = project_id
+    return out
+
+
 def execute_tool(db: Session, name: str, *, approved: bool = False, **kwargs) -> ToolResult:
     """执行注册工具：审批门禁 → Schema 参数校验 → 执行 → 结构化结果。
 
