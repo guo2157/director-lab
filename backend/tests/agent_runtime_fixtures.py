@@ -158,10 +158,10 @@ def mk_job(db, project_id: str, *, status: str = "queued", job_type: str = "gene
     return job
 
 
-def fake_tool(monkeypatch, name: str, *, returns=None, raises=None, spec_overrides=None):
-    """临时注册/替换一个工具，测试结束自动还原。
+def fake_tool(monkeypatch, name: str, *, returns=None, raises=None, spec_overrides=None) -> dict:
+    """临时注册/替换一个工具（monkeypatch.setitem 自动还原），返回注册的 spec。
 
-    - returns：工具返回的数据（dict）
+    - returns：工具返回的数据（dict），或接收 kwargs 的可调用对象
     - raises：工具抛出的异常实例
     - spec_overrides：覆盖注册表 spec 的字段（如 requires_approval=True）
     """
@@ -191,14 +191,5 @@ def fake_tool(monkeypatch, name: str, *, returns=None, raises=None, spec_overrid
     if spec_overrides:
         spec.update(spec_overrides)
 
-    sentinel = object()
-    old = agent_tools.TOOL_REGISTRY.get(name, sentinel)
-    agent_tools.TOOL_REGISTRY[name] = spec
     monkeypatch.setitem(agent_tools.TOOL_REGISTRY, name, spec)
-
-    yield spec
-
-    if old is sentinel:
-        agent_tools.TOOL_REGISTRY.pop(name, None)
-    else:  # pragma: no cover - monkeypatch 已负责还原
-        agent_tools.TOOL_REGISTRY[name] = old
+    return spec

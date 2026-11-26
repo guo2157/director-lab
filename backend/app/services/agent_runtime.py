@@ -11,6 +11,14 @@
 - 模型只负责识别与解释，任务创建与状态流转由确定性业务代码执行
 - 保留现有 SSE 对话流，Runtime 注入 plan_id/goal_id 而非替代
 - 重复请求防重：goal_id + session_id 去重
+
+事务边界（Phase A A1，硬性约定）：
+- 内部函数（goal_manager / planner / execution_manager / verifier / replanner）只 flush，不 commit。
+- 只有 Runtime 对外入口负责提交：run_agent_loop、resume_after_job、resume_after_approval、
+  run_agent_loop_in_new_session。
+- _execute_plan_loop 在每个步骤完成「执行 → 验证 → 重规划」后提交一次，
+  进程崩溃时已完成的步骤不会丢失；未捕获异常时先 rollback，再在新事务中把步骤标记为 failed。
+- 禁止把请求作用域的 Session 传入其他线程；后台执行请用 run_agent_loop_in_new_session。
 """
 from __future__ import annotations
 
@@ -359,6 +367,7 @@ def run_agent_loop(
         success_criteria=success_criteria,
     )
     result.goal_id = goal.goal_id
+    db.commit()  # A1：Goal 创建/复用立即落库，后续崩溃不会丢目标
 
     # 记录 Goal 创建/恢复日志
     log_execution(
@@ -423,6 +432,7 @@ def run_agent_loop(
         return result
 
     result.plan_id = plan.plan_id
+    db.commit()  # A1：Plan 与其步骤落库后再执行
 
     # ── F. 执行循环 ──
     loop_result = _execute_plan_loop(
@@ -523,10 +533,77 @@ def _execute_plan_loop(
     approved: bool = False,
     progress_callback: Callable[[str, dict], None] | None = None,
 ) -> dict:
-    """执行 Plan 步骤循环。
+    """执行 Plan 步骤循环（崩溃隔离包装）。
 
-    返回执行摘要字典。
+    任何未捕获异常都不会向上抛：先 rollback，再把当前步骤标记为 failed 并提交，
+    最后返回 status="failed" 的执行摘要。
     """
+    try:
+        return _run_plan_loop(
+            db,
+            goal=goal,
+            plan=plan,
+            session_id=session_id,
+            project_id=project_id,
+            approved=approved,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:  # noqa: BLE001 - 崩溃隔离
+        db.rollback()
+        error_code = type(exc).__name__
+        error_message = (str(exc) or error_code)[:1000]
+        log_execution(
+            db,
+            ExecutionRecord(
+                goal_id=goal.goal_id,
+                plan_id=plan.plan_id,
+                status="failed",
+                error_code=error_code,
+                error_message=error_message,
+            ),
+        )
+        db.commit()
+        return {
+            "status": "failed",
+            "message": f"执行异常已中止：{error_code}: {error_message}",
+            "total_steps": len(plan.steps),
+            "completed_steps": 0,
+            "failed_steps": 1,
+            "skipped_steps": 0,
+            "next_action": "none",
+            "wait_step_id": None,
+            "errors": [
+                {"step_id": None, "tool_name": None, "error": f"{error_code}: {error_message}"}
+            ],
+        }
+
+
+def _run_plan_loop(
+    db: Session,
+    *,
+    goal: Goal,
+    plan: Any,
+    session_id: str,
+    project_id: str | None = None,
+    approved: bool = False,
+    progress_callback: Callable[[str, dict], None] | None = None,
+) -> dict:
+    """执行 Plan 步骤循环主体。每个步骤的「执行 → 验证 → 重规划」结束后提交一次。"""
+    from app.services.planner import get_next_pending_steps
+    from app.services.execution_manager import execute_step
+    from app.services.verifier import verify_step
+    from app.services.replanner import (
+        ReplanAction,
+        replan_from_verification,
+    )
+
+    def _emit(ev_type: str, payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(ev_type, payload)
+            except Exception:
+                pass
+
     from app.services.planner import get_next_pending_steps, get_latest_plan
     from app.services.execution_manager import execute_step
     from app.services.verifier import verify_step
@@ -559,6 +636,7 @@ def _execute_plan_loop(
             # 检查是否全部完成
             from app.services.verifier import verify_plan_completion
 
+            db.commit()  # 进入判定前先落库，保证判定看到的是已提交状态
             plan_status = verify_plan_completion(db, plan_id=current_plan.plan_id)
             if plan_status["all_verified"]:
                 return {
@@ -614,6 +692,7 @@ def _execute_plan_loop(
 
             # 2b. 审批等待
             if exec_result.get("policy") == "REQUIRE_CONFIRMATION":
+                db.commit()  # waiting_approval 状态必须持久化
                 return {
                     "status": "waiting_approval",
                     "message": f"步骤 '{tool_name}' 需要人工审批",
@@ -637,6 +716,7 @@ def _execute_plan_loop(
 
             if verification.verified:
                 completed += 1
+                db.commit()  # A1：状态转换点提交，崩溃时不丢已完成步骤
                 _emit("step_completed", {"step_id": step_id, "tool_name": tool_name})
                 continue
 
@@ -653,15 +733,18 @@ def _execute_plan_loop(
 
             if decision.action == ReplanAction.RETRY:
                 skipped += 1
+                db.commit()  # 重试计数与状态重置需落库
                 continue  # 步骤已重置为 pending，下次循环重试
 
             elif decision.action == ReplanAction.REPLAN:
                 if decision.updated_plan:
                     current_plan = decision.updated_plan
                     total_steps = len(current_plan.steps)
+                db.commit()  # 新 Plan 与其步骤必须落库，否则重启后丢失
                 break  # 退出内层 for，用新 Plan 重新开始
 
             elif decision.action == ReplanAction.WAIT:
+                db.commit()
                 return {
                     "status": "waiting_job",
                     "message": decision.reason,
@@ -676,6 +759,7 @@ def _execute_plan_loop(
 
             elif decision.action == ReplanAction.SKIP:
                 skipped += 1
+                db.commit()
                 continue
 
             else:  # FAIL / CANCEL
@@ -688,12 +772,14 @@ def _execute_plan_loop(
                     "error": exec_result.get("error", "未知错误"),
                     "verification": verification.to_dict(),
                 })
+                db.commit()  # 失败状态必须落库，否则新连接看不到
                 continue
 
         # 如果 Plan 被替换，继续外层循环
         continue
 
     # 超过最大迭代次数
+    db.commit()
     return {
         "status": "failed",
         "message": f"超过最大迭代次数 ({_MAX_LOOP_ITERATIONS})，可能存在死循环或 Replan 无限触发",
@@ -704,6 +790,32 @@ def _execute_plan_loop(
         "next_action": "none",
         "errors": errors,
     }
+
+
+def run_agent_loop_in_new_session(
+    session_factory: Callable[[], Session] | None = None,
+    **kwargs: Any,
+) -> AgentLoopResult:
+    """在自建 Session 中运行 Agent Loop（供后台线程 / 调试接口使用）。
+
+    禁止把 FastAPI 请求作用域的 Session 传入线程：调用方只传参数，
+    Session 的创建、提交、关闭都在这里完成。
+    """
+    if session_factory is None:
+        from app.core.database import SessionLocal as session_factory  # noqa: N813
+
+    db = session_factory()
+    try:
+        return run_agent_loop(db, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - 后台执行不允许把异常抛给线程
+        db.rollback()
+        return AgentLoopResult(
+            status="failed",
+            message=f"执行异常：{type(exc).__name__}: {exc}",
+            errors=[{"error": f"{type(exc).__name__}: {exc}"}],
+        )
+    finally:
+        db.close()
 
 
 # ── 异步恢复入口 ─────────────────────────────────────────────────────
@@ -763,6 +875,7 @@ def resume_after_job(
         ),
     )
 
+    db.commit()  # A1：Runtime 对外入口负责提交
     return {
         "resumed": True,
         "step_id": step_id,
@@ -808,8 +921,12 @@ def resume_after_approval(
         ),
     )
 
-    # 继续推进
-    goal = get_active_goal(db, session_id or "")
+    db.commit()  # A1：审批裁决带来的步骤状态变化先落库
+
+    # 继续推进（按 goal_id 查询，A7 会移除 session_id 依赖）
+    from app.services.goal_manager import get_goal_by_id
+
+    goal = get_goal_by_id(db, goal_id)
     if goal is None:
         return AgentLoopResult(status="failed", goal_id=goal_id, message="目标不存在")
 
@@ -830,6 +947,7 @@ def resume_after_approval(
         approved=approved,
     )
 
+    db.commit()  # A1：循环内的写入已按步提交，这里兜底提交收尾状态
     return AgentLoopResult(
         status=loop_result["status"],
         goal_id=goal_id,
