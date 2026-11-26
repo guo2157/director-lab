@@ -608,14 +608,14 @@ shot.duration    → $duration_hint（目标时长）
 - 参考图 ≤9 张、短边 ≥256px、宽高比 0.4–2.5；R2V 至少 1 张参考图，否则 422 `h3_reference_required`
 - R2V 不支持首尾帧；FLF2V 首尾帧经 ImageScale(crop=center) 裁切到画布
 - 同生成立体声音轨内嵌 mp4（`audio=true`、`audio_output_mode=embedded`）
-- 本地权重 4 项 + Turbo LoRA 1 项（见 13.3）；需 ≥24GB 显存（验证目标 A10，V100 未验证，NVFP4 不支持已排除）；ComfyUI 须含官方 MiniMax H3 原生节点（2026-08 合入），勿装 ComfyUI-MiniMaxH3-Cache；权重受 MiniMax H3 Community License 约束（美/欧/英/韩为排除地区）
+- 本地权重 4 项 + Turbo LoRA 2 项（4 步 / 8 步，见 13.3）；需 ≥24GB 显存（验证目标 A10，V100 未验证，NVFP4 不支持已排除）；ComfyUI 须含官方 MiniMax H3 原生节点（2026-08 合入），勿装 ComfyUI-MiniMaxH3-Cache；权重受 MiniMax H3 Community License 约束（美/欧/英/韩为排除地区）
 
 ### 13.3 模型默认文件名
 
-按链路分组，与 `backend/data/workflows/` 在用的工作流 JSON 实际引用一致（2026-11-20 逐项核对）：
+按链路分组，与 `backend/data/workflows/` 在用的工作流 JSON 实际引用一致（2026-11-25 逐项核对）：
 
 - 图像链路（`wf_image_ref_qwen21_multi` / `wf_image_t2i_qwen21_turbo`）3 项：`qwen_image_2.1_turbo_int8_convrot.safetensors`（UNETLoader）、`qwen3vl_8b_int8_convrot.safetensors`（CLIPLoader）、`qwen_image_2.1_vae_bf16.safetensors`（VAELoader）。**两个工作流均无 LoRA 节点**，旧版 Lightning 4 步 LoRA 与 `qwen_image_edit_2511` 权重已不再被引用，`wf_image_ref_qwen_edit`、`wf_image_t2i_qwen` 均已退役。
-- H3 视频链路（`wf_video_h3_ref2va_std_5s` / `wf_video_h3_ref2va_quality_10s`）：`minimax_h3_ref2va_pruned_int8_convrot.safetensors`（UNET）、`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`（CLIP）、`minimax_h3_video_vae_int8_convrot.safetensors`（视频 VAE）、`minimax_h3_audio_vae_fp32.safetensors`（音频 VAE）；外加 LoRA `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`（LoraLoaderModelOnly，strength 1.0），**两档均引用该 LoRA**，不是只给已退役的 turbo 工作流使用。`minimax_h3_fl2va_pruned_int8_convrot.safetensors` 仅 `wf_video_h3_flf2v` / `wf_video_h3_t2v` 引用，二者已移入 `_retired`，当前不参与出片。
+- H3 视频链路（`wf_video_h3_ref2va_std_5s` / `wf_video_h3_ref2va_quality_5s` / `wf_video_h3_ref2va_quality_10s`）：`minimax_h3_ref2va_pruned_int8_convrot.safetensors`（UNET）、`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`（CLIP）、`minimax_h3_video_vae_int8_convrot.safetensors`（视频 VAE）、`minimax_h3_audio_vae_fp32.safetensors`（音频 VAE）；LoRA 按档位区分：`std_5s` 用 `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`（4 步、shift 12/3），`quality_5s` / `quality_10s` 用 `minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors`（8 步、shift 6/3，来自 `lightx2v/Minimax-h3-Turbo` 仓库根目录）。`minimax_h3_fl2va_pruned_int8_convrot.safetensors` 仅 `wf_video_h3_flf2v` / `wf_video_h3_t2v` 引用，二者已移入 `_retired`，当前不参与出片。
 - 音频链路：TTS 经 Qwen3Loader 按 HuggingFace 仓库加载，无本地 safetensors：`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`（预设音色）、`Qwen/Qwen3-TTS-12Hz-1.7B-Base`（声音克隆）；BGM `stable-audio-open-1.0.safetensors` + `t5-base.safetensors`，对应 `wf_bgm_stable_audio` 已移入 `_retired`，当前无在用 BGM 工作流。
 
 ### 13.4 依赖与限制

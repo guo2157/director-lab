@@ -64,7 +64,9 @@
 
 优先级：中。前置条件：06 文档 A/B 基线建立完成。
 
-状态：方案 2 已完成（2026-11-25，提交 a95ee66）。新增 tests/test_script_prompt_common.py 6 项，守护 4 条实测共享规范、人物名一致性（两份措辞不同，分别断言不强行统一）、职责边界、专属规则不互相串入；含 3 项模拟漂移反向验证。方案 1（抽公共段）代码修改已完成（2026-11-26，提交 b50acd1）：新增 _SCRIPT_COMMON_FORMAT / _SCRIPT_COMMON_EPISODE / _SCRIPT_COMMON_CONSTRAINTS / _SCRIPT_COMMON_OUTPUT 四个共享常量，两个模板改为括号拼接引用；get_prompt 返回值与原版逐字符一致（create 296 字符、expand 266 字符），test_script_writing / test_script_prompt_common 共 11 项通过。A/B 对比（H-8）仍待执行。
+状态：方案 2 已完成（2026-11-25，提交 a95ee66）。新增 tests/test_script_prompt_common.py 6 项，守护 4 条实测共享规范、人物名一致性（两份措辞不同，分别断言不强行统一）、职责边界、专属规则不互相串入；含 3 项模拟漂移反向验证。方案 1（抽公共段）代码修改已完成（2026-11-26，提交 b50acd1）：新增 _SCRIPT_COMMON_FORMAT / _SCRIPT_COMMON_EPISODE / _SCRIPT_COMMON_CONSTRAINTS / _SCRIPT_COMMON_OUTPUT 四个共享常量，两个模板改为括号拼接引用；get_prompt 返回值与原版逐字符一致（create 296 字符、expand 266 字符），test_script_writing / test_script_prompt_common 共 11 项通过。
+
+模型输入等价性已由工具直读闭环（2026-11-26）：prompt_store.get_prompt（prompt_store.py:80-90）外置文件优先、缺失回退 DEFAULT_PROMPTS；PROMPT_DIR 指向 backend/workspace/prompts，实测该目录存在但 script_create_system.md 与 script_expand_system.md 均不存在，故两模板实际取值均为内置默认值；两个消费点 script_writing.py:331 与 video_workflow.py:274 均把 get_prompt 返回值直接赋给 system 变量；LLMClient.chat（llm.py:213-223）原样构造 role=system、content=system_prompt 的消息并交给 chat_messages，后者直接置入 payload 的 messages 字段，全链路无 strip、无拼接、无截断。因此重构前后模型收到的 system 内容字节级相同，本次改动不改变模型输入，A/B 在输入侧不适用；输出侧非确定性源于 temperature=0.3，与本次改动无因果关系。
 
 ### P3-2 历史负向词层清理（对应 03 的 C-03）
 
@@ -198,7 +200,7 @@
 - 第 1 项：本周期已按该纪律执行。P3-5（2d0daf2）、P3-4（62a1527）、P3-1 方案 2（a95ee66）、R-05（3626277）、06 基线同步（a77a984）五次提交均为单文件提交，提交前均用 git status --porcelain 核对文件清单。
 - 第 2、3、4 项：均已完成，详细状态见各条目的状态说明。合计新增 17 项守护测试，与既有 116 项合并运行共 133 项全部通过（16.04s），且三项守护测试各做了模拟漂移反向验证。
 - 第 5 项：未开始，需真实 LLM 与生成资源，执行计划见 06 文档第六节与第七节。
-- 第 6 项：P3-2 的可零影响部分已完成（c119c45，删除历史层 6 个永不下发的重复词，五种类型输出逐字符不变）；其整层删除/合并部分与 P3-1 方案 1、P3-3 仍待 A/B 基线，理由见 P3-2 状态说明的三项实证结论。
+- 第 6 项：P3-2 的可零影响部分已完成（c119c45，删除历史层 6 个永不下发的重复词，五种类型输出逐字符不变）；P3-1 方案 1 已完成（b50acd1）并通过全链路输入等价直读验证（get_prompt 外置缺失回退内置 → 两处消费点直传 system → LLMClient.chat 原样构造 content），模型输入字节级不变，A/B 在输入侧不适用，不再等待基线；P3-2 整层删除/合并部分与 P3-3 仍待 A/B 基线，理由见各自状态说明的实证结论。
 - 本周期后续提交：02 审计数据修正（95df654）、07 报告同步（5a0bc4f）、P3-2 精简（c119c45），均为单文件提交。
 
 ---

@@ -351,6 +351,7 @@ def complete_task(db: Session, task: Task, *, summary: str, result_data: dict | 
         return False
     task.status = "completed"
     task.progress = 100
+    # 终态必须覆盖排队文案，否则任务卡片会一直显示「任务已提交，等待执行」
     task.current_step = "completed"
     task.current_message = summary[:500]
     if result_data is not None:
@@ -375,6 +376,8 @@ def fail_task(db: Session, task: Task, *, error_code: str, error_msg: str) -> bo
     task.current_message = error_msg[:500]
     task.error_code = error_code[:48]
     task.error_msg = error_msg[:4000]
+    task.current_step = "failed"
+    task.current_message = error_msg[:500]
     db.flush()
     write_event(db, task, "task.failed", {"error_code": task.error_code, "error_msg": task.error_msg})
     return True

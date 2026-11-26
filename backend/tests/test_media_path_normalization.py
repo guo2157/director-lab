@@ -40,7 +40,7 @@ class TestImageToDataUriBackslashPath:
 
         out = _image_to_data_uri("data\\media\\frame.png")
         assert out is not None, "反斜杠路径未被归一化，参考图会被静默丢弃"
-        # 实现按 keyframe_image_qc 注释有意输出 JPEG（PNG base64 会撑爆评图请求体）
+        # 实现会统一缩放并转 JPEG（PNG base64 会撑爆评图请求体），故 MIME 固定为 jpeg
         assert out.startswith("data:image/jpeg;base64,")
 
     def test_forward_slash_path_unchanged(self, tmp_path, monkeypatch):
@@ -107,4 +107,6 @@ class TestExecutorNormalizesMediaPaths:
     def test_stored_path_normalizes_backslash(self):
         from app.core.config import stored_path
 
-        assert str(stored_path("data\\media\\x.png")) == "data/media/x.png"
+        # 用 as_posix 断言：Windows 上 Path 的 str() 会把分隔符还原成反斜杠，
+        # 这里校验的是「分隔符已归一为正斜杠」这一语义
+        assert stored_path("data\\media\\x.png").as_posix() == "data/media/x.png"

@@ -114,6 +114,38 @@ def test_reconcile_idempotent_on_terminal_tasks(db):
     assert to.reconcile_orphan_tasks(session) == 0
 
 
+def test_reconcile_generate_orphan_writes_result_message(db):
+    """恢复对账闭环生成任务时同样回写结果图，避免气泡缺图。"""
+    from app.models import AgentSession, Asset  # noqa: F401
+    from app.models.agent import AgentMessage
+
+    session, project = db
+    session.add(AgentSession(id="ags_rec", title="随手生成", status="active"))
+    session.commit()
+    job = _mk_job(
+        session, project.id, status="succeeded",
+        result={"assets": [{"asset_id": "ast_rec", "asset_type": "keyframe", "out_name": "cover_rec"}]},
+    )
+    job.job_type = "generate_keyframe"
+    task = to.create_task(
+        session, session_id="ags_rec", task_type="generate", title="生成", project_id=project.id,
+    )
+    to.start_task(db=session, task=task)
+    stage = to.add_stage(session, task, stage_key="generate", stage_name="生成", job_id=job.id)
+    stage.status = "running"
+    session.flush()
+
+    assert to.reconcile_orphan_tasks(session) == 1
+    assert task.status == "completed"
+    assert task.current_message.startswith("生成完成")
+    msg = (
+        session.query(AgentMessage)
+        .filter(AgentMessage.session_id == "ags_rec", AgentMessage.role == "assistant")
+        .one()
+    )
+    assert msg.payload["asset_refs"][0]["asset_id"] == "ast_rec"
+
+
 def test_system_prompt_contains_task_state_discipline():
     """LLM 状态纪律：系统提示词含任务状态纪律规则（不得编造状态）。"""
     from app.api.v1.agent import _DIRECTOR_SYSTEM_PROMPT

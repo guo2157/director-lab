@@ -1180,12 +1180,21 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         # 仍提交 ComfyUI。实体资产图（定妆/基准/锚定图）自身不适用该门禁。
         if job.job_type == "generate_keyframe":
             _params_peek = dict(job.params or {})
-            _is_entity_asset = any(
-                k in _params_peek for k in ("__character_id__", "__scene_id__", "__prop_id__")
+            # 实体资产图（定妆/基准/锚定图）与对话内随手生成（无镜头、无项目分镜上下文）
+            # 自身不适用资产就绪门禁
+            # 随手生成（A 方案）：草稿项目没有剧本/镜头/角色资产，纯文生图不适用资产门禁，
+            # 与实体资产图一并计入跳过名单
+            _skip_assets_gate = any(
+                k in _params_peek
+                for k in (
+                    "__character_id__",
+                    "__scene_id__",
+                    "__prop_id__",
+                    "__quick_generate__",
+                    "__quick_image__",
+                )
             )
-            # 随手生成（A 方案）：草稿项目没有剧本/镜头/角色资产，纯文生图不适用资产门禁
-            _is_quick_image = bool(_params_peek.get("__quick_image__"))
-            if not _is_entity_asset and not _is_quick_image:
+            if not _skip_assets_gate:
                 from app.services.assets_gate import evaluate_assets_gate
 
                 _gate = evaluate_assets_gate(db, job.project_id)

@@ -130,6 +130,45 @@ def test_generate_bridge_auto_completes_with_result_card(db):
     assert card.data["assets"][0]["asset_id"] == "ast_1"
 
 
+def test_generate_bridge_writes_result_message_to_session(db):
+    """生成完成后把产出图片回写成会话消息：导演台气泡据此展示结果图。"""
+    session, pid, sid = db
+    from app.models import AgentSession
+    from app.models.agent import AgentMessage
+
+    session.add(AgentSession(id="ags_p4", title="生成对话", status="active"))
+    session.commit()
+
+    confirmation_id = _request_and_approve(session, pid, sid)
+    result = execute_tool(session, "run_generate", confirmation_id=confirmation_id, approved=True)
+    job_id = result.data["job_id"]
+    task = session.query(Task).filter(Task.project_id == pid).one()
+
+    to.bridge_job_event(
+        session, job_id=job_id, event_type="job.finished",
+        payload={
+            "status": "succeeded",
+            "result": {
+                "assets": [{
+                    "asset_id": "ast_1", "asset_type": "keyframe", "out_name": "shot_1.png",
+                }],
+                "prompt_id": "p1",
+            },
+        },
+    )
+    assert task.status == "completed"
+    msg = (
+        session.query(AgentMessage)
+        .filter(AgentMessage.session_id == "ags_p4", AgentMessage.role == "assistant")
+        .one()
+    )
+    assert msg.payload["task_id"] == task.id
+    ref = msg.payload["asset_refs"][0]
+    assert ref["asset_id"] == "ast_1"
+    assert ref["has_thumb"] is True
+    assert "生成完成" in msg.content
+
+
 def test_generate_bridge_auto_fails(db):
     session, pid, sid = db
     confirmation_id = _request_and_approve(session, pid, sid)
@@ -143,3 +182,159 @@ def test_generate_bridge_auto_fails(db):
     )
     assert task.status == "failed"
     assert task.error_code == "comfy_timeout"
+
+
+# ── 对话内随手生成（文生图 / 图生图）：气泡内真实出图 ──
+
+
+@pytest.fixture()
+def quick_db(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'quick_gen.db'}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    t2i = Workflow(
+        id=ids.workflow_id(), name="文生图", workflow_type="image",
+        version=1, definition={}, status="published", is_builtin=True,
+        capabilities={"generation_modes": ["text_to_image"], "reference_slots": []},
+    )
+    i2i = Workflow(
+        id=ids.workflow_id(), name="图生图", workflow_type="image",
+        version=1, definition={}, status="published", is_builtin=True,
+        capabilities={
+            "generation_modes": ["image_to_image", "multi_reference"],
+            "reference_slots": [{"param": "ref_scene"}, {"param": "ref_identity"}],
+        },
+    )
+    session.add_all([t2i, i2i])
+    session.commit()
+    yield session, tmp_path
+    session.close()
+
+
+def test_quick_generate_text_to_image_creates_job(quick_db):
+    from app.api.v1 import agent as agent_api
+
+    session, _ = quick_db
+    result = agent_api._try_quick_generate(session, "ags_quick", "生成一张小狗的图片", [])
+    assert result is not None
+    session.commit()
+
+    job = session.get(Job, result["job_id"])
+    assert job.status == "queued"
+    assert job.shot_id is None
+    assert job.params["__quick_generate__"] is True
+    assert job.params["prompt"] == "生成一张小狗的图片"
+    project = session.get(Project, job.project_id)
+    assert project.name == "随手生成"
+
+    task = session.get(Task, result["task"].id)
+    assert task.task_type == "generate"
+    assert task.project_id == project.id
+    stage = session.query(TaskStage).filter(TaskStage.task_id == task.id).one()
+    assert stage.job_id == job.id
+    assert "文生图" in result["reply"]
+
+
+def test_quick_generate_image_to_image_binds_attachments(quick_db, monkeypatch):
+    from app.api.v1 import agent as agent_api
+
+    session, tmp_path = quick_db
+    ref_dir = tmp_path / "refs"
+    ref_dir.mkdir()
+    ref_file = ref_dir / "img1.png"
+    ref_file.write_bytes(b"x")
+    monkeypatch.setattr(agent_api, "_attachment_root", lambda sid: ref_dir)
+
+    result = agent_api._try_quick_generate(
+        session, "ags_quick", "生成一张海边日落的图片",
+        [{"id": "img1.png", "name": "img1.png"}],
+    )
+    assert result is not None
+    job = session.get(Job, result["job_id"])
+    assert job.params["__media__"] == {"ref_scene": str(ref_file)}
+    assert "图生图" in result["reply"]
+
+
+def test_quick_generate_skips_pipeline_requests(quick_db):
+    from app.api.v1 import agent as agent_api
+
+    session, _ = quick_db
+    assert agent_api._try_quick_generate(session, "ags_quick", "生成第 3 镜的分镜图", []) is None
+    assert agent_api._try_quick_generate(session, "ags_quick", "生成一段视频", []) is None
+
+
+def test_quick_generate_result_message_has_asset_refs(quick_db):
+    """随手生成完成后回写会话消息：气泡据此展示结果图。"""
+    from app.api.v1 import agent as agent_api
+    from app.models import AgentSession
+    from app.models.agent import AgentMessage
+
+    session, _ = quick_db
+    session.add(AgentSession(id="ags_quick", title="随手生成", status="active"))
+    session.commit()
+
+    result = agent_api._try_quick_generate(session, "ags_quick", "生成一张小狗的图片", [])
+    assert result is not None
+    session.commit()
+
+    to.bridge_job_event(
+        session, job_id=result["job_id"], event_type="job.finished",
+        payload={
+            "status": "succeeded",
+            "result": {
+                "assets": [{
+                    "asset_id": "ast_q1", "asset_type": "keyframe", "out_name": "quick_1.png",
+                }],
+            },
+        },
+    )
+    task = session.get(Task, result["task"].id)
+    assert task.status == "completed"
+    # 终态必须覆盖排队文案，否则任务卡片一直显示「任务已提交，等待执行」
+    assert task.current_step == "completed"
+    assert task.current_message.startswith("生成完成")
+    msg = (
+        session.query(AgentMessage)
+        .filter(AgentMessage.session_id == "ags_quick", AgentMessage.role == "assistant")
+        .one()
+    )
+    assert msg.payload["asset_refs"][0]["asset_id"] == "ast_q1"
+
+
+def test_recovery_job_succeeded_closes_task_and_writes_assets(quick_db):
+    """恢复/对账路径（job.succeeded，payload 只有统计字段）同样要闭环并回写结果图。"""
+    from app.api.v1 import agent as agent_api
+    from app.models import AgentSession
+    from app.models.agent import AgentMessage
+
+    session, _ = quick_db
+    session.add(AgentSession(id="ags_quick", title="随手生成", status="active"))
+    session.commit()
+
+    result = agent_api._try_quick_generate(session, "ags_quick", "生成一张小狗的图片", [])
+    assert result is not None
+    session.commit()
+    job_id = result["job_id"]
+    job = session.get(Job, job_id)
+    # 执行器已把产物落库；恢复路径的终态 payload 只有 {"assets": N}，没有明细
+    session.add(
+        Asset(
+            id="ast_recover1", project_id=job.project_id, asset_type="keyframe",
+            name="cover_recover", version=1, source_job_id=job_id,
+        )
+    )
+    session.commit()
+
+    to.bridge_job_event(session, job_id=job_id, event_type="job.succeeded", payload={"assets": 1})
+
+    task = session.get(Task, result["task"].id)
+    assert task.status == "completed"
+    assert task.current_step == "completed"
+    assert task.current_message.startswith("生成完成")
+    msg = (
+        session.query(AgentMessage)
+        .filter(AgentMessage.session_id == "ags_quick", AgentMessage.role == "assistant")
+        .one()
+    )
+    assert msg.payload["asset_refs"][0]["asset_id"] == "ast_recover1"
+    assert msg.payload["asset_refs"][0]["has_thumb"] is True

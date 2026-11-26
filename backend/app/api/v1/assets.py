@@ -111,7 +111,8 @@ def get_asset_file(
 ) -> FileResponse:
     """媒体文件服务：返回资产原文件或缩略图（thumb=true 且缩略图存在时）。
     缩略图缺失时回退原文件，保证前端展示不中断。
-    download=true 时以附件形式返回（按资产名命名），供对话气泡内直接下载原图。"""
+    download=true 时带 Content-Disposition，以附件形式返回（按资产名命名），
+    浏览器按资产名保存而不是内联打开，供对话气泡内直接下载原图。"""
     a = _get_asset(db, asset_id)
     path_str = a.file_path
     if thumb and a.thumb_path:
