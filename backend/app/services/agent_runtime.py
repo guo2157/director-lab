@@ -827,10 +827,22 @@ def _get_or_create_plan(
       不再把「上次已跑完」当成「本次已完成」
     """
     from app.services.planner import (
+        TEMPLATE_GOAL_TYPES,
         build_and_save_plan,
+        build_plan_from_template,
         get_latest_plan,
         get_latest_plan_any,
     )
+
+    from app.models.agent import AgentGoal as _GoalRow
+
+    goal_row = db.get(_GoalRow, goal_id)
+    if goal_row is not None and goal_row.goal_type in TEMPLATE_GOAL_TYPES:
+        return _get_or_create_template_plan(
+            db,
+            goal_row=goal_row,
+            project_id=project_id,
+        )
 
     existing = get_latest_plan(db, goal_id)
     previous = None
@@ -872,6 +884,73 @@ def _get_or_create_plan(
         )
         return None
 
+    return plan
+
+
+def _get_or_create_template_plan(
+    db: Session,
+    *,
+    goal_row,
+    project_id: str | None,
+) -> Any | None:
+    """模板目标（generate_assets / generate_keyframes）的计划获取/生成（B7）。
+
+    - 有 active Plan 且仍有非终态步骤 → 复用
+    - 计划全部终态且 constraints["remaining_count"] > 0 → 生成新 revision 并继续
+      下一批（carry_over 已完成的步骤，避免重复提交审批/生成）
+    - 否则生成新 revision（previous_plan=旧计划）
+    """
+    from app.services.planner import (
+        build_plan_from_template,
+        carry_over_steps,
+        get_latest_plan,
+        get_latest_plan_any,
+        save_plan,
+        save_plan_steps,
+    )
+
+    existing = get_latest_plan(db, goal_row.id)
+    if existing is not None and not _plan_all_terminal(db, existing.plan_id):
+        return existing
+
+    previous = existing or get_latest_plan_any(db, goal_row.id)
+    constraints = dict(goal_row.constraints or {})
+    scope = str(constraints.get("scope") or "all")
+
+    plan, report, meta = build_plan_from_template(
+        db,
+        goal_id=goal_row.id,
+        goal_type=goal_row.goal_type,
+        project_id=project_id or goal_row.project_id or "",
+        scope=scope,
+        revision=(previous.revision + 1) if previous else 1,
+        previous_plan=previous,
+    )
+    if not report.passed:
+        log_execution(
+            db,
+            ExecutionRecord(
+                goal_id=goal_row.id,
+                status="plan_validation_failed",
+                error_message=f"模板计划校验失败: {report.errors} errors",
+            ),
+        )
+        return None
+
+    save_plan(db, plan, supersede_previous=True)
+    save_plan_steps(db, plan)
+    if previous is not None:
+        from app.models.agent import AgentPlan as _PlanRow
+
+        row = db.get(_PlanRow, plan.plan_id)
+        if row is not None:
+            row.parent_plan_id = previous.plan_id
+        carry_over_steps(db, previous.plan_id, plan)
+
+    # 批量上限：记录剩余数量，供下一次 tick 继续
+    constraints["remaining_count"] = int(meta.get("remaining_count") or 0)
+    goal_row.constraints = constraints
+    db.flush()
     return plan
 
 
@@ -1096,6 +1175,35 @@ def _run_plan_loop(
                 }
             step_id = step_info["id"]
             tool_name = step_info.get("tool_name", "")
+
+            # 2a-0. 澄清步骤（B7 模板计划）：不调用工具，直接进入 waiting_user
+            if step_info.get("step_type") == "clarification":
+                from app.models.agent import AgentPlanStep
+
+                row = db.get(AgentPlanStep, step_id)
+                message = str((row.args or {}).get("message") or row.description or "")[:1000]
+                if row is not None:
+                    row.status = "waiting_user"
+                    row.error_code = "precondition_failed"
+                    row.error_message = message
+                    row.lock_owner = None
+                db.commit()
+                _emit(
+                    LoopEvent.STEP_WAITING.value,
+                    {"step_id": step_id, "tool_name": tool_name, "waiting": "user",
+                     "reason": message},
+                )
+                return {
+                    "status": "waiting_user",
+                    "message": message,
+                    "total_steps": total_steps,
+                    "completed_steps": completed,
+                    "failed_steps": failed,
+                    "skipped_steps": skipped,
+                    "next_action": "wait_user",
+                    "wait_step_id": step_id,
+                    "errors": errors,
+                }
 
             # 2a. 执行
             _emit("step_started", {"step_id": step_id, "tool_name": tool_name,

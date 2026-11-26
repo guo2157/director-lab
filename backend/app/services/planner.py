@@ -80,6 +80,8 @@ class PlanStep:
 
     step_key: str                          # 步骤唯一标识（计划内）
     tool_name: str                         # TOOL_REGISTRY 工具名
+    # tool_call（工具调用）/ clarification（向用户澄清，不调用工具，Phase B B7）
+    step_type: str = "tool_call"
     description: str = ""                  # 步骤描述
     args: dict[str, Any] = field(default_factory=dict)  # 工具参数
     depends_on: list[str] = field(default_factory=list)  # 依赖步骤 key 列表
@@ -108,6 +110,7 @@ class Plan:
                 {
                     "step_key": s.step_key,
                     "tool_name": s.tool_name,
+                    "step_type": s.step_type,
                     "description": s.description,
                     "args": s.args,
                     "depends_on": s.depends_on,
@@ -130,6 +133,7 @@ class Plan:
                 PlanStep(
                     step_key=s.get("step_key", ""),
                     tool_name=s.get("tool_name", ""),
+                    step_type=s.get("step_type", "tool_call"),
                     description=s.get("description", ""),
                     args=s.get("args", {}),
                     depends_on=s.get("depends_on", []),
@@ -496,8 +500,10 @@ def validate_plan(plan: Plan, *, project_id: str | None = None) -> ValidationRep
     if not plan.steps:
         report.add_warning("steps_empty", "计划包含零个步骤，可能无法完成目标")
 
-    # 2: tool_name 存在
+    # 2: tool_name 存在（clarification 步骤不调用工具，跳过）
     for step in plan.steps:
+        if step.step_type == "clarification":
+            continue
         if step.tool_name not in registry:
             report.add_error(
                 "tool_not_found",
@@ -642,7 +648,7 @@ def save_plan_steps(
             plan_id=plan.plan_id,
             task_id="",  # 将在 ExecutionManager 分配 Task 后回填
             step_index=idx,
-            step_type="tool_call",
+            step_type=step.step_type or "tool_call",
             tool_name=step.tool_name,
             description=step.description,
             args=step.args,
@@ -731,6 +737,201 @@ def build_and_save_plan(
         save_plan_steps(db, plan)
 
     return plan, report
+
+
+# ── Phase B B7：最小计划模板（资产生成 / 分镜图生成）───────────────────
+#
+# Phase C 会把 Planner 改成完全由项目状态驱动。Phase B 只把两种目标做对：
+# 计划结构由代码生成，不调用 LLM。
+
+TEMPLATE_GOAL_TYPES = ("generate_assets", "generate_keyframes")
+
+_ENTITY_TARGETS = ("character", "scene", "prop")
+
+
+def _missing_entities(db: Session, project_id: str, scope: str) -> list[dict]:
+    """当前解析版本下、没有 current 有效资产的实体（按 scope 过滤）。
+
+    复用 list_project_entities 的 has_image 判定（与资产库口径一致），
+    不自己写 SQL 判断资产有效性。
+    """
+    from app.services.agent_tool_impls import tool_list_project_entities
+    from app.services.assets_gate import evaluate_assets_gate
+
+    targets = [scope] if scope in _ENTITY_TARGETS else list(_ENTITY_TARGETS)
+    # 资产门禁给出「版本失效 / 文件缺失 / 在途生成」的精确判定，与生成入口口径一致；
+    # 指针为空（缺图）由 list_project_entities 的 has_image 给出。
+    blocked_ids: set[str] = set()
+    try:
+        gate = evaluate_assets_gate(db, project_id)
+        blocked_ids = {b.entity_id for b in gate.blockers if b.entity_id}
+    except Exception:  # noqa: BLE001 - 门禁异常不阻断规划，退回指针判定
+        blocked_ids = set()
+
+    missing: list[dict] = []
+    for target in targets:
+        try:
+            data = tool_list_project_entities(db, project_id, entity_type=target, limit=200)
+        except Exception:  # noqa: BLE001 - 项目不存在等由调用方按空计划处理
+            return []
+        for item in data.get("items", []):
+            if not item.get("has_image") or item["id"] in blocked_ids:
+                missing.append(
+                    {"entity_id": item["id"], "name": item.get("name") or item["id"], "target": target}
+                )
+    return missing
+
+
+def _missing_keyframe_shots(db: Session, project_id: str, scope: str) -> list[dict]:
+    """没有 current 有效分镜图的镜头（scope=all 或 episode:<id>）。"""
+    from app.services.agent_tool_impls import tool_list_project_shots
+
+    episode = None
+    if scope.startswith("episode:"):
+        try:
+            episode = int(scope.split(":", 1)[1])
+        except ValueError:
+            episode = None
+    try:
+        data = tool_list_project_shots(db, project_id, episode=episode, limit=200)
+    except Exception:  # noqa: BLE001
+        return []
+    return [item for item in data.get("items", []) if not item.get("has_keyframe")]
+
+
+def _assets_not_ready_message(db: Session, project_id: str) -> str | None:
+    """资产门禁未通过时返回可读原因（复用 assets_gate 的分项统计与阻断明细）。"""
+    from app.services.assets_gate import evaluate_assets_gate
+
+    gate = evaluate_assets_gate(db, project_id)
+    if gate.ready:
+        return None
+    names = "、".join(f"{b.asset_type}:{b.name}" for b in gate.blockers[:5])
+    more = f" 等 {len(gate.blockers)} 项" if len(gate.blockers) > 5 else ""
+    return f"{gate.message}（{names}{more}）" if names else gate.message
+
+
+def build_plan_from_template(
+    db: Session,
+    *,
+    goal_id: str,
+    goal_type: str,
+    project_id: str,
+    scope: str = "all",
+    revision: int = 1,
+    previous_plan: Plan | None = None,
+) -> tuple[Plan, ValidationReport, dict]:
+    """按模板生成计划（B7）。
+
+    返回 (plan, report, meta)：
+    - meta["remaining_count"]：本批因 agent_max_batch_steps 上限未纳入的实体/镜头数
+    - meta["clarification"]：需要用户先处理的前置条件说明（有值时计划只含一个 clarification 步骤）
+    """
+    from app.core.config import get_settings
+
+    max_batch = int(getattr(get_settings(), "agent_max_batch_steps", 30) or 30)
+    plan = Plan(
+        plan_id=agent_plan_id(),
+        goal_id=goal_id,
+        revision=revision,
+        metadata={
+            "description": f"{goal_type}（模板计划）",
+            "project_id": project_id,
+            "template": goal_type,
+            "scope": scope,
+            "created_at": datetime.now().isoformat(),
+        },
+    )
+    meta: dict[str, Any] = {"remaining_count": 0, "clarification": None}
+
+    def _clarification(message: str) -> tuple[Plan, ValidationReport, dict]:
+        plan.steps.append(
+            PlanStep(
+                step_key="clarification",
+                tool_name="",
+                step_type="clarification",
+                description=message[:200],
+                args={"message": message},
+            )
+        )
+        meta["clarification"] = message
+        return plan, validate_plan(plan, project_id=project_id), meta
+
+    if goal_type == "generate_assets":
+        missing = _missing_entities(db, project_id, scope)
+        plan.steps.append(
+            PlanStep(
+                step_key="project_overview",
+                tool_name="project_overview",
+                description="获取项目基本信息与概览",
+                args={"project_id": project_id},
+                estimated_timeout=30,
+            )
+        )
+        if len(missing) > max_batch:
+            meta["remaining_count"] = len(missing) - max_batch
+            missing = missing[:max_batch]
+        for item in missing:
+            plan.steps.append(
+                PlanStep(
+                    step_key=f"asset:{item['target']}:{item['entity_id']}",
+                    tool_name="request_generate",
+                    description=f"生成{item['target']}资产 {item['name']}",
+                    args={
+                        "project_id": project_id,
+                        "entity_id": item["entity_id"],
+                        "target": item["target"],
+                    },
+                    depends_on=["project_overview"],
+                    estimated_timeout=60,
+                )
+            )
+        return plan, validate_plan(plan, project_id=project_id), meta
+
+    if goal_type == "generate_keyframes":
+        blocked = _assets_not_ready_message(db, project_id)
+        if blocked:
+            return _clarification(f"分镜图生成需要资产先就绪：{blocked}")
+        missing_shots = _missing_keyframe_shots(db, project_id, scope)
+        plan.steps.append(
+            PlanStep(
+                step_key="project_overview",
+                tool_name="project_overview",
+                description="获取项目基本信息与概览",
+                args={"project_id": project_id},
+                estimated_timeout=30,
+            )
+        )
+        if len(missing_shots) > max_batch:
+            meta["remaining_count"] = len(missing_shots) - max_batch
+            missing_shots = missing_shots[:max_batch]
+        for item in missing_shots:
+            plan.steps.append(
+                PlanStep(
+                    step_key=f"keyframe:{item['shot_id']}",
+                    tool_name="request_generate",
+                    description=f"生成分镜图 {item.get('global_hint') or item['shot_id']}",
+                    args={
+                        "project_id": project_id,
+                        "shot_id": item["shot_id"],
+                        "target": "keyframe",
+                    },
+                    depends_on=["project_overview"],
+                    estimated_timeout=60,
+                )
+            )
+        return plan, validate_plan(plan, project_id=project_id), meta
+
+    plan.steps.append(
+        PlanStep(
+            step_key="project_overview",
+            tool_name="project_overview",
+            description="获取项目基本信息与概览",
+            args={"project_id": project_id},
+            estimated_timeout=30,
+        )
+    )
+    return plan, validate_plan(plan, project_id=project_id), meta
 
 
 def get_latest_plan(db: Session, goal_id: str) -> Plan | None:
@@ -829,6 +1030,7 @@ def get_next_pending_steps(db: Session, plan_id: str) -> list[dict]:
                 {
                     "id": s.id,
                     "step_index": s.step_index,
+                    "step_type": s.step_type,
                     "tool_name": s.tool_name,
                     "description": s.description,
                     "args": s.args,
