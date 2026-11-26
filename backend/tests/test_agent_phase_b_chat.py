@@ -83,7 +83,7 @@ def project_env(client, tmp_path, monkeypatch):
 
     pv = ParseVersion(
         id=ids.parse_version_id(), project_id=project.id,
-        script_version_id=script.id, version=1, status="completed", created_at=now,
+        script_version_id=script.id, version=1, status="current", created_at=now,
     )
     db.add(pv)
     db.flush()

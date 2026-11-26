@@ -81,6 +81,9 @@ class AnalyzeScriptInput(BaseModel):
     episode_end: int | None = Field(default=None, ge=1)
     # 发起方会话：解析为异步任务，完成后据此把结果回推到对应对话框
     session_id: str | None = None
+    # 复用已有统一任务（对话链路传入）：一次解析只应有一条任务记录，
+    # 且对话气泡的任务卡要绑定到真实进度所在的任务
+    task_id: str | None = None
 
 
 class ComposeVideoInput(BaseModel):
@@ -143,16 +146,17 @@ def tool_confirm_parse(db: Session, project_id: str, parse_version_id: str | Non
         .order_by(Job.finished_at.desc())
         .all()
     )
-    target_results = [
+    from app.services.script_parse import apply_parse_result, latest_results_per_range
+
+    raw_results = [
         (j.result, j.finished_at.isoformat() if j.finished_at else "")
         for j in parse_jobs if (j.result or {}).get("parse_version_id") == pv.id
     ]
-    target_results.sort(key=lambda t: (int(t[0].get("episode_start") or 1), t[1]))
-    target_results = [t[0] for t in target_results]
+    # 同一集数范围多次解析只回放最后一次，避免重复任务各自建场景/镜头
+    target_results = latest_results_per_range(raw_results)
     stats: dict = {}
     if target_results:
         from app.models import Scene as SceneModel
-        from app.services.script_parse import apply_parse_result
         current_scene_ids = [
             row[0] for row in db.query(SceneModel.id).filter(
                 SceneModel.project_id == project_id).all()
@@ -339,7 +343,8 @@ def tool_save_script(db: Session, project_id: str, text: str) -> dict:
 def tool_analyze_script(db: Session, project_id: str, episode_start: int = 1,
                          episode_count: int | None = None,
                          episode_end: int | None = None,
-                         session_id: str | None = None) -> dict:
+                         session_id: str | None = None,
+                         task_id: str | None = None) -> dict:
     """分析剧本：创建解析任务（异步），返回任务 ID 与流程状态。"""
     try:
         assert_action_allowed(db, project_id, "analyze_script")
@@ -379,15 +384,21 @@ def tool_analyze_script(db: Session, project_id: str, episode_start: int = 1,
     # 统一任务编排层（Phase 3）：解析任务同步创建统一 Task + parse 阶段（关联 job_id），
     # Job 事件经 bridge_job_event 自动桥接为 task 事件，驱动前端任务卡片动态更新
     try:
+        from app.models import Task
         from app.services import task_orchestrator
-        _task = task_orchestrator.create_task(
-            db, session_id=session_id, task_type="parse", title="剧本解析",
-            project_id=project_id,
-        )
+        # 调用方（对话链路）已建统一任务时复用，避免同一次解析产生两条任务；
+        # 复用任务的 task_type 由调用方按真实语义（parse）设置
+        _task = db.get(Task, task_id) if task_id else None
+        if _task is None:
+            _task = task_orchestrator.create_task(
+                db, session_id=session_id, task_type="parse", title="剧本解析",
+                project_id=project_id,
+            )
         task_orchestrator.start_task(db, _task)
         task_orchestrator.add_stage(
             db, _task, stage_key="parse", stage_name="剧本解析", job_id=job.id,
         )
+        task_id = _task.id
     except Exception:  # noqa: BLE001
         pass  # 编排层失败不影响既有解析链路
     # 同步完成评估标记（与 API 流程的 estimate 步骤对齐）：
@@ -401,6 +412,7 @@ def tool_analyze_script(db: Session, project_id: str, episode_start: int = 1,
     return {
         "job_id": job.id,
         "job_status": job.status,
+        "task_id": task_id,
         "script_version_id": sv.id,
         "note": "解析任务已入队，可通过 list_jobs 查询进度",
         **_pipeline_ctx(db, project_id),

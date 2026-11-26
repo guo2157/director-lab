@@ -61,6 +61,12 @@ _ACTION_SUBCATEGORY: dict[str, str] = {
     "adopt_candidate": "candidate.adopt",
     "list_candidates": "candidate.list",
 }
+# 子类 → 动作键反向映射：LLM 有时把细粒度子类（如 script.parse）直接填进
+# entities.pipeline_action，而流程工具注册表只认动作键（analyze_script）。
+# 识别后统一归一化，避免报『未注册的流程操作』。
+_SUBCATEGORY_ACTION: dict[str, str] = {
+    sub: action for action, sub in _ACTION_SUBCATEGORY.items()
+}
 # 瞬态错误码（可重试）：环境类错误
 _RETRYABLE_CODES = {"llm_unreachable", "llm_timeout", "llm_error"}
 # 置信度阈值：低于该值视为识别不可靠，按 ambiguous 处理（向用户澄清）
@@ -129,7 +135,11 @@ _PIPELINE_RULES: list[tuple[re.Pattern[str], str]] = [
         r"|(分析|解析)\s*(完成|结束)\s*(了)?\s*(吗|么|嘛|没|没有)"
         r"|分析\s*(中|中吗)\s*[?？]?$"
     ), "query_parse_status"),
-    (re.compile(r"(发起|开始|执行|做)?(一?次?)(分析|解析|拆解)剧本"), "analyze_script"),
+    (re.compile(
+        r"(发起|开始|执行|做)(一?次?)?(分析|解析|拆解)(剧本|一下|下|吧)?"
+        r"|^(分析|解析|拆解)(一下|下|吧)?$"
+        r"|(分析|解析|拆解)(一下|下)?剧本"
+    ), "analyze_script"),
     # 确认解析结果：解析产出为候选版本，须确认后角色/场景/道具/镜头才落库
     (re.compile(r"(确认|采纳|应用)(一下|下)?(剧本)?(解析|分析)(结果|版本)?"), "confirm_parse"),
     (re.compile(r"(合成|拼接)(成片|视频|导出)?"), "compose_video"),
@@ -328,6 +338,14 @@ def _apply_intent_rules(user_content: str, result: IntentResult) -> IntentResult
 
     规则只做补充与兜底，不做最终裁决：类别判定仍以 LLM 结构化输出为准。
     """
+    # 动作键归一化：LLM 可能把细粒度子类（script.parse）填进 pipeline_action，
+    # 统一映射回注册表认的动作键（analyze_script），否则流程工具查不到会报未注册
+    if result.intent == "pipeline_action" and result.entities:
+        raw_action = result.entities.get("pipeline_action")
+        if isinstance(raw_action, str) and raw_action not in _ACTION_SUBCATEGORY:
+            mapped = _SUBCATEGORY_ACTION.get(raw_action)
+            if mapped:
+                result.entities["pipeline_action"] = mapped
     if any(word in user_content for word in _HIGH_RISK_KEYWORDS):
         if result.risk_level != "high":
             result.risk_level = "high"

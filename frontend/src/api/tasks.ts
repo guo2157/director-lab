@@ -18,6 +18,7 @@ export interface TaskCardData {
   title: string
   status: string
   progress: number
+  current_message?: string | null
   error_code: string | null
   error_msg: string | null
   stages: TaskStageInfo[]

@@ -50,6 +50,26 @@ def test_analyze_script_creates_unified_task(db):
     assert stage.job_id == job_id
 
 
+def test_analyze_script_reuses_passed_task(db):
+    """对话链路传入统一任务时复用，不另建第二条 parse 任务（气泡任务卡绑定真实进度）。"""
+    session, project, sv = db
+    existing = to.create_task(
+        session, session_id=None, task_type="parse", title="解析剧本",
+        project_id=project.id,
+    )
+    from app.services.pipeline_tools import tool_analyze_script
+    result = tool_analyze_script(
+        session, project.id, episode_start=1, episode_count=1, task_id=existing.id,
+    )
+    tasks = session.query(Task).filter(Task.project_id == project.id).all()
+    assert len(tasks) == 1
+    assert tasks[0].id == existing.id
+    assert result["task_id"] == existing.id
+    stage = session.query(TaskStage).filter(TaskStage.task_id == existing.id).one()
+    assert stage.job_id == result["job_id"]
+    assert tasks[0].status == "running"
+
+
 def test_bridge_auto_completes_task_with_result_card(db):
     session, project, sv = db
     from app.services.pipeline_tools import tool_analyze_script
@@ -90,6 +110,24 @@ def test_bridge_auto_fails_task(db):
     )
     assert task.status == "failed"
     assert task.error_code == "llm_error"
+
+
+def test_bridge_agent_stage_updates_task_current_step(db):
+    """执行器过程事件（agent.stage 带 label）要透传为任务当前步骤文案（任务卡运行期可见进展）。"""
+    session, project, sv = db
+    from app.services.pipeline_tools import tool_analyze_script
+    result = tool_analyze_script(session, project.id, episode_start=1, episode_count=1)
+    job_id = result["job_id"]
+    task = session.query(Task).filter(Task.project_id == project.id).one()
+
+    to.bridge_job_event(
+        session, job_id=job_id, event_type="agent.stage",
+        payload={"stage": "parsing", "label": "正在拆解第 1-6 集（共 3 批）"},
+    )
+    assert task.current_step == "parsing"
+    assert task.current_message == "正在拆解第 1-6 集（共 3 批）"
+    # 进度仍以阶段聚合为准，不由过程事件虚构
+    assert task.progress == 0
 
 
 def test_update_stage_progress_by_job(db):

@@ -755,6 +755,22 @@ _register_default("image_prompt", """任务：生成第 {episode} 集第 {seq} �
 必须保持：人物面部特征、发型、服装与配饰与参考图一致；场景空间结构、建筑布局与光线方向与基准图一致；道具形状、颜色与材质一致。
 禁止：人物畸形、多余肢体、换脸、服装跳变、未绑定人物与道具、文字与字幕、水印与 Logo、拼贴与分屏、同一角色重复出现、动作前后状态并列。""")
 
+def latest_results_per_range(job_results: list) -> list:
+    """同一集数范围被多次解析时只保留最后一次结果。
+
+    重试解析会在同一解析版本下留下多条成功任务；确认时若全部回放，
+    重复任务会各自建场景/镜头（场景 time_note 措辞漂移导致 normalized_name 不同）。
+    job_results 元素为 (result, finished_at) 二元组。
+    """
+    best: dict = {}
+    for result, finished in job_results:
+        key = (int(result.get("episode_start") or 1), int(result.get("episode_count") or 1))
+        current = best.get(key)
+        if current is None or (finished or "") >= (current[1] or ""):
+            best[key] = (result, finished)
+    return [best[key][0] for key in sorted(best)]
+
+
 # --- 候选解析确认后的级联落库（API.md §5 parse-version confirm / PROMPTS.md §3 集级合并规则） ---
 def apply_parse_result(db, project, parse_result: dict, *, episode_start: int, episode_count: int,
                        current_scene_ids: list | None = None) -> dict:

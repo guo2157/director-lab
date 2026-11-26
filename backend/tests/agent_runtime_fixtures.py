@@ -120,7 +120,7 @@ def mk_project(
             project_id=project.id,
             script_version_id=project.current_script_version_id or ids.script_version_id(),
             version=1,
-            status="completed",
+            status="current",
             created_at=now,
         )
         db.add(pv)

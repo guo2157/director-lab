@@ -120,7 +120,7 @@ def _seed_project(factory, *, characters=3, with_assets=0):
         project.current_script_version_id = script.id
         pv = ParseVersion(
             id=ids.parse_version_id(), project_id=project.id,
-            script_version_id=script.id, version=1, status="completed", created_at=now,
+            script_version_id=script.id, version=1, status="current", created_at=now,
         )
         db.add(pv)
         db.flush()

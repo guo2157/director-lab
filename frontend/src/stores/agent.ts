@@ -14,7 +14,7 @@ import {
   updateSession,
 } from '@/api/agent'
 import type { AgentApproval, AgentMessage, AgentSession, ReviewCard } from '@/api/agent'
-import { post } from '@/api/client'
+import { ApiError, post } from '@/api/client'
 
 /**
  * Agent 会话全局状态（V2 双栏工作台 Phase 2）
@@ -260,6 +260,7 @@ export const useAgentStore = defineStore('agent', () => {
       const res = await post<{ user_message: AgentMessage; assistant_message: AgentMessage }>(
         `/agent/sessions/${activeSessionId.value}/chat`,
         { content: text },
+        { timeout: 180000 },
       )
       const idx = messages.value.findIndex((m) => m.id === optimisticId)
       if (idx >= 0) messages.value.splice(idx, 1, res.user_message)
@@ -270,6 +271,14 @@ export const useAgentStore = defineStore('agent', () => {
       void autoTitle(activeSessionId.value)
       return res.assistant_message
     } catch (e) {
+      // 超时/网络错误时服务端可能已完成（长耗时剧本生成常见），先拉回真实消息再判定
+      if (e instanceof ApiError && (e.code === 'timeout' || e.code === 'network_error')) {
+        const before = messages.value.length
+        await loadMessages()
+        if (messages.value.length > before && messages.value[messages.value.length - 1]?.role === 'assistant') {
+          return messages.value[messages.value.length - 1] ?? null
+        }
+      }
       const idx = messages.value.findIndex((m) => m.id === optimisticId)
       if (idx >= 0) messages.value.splice(idx, 1)
       draft.value = text

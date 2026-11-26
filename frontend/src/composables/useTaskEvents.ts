@@ -46,7 +46,13 @@ function applyEvent(ev: TaskEvent) {
   // 事件 payload 中的扩展字段（error_code/error_msg/stage 等）合并进快照
   for (const [k, v] of Object.entries(ev)) {
     if (['seq', 'event_type', 'task_id', 'status', 'progress', 'updated_at'].includes(k)) continue
-    if (v != null) (snap as Record<string, unknown>)[k] = v
+    if (v == null) continue
+    // task.step 事件的 message 是后端真实阶段文案（当前步骤展示）
+    if (k === 'message') {
+      snap.current_message = String(v)
+      continue
+    }
+    ;(snap as Record<string, unknown>)[k] = v
   }
   snap.lastEvent = ev
 }

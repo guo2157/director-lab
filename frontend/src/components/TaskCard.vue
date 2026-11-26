@@ -79,6 +79,10 @@ const downloadUrl = computed(() => {
     <div v-if="!isTerminal" class="task-card-progress">
       <div class="task-card-progress-bar" :style="{ width: `${progressPercent}%` }" />
     </div>
+    <!-- 当前步骤：后端过程事件上报的真实阶段文案（如「正在拆解第 1–6 集」） -->
+    <div v-if="!isTerminal && view.current_message" class="task-card-step">
+      {{ view.current_message }}
+    </div>
     <!-- 阶段列表 -->
     <div v-if="view.stages?.length" class="task-card-stages">
       <div
@@ -109,7 +113,7 @@ const downloadUrl = computed(() => {
       </div>
     </div>
     <a
-n      v-if="downloadUrl"
+      v-if="downloadUrl"
       class="task-card-download"
       :href="downloadUrl"
       target="_blank"
@@ -162,6 +166,14 @@ n      v-if="downloadUrl"
   border-radius: 2px;
   background: var(--brand-primary);
   transition: width 0.3s ease;
+}
+.task-card-step {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .task-card-stages {
   margin-top: 8px;

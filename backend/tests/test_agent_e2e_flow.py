@@ -170,7 +170,7 @@ def project_env(client, tmp_path):
     project.estimated_text_hash = script_hash
     parse_version = ParseVersion(
         id=ids.parse_version_id(), project_id=project.id, script_version_id=script_version.id,
-        version=1, status="completed", script_hash=script_hash, created_at=now,
+        version=1, status="current", script_hash=script_hash, created_at=now,
     )
     session.add(parse_version)
     session.flush()

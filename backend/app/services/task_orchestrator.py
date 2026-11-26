@@ -421,6 +421,10 @@ _TERMINAL_JOB_EVENTS = {
     "job.succeeded": "succeeded",
     "job.failed": "failed",
     "job.cancelled": "cancelled",
+    # 剧本解析走 script_agent，它发的是 agent.* 事件名；不识别会让 parse 阶段
+    # 永远停在 pending、任务卡不闭环（结果虽已落库，对话里却看不到）
+    "agent.succeeded": "succeeded",
+    "agent.cancelled": "cancelled",
 }
 
 def mark_agent_steps_for_job(db: Session, job_id: str, *, reason: str = "job_terminal") -> int:
@@ -502,6 +506,15 @@ def bridge_job_event(
                 "task.job_event",
                 {"stage_id": stage.id, "stage_key": stage.stage_key, "source": event_type, **(payload or {})},
             )
+            # 过程阶段事件（解析的 agent.stage 等带 label 的真实阶段上报）：
+            # 同步为任务当前步骤文案，运行期间任务卡才有可见进展（进度仍按阶段聚合，不虚构）
+            label = str((payload or {}).get("label") or "").strip()
+            if label:
+                set_task_step(
+                    db, task,
+                    step=str((payload or {}).get("stage") or event_type)[:64],
+                    message=label,
+                )
         bridged += 1
         # Phase 2 自动调度：Job 状态变更后尝试启动下一批就绪阶段
         schedule_ready_stages(db, task)

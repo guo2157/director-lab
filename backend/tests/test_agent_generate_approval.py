@@ -97,7 +97,7 @@ def db(tmp_path):
     )
     parse_version = ParseVersion(
         id=ids.parse_version_id(), project_id=project.id, script_version_id=script_version.id,
-        version=1, status="completed", script_hash=script_hash, created_at=now,
+        version=1, status="current", script_hash=script_hash, created_at=now,
     )
     session.add_all([project, scene, shot, workflow, video_workflow, baseline, script_version, parse_job, parse_version])
     session.flush()
@@ -228,7 +228,7 @@ def test_shot_must_belong_to_project(db):
     )
     pv = ParseVersion(
         id=ids.parse_version_id(), project_id=other.id, script_version_id=sv.id,
-        version=1, status="completed", script_hash=script_hash, created_at=now,
+        version=1, status="current", script_hash=script_hash, created_at=now,
     )
     session.add_all([sv, pv])
     session.flush()

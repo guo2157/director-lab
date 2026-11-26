@@ -26,6 +26,7 @@ from app.services.intent_router import (
     IntentResult,
     _ACTION_SUBCATEGORY,
     _apply_confidence_tier,
+    _apply_intent_rules,
     apply_fast_path_rules,
     route_action,
 )
@@ -109,6 +110,37 @@ def test_ambiguous_query_subcategory_left_empty():
     assert r is not None
     assert r.intent == "query"
     assert r.subcategory == "" or r.subcategory in INTENT_SUBCATEGORIES["query"]
+
+
+@pytest.mark.parametrize("text", ["开始解析", "开始分析", "解析一下", "发起解析", "分析剧本"])
+def test_start_parse_maps_to_analyze_script_action(text: str):
+    """『开始解析』类消息必须落 analyze_script 动作键，不能落到未注册动作上。
+
+    回归点：LLM 曾把细粒度子类 script.parse 直接填进 entities.pipeline_action，
+    流程工具注册表只认 analyze_script，导致报『未注册的流程操作：script.parse』。
+    """
+    r = apply_fast_path_rules(text)
+    assert r is not None, f"{text} 应命中规则快路径"
+    assert r.entities.get("pipeline_action") == "analyze_script"
+    assert r.subcategory == "script.parse"
+
+
+def test_subcategory_in_pipeline_action_normalized_to_action_key():
+    """LLM 把子类名填进 pipeline_action 时，归一化为注册表认的动作键。"""
+    r = IntentResult(
+        "pipeline_action", "t", entities={"pipeline_action": "script.parse"}, confidence=0.9
+    )
+    r = _apply_intent_rules("开始解析", r)
+    assert r.entities["pipeline_action"] == "analyze_script"
+
+
+def test_known_action_key_not_overwritten():
+    """已是合法动作键时不做改写。"""
+    r = IntentResult(
+        "pipeline_action", "t", entities={"pipeline_action": "analyze_script"}, confidence=0.9
+    )
+    r = _apply_intent_rules("开始解析", r)
+    assert r.entities["pipeline_action"] == "analyze_script"
 
 
 # --- 3. 分级置信度与三出口 ---

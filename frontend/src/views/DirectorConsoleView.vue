@@ -347,7 +347,7 @@ async function send() {
       content,
       // 只回传服务端需要的引用，文件已通过 /attachments 落盘
       attachments: sentAttachments.map((a) => ({ id: a.id, name: a.name })),
-    })
+    }, { timeout: 180000 })
     stopThinking()
     // 用服务端消息替换乐观消息；思考气泡由最终回复无缝接管
     const optimisticIdx = messages.value.findIndex((m) => m.id === optimisticId)
@@ -384,6 +384,19 @@ async function send() {
     void loadReviewCards()
   } catch (e) {
     stopThinking()
+    // 超时/网络错误时服务端可能已经处理完成（长耗时剧本生成常见），
+    // 先从服务端拉回真实消息，避免把已完成的结果误判为失败
+    const mayHaveSucceeded =
+      e instanceof ApiError && (e.code === 'timeout' || e.code === 'network_error')
+    if (mayHaveSucceeded && sessionId === activeSessionId.value) {
+      const before = messages.value.length
+      await loadMessages(sessionId)
+      if (messages.value.length > before && messages.value[messages.value.length - 1]?.role === 'assistant') {
+        message.info('请求超时，但服务端已完成，已自动刷新最新消息')
+        void loadReviewCards()
+        return
+      }
+    }
     // 失败回滚：移除乐观消息并恢复输入
     const optimisticIdx = messages.value.findIndex((m) => m.id === optimisticId)
     if (optimisticIdx >= 0) messages.value.splice(optimisticIdx, 1)

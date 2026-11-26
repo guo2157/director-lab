@@ -58,6 +58,13 @@ def _write_event(db: Session, job: Job, event_type: str, payload: dict | None = 
     db.add(ev)
     db.flush()
     job.event_seq = ev.event_seq
+    # 统一任务编排层桥接：job_event → task_event（Job 归属任务时同步任务阶段状态）
+    # 与 parse_executor 保持一致；缺失会让 parse 阶段永远停在 pending
+    try:
+        from app.services.task_orchestrator import bridge_job_event
+        bridge_job_event(db, job_id=job.id, event_type=event_type, payload=payload or {})
+    except Exception:  # noqa: BLE001
+        pass  # 桥接失败不影响既有执行链路
 
 
 def _fail_job(db: Session, job: Job, code: str, message: str) -> None:
@@ -1052,6 +1059,14 @@ def execute_script_agent_job(job_id: str) -> dict:
         db.query(JobEvent).filter(
             JobEvent.job_id == job.id, JobEvent.event_type == "agent.llm_delta"
         ).delete(synchronize_session=False)
+        # 结果回推发起会话：解析是异步任务，用户是在对话框里发起的；
+        # 不回推时对话只会停在『正在分析』，用户得自己去页面找结果。
+        # 复用 parse_executor 的同一实现，保证两条链路文案一致。
+        try:
+            from app.worker.parse_executor import _push_result_to_session
+            _push_result_to_session(db, job, pv, merged, shot_total)
+        except Exception:  # noqa: BLE001
+            pass  # 回推失败不影响解析结果落库
         db.commit()
         return {"ok": True, "parse_version_id": pv.id, "shots": shot_total, "has_more": has_more}
     except job_cancel.JobCancelled as e:

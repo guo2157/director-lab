@@ -136,7 +136,7 @@ def _precheck_script_parsed(db: Session, **kwargs: object) -> tuple[bool, str]:
     if not p.current_parse_version_id:
         return False, "剧本尚未完成解析，请先执行剧本分析后再操作"
     pv = db.get(ParseVersion, p.current_parse_version_id)
-    if not pv or pv.status not in ("completed",):
+    if not pv or pv.status not in ("current",):
         return False, f"剧本解析状态为 {pv.status if pv else '未知'}，请等待解析完成后再操作"
     return True, ""
 

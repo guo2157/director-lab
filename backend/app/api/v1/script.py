@@ -820,14 +820,15 @@ def confirm_parse_version(project_id: str, parse_version_id: str, payload: Parse
         .order_by(Job.finished_at.desc())
         .all()
     )
-    # 应用顺序：(episode_start, finished_at) 升序——同集数范围时旧任务先应用、
-    # 新批次后应用覆盖；否则旧全量解析会覆盖新批次的增量结果
-    target_results = [
+    # 应用顺序：(episode_start, finished_at) 升序——同集数范围时只应用最后一次解析结果，
+    # 避免重试任务被全部回放导致重复建场景/镜头
+    from app.services.script_parse import latest_results_per_range
+
+    raw_results = [
         (j.result, j.finished_at.isoformat() if j.finished_at else "")
         for j in parse_jobs if (j.result or {}).get("parse_version_id") == pv.id
     ]
-    target_results.sort(key=lambda t: (int(t[0].get("episode_start") or 1), t[1]))
-    target_results = [t[0] for t in target_results]
+    target_results = latest_results_per_range(raw_results)
     if target_results:
         from app.models import Scene as SceneModel
         from app.services.script_parse import apply_parse_result

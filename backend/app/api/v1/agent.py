@@ -978,7 +978,8 @@ def _resolve_create_project_args(
 
 
 def _handle_pipeline_action(
-    db: Session, session: AgentSession, session_id: str, intent, text: str
+    db: Session, session: AgentSession, session_id: str, intent, text: str,
+    unified_task=None,
 ) -> tuple[str, dict | None]:
     """流程操作处理：意图识别流程节点 → 状态机门禁 → 执行流程工具。
 
@@ -1097,6 +1098,12 @@ def _handle_pipeline_action(
     if action == "analyze_script":
         # 解析是异步耗时任务：把发起方会话带进去，完成后据此把结果回推到本对话
         kwargs["session_id"] = session_id
+        # 复用本轮意图级统一任务：进度写在同一条任务上，对话气泡的任务卡才能实时更新
+        if unified_task is not None:
+            unified_task.task_type = "parse"
+            # 卡片标题按真实任务命名（意图任务标题是泛化的『执行制作流程操作』）
+            unified_task.title = "剧本解析"
+            kwargs["task_id"] = unified_task.id
     if action == "save_script":
         # 保存剧本：从消息中提取剧本文本（『保存剧本』指令之后的部分，允许冒号/换行分隔）。
         # 无剧本文本时不猜测执行，明确要求用户提供（工具入参 text 必填）。
@@ -2506,7 +2513,9 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             reply, approval_info = guide_reply, guide_approval
         elif action == NextAction.PIPELINE:
             # 流程操作：意图识别流程节点，经状态机门禁执行（审核闸口/审批纪律不跳过）
-            reply, approval_info = _handle_pipeline_action(db, s, session_id, intent, payload.content)
+            reply, approval_info = _handle_pipeline_action(
+                db, s, session_id, intent, payload.content, unified_task=unified_task
+            )
             # navigate_workspace 的产物是导航指令而不是审批申请：
             # 混在 approval 里前端读不到 route_action，导航会静默失效
             if (
@@ -2560,7 +2569,18 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                         task_orchestrator.fail_task(db, unified_task, error_code="approval_submit_failed", error_msg=str(reply)[:2000])
             elif action == NextAction.PIPELINE:
                 parent_agent.complete_task(db, task, str(reply)[:2000])
-                if unified_task is not None:
+                _pipeline_result = approval_info if isinstance(approval_info, dict) else {}
+                if _pipeline_result.get("async") and _pipeline_result.get("job_id"):
+                    # 异步流程操作（剧本解析）：统一任务已挂上 Job 阶段，
+                    # 终态由 Job 事件桥接闭环；此处标完成会让任务卡一提交就停在 100%
+                    pass
+                elif _pipeline_result.get("ok") is False and unified_task is not None:
+                    task_orchestrator.fail_task(
+                        db, unified_task,
+                        error_code=_pipeline_result.get("error_code") or "pipeline_action_failed",
+                        error_msg=str(reply)[:2000],
+                    )
+                elif unified_task is not None:
                     task_orchestrator.complete_task(db, unified_task, summary=str(reply)[:2000])
             else:
                 # 澄清/拒绝：任务取消（用户补充信息后将产生新任务）

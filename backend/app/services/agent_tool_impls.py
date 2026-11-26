@@ -1042,6 +1042,16 @@ def tool_request_generate(
         # 状态机门禁：申请侧快速失败，阶段不足不建审批记录
         _assert_stage_gate(db, project_id, target)
         wf = _match_generate_workflow(db, "keyframe", speed=speed)
+        # 实体公共资产（角色定妆图/场景基准图/道具锚定图）没有参考图可注入，
+        # 若匹配到声明了参考槽位的工作流，须换成 0 槽位纯文生图，避免执行期 missing_reference_image
+        from app.services.workflow.capabilities import declared_reference_slots
+
+        if declared_reference_slots(wf.capabilities):
+            from app.api.v1.asset_plans import _find_plain_image_workflow
+
+            plain_wf = _find_plain_image_workflow(db)
+            if plain_wf is not None:
+                wf = plain_wf
         # 在途去重：同实体已有 queued/running 的公共资产生成任务时拒绝重复申请
         candidates = (
             db.scalars(
@@ -1211,11 +1221,17 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
                 )
     else:
         entity, owner_key = _assert_entity_in_project(db, entity_id or "", target, project_id)
+    wf_target = "keyframe" if target in _ENTITY_TARGETS else target
+    if wf is None and args.get("workflow_id"):
+        # 申请时已选定工作流（如实体资产用 0 槽位纯文生图），执行时须沿用，
+        # 否则会按默认绑定重新匹配到需要参考图的工作流而 blocked
+        from app.models import Workflow as _Workflow
+
+        wf = db.get(_Workflow, args["workflow_id"])
     if wf is None:
         # 实体目标（公共资产）走 keyframe 图像工作流
-        wf_target = "keyframe" if target in _ENTITY_TARGETS else target
         wf = _match_generate_workflow(db, wf_target)
-        job_type = f"generate_{wf_target}"
+    job_type = f"generate_{wf_target}"
 
     # 幂等：同一审批只产生一个任务；已有同 request_key 的任务直接复用
     request_key = f"agc:{confirmation.id}"
