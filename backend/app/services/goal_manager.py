@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 
 from sqlalchemy import select, and_
@@ -48,6 +49,7 @@ class Goal:
         constraints: dict | None = None,
         success_criteria: list | None = None,
         status: str = "active",
+        fingerprint: str | None = None,
         created_at: datetime | None = None,
         updated_at: datetime | None = None,
     ):
@@ -59,6 +61,7 @@ class Goal:
         self.constraints = constraints or {}
         self.success_criteria = success_criteria or []
         self.status = status
+        self.fingerprint = fingerprint
         self.created_at = created_at or datetime.now()
         self.updated_at = updated_at or datetime.now()
 
@@ -72,6 +75,7 @@ class Goal:
             "constraints": self.constraints,
             "success_criteria": self.success_criteria,
             "status": self.status,
+            "fingerprint": self.fingerprint,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -96,9 +100,51 @@ def _row_to_goal(row) -> Goal:
         constraints=row.constraints,
         success_criteria=row.success_criteria,
         status=row.status,
+        fingerprint=getattr(row, "fingerprint", None),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def compute_fingerprint(
+    *,
+    project_id: str | None,
+    goal_type: str,
+    target_stage: str,
+    scope: str = "",
+) -> str:
+    """计算目标指纹：同一「项目 + 意图 + 范围」视为同一目标。
+
+    Phase A 没有结构化目标解析，target_stage 由 planner.classify_description 推导，
+    scope 取 constraints["scope"]（没有则为空串）。
+    Phase C 由结构化 Goal 解析（LLM 只解析目标，计划仍由代码生成）替换。
+    """
+    raw = "|".join(
+        [
+            project_id or "",
+            goal_type or "",
+            target_stage or "",
+            scope or "",
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def derive_target_stage(description: str) -> str:
+    """按描述推导 target_stage（与 Planner 共用同一份意图判定）。"""
+    from app.services.planner import classify_description
+
+    return classify_description(description)
+
+
+def _append_history(existing, description: str) -> dict:
+    """把最新描述追加到 constraints["history"]，最多保留 10 条。"""
+    constraints = dict(existing.constraints or {})
+    history = list(constraints.get("history") or [])
+    if not history or history[-1] != description:
+        history.append(description)
+    constraints["history"] = history[-10:]
+    return constraints
 
 
 def get_or_create_goal(
@@ -110,17 +156,29 @@ def get_or_create_goal(
     goal_type: str = "user_request",
     constraints: dict | None = None,
     success_criteria: list | None = None,
+    target_stage: str | None = None,
 ) -> Goal:
-    """获取或创建当前会话的活跃目标。
+    """获取或创建当前会话的活跃目标（A8 / P0-10：按指纹判定是否同一目标）。
 
     规则：
-    - 同一 session 存在 active 目标时复用（防止碎片化）
-    - 否则创建新目标
-    - 复用时会更新 description/constraints/success_criteria（覆盖最新意图）
+    - 同 session 存在 active 目标，且指纹（project_id + goal_type + target_stage + scope）相同
+      → 复用：只更新 updated_at；**不覆盖 description**，最新描述追加到 constraints["history"]（最多 10 条）
+    - 指纹不同 → 旧目标 status=superseded（终态），新建目标
+    - project_id 不同自然导致指纹不同 → 新建目标
     """
     from app.models.agent import AgentGoal
 
-    # 查找当前会话活跃目标
+    scope = ""
+    if constraints:
+        scope = str(constraints.get("scope") or "")
+    stage = target_stage or derive_target_stage(description)
+    fingerprint = compute_fingerprint(
+        project_id=project_id,
+        goal_type=goal_type or "user_request",
+        target_stage=stage,
+        scope=scope,
+    )
+
     existing = db.scalars(
         select(AgentGoal).where(
             and_(AgentGoal.session_id == session_id, AgentGoal.status == "active")
@@ -128,30 +186,47 @@ def get_or_create_goal(
     ).first()
 
     if existing is not None:
-        # 复用：更新描述与约束
-        existing.description = description
-        if project_id is not None:
-            existing.project_id = project_id
-        if goal_type:
-            existing.goal_type = goal_type
-        if constraints is not None:
-            existing.constraints = constraints
-        if success_criteria is not None:
-            existing.success_criteria = success_criteria
+        existing_fp = getattr(existing, "fingerprint", None)
+        if existing_fp is None:
+            # 历史目标没有指纹：按当前描述推导一次并写入，避免把所有旧目标都判成「不同意图」
+            existing_fp = compute_fingerprint(
+                project_id=existing.project_id,
+                goal_type=existing.goal_type or "user_request",
+                target_stage=derive_target_stage(existing.description or ""),
+                scope=str((existing.constraints or {}).get("scope") or ""),
+            )
+            existing.fingerprint = existing_fp
+
+        if existing_fp == fingerprint:
+            merged = _append_history(existing, description)
+            if constraints:
+                for key, value in constraints.items():
+                    if key != "history":
+                        merged[key] = value
+            existing.constraints = merged
+            if success_criteria is not None:
+                existing.success_criteria = success_criteria
+            existing.updated_at = datetime.now()
+            db.flush()
+            return _row_to_goal(existing)
+
+        # 不同意图：旧目标 superseded（终态，不可再回到 active）
+        existing.status = "superseded"
         existing.updated_at = datetime.now()
         db.flush()
-        return _row_to_goal(existing)
 
-    # 新建
+    new_constraints = dict(constraints or {})
+    new_constraints.setdefault("history", [description])
     g = AgentGoal(
         id=goal_id(),
         session_id=session_id,
         project_id=project_id,
         description=description,
         goal_type=goal_type,
-        constraints=constraints or {},
+        constraints=new_constraints,
         success_criteria=success_criteria or [],
         status="active",
+        fingerprint=fingerprint,
     )
     db.add(g)
     db.flush()

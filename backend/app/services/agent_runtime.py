@@ -537,6 +537,19 @@ def run_agent_loop(
     return result
 
 
+_TERMINAL_STEP_STATUSES = ("succeeded", "failed", "skipped", "cancelled")
+
+
+def _plan_all_terminal(db: Session, plan_id: str) -> bool:
+    """Plan 的所有步骤是否都已终态（A8：终态计划要生成新 revision，而不是直接返回已完成）。"""
+    from app.services.planner import get_plan_steps
+
+    steps = get_plan_steps(db, plan_id)
+    if not steps:
+        return False
+    return all(s["status"] in _TERMINAL_STEP_STATUSES for s in steps)
+
+
 def _get_or_create_plan(
     db: Session,
     *,
@@ -544,19 +557,37 @@ def _get_or_create_plan(
     description: str,
     project_id: str | None = None,
 ) -> Any | None:
-    """获取或创建执行计划。优先复用已有 active Plan。"""
+    """获取或创建执行计划。
+
+    A8 / P0-10：
+    - 有 active Plan 且仍有非终态步骤 → 直接复用
+    - 有 active Plan 但所有步骤都已终态 → 生成新 revision（previous_plan=旧计划），
+      不再把「上次已跑完」当成「本次已完成」
+    """
     from app.services.planner import build_and_save_plan, get_latest_plan
 
     existing = get_latest_plan(db, goal_id)
+    previous = None
     if existing:
-        return existing
+        if not _plan_all_terminal(db, existing.plan_id):
+            return existing
+        previous = existing
 
     plan, report = build_and_save_plan(
         db,
         goal_id=goal_id,
         description=description,
         project_id=project_id,
+        previous_plan=previous,
     )
+    if report.passed and previous is not None:
+        # A8/A9：新 revision 关联父计划，便于按链统计 replan 次数
+        from app.models.agent import AgentPlan
+
+        row = db.get(AgentPlan, plan.plan_id)
+        if row is not None:
+            row.parent_plan_id = previous.plan_id
+            db.flush()
 
     if not report.passed:
         log_execution(

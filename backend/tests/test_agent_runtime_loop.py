@@ -3,8 +3,9 @@
 原 tests/test_agent_loop_main.py 在模块顶层连真实库、用 print/check 计数，
 pytest 收集时就会污染生产数据。这里改为 tmp 库 + 真断言，保留原 5 个场景意图。
 
-TODO(A8)：场景 2 原先断言「同 session 复用同一 plan_id」。那正是 A8 要修的错误行为
-（新目标不应复用旧计划），这里不再断言，A8 完成后补上「指纹变化 → 新 Goal / 新 Plan」。
+A8 已修正场景 2：原先断言「同 session 复用同一 plan_id」是错误的——新目标不应复用旧计划。
+现在断言「相同意图复用同一 Goal / 不同意图生成新 Goal，旧 Goal 变为 superseded」，
+详见 tests/test_agent_runtime_goal.py。
 """
 from __future__ import annotations
 
@@ -44,14 +45,24 @@ def test_scenario1_query_returns_loop_result(db, project):
 
 
 def test_scenario2_same_session_reuses_goal(db, project):
+    """A8：相同意图复用同一 Goal；不同意图生成新 Goal 并把旧 Goal 置为 superseded。"""
     session_id = "ags_mainloop_test2"
     first = run_agent_loop(
         db, session_id=session_id, description="检查项目进度概览", project_id=project.id
     )
     second = run_agent_loop(
-        db, session_id=session_id, description="更新后的概览查询", project_id=project.id
+        db, session_id=session_id, description="再检查一遍项目进度概览", project_id=project.id
     )
     assert second.goal_id == first.goal_id
+
+    third = run_agent_loop(
+        db, session_id=session_id, description="生成分镜图", project_id=project.id
+    )
+    assert third.goal_id != first.goal_id
+
+    from app.models.agent import AgentGoal
+
+    assert db.get(AgentGoal, first.goal_id).status == "superseded"
 
 
 def test_scenario3_analysis_intent_has_more_steps(db, project):

@@ -207,6 +207,37 @@ class ValidationReport:
         }
 
 
+# ── 意图分类（A8：供目标指纹使用，Phase C 由结构化 Goal 解析替换）─────────
+
+def classify_description(description: str) -> str:
+    """把目标描述归类为稳定的 target_stage 语义标签。
+
+    返回：query / analyze / generate_keyframe / generate_clip / generate_default / default
+
+    这是 Phase A 的临时实现（关键词规则），Phase C 会由结构化 Goal 解析
+    （LLM 只解析目标、计划结构仍由代码生成）替换；在此之前 build_plan 与
+    goal_manager.compute_fingerprint 共用同一份判定，保证「同一意图」判定一致。
+    """
+    desc = (description or "").lower()
+    is_query = any(kw in desc for kw in ["概览", "overview", "进度", "状态", "status", "progress"])
+    is_analyze = any(kw in desc for kw in ["分析", "analyze", "诊断", "diagnose", "检查", "check"])
+    is_generate = any(kw in desc for kw in ["生成", "generate", "创建", "create", "制作", "跑"])
+
+    if is_analyze:
+        return "analyze"
+    if is_query and not is_generate:
+        return "query"
+    if is_generate:
+        if any(kw in desc for kw in ["分镜图", "keyframe"]):
+            return "generate_keyframe"
+        if any(kw in desc for kw in ["分镜视频", "clip", "视频"]):
+            return "generate_clip"
+        return "generate_default"
+    if is_query:
+        return "query"
+    return "default"
+
+
 # ── Plan Builder ───────────────────────────────────────────────────────
 
 
@@ -236,6 +267,9 @@ def build_plan(
     )
 
     desc_lower = description.lower()
+    # 说明：build_plan 保留原有的独立关键词判定（同一描述可以既查询又生成，
+    # 例如「检查进度并生成分镜图」），行为与 Phase A 之前完全一致。
+    # A8 的 classify_description 只用于目标指纹，不改变计划结构。
     is_query = any(kw in desc_lower for kw in ["概览", "overview", "进度", "状态", "status", "progress"])
     is_generate = any(kw in desc_lower for kw in ["生成", "generate", "创建", "create", "制作", "跑"])
     is_analyze = any(kw in desc_lower for kw in ["分析", "analyze", "诊断", "diagnose", "检查", "check"])

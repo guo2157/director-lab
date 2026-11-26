@@ -56,7 +56,9 @@ def test_goal_create_and_reuse(db, project):
         db, session_id="ags_testloop2026", description="更新的描述", project_id=project.id
     )
     assert again.goal_id == goal.goal_id
-    assert again.description == "更新的描述"
+    # A8：同一意图复用目标时不再覆盖 description，最新描述进入 constraints["history"]
+    assert again.description == "初始描述"
+    assert (again.constraints or {}).get("history", [])[-1] == "更新的描述"
     assert get_active_goal(db, "ags_testloop2026").goal_id == goal.goal_id
 
 
