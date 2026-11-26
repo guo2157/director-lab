@@ -21,7 +21,7 @@
 - [x] **A3** 进度回调透传与结果汇总顺序（P0-4）
 - [x] **A4** Executor 只走 execute_tool 网关（P0-5）
 - [x] **A5** 结果分流：Job → waiting_job，审批 → waiting_approval（P0-6）
-- [ ] **A6** Verifier 以真实状态判定（P0-7）
+- [x] **A6** Verifier 以真实状态判定（P0-7）
 - [ ] **A7** 审批按步骤绑定（P0-8）
 - [ ] **A8** 目标指纹：新目标不复用旧计划（P0-10）
 - [ ] **A9** Replan 产生新 revision 并复用已完成步骤（P0-11）

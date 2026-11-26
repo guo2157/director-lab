@@ -25,7 +25,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.services.execution_verifier import (
+from app.services.execution_verifier import (  # noqa: F401 - 保留对外导出
     VerificationResult as JobVerificationResult,
     verify_job_submission,
 )
@@ -90,10 +90,22 @@ class StepVerificationResult:
             )
 
     def finalize(self) -> None:
-        """汇总各维度结果得出整体判定。"""
+        """汇总各维度结果得出整体判定。
+
+        A6 / P0-7：
+        - 有 failed → failed（不计入 completed）
+        - 有 pending（步骤/Job 尚未到达终态）→ pending，不触发 Replan
+        - 有 needs_review → needs_review
+        - 有 partial → partial
+        - 全部 skipped → skipped 且 verified=False（没有任何检查通过不能算验证通过）
+        - 其余 → passed
+        """
         statuses = [c.status for c in self.checks]
         if any(s == "failed" for s in statuses):
             self.overall = "failed"
+            self.verified = False
+        elif any(s == "pending" for s in statuses):
+            self.overall = "pending"
             self.verified = False
         elif any(s == "needs_review" for s in statuses):
             self.overall = "needs_review"
@@ -101,9 +113,12 @@ class StepVerificationResult:
         elif any(s == "partial" for s in statuses):
             self.overall = "partial"
             self.verified = True
-        elif all(s == "skipped" for s in statuses):
-            self.overall = "partial"
-            self.verified = True
+        elif statuses and all(s == "skipped" for s in statuses):
+            self.overall = "skipped"
+            self.verified = False
+        elif not statuses:
+            self.overall = "skipped"
+            self.verified = False
         else:
             self.overall = "passed"
             self.verified = True
@@ -135,11 +150,19 @@ def verify_state(
     step_id: str,
     tool_name: str | None = None,
     result_data: dict | None = None,
+    project_id: str | None = None,
 ) -> list[VerifyCheck]:
-    """State 维度：Task/Job/AgentTask 状态一致性检查。"""
+    """State 维度：按步骤与 Job 的真实状态判定（A6 / P0-7）。
+
+    - succeeded → passed
+    - waiting_job / waiting_approval / waiting_user / running → pending（等待外部事件，不触发 Replan）
+    - failed / cancelled → failed
+    - 步骤带 job_id：Job 必须存在、归属同一项目，且 succeeded 才 passed；
+      queued / running → pending；failed / cancelled → failed
+    - 步骤 result 中 ToolResult.ok=False → failed（tool_result_ok）
+    """
     checks: list[VerifyCheck] = []
 
-    # 检查 step 自身状态
     from app.models.agent import AgentPlanStep
 
     step = db.get(AgentPlanStep, step_id)
@@ -154,37 +177,129 @@ def verify_state(
         )
         return checks
 
-    checks.append(
-        VerifyCheck(
-            name="step_status",
-            dimension="state",
-            status="passed",
-            message=f"步骤状态: {step.status}",
-            details={"status": step.status},
+    status = step.status
+    if status == "succeeded":
+        checks.append(
+            VerifyCheck(
+                name="step_status",
+                dimension="state",
+                status="passed",
+                message=f"步骤状态: {status}",
+                details={"status": status},
+            )
         )
-    )
+    elif status in ("waiting_job", "waiting_approval", "waiting_user", "running"):
+        checks.append(
+            VerifyCheck(
+                name="step_status",
+                dimension="state",
+                status="pending",
+                message=f"步骤仍在等待中: {status}",
+                details={"status": status},
+            )
+        )
+    elif status in ("failed", "cancelled"):
+        checks.append(
+            VerifyCheck(
+                name="step_status",
+                dimension="state",
+                status="failed",
+                message=f"步骤状态为 {status}",
+                details={
+                    "status": status,
+                    "error_code": step.error_code,
+                    "error_message": (step.error_message or "")[:200],
+                },
+            )
+        )
+    else:
+        # pending / ready：尚未执行
+        checks.append(
+            VerifyCheck(
+                name="step_status",
+                dimension="state",
+                status="pending",
+                message=f"步骤尚未执行: {status}",
+                details={"status": status},
+            )
+        )
 
-    # 如果有 result_data 含 job_id，复用 execution_verifier
-    if result_data and result_data.get("job_id"):
-        job_result = verify_job_submission(db, result_data)
-        if job_result.verified:
+    # 步骤执行结果中的 ok=False 必须导致验证失败
+    step_result = step.result if isinstance(step.result, dict) else {}
+    if step_result and step_result.get("ok") is False:
+        checks.append(
+            VerifyCheck(
+                name="tool_result_ok",
+                dimension="state",
+                status="failed",
+                message=(
+                    "工具执行失败: "
+                    f"{step_result.get('error_code') or 'unknown'} "
+                    f"{(step_result.get('error_message') or '')[:200]}"
+                ),
+                details={
+                    "error_code": step_result.get("error_code"),
+                    "error_message": (step_result.get("error_message") or "")[:200],
+                },
+            )
+        )
+
+    # Job 绑定：以 Job 真实终态为准（step.job_id 优先，其次工具返回值）
+    job_id = step.job_id
+    if not job_id and isinstance(result_data, dict):
+        job_id = result_data.get("job_id")
+    if job_id:
+        from app.models import Job
+
+        job = db.get(Job, str(job_id))
+        if job is None:
             checks.append(
                 VerifyCheck(
-                    name="job_verified",
+                    name="job_exists",
+                    dimension="state",
+                    status="failed",
+                    message=f"Job {job_id} 在数据库中不存在",
+                    details={"job_id": str(job_id)},
+                )
+            )
+        elif project_id and job.project_id != project_id:
+            checks.append(
+                VerifyCheck(
+                    name="job_project_match",
+                    dimension="state",
+                    status="failed",
+                    message=f"Job {job_id} 归属项目 {job.project_id} 与预期 {project_id} 不一致",
+                    details={"job_id": job.id, "job_project_id": job.project_id},
+                )
+            )
+        elif job.status == "succeeded":
+            checks.append(
+                VerifyCheck(
+                    name="job_terminal_state",
                     dimension="state",
                     status="passed",
-                    message=f"Job {job_result.job_id} 验证通过: {job_result.job_status}",
-                    details={"job_id": job_result.job_id, "job_status": job_result.job_status},
+                    message=f"Job {job_id} 已完成",
+                    details={"job_id": job.id, "job_status": job.status},
+                )
+            )
+        elif job.status in ("failed", "cancelled"):
+            checks.append(
+                VerifyCheck(
+                    name="job_terminal_state",
+                    dimension="state",
+                    status="failed",
+                    message=f"Job {job_id} 状态为 {job.status}",
+                    details={"job_id": job.id, "job_status": job.status},
                 )
             )
         else:
             checks.append(
                 VerifyCheck(
-                    name="job_verification_failed",
+                    name="job_terminal_state",
                     dimension="state",
-                    status="failed",
-                    message=f"Job 验证失败: {job_result.reason_code} - {job_result.message}",
-                    details={"reason_code": job_result.reason_code},
+                    status="pending",
+                    message=f"Job {job_id} 仍在执行: {job.status}",
+                    details={"job_id": job.id, "job_status": job.status},
                 )
             )
 
@@ -417,7 +532,8 @@ def verify_step(
     for dim in dimensions:
         if dim == "state":
             checks = verify_state(
-                db, step_id=step_id, tool_name=tool_name, result_data=result_data
+                db, step_id=step_id, tool_name=tool_name,
+                result_data=result_data, project_id=project_id,
             )
         elif dim == "artifact":
             checks = verify_artifact(
@@ -468,11 +584,17 @@ def verify_plan_completion(
     steps = get_plan_steps(db, plan_id)
     failed = [s for s in steps if s["status"] in ("failed", "cancelled")]
     pending = [s for s in steps if s["status"] not in ("succeeded", "skipped", "failed", "cancelled")]
+    succeeded = [s for s in steps if s["status"] == "succeeded"]
+    skipped = [s for s in steps if s["status"] == "skipped"]
 
+    # A6：只有全部 succeeded / skipped 才算完成；有失败且无可执行步骤时为部分完成
+    all_verified = len(steps) > 0 and len(failed) == 0 and len(pending) == 0
     return {
-        "all_verified": len(failed) == 0 and len(pending) == 0,
+        "all_verified": all_verified,
         "total": len(steps),
-        "succeeded": sum(1 for s in steps if s["status"] == "succeeded"),
+        "succeeded": len(succeeded),
+        "skipped": len(skipped),
         "failed_steps": failed,
         "pending_steps": pending,
+        "partial": bool(failed) and not pending and bool(succeeded),
     }

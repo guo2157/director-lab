@@ -712,9 +712,21 @@ def _run_plan_loop(
                     "next_action": "pending",
                     "errors": errors,
                 }
+            # 有失败且无可执行步骤：有成功 → partially_completed；全失败 → failed
+            if plan_status.get("partial"):
+                return {
+                    "status": "partially_completed",
+                    "message": f"部分步骤完成（{completed} 成功 / {failed} 失败）",
+                    "total_steps": total_steps,
+                    "completed_steps": completed,
+                    "failed_steps": failed,
+                    "skipped_steps": skipped,
+                    "next_action": "none",
+                    "errors": errors,
+                }
             return {
-                "status": "completed",
-                "message": "无可执行步骤",
+                "status": "failed",
+                "message": "无可执行步骤，且存在失败步骤",
                 "total_steps": total_steps,
                 "completed_steps": completed,
                 "failed_steps": failed,
@@ -774,6 +786,28 @@ def _run_plan_loop(
                 result_data=exec_result.get("result"),
                 project_id=project_id,
             )
+
+            # 2c-1. 等待态验证（A6）：pending 表示步骤/Job 尚未终态，按等待处理不触发 Replan
+            if verification.overall == "pending":
+                db.commit()
+                step_status_now = exec_result.get("step_status") or "waiting_job"
+                wait_kind = (
+                    step_status_now
+                    if step_status_now in ("waiting_job", "waiting_approval", "waiting_user")
+                    else "waiting_job"
+                )
+                _emit(
+                    LoopEvent.STEP_WAITING.value,
+                    {"step_id": step_id, "tool_name": tool_name,
+                     "waiting": "job" if wait_kind == "waiting_job" else "approval"},
+                )
+                if waiting_hit is None:
+                    waiting_hit = {
+                        "kind": wait_kind,
+                        "step_id": step_id,
+                        "tool_name": tool_name,
+                    }
+                continue
 
             if verification.verified:
                 completed += 1
