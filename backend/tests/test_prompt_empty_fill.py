@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import pytest
 
-
-def _first_shot(db):
-    from app.models import Scene, Shot
-
-    return db.query(Shot).join(Scene, Scene.id == Shot.scene_id).first()
+from app.core.database import make_engine
+from app.models import Base, Project, Scene, Shot, Workflow
+from app.models import ids
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture(autouse=True)
@@ -38,34 +37,86 @@ def _assume_asset_files_exist(monkeypatch):
 
 
 @pytest.fixture()
-def ctx():
-    """真实库上下文：取一个镜头 + 它的工作流。"""
-    from app.core.database import SessionLocal
+def ctx(tmp_path, monkeypatch):
+    """临时库上下文：自建项目 / 场景 / 镜头 / 工作流。
 
-    db = SessionLocal()
+    原先这里连的是真实库、靠库里已有镜头才跑得起来（没有镜头就 skip），
+    隔离改造后真实库不再可达，所以改为自建数据，断言意图保持不变。
+    """
+    engine = make_engine(f"sqlite:///{tmp_path / 'prompt_empty_fill.db'}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    import app.core.database as db_mod
+
+    monkeypatch.setattr(db_mod, "engine", engine)
+    monkeypatch.setattr(db_mod, "SessionLocal", Session)
+
+    db = Session()
     try:
         import app.api.v1.generate as G
 
-        shot = _first_shot(db)
-        if shot is None:
-            pytest.skip("库里没有镜头，跳过")
-        from app.models import Scene
-
-        project_id = db.get(Scene, shot.scene_id).project_id
-        wf = G._match_workflow(db, "keyframe", None, project_id)
-        if wf is None:
-            pytest.skip("没有匹配的 keyframe 工作流，跳过")
-        # 隔离真实资产质检状态：本文件只验证提示词填充与不被覆盖，
-        # 不验证「质检未通过不得引用」的底图卫兵；否则用例会随资产质检结果飘。
-        # 仅在会话内改为 pending，finally 中 rollback，不落库。
-        from app.models import Asset
-        for asset in db.query(Asset).filter(Asset.quality_status == "failed").all():
-            asset.quality_status = "pending"
+        project = Project(
+            id=ids.project_id(),
+            name="空提示词填充测试",
+            creation_type="novel",
+            aspect_ratio="9:16",
+            status="active",
+        )
+        scene = Scene(
+            id=ids.scene_id(),
+            project_id=project.id,
+            episode=1,
+            seq=1,
+            title="测试场景",
+        )
+        shot = Shot(
+            id=ids.shot_id(),
+            scene_id=scene.id,
+            episode=1,
+            seq=1,
+            shot_kind="dialogue",
+            duration=3,
+            image_prompt="原有提示词",
+        )
+        wf = Workflow(
+            id=ids.workflow_id(),
+            name="测试分镜图工作流",
+            workflow_type="image",
+            version=1,
+            capabilities={"reference_slots": [{"param": "ref_image"}]},
+            definition={"nodes": []},
+            is_default=True,
+        )
+        db.add_all([project, scene, shot, wf])
         db.flush()
-        yield db, G, shot, wf
+
+        # 场景基准图：提示词编译器要求场景有可用的基准图，否则编译直接阻断。
+        from app.models import Asset
+
+        baseline_path = tmp_path / "scene_baseline.png"
+        baseline_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        baseline = Asset(
+            id=ids.asset_id(),
+            project_id=project.id,
+            asset_type="scene",
+            name="测试场景-基准图",
+            version=1,
+            validity="current",
+            file_path=str(baseline_path),
+        )
+        db.add(baseline)
+        db.flush()
+        scene.baseline_asset_id = baseline.id
+        db.commit()
+
+        matched = G._match_workflow(db, "keyframe", None, project.id)
+        assert matched is not None, "临时库应能匹配到分镜图工作流"
+        yield db, G, shot, matched
     finally:
         db.rollback()
         db.close()
+        engine.dispose()
 
 
 def test_empty_image_prompt_gets_compiled_template(ctx):

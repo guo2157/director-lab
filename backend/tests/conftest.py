@@ -25,9 +25,52 @@ import pytest
 _TEST_DATA_ROOT = Path(tempfile.mkdtemp(prefix="dlab-test-media-"))
 os.environ.setdefault("DLAB_DATA_DIR", str(_TEST_DATA_ROOT / "data"))
 os.environ.setdefault("DLAB_MEDIA_DIR", str(_TEST_DATA_ROOT / "data" / "media"))
+# 数据库隔离（2026-11-26 真实事故回归）：
+# alembic/env.py 无条件用 get_settings().database_url 覆盖 Config 里的地址，
+# 迁移测试即使传了临时库 URL，command.upgrade() 仍会连到真实库并写入 schema。
+# 因此在导入任何 app 模块之前，先把数据库地址钉死在临时目录；
+# 下面的 _guard_real_database 会话级夹具再做一次硬断言，任何一次会话都不允许指向真实库。
+_TEST_DB_PATH = _TEST_DATA_ROOT / "data" / "director_lab.db"
+_TEST_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+os.environ["DLAB_DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_REAL_DB_PATH = (_BACKEND_DIR / "data" / "director_lab.db").resolve()
 os.environ["DLAB_RENDER_MOCK"] = "false"  # 避免 .env 的真实配置漏进测试
 # API lifespan 会内嵌调度线程；测试不允许后台消费任务（会抢跑用例手工构造的 queued 任务）
 os.environ["DLAB_WORKER_EMBEDDED"] = "false"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_real_database():
+    """整个测试会话禁止连接真实库（backend/data/director_lab.db）。
+
+    alembic/env.py 用 get_settings().database_url 覆盖 Config 中的地址，
+    单靠测试里传 URL 无效，所以这里在会话开始时校验解析后的实际地址。
+    """
+    from sqlalchemy.engine import make_url
+
+    from app.core.config import clear_settings_cache, get_settings
+
+    clear_settings_cache()
+    url = make_url(get_settings().database_url)
+    assert url.get_backend_name() == "sqlite", f"测试库必须是 SQLite，实际 {url}"
+    db_path = Path(url.database or "").resolve()
+    if db_path == _REAL_DB_PATH:
+        raise RuntimeError(
+            "测试会话解析到了真实库 backend/data/director_lab.db，已中止："
+            "请检查 DLAB_DATABASE_URL 是否被 .env 或代码覆盖"
+        )
+    if _TEST_DATA_ROOT.resolve() not in db_path.parents:
+        raise RuntimeError(f"测试库不在临时目录 {_TEST_DATA_ROOT} 下，已中止：{db_path}")
+
+    # 模块级 engine 在 import 时按环境变量创建，必须同样是临时库，
+    # 否则 app.core.database.SessionLocal 会把用例写进真实库。
+    from app.core import database as database_mod
+
+    engine_path = Path(database_mod.engine.url.database or "").resolve()
+    if engine_path == _REAL_DB_PATH or _TEST_DATA_ROOT.resolve() not in engine_path.parents:
+        raise RuntimeError(f"模块级 engine 未指向临时库，已中止：{engine_path}")
+    yield
 
 
 @pytest.fixture(autouse=True)
