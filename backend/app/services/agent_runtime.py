@@ -1288,12 +1288,21 @@ def _resume_marked_steps(db: Session, goal: Goal) -> list[str]:
     handled: list[str] = []
     for step in steps:
         reason = step.resume_reason or "manual"
+        # B5：Worker 认领会把 reason 改写为 "claimed:<reason>"，这里剥掉前缀
+        if reason.startswith("claimed:"):
+            reason = reason[len("claimed:"):] or "manual"
         step.resume_requested_at = None
         step.resume_reason = None
         if reason == "job_terminal":
             _resume_step_after_job(db, step, goal=goal)
         elif reason == "approval_resolved":
             _resume_step_after_approval(db, step, goal=goal)
+        elif reason == "sweep":
+            # B5 兜底扫描补打的标记：按步骤当前等待态分派（标记来源丢失时也能收敛）
+            if step.status == "waiting_job":
+                _resume_step_after_job(db, step, goal=goal)
+            elif step.status == "waiting_approval":
+                _resume_step_after_approval(db, step, goal=goal)
         handled.append(step.id)
     db.flush()
     return handled

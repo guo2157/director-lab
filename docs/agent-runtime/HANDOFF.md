@@ -1,7 +1,7 @@
 # Agent Runtime 升级 · 交接说明（HANDOFF）
 
 > 本文件面向「接手这项工作的下一位编码 Agent / 用户」。目标是让接手者在 10 分钟内恢复现场，
-> 不需要重读全部历史对话。最后更新：2026-11-26（Phase A 收尾）。
+> 不需要重读全部历史对话。最后更新：2026-11-26（Phase B 进行中，B5 完成）。
 > **本文件不记录任何密码、密钥或登录凭据。**
 
 ## 1. 从哪读起
@@ -74,6 +74,26 @@
    `cd backend && .venv/bin/python -m pytest -q tests/test_agent_runtime_*.py`。
 
 ## 7. 当前状态
+
+### Phase B · 最小可用版本（进行中）
+
+- 已完成：B0（迁移与事件白名单）、B1（tick）、B2（agent.* 事件）、B3（Job 终态 → 恢复标记）、
+  B4（审批闭环：自动申请 / 裁决打标记 / 自动执行）、B5（Worker 的 agent-resume 线程与兜底扫描）
+- 进行中：B6 `/chat` 接入 Runtime（开关后面）
+- 阶段门禁：B10 端到端 MVP（7 个场景）；Phase A 的 `test_p0_9_resume_has_caller` 在 B10 转正
+
+#### B5 部署注意事项（重要）
+
+- 线上 `director-lab-backend.service` 用 `uvicorn app.main:app` 启动，systemd 单元**未设置**
+  `DLAB_WORKER_EMBEDDED`；`app/core/config.py` 默认 `worker_embedded=True`，
+  即 **Worker 内嵌在 API 进程**，`run_worker` 随 lifespan 一起启动。
+- 因此 B5 新增的 `agent-resume` 守护线程（`app/services/agent_resume.py`）**要等服务下次重启才生效**。
+  本轮不重启服务（属于「必须停下」的 4 种情况之一），线程是否启动由部署方在下次重启时自然接管。
+- `agent_resume_enabled` 默认 `True`；但 `agent_runtime_chat_enabled` 默认 `False`，
+  `/chat` 不会创建 Goal，因此线程即使运行也遇不到任何带标记的步骤——
+  `tests/test_agent_phase_b_resume_worker.py::test_chat_flag_off_means_no_marked_steps` 证明这一点。
+- 线程每 2 秒 `process_marked`，每 30 秒 `sweep`；异常只记日志，不会让调度主循环退出；
+  停止时 `run_worker` 置 stop_event 并 join ≤ 5 秒。
 
 ### Phase A · 止血与正确性
 

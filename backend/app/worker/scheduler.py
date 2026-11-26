@@ -406,9 +406,29 @@ def run_worker(once: bool = False, install_signal_handlers: bool = True) -> None
     except Exception as e:  # noqa: BLE001
         print(f"[worker] 统一任务对账失败（不影响主循环）: {e}")
     db.close()
+    # Phase B B5：启动对账后先跑一次 agent-resume 兜底扫描（补回重启期间丢失的标记）
+    resume_thread = None
+    resume_stop = None
+    try:
+        from app.services import agent_resume
+
+        if bool(getattr(settings, "agent_resume_enabled", True)):
+            agent_resume.sweep(SessionLocal)
+    except Exception as e:  # noqa: BLE001 - 恢复扫描失败不能阻止 Worker 启动
+        print(f"[worker] agent-resume 启动扫描失败（不影响调度）: {e}")
     # 启动 ComfyUI 实例健康心跳（熔断机制后台探测，幂等）
     comfyui_pool.start_heartbeat()
     _write_heartbeat()
+    # Phase B B5：agent-resume 守护线程（2s 认领标记 / 30s 兜底扫描）
+    try:
+        from app.services import agent_resume as _agent_resume
+
+        started = _agent_resume.start_resume_thread(SessionLocal)
+        if started is not None:
+            resume_thread, resume_stop = started
+            print("[worker] agent-resume 线程已启动")
+    except Exception as e:  # noqa: BLE001
+        print(f"[worker] agent-resume 线程启动失败（不影响调度）: {e}")
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dlab-worker")
     # future -> job_id 映射：运行期失联回收时据此排除本进程正在执行的任务
     in_flight: dict = {}
@@ -506,6 +526,10 @@ def run_worker(once: bool = False, install_signal_handlers: bool = True) -> None
                 except Exception as e:  # noqa: BLE001
                     print(f"[worker] 任务线程异常: {e}")
     finally:
+        if resume_stop is not None:
+            resume_stop.set()
+        if resume_thread is not None:
+            resume_thread.join(timeout=5)
         pool.shutdown(wait=False)
         release_worker_lock()
     print("[worker] 停止")
