@@ -44,6 +44,114 @@ os.environ["DLAB_WORKER_EMBEDDED"] = "false"
 pytest_plugins = ["tests.agent_runtime_fixtures"]
 
 
+# ---------------------------------------------------------------------------
+# 真实外部服务守卫（A00b）：
+# 服务器 .env 已配置真实 LLM / ComfyUI，测试一旦连出去就会真的烧 token、真的渲染。
+# 做法：在 httpx 真实传输类（httpx._transports.default 里的 HTTPTransport /
+# AsyncHTTPTransport）的**请求**环节加闸，按目标地址判定：
+# - 回环地址（127.0.0.1 / localhost / ::1）放行，供既有 startup 自检 / 探活用例；
+# - 其余外部地址一律抛错，测试立即失败；
+# - 进程内传输（ASGITransport / WSGITransport / MockTransport / TestClient 自建）不经过这里，不受影响。
+# 同时测试会话内禁用代理环境变量，避免宿主机 socks5 代理让 httpx 构造阶段就报无关错误。
+# 需要真实外部网络的用例必须显式 monkeypatch 对应客户端。
+class _ExternalNetworkBlocked(RuntimeError):
+    """测试试图发起真实外部网络请求时抛出。"""
+
+
+def _blocked_message(target: str) -> str:
+    return (
+        f"测试禁止发起真实外部网络请求（{target}）。"
+        "如果该用例确实需要，请显式 monkeypatch 对应客户端（LLMClient / ComfyUIClient）。"
+    )
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _block_real_external_network():
+    from urllib.parse import urlparse
+
+    import httpx._transports.default as _default
+
+    proxy_vars = (
+        "http_proxy", "https_proxy", "all_proxy",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    )
+    saved_proxies = {k: os.environ.pop(k, None) for k in proxy_vars}
+
+    real_sync_init = _default.HTTPTransport.__init__
+    real_sync_handle = _default.HTTPTransport.handle_request
+    real_async_init = _default.AsyncHTTPTransport.__init__
+    real_async_handle = _default.AsyncHTTPTransport.handle_async_request
+
+    def _host_allowed(url) -> bool:  # noqa: ANN001
+        host = urlparse(str(url)).hostname
+        return host in _LOOPBACK_HOSTS if host else False
+
+    def _sync_init(self, *args, **kwargs):
+        kwargs.pop("proxy", None)
+        return real_sync_init(self, *args, **kwargs)
+
+    def _sync_handle(self, request):  # noqa: ANN001
+        if not _host_allowed(request.url):
+            raise _ExternalNetworkBlocked(_blocked_message(str(request.url)))
+        return real_sync_handle(self, request)
+
+    def _async_init(self, *args, **kwargs):
+        kwargs.pop("proxy", None)
+        return real_async_init(self, *args, **kwargs)
+
+    async def _async_handle(self, request):  # noqa: ANN001
+        if not _host_allowed(request.url):
+            raise _ExternalNetworkBlocked(_blocked_message(str(request.url)))
+        return await real_async_handle(self, request)
+
+    _default.HTTPTransport.__init__ = _sync_init
+    _default.HTTPTransport.handle_request = _sync_handle
+    _default.AsyncHTTPTransport.__init__ = _async_init
+    _default.AsyncHTTPTransport.handle_async_request = _async_handle
+    try:
+        yield
+    finally:
+        _default.HTTPTransport.__init__ = real_sync_init
+        _default.HTTPTransport.handle_request = real_sync_handle
+        _default.AsyncHTTPTransport.__init__ = real_async_init
+        _default.AsyncHTTPTransport.handle_async_request = real_async_handle
+        for key, value in saved_proxies.items():
+            if value is not None:
+                os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_settings(tmp_path, monkeypatch):
+    """get_settings() 会读取 ./data/runtime_settings.json 并覆盖环境变量。
+
+    服务器上该文件含真实 LLM / ComfyUI 配置，测试若不隔离就会真的连出去。
+    这里把设置文件路径指到本用例的临时目录（不存在 → 只用环境变量/默认值），
+    并清空 Settings 缓存。需要校验运行时设置加载的用例自己 monkeypatch 覆盖。
+    """
+    import app.core.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "_runtime_settings_path", lambda: tmp_path / "runtime_settings.json")
+    cfg_mod.clear_settings_cache()
+    yield
+    cfg_mod.clear_settings_cache()
+
+
+@pytest.fixture(autouse=True)
+def _skip_startup_external_probe(monkeypatch):
+    """测试里 TestClient(app) 会触发 lifespan 的启动自检，其中会真实探活 ComfyUI。
+
+    服务器 .env 有真实地址（线上隧道），探活既慢又不该在测试里发生。
+    这里把自检里的 test_connection 换成 no-op，其余启动逻辑保持不变；
+    需要校验探活行为的用例自己 monkeypatch 覆盖本夹具。
+    """
+    import app.integrations.comfyui as comfy_mod
+
+    monkeypatch.setattr(comfy_mod.ComfyUIClient, "test_connection", lambda self: {"ok": True})
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_real_database():
     """整个测试会话禁止连接真实库（backend/data 目录下的 director_lab.db）。

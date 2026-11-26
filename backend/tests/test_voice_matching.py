@@ -32,6 +32,10 @@ def env(tmp_path, monkeypatch):
     media_dir.mkdir()
     import app.core.config as cfg_mod
     monkeypatch.setenv("DLAB_MEDIA_DIR", str(media_dir))
+    # 本文件默认验证「无 LLM 时确定性降级」。服务器 .env 已配置真实 LLM，
+    # 不显式清空就会真的发请求（A00b 守卫会拦下并让用例失败）。
+    monkeypatch.setenv("DLAB_LLM_API_KEY", "")
+    monkeypatch.setenv("DLAB_LLM_BASE_URL", "")
     cfg_mod.clear_settings_cache()
     client = TestClient(app)
     return client, tmp_path, new_session
