@@ -1,7 +1,7 @@
 # Agent Runtime 升级 · 交接说明（HANDOFF）
 
 > 本文件面向「接手这项工作的下一位编码 Agent / 用户」。目标是让接手者在 10 分钟内恢复现场，
-> 不需要重读全部历史对话。最后更新：2026-11-26（Phase B 进行中，B5 完成）。
+> 不需要重读全部历史对话。最后更新：2026-11-27（Phase B 完成，待进入 Phase C）。
 > **本文件不记录任何密码、密钥或登录凭据。**
 
 ## 1. 从哪读起
@@ -75,12 +75,17 @@
 
 ## 7. 当前状态
 
-### Phase B · 最小可用版本（进行中）
+### Phase B · 最小可用版本
 
-- 已完成：B0（迁移与事件白名单）、B1（tick）、B2（agent.* 事件）、B3（Job 终态 → 恢复标记）、
-  B4（审批闭环：自动申请 / 裁决打标记 / 自动执行）、B5（Worker 的 agent-resume 线程与兜底扫描）
-- 进行中：B6 `/chat` 接入 Runtime（开关后面）
-- 阶段门禁：B10 端到端 MVP（7 个场景）；Phase A 的 `test_p0_9_resume_has_caller` 在 B10 转正
+- 状态：**已完成**（B0 → B11）
+- 关键提交：B0 `f3d97e4`、B1 `4f75a3a`、B2 `66c3cd6`、B3 `e7ad13d`、B4 `8ffa690`、B5 `7ca4668`、
+  B6 `76c6795`、B7 `84a47fb`、B8 `84cb666`、B9 `a75bafa`、B10 `0a25415`、B11（本提交）
+- 门禁：`tests/test_agent_phase_b_e2e.py` 7 个场景全绿；Phase A 的 `test_p0_9_resume_has_caller`
+  已从 `xfail` 转正并通过（断言固化「步骤标志位 + 兜底扫描」的真实实现）
+- 全量 pytest：1625 passed / 0 failed（Phase A 末 1560 passed / 1 xfailed）
+- 开关：`agent_runtime_chat_enabled` 默认 **false** 且线上未打开；关闭时 `/chat` 行为由黄金快照
+  `tests/fixtures/chat_baseline_flag_off.json` 固化。**Phase C 完成前不要打开。**
+- 遗留问题清单见 `implementation-plan.md` 的「Phase B 遗留问题汇总」（7 条，作为 Phase C/D 输入）。
 
 #### B5 部署注意事项（重要）
 
@@ -102,6 +107,8 @@
 - 门禁：`tests/test_agent_runtime_*.py` + `tests/test_agent_loop_api.py` 101 passed / 1 xfailed（P0-9 占位）
 - 全量 pytest：1560 passed / 1 xfailed / 0 failed（基线 1445 passed / 1 failed）
 
-### Phase B–F
+### Phase C–F
 
-- 状态：待开始 / 进行中（以 `implementation-plan.md` 顶部「当前进度」为准）
+- 状态：待开始（以 `implementation-plan.md` 顶部「当前进度」为准）
+- 下一个任务：Phase C · C0「统一工具目录（三套注册表的门面）」
+- 进入 Phase C 前先完整重读 `plan/phase-c-agent-prompts.md` 的「〇、通用上下文」与 `plan/final-plan.md` §五 硬性约束。

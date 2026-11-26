@@ -680,7 +680,7 @@ assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用�
 
 | 接口 | 说明 |
 | --- | --- |
-| `GET /api/agent/{session_id}/goal` | 当前 active Goal 的完整状态；没有则返回 `{"goal": null}` |
+| `GET /api/agent/{session_id}/goal` | 当前 active Goal 的完整状态；没有 active 时回退到最近一个非 superseded 的 Goal（目标刚完成/失败后刷新仍可读到终态）；会话从未有过 Goal 时返回 `{"goal": null}` |
 | `GET /api/agent/{session_id}/goals` | 该会话历史 Goal（`page` / `page_size`，按 `updated_at` 倒序） |
 | `GET /api/agent/goals/{goal_id}` | 按 goal_id 查询同一份载荷 |
 | `POST /api/agent/goals/{goal_id}/pause` | 暂停：不再推进新步骤，已在跑的 Job 不取消 |
@@ -690,6 +690,11 @@ assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用�
 暂停 / 恢复 / 取消对已终态目标返回 409 `agent_goal_terminal`，目标不存在返回 404。
 `/chat` 也识别「暂停当前任务 / 继续当前任务 / 取消当前任务」这类短语，但只在存在 active Goal
 且开关打开时生效，回复 payload 的 `route_action` 为 `agent_runtime_control`。
+
+生命周期（`lifecycle_state`）：`planning` / `running` / `waiting_job` / `waiting_approval` /
+`waiting_user` / `paused` / `partially_completed` / `completed` / `failed` / `cancelled`。
+`goal.status` 仍取 active / paused / completed / failed / cancelled / superseded；
+`partially_completed` 只体现在 `lifecycle_state` 与 `loop_status` 上，`goal.status` 保持 active（可继续）。
 
 `goal` 载荷字段：`goal_id`、`description`、`goal_type`、`status`、`lifecycle_state`
 （planning / running / waiting_job / waiting_approval / waiting_user / paused /

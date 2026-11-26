@@ -132,7 +132,7 @@ def process_marked(session_factory: Callable[[], Session] | None = None, *, limi
     from app.services.agent_runtime import tick
 
     if session_factory is None:
-        from app.core.database import SessionLocal as session_factory  # noqa: N813
+        from app.core.database import SessionLocal as session_factory
 
     db = session_factory()
     try:
@@ -180,7 +180,7 @@ def sweep(session_factory: Callable[[], Session] | None = None) -> dict:
     from app.services.execution_manager import reclaim_stale_steps
 
     if session_factory is None:
-        from app.core.database import SessionLocal as session_factory  # noqa: N813
+        from app.core.database import SessionLocal as session_factory
 
     out = {
         "marked_job": 0,

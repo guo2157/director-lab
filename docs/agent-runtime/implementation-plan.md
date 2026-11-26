@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase B · 最小可用版本（进行中：B10 完成，待 B11 收尾） |
-| 下一个任务 | B11 收尾：文档、开关策略、清理 |
-| 最近提交 | B10（本提交）、`a75bafa` B9、`84cb666` B8、`84a47fb` B7 |
+| 当前阶段 | Phase B · 最小可用版本（**已完成**：B0 → B11，门禁 B10 全绿） |
+| 下一个任务 | Phase C · C0 统一工具目录 |
+| 最近提交 | B11（本提交）、`0a25415` B10、`a75bafa` B9、`84cb666` B8 |
 | 最近全量 pytest | 1625 passed / 0 failed（Phase A 结束基线 1560 passed / 1 xfailed；原始基线 1445 passed / 1 failed）；tests/test_agent_*.py = 331 passed / 0 xfailed |
-| 更新时间 | 2026-11-27 02:10（Asia/Shanghai） |
+| 更新时间 | 2026-11-27 03:05（Asia/Shanghai） |
 | 工作区 | 干净（每次任务一个本地提交，不推送） |
 
 > 本文件替换 Phase 0 时期的旧版 implementation-plan.md。
@@ -82,14 +82,45 @@
 - [x] **B7** 最小计划模板：资产生成与分镜图生成（本提交）
 - [x] **B8** 确定性回复与状态查询接口（本提交）
 - [x] **B9** 暂停、继续、取消（本提交）
-- [x] **B10** 端到端 MVP 验收测试（本提交）
-- [ ] **B11** 收尾：文档、开关策略、清理
+- [x] **B10** 端到端 MVP 验收测试（`0a25415`）
+- [x] **B11** 收尾：文档、开关策略、清理（本提交）
 
 | 阶段完成记录 | 内容 |
 |---|---|
-| 合并的 PR | |
-| 全量 pytest（修复前 → 修复后） | |
-| 遗留问题 | |
+| 合并的 PR | 无（按用户要求仅本地提交，不推送、不开 PR） |
+| 门禁 B10 | `tests/test_agent_phase_b_e2e.py` 7 个场景全绿；Phase A 的 `test_p0_9_resume_has_caller` 已从 xfail 转正并通过 |
+| 全量 pytest（修复前 → 修复后） | 基线 1445 passed / 1 failed → Phase A 末 1560 passed / 1 xfailed → Phase B 末 **1625 passed / 0 failed** |
+| 真实库核对 | 只读三项：① `alembic_version` 仍为 `a1b2c3d4e5f9`（Phase B 迁移 head `a1b2c3d4e5fb` 从未对真实库执行）；② 用临时库升级到 `a1b2c3d4e5f9` 后与真实库逐对象比对 `sqlite_master`（type/name/sql）：287 个对象、0 差异；③ 业务表行数无异常突变（project 6 / job 211 / asset 161 / character 6 / scene 8 / shot 42，agent_goal 2 / agent_plan 8 / agent_plan_step 46 为 Phase A 已有记录）。`PRAGMA table_info` 确认真实库 `agent_plan_step` / `agent_goal` 均无 Phase B 新列 |
+| 遗留问题 | 见下节「Phase B 遗留问题汇总」 |
+
+### Phase B 开关策略
+
+- `DLAB_AGENT_RUNTIME_CHAT_ENABLED`（`settings.agent_runtime_chat_enabled`）**默认 `false`**，本阶段保持关闭，
+  线上 `backend/data/runtime_settings.json` 未写入该项。
+- 关闭时 `/chat` 行为与接入前一致：`tests/test_agent_phase_b_chat.py::test_flag_off_behavior_unchanged`
+  用黄金快照 `tests/fixtures/chat_baseline_flag_off.json` 逐字节比对问答 / 导航 / 单镜头生成 / 批量资产生成四条输入，
+  并把 Runtime 分支函数替换为「一旦被调用即失败」；`test_agent_phase_b_e2e.py::test_flag_off_untouched` 再确认不产生任何 `agent_goal`。
+- 计划中的「本地用示例项目《游乐场》手动验收后把 `.env.example` 改为 true」**未执行**：仓库没有 `.env.example`
+  （配置走 `backend/.env`，且 `.gitignore` 忽略），且用户明确要求不要打开该开关。因此本阶段只在文档里给出建议值，
+  默认值保持 `false`，留待 Phase C 完成、用户手动验收后再打开（见 `docs/DECISIONS.md` AG-41）。
+- `DLAB_AGENT_RESUME_ENABLED`（`settings.agent_resume_enabled`）默认 `true`；`agent_runtime_chat_enabled` 关闭时
+  `/chat` 不创建 Goal，agent-resume 线程遇不到任何带标记的步骤（`test_chat_flag_off_means_no_marked_steps` 证明）。
+- `DLAB_AGENT_LOOP_DEBUG_ENABLED` 默认 `false`，调试接口 `/api/agent/loop/run` 关闭时返回 404。
+
+### Phase B 遗留问题汇总（Phase C/D 输入）
+
+1. `approvals.create_confirmation` / `resolve_confirmation` / `mark_task_finished` 内部 `db.commit()`，
+   调用后无法用回滚撤销；Phase B 未重构（通用约束 5），tick 与审批写入不是单事务。
+2. `resolve_confirmation` 写 workspace 事件时 `session_id` 可能取不到值（审批记录本身不带 session），
+   前端依赖该字段的订阅会拿不到；需在 Phase D 统一审批事件的会话归属。
+3. 流程工具（`PIPELINE_TOOL_REGISTRY`）与返工工具（`REGEN_TOOL_REGISTRY`）尚未接入 Runtime；
+   Plan Validator 目前直接拒绝不在 `TOOL_REGISTRY` 中的工具，Phase C 再按需放开。
+4. `agent-resume` 守护线程要等线上服务下次重启才生效（本轮不重启，属「必须停下」的情形）；
+   重启前，恢复只依赖 `/chat` 的同步 tick 与手动调用。
+5. 取消 Goal 时只对本系统内 `queued` / `running` 的 Job 调用 `cancel_jobs`；
+   已提交到远端 ComfyUI 但没有本地 `prompt_id` 的任务无法撤回，会在 Worker 侧自然跑完（结果不再回写 Goal）。
+6. `/chat` 的暂停 / 继续 / 取消只认精确短语（AG-37），自然语言表达要等 Phase C 的 GoalSpec。
+7. 批量生成步骤仍是一步一个审批记录；Phase C 会把批量步骤按实体拆分 / 合并（Phase A A5 已注明）。
 
 ## Phase C · 状态驱动 Planner 与工具层收敛
 

@@ -5,12 +5,108 @@
 
 ---
 
-## 目标分层
+## 目标分层（Phase B 实际落地形态）
+
+Phase B 只落地了「MVP」这一层：`/chat` 把批量生产类请求交给 Runtime，
+审批 / Job 完成后由 Worker 自动续跑，重启由兜底扫描补齐。图中标注了每块的实现文件。
 
 ```
                          User
                           │
-                   Agent Workbench (前端)
+        POST /api/agent/{session_id}/chat          （开关 agent_runtime_chat_enabled，默认关闭）
+                          │
+              agent_runtime_router.should_use_runtime()
+                │ 命中批量资产生成 / 批量分镜图 / 继续上次任务
+                ▼
+        agent_runtime.run_agent_loop()
+          ├─ goal_manager.get_or_create_goal()   指纹相同复用，不同则 supersede
+          ├─ planner.build_plan_from_template()  B7 两个模板，代码生成、不用 LLM
+          └─ agent_runtime.tick()                幂等单次推进（B1）
+                 ├─ 抢 Goal 锁（agent_goal.locked_until 条件 UPDATE）
+                 ├─ 认领恢复标记（agent_plan_step.resume_requested_at）
+                 ├─ 逐步执行 → execute_step → 只走 agent_tools.execute_tool
+                 │     ├─ 同步成功 → verifier.verify_step → succeeded
+                 │     ├─ 返回 job_id → waiting_job（TaskStage 挂到 Goal 的统一 Task）
+                 │     ├─ 需要审批 → waiting_approval（自动创建 AgentConfirmation）
+                 │     └─ 失败 → replanner.classify_error → 重试 / 等待用户 / 失败
+                 ├─ 每步提交一次（崩溃不丢已完成步骤）
+                 └─ _derive_loop_status → agent_goal.lifecycle_state + agent.* 事件
+                          │
+        ┌─────────────────┴──────────────────┐
+        │                                    │
+   HTTP 同步推进                        Worker 内嵌线程
+   （/chat 首次 tick）                agent_resume.start_resume_thread()
+                                          ├─ 每 2s process_marked()：认领标记 → tick
+                                          └─ 每 30s sweep()：补标记 + 回收超时 running
+                                                     │
+                                          Job 执行器（executor）
+                                          task_orchestrator.bridge_job_event()
+                                            └─ 终态时 mark_agent_steps_for_job()
+                                          approvals.resolve_confirmation()
+                                            └─ 裁决时写 resume_requested_at
+```
+
+### 恢复闭环为什么用「标志位 + 兜底扫描」
+
+Phase B 没有新建事件表，也不用事件游标。恢复请求就是 `agent_plan_step.resume_requested_at`：
+
+- `bridge_job_event` 在 Job 进入终态时、与业务写入同一事务，把 `waiting_job` 步骤打上标记；
+- `approvals.resolve_confirmation` 在裁决提交前，把 `waiting_approval` 步骤打上标记；
+- Worker 的 agent-resume 线程每 2 秒认领标记并 tick；
+- 标记丢失（进程崩溃、事务回滚）由每 30 秒的 `sweep()` 重新推导：
+  Job 已终态但步骤仍 `waiting_job`、审批已裁决但步骤仍 `waiting_approval`、
+  `running` 超时、以及 `lifecycle_state=running` 但 `last_tick_at` 超过 5 分钟且有 pending 步骤。
+
+优点：不依赖长连接、不依赖页面在线、不需要维护事件游标；重复打标记是幂等的。
+
+### Goal ↔ AgentTask ↔ 统一 Task
+
+```
+agent_goal (1) ──── agent_task_id ───▶ agent_task   （用户级任务：意图快照 + 状态机）
+     │
+     └────────────── task_id ─────────▶ task         （统一 Task：承载本 Goal 下所有 Job 阶段）
+                                          └── task_stage（每个产生 Job 的步骤挂一个 stage）
+```
+
+一个 Goal 只有一个统一 Task；产生 Job 的步骤把 `TaskStage` 挂到这个 Task 上，
+不再「一步一个 Task」。`goal.task_id` 为空时（例如调试接口创建的 Goal）才新建统一 Task 并回写。
+
+### 前端可见的事实流（workspace_event outbox）
+
+`agent_events.py` 把 Goal / Plan / Step / tick 的事实写入 `workspace_event`（与业务同一事务）：
+
+| 事件 | payload |
+| --- | --- |
+| `agent.goal.created` / `updated` / `finished` | goal_id, status, lifecycle_state, goal_type |
+| `agent.goal.superseded` | goal_id, superseded_by |
+| `agent.plan.created` | goal_id, plan_id, revision, steps[{step_id, step_key, tool_name, status}] |
+| `agent.step.updated` | goal_id, plan_id, step_id, step_key, tool_name, status, job_id?, confirmation_id?, error_code? |
+| `agent.tick.finished` | goal_id, lifecycle_state, counts{succeeded, failed, waiting, pending} |
+
+payload 只放事实字段（id / 状态 / 错误码），不放 LLM 文本、提示词或进度百分比估算。
+这些事件**只用于前端展示**，不作为恢复驱动。
+
+### 状态与查询接口
+
+- `GET /api/agent/{session_id}/goal`：当前 active Goal；没有 active 时回退最近一个非 superseded 的 Goal。
+- `GET /api/agent/{session_id}/goals`：历史 Goal 分页。
+- `GET /api/agent/goals/{goal_id}`：按 id 查询同一份载荷。
+- `POST /api/agent/goals/{goal_id}/pause|resume|cancel`：暂停 / 恢复 / 取消。
+- 生命周期：planning / running / waiting_job / waiting_approval / waiting_user / paused /
+  partially_completed / completed / failed / cancelled。
+
+---
+
+## 完整目标架构（Phase C 之后逐步补齐）
+
+下面的分层是最终形态，Phase B 只实现了其中「Goal Manager → Planner（模板）→ Execution Manager →
+Verifier → Replanner → Response Manager」这条最小链路；Context Resolver、Constraint Manager、
+通用状态驱动 Planner、审核门禁、前端工作台在 Phase C/D/E 落地。
+
+```
+                         User
+                          │
+                   Agent Workbench (前端, Phase E)
                   Plan/Step/Job/产物/审核展示
                           │
                      Agent API (保留路由层)
@@ -53,9 +149,7 @@
                          User
 ```
 
----
-
-## 核心模块设计
+## 核心模块设计（最终形态）
 
 ### 1. Goal Manager (app/services/goal_manager.py)
 
@@ -211,13 +305,15 @@ Check Goal Completion
                         └── passed -> Persist State -> Update Context -> Loop
 ```
 
-### Agent Loop 持久化
+### Agent Loop 持久化（Phase B 实际实现）
 
-- 每次循环后写 agent_execution_log
-- 每个Step状态变更写 agent_event
-- Job完成后通过 bridge_job_event 触发Loop恢复
-- 审核完成后通过 bridge_approval_resolved 触发Loop恢复
-- 页面刷新/服务重启后重读 agent_plan + agent_plan_step 继续
+- 每次工具调用写一条 `agent_execution_log`（含 input/output/error_code/duration_ms）。
+- 步骤状态变化写 `agent.step.updated` 到 `workspace_event` outbox（同一事务，**不新建 agent_event 表**）。
+- Job 进入终态：`bridge_job_event` 与业务写入同一事务给 `waiting_job` 步骤打 `resume_requested_at`；
+  审批裁决：`resolve_confirmation` 提交前给 `waiting_approval` 步骤打标记。
+- Worker 的 agent-resume 线程每 2s 认领标记并 `tick()`；每 30s `sweep()` 补标记、回收超时 running 步骤、
+  推进「running 但 5 分钟无 tick 且有 pending 步骤」的崩溃 Goal。
+- 页面刷新 / 服务重启后重读 `agent_plan` + `agent_plan_step`，兜底扫描补齐丢失的标记，不重复创建 Job。
 
 ---
 
@@ -225,16 +321,21 @@ Check Goal Completion
 
 | 表 | 用途 | 关联 |
 |---|---|---|
-| agent_goal | 用户目标持久化 | session_id, project_id |
-| agent_plan | 执行计划 + revision | goal_id |
-| agent_plan_step | 计划步骤(重构自现有) | plan_id |
-| agent_execution_log | 执行记录(新增) | goal_id/plan_id/step_id |
-| agent_event | 持久化事件(新增) | goal_id/plan_id/step_id/job_id |
-| agent_verification | 验证记录(新增) | step_id |
+| agent_goal | 用户目标持久化 + 指纹 + 生命周期 + Goal 锁 + AgentTask/Task 绑定 | session_id, project_id |
+| agent_plan | 执行计划 + revision + parent_plan_id | goal_id |
+| agent_plan_step | 计划步骤（step_key / job_id / confirmation_id / 锁 / 恢复标记） | plan_id |
+| agent_execution_log | 执行记录 | goal_id / plan_id / step_id |
+| agent_confirmation | 审批记录（按步骤绑定，不可复用） | — |
+| workspace_event | 事件 outbox（含 `agent.*` 事实流） | session_id / project_id |
 
-现有表改动:
-- agent_task + goal_id + plan_id + current_step_id + lifecycle_state
-- agent_plan_step 重构为 plan->step 二层
+**Phase B 明确没有新建**：`agent_event` 表、事件游标表、第二套工具注册表、并行执行器。
+恢复靠 `agent_plan_step.resume_requested_at` 标志位 + Worker 周期兜底扫描。
+
+现有表改动（Phase A + Phase B 迁移，全部只加可空列）:
+- `agent_goal`：`fingerprint`、`locked_until`、`agent_task_id`、`task_id`、`lifecycle_state`、`last_tick_at`
+- `agent_plan_step`：`confirmation_id`、`job_id`、`step_key`、`lock_owner`、`resume_requested_at`、`resume_reason`
+- `agent_plan`：`parent_plan_id`
+- `agent_task`：`goal_id`、`plan_id`、`current_step_id`、`lifecycle_state`（Phase 1 已有）
 
 ---
 
@@ -242,7 +343,7 @@ Check Goal Completion
 
 | Runtime模块 | 调用现有 | 方式 |
 |------------|---------|------|
-| Goal Manager | Project/Script模型, derive_progress | 只读查询 |
+| Goal Manager | Project/Script模型, derive_progress | 只读查询（Phase B 模板计划复用 assets_gate / stage_readiness 判定） |
 | Context Resolver | 所有Models, context_manager | 只读查询 |
 | Planner | pipeline_state(参考) | 读流程节点定义 |
 | Execution Manager | task_orchestrator, agent_tools, approvals | 创建Task+TaskStage, 调用Tool |

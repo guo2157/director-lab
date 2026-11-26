@@ -2,10 +2,11 @@
 from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
+
+from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PREV_HEAD = "a1b2c3d4e5fa"

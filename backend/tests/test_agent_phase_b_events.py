@@ -81,7 +81,7 @@ def test_events_written_in_same_tx(db, project):
 
 def test_step_event_only_on_change(db, project, monkeypatch, rt_sessionmaker):
     fake_tool(monkeypatch, "b2_sync", returns={"ok": 1})
-    goal, plan = _goal_with_plan(db, project, monkeypatch, ["b2_sync"], session="b2step")
+    goal, _plan = _goal_with_plan(db, project, monkeypatch, ["b2_sync"], session="b2step")
 
     tick(rt_sessionmaker, goal.goal_id, trigger="manual")
     first_count = len(_events(db, "agent.step.updated"))
@@ -118,7 +118,7 @@ def test_event_sequence_for_simple_plan(db, project, monkeypatch, rt_sessionmake
 
 def test_payload_has_no_free_text(db, project, monkeypatch, rt_sessionmaker):
     fake_tool(monkeypatch, "b2_payload", returns={"ok": 1})
-    goal, plan = _goal_with_plan(db, project, monkeypatch, ["b2_payload"], session="b2pay")
+    goal, _plan = _goal_with_plan(db, project, monkeypatch, ["b2_payload"], session="b2pay")
     tick(rt_sessionmaker, goal.goal_id, trigger="manual")
 
     allowed = {

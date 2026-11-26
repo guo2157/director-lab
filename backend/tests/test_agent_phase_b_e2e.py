@@ -22,7 +22,6 @@ from app.models.agent import (
     AgentPlan,
     AgentPlanStep,
 )
-from app.models.task import TaskStage
 from app.services import approvals
 from app.services.agent_resume import process_marked, sweep
 
@@ -51,8 +50,8 @@ def _install_settings(monkeypatch, settings, tmp_path):
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """tmp 库 + tmp media + render_mock + 开关打开。"""
-    from app.core.config import Settings, clear_settings_cache
     import app.core.database as db_mod
+    from app.core.config import Settings, clear_settings_cache
     from app.main import app
     from app.models import Base
 
@@ -100,7 +99,7 @@ def env(tmp_path, monkeypatch):
 
 def _seed_project(factory, *, characters=3, with_assets=0):
     """已解析项目 + N 个角色（可带真实定妆图）+ 场景基准图 + 镜头 + 图像工作流。"""
-    from app.models import Project, ParseVersion
+    from app.models import ParseVersion, Project
 
     db = factory()
     now = datetime.now()

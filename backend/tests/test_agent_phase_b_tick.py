@@ -160,7 +160,7 @@ def test_tick_exception_releases_lock(db, project, monkeypatch, rt_sessionmaker)
     from app.services import agent_runtime as rt
 
     fake_tool(monkeypatch, "b1_err", returns={"ok": 1})
-    goal, plan = _goal_with_plan(db, project, monkeypatch, ["b1_err"], session="b1err")
+    goal, _plan = _goal_with_plan(db, project, monkeypatch, ["b1_err"], session="b1err")
 
     real = rt._execute_plan_loop
 
@@ -213,7 +213,7 @@ def test_lifecycle_written_to_goal_and_agent_task(db, project, monkeypatch, rt_s
     row.agent_task_id = agent_task.id
     db.commit()
 
-    plan, report = planner_mod.build_and_save_plan(
+    _plan, report = planner_mod.build_and_save_plan(
         db, goal_id=goal.goal_id, description="执行测试步骤", project_id=project.id
     )
     assert report.passed, report.errors
