@@ -1065,6 +1065,7 @@ def _run_plan_loop(
                 step_id=step_id,
                 plan_id=current_plan.plan_id,
                 goal_id=goal.goal_id,
+                goal=goal,
                 session_id=session_id,
                 project_id=project_id,
             )
@@ -1292,7 +1293,7 @@ def _resume_marked_steps(db: Session, goal: Goal) -> list[str]:
         if reason == "job_terminal":
             _resume_step_after_job(db, step, goal=goal)
         elif reason == "approval_resolved":
-            _resume_step_after_approval(db, step)
+            _resume_step_after_approval(db, step, goal=goal)
         handled.append(step.id)
     db.flush()
     return handled
@@ -1388,8 +1389,19 @@ def _resume_step_after_job(db: Session, step, *, goal=None) -> None:
     db.flush()
 
 
-def _resume_step_after_approval(db: Session, step) -> None:
-    """审批裁决后的步骤收敛（B4 会补 run_generate 自动执行）。"""
+# 申请类工具：审批通过后由 Runtime 调 run_generate 自动建 Job（幂等）
+_APPROVAL_REQUEST_TOOLS = ("request_generate", "batch_request_generate")
+
+
+def _resume_step_after_approval(db: Session, step, *, goal=None) -> None:
+    """审批裁决后的步骤收敛（B4）。
+
+    - 仍是 pending（标记来源异常）→ 清标记保持等待
+    - rejected / revision_requested → waiting_user，error_code="approval_rejected"，带审批意见
+    - approved 且是申请类工具 → 调 run_generate(approved=True, confirmation_id=...) 建 Job
+      （run_generate 幂等：用户已在页面点过执行会返回同一个 job_id）→ waiting_job
+    - approved 且工具本身需要审批 → 交给 _execute_plan_loop 以 approved 重新执行
+    """
     from app.models.agent import AgentConfirmation
 
     if step.status != "waiting_approval":
@@ -1398,15 +1410,95 @@ def _resume_step_after_approval(db: Session, step) -> None:
         db.get(AgentConfirmation, step.confirmation_id) if step.confirmation_id else None
     )
     if confirmation is None or confirmation.status == "pending":
+        step.status = "waiting_approval"
+        db.flush()
         return
-    if confirmation.status == "approved":
-        step.status = "pending"
-        step.error_code = None
-        step.error_message = None
-    else:
+
+    if confirmation.status != "approved":
         step.status = "waiting_user"
         step.error_code = "approval_rejected"
         step.error_message = confirmation.comment or f"审批结果：{confirmation.status}"
+        step.completed_at = datetime.now()
+        step.lock_owner = None
+        db.flush()
+        return
+
+    if (step.tool_name or "") not in _APPROVAL_REQUEST_TOOLS:
+        # 工具本身需要审批：清空绑定前的执行痕迹，回到 pending 由循环以 approved 执行
+        step.status = "pending"
+        step.error_code = None
+        step.error_message = None
+        step.lock_owner = None
+        db.flush()
+        return
+
+    _run_generate_after_approval(db, step=step, confirmation=confirmation, goal=goal)
+    db.flush()
+
+
+def _run_generate_after_approval(db: Session, *, step, confirmation, goal=None) -> None:
+    """申请类工具获批后自动执行：run_generate → 写 job_id → 挂统一 Task → waiting_job。"""
+    from app.services.agent_tools import execute_tool
+    from app.services.execution_manager import _ensure_task_stage_for_job
+
+    tool_result = execute_tool(
+        db, "run_generate", approved=True, confirmation_id=confirmation.id
+    )
+    data = tool_result.data if isinstance(tool_result.data, dict) else {}
+    result = {
+        "ok": bool(tool_result.ok),
+        "data": tool_result.data,
+        "error_code": tool_result.error_code,
+        "error_message": tool_result.error_message,
+        "executed_confirmation_id": confirmation.id,
+    }
+    step.result = result
+    step.lock_owner = None
+
+    if not tool_result.ok:
+        step.status = "waiting_user"
+        step.error_code = f"approval_execute_failed:{tool_result.error_code or 'unknown'}"
+        step.error_message = (tool_result.error_message or "审批后执行失败")[:1000]
+        step.completed_at = datetime.now()
+        return
+
+    job_id = data.get("job_id")
+    if not job_id:
+        # run_generate 没返回 Job：无法继续，交给用户
+        step.status = "waiting_user"
+        step.error_code = "job_not_created"
+        step.error_message = "审批已通过，但执行工具未返回 Job"
+        step.completed_at = datetime.now()
+        return
+
+    step.job_id = str(job_id)
+    _ensure_task_stage_for_job(
+        db,
+        step=step,
+        job_id=str(job_id),
+        session_id=getattr(goal, "session_id", None),
+        project_id=getattr(goal, "project_id", None),
+        goal=goal,
+    )
+
+    from app.models import Job
+
+    job = db.get(Job, str(job_id))
+    now = datetime.now()
+    if job is not None and job.status == "succeeded":
+        step.status = "succeeded"
+        step.error_code = None
+        step.error_message = None
+        step.completed_at = now
+    elif job is not None and job.status in ("failed", "cancelled"):
+        step.status = "waiting_user"
+        step.error_code = f"job_failed:{job.error_code or job.status}"
+        step.error_message = job.error_msg or f"Job {job.id} 状态为 {job.status}"
+        step.completed_at = now
+    else:
+        step.status = "waiting_job"
+        step.error_code = None
+        step.error_message = None
 
 
 def _sync_agent_task_lifecycle(db: Session, goal: Goal, lifecycle: str) -> None:

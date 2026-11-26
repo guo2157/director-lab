@@ -118,6 +118,7 @@ def _release_step_lock(
     error_code: str | None = None,
     error_message: str | None = None,
     lock_owner: str | None = None,
+    confirmation_id: str | None = None,
 ) -> bool:
     """释放步骤执行锁并更新状态。
 
@@ -138,6 +139,8 @@ def _release_step_lock(
         values["error_code"] = error_code
     if error_message is not None:
         values["error_message"] = error_message
+    if confirmation_id is not None:
+        values["confirmation_id"] = confirmation_id
 
     stmt = update(AgentPlanStep).where(AgentPlanStep.id == step_id)
     if lock_owner is not None:
@@ -278,7 +281,63 @@ def _step_is_approved(db: Session, step) -> tuple[bool, str | None]:
     return True, confirmation_id
 
 
+def _ensure_step_confirmation(
+    db: Session,
+    *,
+    step,
+    session_id: str | None,
+    args: dict,
+) -> str | None:
+    """B4：步骤需要审批但还没有绑定审批记录时，自动创建（幂等）。
+
+    approvals.create_confirmation 内部会 commit（通用约束 5 允许的已知例外），
+    同会话同工具同入参复用 pending 记录，因此同一步骤重复执行只会有 1 条审批。
+    没有 session_id 时无法归属审批，返回 None（步骤仍进入 waiting_approval）。
+    """
+    if not session_id:
+        return None
+    from app.services import approvals
+
+    confirmation = approvals.create_confirmation(
+        db,
+        session_id=session_id,
+        tool_name=step.tool_name or "",
+        args=args or {},
+        goal=(step.description or f"执行 {step.tool_name}（需人工审批）")[:200],
+    )
+    return confirmation.id
+
+
 # ── 结果分流（A5 / P0-6）──────────────────────────────────────────────
+
+def ensure_goal_task(db: Session, goal):
+    """取 Goal 的统一 Task（承载该目标下所有 Job 阶段），没有则新建并回写 goal.task_id。
+
+    一个 Goal ↔ 一个 AgentTask ↔ 一个统一 Task（Phase B 通用约束）：
+    调试接口创建的 Goal 没有 task_id 时才新建，正常链路由 /chat 复用已有 Task。
+    """
+    from app.models.task import Task
+    from app.services import task_orchestrator
+
+    task_id = getattr(goal, "task_id", None)
+    if task_id:
+        existing = db.get(Task, task_id)
+        if existing is not None:
+            return existing
+
+    title = (getattr(goal, "description", "") or "Agent 目标")[:200]
+    task = task_orchestrator.create_task(
+        db,
+        session_id=getattr(goal, "session_id", None),
+        task_type="agent_goal",
+        title=title,
+        agent_task_id=getattr(goal, "agent_task_id", None),
+        project_id=getattr(goal, "project_id", None),
+    )
+    goal.task_id = task.id
+    db.flush()
+    return task
+
 
 def _ensure_task_stage_for_job(
     db: Session,
@@ -287,10 +346,12 @@ def _ensure_task_stage_for_job(
     job_id: str,
     session_id: str | None,
     project_id: str | None,
+    goal=None,
 ):
     """把步骤产生的 Job 挂成统一 Task 的阶段，让 bridge_job_event 能闭环。
 
     幂等：同一 job_id 已有 TaskStage 时直接复用，不重复建 Task。
+    传入 goal 时挂到 Goal 的统一 Task（B6），否则退回旧行为（一步一个 Task）。
     """
     from sqlalchemy import select
 
@@ -299,16 +360,26 @@ def _ensure_task_stage_for_job(
 
     existing = db.scalars(select(TaskStage).where(TaskStage.job_id == job_id)).first()
     if existing is not None:
+        if goal is not None:
+            # run_generate 等工具自己建过 Task：统一到 Goal 的 Task，保证
+            # 一个 Goal 的所有 TaskStage 都挂同一个 Task（B6 验收口径）
+            goal_task = ensure_goal_task(db, goal)
+            if existing.task_id != goal_task.id:
+                existing.task_id = goal_task.id
+                db.flush()
         return existing
 
     title = (step.description or step.tool_name or "Agent 步骤")[:200]
-    task = task_orchestrator.create_task(
-        db,
-        session_id=session_id,
-        task_type="agent_step",
-        title=title,
-        project_id=project_id,
-    )
+    if goal is not None:
+        task = ensure_goal_task(db, goal)
+    else:
+        task = task_orchestrator.create_task(
+            db,
+            session_id=session_id,
+            task_type="agent_step",
+            title=title,
+            project_id=project_id,
+        )
     return task_orchestrator.attach_job_stage(
         db,
         task,
@@ -326,6 +397,7 @@ def _route_job_result(
     result_payload: dict,
     session_id: str | None,
     project_id: str | None,
+    goal=None,
 ) -> str:
     """Job 结果 → 步骤状态。Job 创建成功只代表进入 waiting_job（除非已终态）。
 
@@ -340,6 +412,7 @@ def _route_job_result(
         job_id=job_id,
         session_id=session_id,
         project_id=project_id,
+        goal=goal,
     )
 
     job = db.get(Job, job_id)
@@ -464,6 +537,7 @@ def execute_step(
     agent_task_id: str | None = None,
     budget: ToolBudget | None = None,
     timeout_override: int | None = None,
+    goal=None,
 ) -> dict:
     """执行单个 PlanStep。
 
@@ -498,17 +572,31 @@ def execute_step(
             "error": f"无法获取执行锁，当前状态: {step.status}",
         }
 
-    # 2. 审批门禁（A7 / P0-8）：按步骤绑定的审批判定，不再接收循环级 approved 布尔值
+    # 2. 服务端参数注入（审批记录需要与真正执行的参数一致，因此提前到门禁之前）
+    from app.services.agent_tools import execute_tool, inject_server_args
+
     spec = _get_tool_spec(tool_name) or {}
+    args = inject_server_args(
+        spec,
+        step.args,
+        session_id=session_id,
+        project_id=project_id,
+    )
+
+    # 3. 审批门禁（A7 / P0-8）：按步骤绑定的审批判定，不再接收循环级 approved 布尔值
     step_approved, bound_confirmation_id = _step_is_approved(db, step)
     if _step_needs_approval(spec, step) and not step_approved:
-        # 需要审批但当前没有绑定到本步骤的可用批准 → waiting_approval
+        # 需要审批但当前没有绑定到本步骤的可用批准 → 自动申请审批 + waiting_approval（B4）
+        confirmation_id = _ensure_step_confirmation(
+            db, step=step, session_id=session_id, args=args
+        )
         _release_step_lock(
             db,
             step_id,
             status="waiting_approval",
             error_code="approval_required",
             lock_owner=lock_owner,
+            confirmation_id=confirmation_id,
         )
         return {
             "success": False,
@@ -516,6 +604,7 @@ def execute_step(
             "step_status": "waiting_approval",
             "result": {},
             "policy": "REQUIRE_CONFIRMATION",
+            "confirmation_id": confirmation_id,
             "error": f"工具 '{tool_name}' 需要人工审批",
         }
     # 3. 预算检查
@@ -531,17 +620,7 @@ def execute_step(
                 "error": f"预算超限: {violation}",
             }
 
-    # 4. 服务端参数注入 + 只走网关执行（A4/P0-5）
-    from app.services.agent_tools import execute_tool, inject_server_args
-
-    args = inject_server_args(
-        spec,
-        step.args,
-        session_id=session_id,
-        project_id=project_id,
-    )
-
-    # 5. 写执行日志（started）
+    # 4. 写执行日志（started）
     started_at = datetime.now()
     log_id = log_step_start(
         db,
@@ -552,7 +631,7 @@ def execute_step(
         input_data=args,
     )
 
-    # 6. 执行（唯一合法入口：agent_tools.execute_tool）
+    # 5. 执行（唯一合法入口：agent_tools.execute_tool）
     tool_result = execute_tool(db, tool_name, approved=step_approved, **args)
     duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
     if budget:
@@ -584,6 +663,7 @@ def execute_step(
                 result_payload=result_payload,
                 session_id=session_id,
                 project_id=project_id,
+                goal=goal,
             )
         else:
             # b. 产生审批记录 → waiting_approval
@@ -624,6 +704,9 @@ def execute_step(
 
     # 失败分流：审批等待 / 其余一律 failed，错误码原样写入
     if tool_result.error_code == "approval_required":
+        confirmation_id = _ensure_step_confirmation(
+            db, step=step, session_id=session_id, args=args
+        )
         _release_step_lock(
             db,
             step_id,
@@ -632,6 +715,7 @@ def execute_step(
             error_code="approval_required",
             error_message=tool_result.error_message,
             lock_owner=lock_owner,
+            confirmation_id=confirmation_id,
         )
         log_step_end(
             db,
@@ -653,6 +737,7 @@ def execute_step(
             "result": result_payload,
             "policy": "REQUIRE_CONFIRMATION",
             "duration_ms": duration_ms,
+            "confirmation_id": confirmation_id,
             "error": tool_result.error_message or "需要人工审批",
         }
 

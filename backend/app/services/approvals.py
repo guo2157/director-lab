@@ -243,6 +243,29 @@ def resolve_confirmation(
             "write workspace.approval_resolved event failed (confirmation_id=%s): %s",
             confirmation_id, __import__("traceback").format_exc(),
         )
+    # B4：裁决后给绑定的 Agent 步骤打恢复标记（同一事务，Worker 线程据此推进 tick）。
+    # 只打 waiting_approval 且尚无标记的步骤；不在此处调用 Runtime，避免重入与长事务。
+    try:
+        from sqlalchemy import update
+
+        from app.models.agent import AgentPlanStep
+
+        db.execute(
+            update(AgentPlanStep)
+            .where(
+                AgentPlanStep.confirmation_id == confirmation_id,
+                AgentPlanStep.status == "waiting_approval",
+                AgentPlanStep.resume_requested_at.is_(None),
+            )
+            .values(resume_requested_at=datetime.now(), resume_reason="approval_resolved")
+        )
+        db.flush()
+    except Exception:
+        _log.warning(
+            "mark agent step for approval_resolved failed (confirmation_id=%s): %s",
+            confirmation_id, __import__("traceback").format_exc(),
+        )
+
     db.commit()
     db.refresh(confirmation)
     return confirmation
