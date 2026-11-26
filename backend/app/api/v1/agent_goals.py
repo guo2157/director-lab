@@ -34,12 +34,21 @@ def get_current_goal(session_id: str, db: Session = Depends(get_db)) -> dict:
     if session is None:
         raise biz_error(code="agent_session_not_found", http=404, message="会话不存在")
 
+    # 优先返回 active Goal；没有 active 时回退到最近一个未被替代的 Goal，
+    # 这样目标刚完成/失败后页面刷新仍能看到真实终态（B10 门禁要求）。
     goal = db.scalars(
         _session_goal_query(session_id)
         .where(AgentGoal.status == "active")
         .order_by(AgentGoal.updated_at.desc())
         .limit(1)
     ).first()
+    if goal is None:
+        goal = db.scalars(
+            _session_goal_query(session_id)
+            .where(AgentGoal.status != "superseded")
+            .order_by(AgentGoal.updated_at.desc())
+            .limit(1)
+        ).first()
     if goal is None:
         return {"goal": None}
     return get_goal_status_by_id(db, goal.id)

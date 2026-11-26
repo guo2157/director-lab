@@ -355,12 +355,18 @@ def test_p0_8_approval_per_step(db, project, monkeypatch):
 
 # -- P0-9 resume 尚无调用方（Phase B） ----------------------------------
 
-@pytest.mark.xfail(reason="Phase B：bridge_job_event / 审批裁决接入 resume", strict=False)
 def test_p0_9_resume_has_caller():
-    from app.services import task_orchestrator
+    """Phase B：Job 终态与审批裁决都会打恢复标记，Worker 的 agent-resume 线程负责消费。"""
+    from app.services import agent_resume, approvals, task_orchestrator
 
     source = Path(task_orchestrator.__file__).read_text(encoding="utf-8")
-    assert "resume_after_job" in source
+    assert "mark_agent_steps_for_job" in source
+
+    approvals_source = Path(approvals.__file__).read_text(encoding="utf-8")
+    assert "resume_requested_at" in approvals_source
+
+    resume_source = Path(agent_resume.__file__).read_text(encoding="utf-8")
+    assert "process_marked" in resume_source and "sweep" in resume_source
 
 
 # -- P0-10 新意图不复用旧目标 -------------------------------------------

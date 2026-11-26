@@ -1964,6 +1964,7 @@ def _post_lifecycle_message(db: Session, goal: Goal, result: "TickResult") -> No
     goal_id 与 source=agent_runtime。seq 取 max+1，(session_id, seq) 冲突重试一次。
     """
     from sqlalchemy import func as _func
+    from sqlalchemy import select as _select
     from sqlalchemy.exc import IntegrityError as _IntegrityError
 
     from app.models.agent import AgentMessage
@@ -1977,7 +1978,7 @@ def _post_lifecycle_message(db: Session, goal: Goal, result: "TickResult") -> No
     for _attempt in range(2):
         seq = (
             db.scalar(
-                _func.max(AgentMessage.seq).where(
+                _select(_func.max(AgentMessage.seq)).where(
                     AgentMessage.session_id == goal.session_id
                 )
             )
