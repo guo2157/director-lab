@@ -76,8 +76,13 @@ def _startup_selfcheck() -> dict:
     if not cfg.render_mock:
         try:
             from app.integrations.comfyui import ComfyUIClient, ComfyUIError
+            from app.services.workflow.runtime_checker import default_base_url
 
-            ComfyUIClient().test_connection()
+            # 启用多实例后 comfyui_base_url 会被清空，真实地址在实例池里
+            base_url = default_base_url()
+            if not base_url:
+                raise ComfyUIError("comfy_unconfigured", "未配置 ComfyUI 实例")
+            ComfyUIClient(base_url=base_url).test_connection()
             report["comfyui"] = "ok"
         except ComfyUIError as e:
             logger.warning("ComfyUI 不可达（生成任务将失败，可设 DLAB_RENDER_MOCK=true 演示）: %s", e.message)
