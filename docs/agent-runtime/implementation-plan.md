@@ -15,7 +15,7 @@
 - 任务说明：[plan/phase-a-agent-prompts.md](plan/phase-a-agent-prompts.md)
 
 - [x] **A0** 数据模型补丁（一次迁移，为后续任务铺路）
-- [ ] **A12a** 测试基建：Runtime 专用夹具（先于 A1 完成）
+- [x] **A12a** 测试基建：Runtime 专用夹具（先于 A1 完成）
 - [ ] **A1** 事务边界：Runtime 入口自管 Session 与提交（P0-1）
 - [ ] **A2** 调试接口的线程与 SSE 桥接（P0-2、P0-3）
 - [ ] **A3** 进度回调透传与结果汇总顺序（P0-4）

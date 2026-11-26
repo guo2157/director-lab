@@ -40,9 +40,13 @@ os.environ["DLAB_RENDER_MOCK"] = "false"  # 避免 .env 的真实配置漏进测
 os.environ["DLAB_WORKER_EMBEDDED"] = "false"
 
 
+# Agent Runtime 专用夹具（tmp 库 / fake_tool / mk_project 等），见 agent_runtime_fixtures.py
+pytest_plugins = ["tests.agent_runtime_fixtures"]
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_real_database():
-    """整个测试会话禁止连接真实库（backend/data/director_lab.db）。
+    """整个测试会话禁止连接真实库（backend/data 目录下的 director_lab.db）。
 
     alembic/env.py 用 get_settings().database_url 覆盖 Config 中的地址，
     单靠测试里传 URL 无效，所以这里在会话开始时校验解析后的实际地址。
@@ -57,7 +61,7 @@ def _guard_real_database():
     db_path = Path(url.database or "").resolve()
     if db_path == _REAL_DB_PATH:
         raise RuntimeError(
-            "测试会话解析到了真实库 backend/data/director_lab.db，已中止："
+            "测试会话解析到了真实库（backend/data 目录下的 director_lab.db），已中止："
             "请检查 DLAB_DATABASE_URL 是否被 .env 或代码覆盖"
         )
     if _TEST_DATA_ROOT.resolve() not in db_path.parents:
