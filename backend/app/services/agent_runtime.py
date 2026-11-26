@@ -588,6 +588,17 @@ def run_agent_loop(
         LoopEvent.GOAL_RESUMED.value if resumed else LoopEvent.GOAL_CREATED.value,
         {"goal_id": goal.goal_id, "description": goal.description},
     )
+    try:
+        from app.services.agent_events import publish_goal
+
+        publish_goal(
+            db,
+            goal,
+            "agent.goal.updated" if resumed else "agent.goal.created",
+        )
+        db.commit()
+    except Exception:  # noqa: BLE001 - 事件旁路失败不影响主流程
+        pass
 
     try:
         return _run_agent_loop_locked(
@@ -686,6 +697,12 @@ def _run_agent_loop_locked(
         return result
 
     result.plan_id = plan.plan_id
+    try:
+        from app.services.agent_events import publish_plan_created
+
+        publish_plan_created(db, goal, plan)
+    except Exception:  # noqa: BLE001 - 事件旁路失败不影响主流程
+        pass
     db.commit()  # A1：Plan 与其步骤落库后再执行
     _emit(
         LoopEvent.PLAN_GENERATED.value,
@@ -1381,9 +1398,15 @@ def _tick_locked(
         db.flush()
         return result
 
+    from app.services.agent_events import publish_step, publish_tick_finished
+    from app.services.planner import get_plan_steps as _get_steps
+
     result.plan_id = plan.plan_id
     _resume_marked_steps(db, goal)
     db.flush()
+
+    # B2：状态确实变化才发 agent.step.updated（执行前快照，执行后比对）
+    status_before = {s["id"]: s["status"] for s in _get_steps(db, plan.plan_id)}
 
     loop_result = _execute_plan_loop(
         db,
@@ -1458,6 +1481,17 @@ def _tick_locked(
     result.waiting = waiting
     result.failed = failed_items
     result.counts = counts
+
+    for s in steps:
+        before = status_before.get(s["id"])
+        if before != s["status"]:
+            from app.models.agent import AgentPlanStep
+
+            row = db.get(AgentPlanStep, s["id"])
+            if row is not None:
+                publish_step(db, goal, row)
+
+    publish_tick_finished(db, goal, result)
     db.flush()
     return result
 
