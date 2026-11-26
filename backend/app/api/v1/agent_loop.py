@@ -26,20 +26,8 @@ logger = logging.getLogger("director-lab.agent-loop")
 
 router = APIRouter(prefix="/api/agent/loop", tags=["agent-loop"])
 
-# 终止事件集合：收到即结束 SSE 流
-TERMINAL_EVENTS = frozenset(
-    {
-        "completed",
-        "failed",
-        "blocked",
-        "waiting",
-        "waiting_approval",
-        "waiting_job",
-        "waiting_user",
-        "paused",
-        "cancelled",
-    }
-)
+# 终止事件集合：统一引用 Runtime 的 LoopEvent 常量，避免两处手写字符串漂移
+from app.services.agent_runtime import TERMINAL_EVENTS  # noqa: E402
 
 
 class AgentLoopRunRequest(BaseModel):

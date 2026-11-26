@@ -44,6 +44,45 @@ from app.services.context_resolver import ContextSnapshot, snapshot
 from app.services.constraint_manager import ConstraintReport, check_constraints
 
 
+# ── 事件名（A3：集中定义，agent_loop 的终止集合引用这里） ──────────────
+
+class LoopEvent(str, Enum):
+    """Agent Loop 进度事件名。"""
+
+    GOAL_CREATED = "goal_created"
+    GOAL_RESUMED = "goal_resumed"
+    PLAN_GENERATED = "plan_generated"
+    STEP_STARTED = "step_started"
+    STEP_COMPLETED = "step_completed"
+    STEP_FAILED = "step_failed"
+    STEP_SKIPPED = "step_skipped"
+    STEP_WAITING = "step_waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    WAITING = "waiting"
+    WAITING_APPROVAL = "waiting_approval"
+    WAITING_JOB = "waiting_job"
+    WAITING_USER = "waiting_user"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+
+
+TERMINAL_EVENTS = frozenset(
+    {
+        LoopEvent.COMPLETED.value,
+        LoopEvent.FAILED.value,
+        LoopEvent.BLOCKED.value,
+        LoopEvent.WAITING.value,
+        LoopEvent.WAITING_APPROVAL.value,
+        LoopEvent.WAITING_JOB.value,
+        LoopEvent.WAITING_USER.value,
+        LoopEvent.PAUSED.value,
+        LoopEvent.CANCELLED.value,
+    }
+)
+
+
 # ── 枚举 ──────────────────────────────────────────────────────────────
 
 class LoopStatus(Enum):
@@ -357,6 +396,9 @@ def run_agent_loop(
     result = AgentLoopResult()
 
     # ── A. Goal 解析 ──
+    from app.services.goal_manager import get_active_goal as _get_active_goal
+
+    resumed = _get_active_goal(db, session_id) is not None
     goal = start_or_resume_goal(
         db,
         session_id=session_id,
@@ -368,6 +410,10 @@ def run_agent_loop(
     )
     result.goal_id = goal.goal_id
     db.commit()  # A1：Goal 创建/复用立即落库，后续崩溃不会丢目标
+    _emit(
+        LoopEvent.GOAL_RESUMED.value if resumed else LoopEvent.GOAL_CREATED.value,
+        {"goal_id": goal.goal_id, "description": goal.description},
+    )
 
     # 记录 Goal 创建/恢复日志
     log_execution(
@@ -433,6 +479,18 @@ def run_agent_loop(
 
     result.plan_id = plan.plan_id
     db.commit()  # A1：Plan 与其步骤落库后再执行
+    _emit(
+        LoopEvent.PLAN_GENERATED.value,
+        {
+            "goal_id": goal.goal_id,
+            "plan_id": plan.plan_id,
+            "revision": getattr(plan, "revision", 1),
+            "steps": [
+                {"step_key": st.step_key, "tool_name": st.tool_name, "description": st.description}
+                for st in plan.steps
+            ],
+        },
+    )
 
     # ── F. 执行循环 ──
     loop_result = _execute_plan_loop(
@@ -445,18 +503,9 @@ def run_agent_loop(
         progress_callback=progress_callback,
     )
 
-    # ── G. 汇总结果 ──
+    # ── G. 汇总结果（先写全字段，再发最终事件，A3/P0-4） ──
     result.status = loop_result["status"]
     result.message = loop_result["message"]
-    _emit(result.status, {
-        "goal_id": goal.goal_id,
-        "plan_id": plan.plan_id,
-        "status": result.status,
-        "message": result.message,
-        "completed": result.completed_steps,
-        "failed": result.failed_steps,
-        "total": result.total_steps,
-    })
     result.total_steps = loop_result["total_steps"]
     result.completed_steps = loop_result["completed_steps"]
     result.failed_steps = loop_result["failed_steps"]
@@ -464,6 +513,7 @@ def run_agent_loop(
     result.next_action = loop_result["next_action"]
     result.wait_step_id = loop_result.get("wait_step_id")
     result.errors = loop_result["errors"]
+    _emit(result.status, result.to_dict())
 
     # 记录 Loop 完成日志
     log_execution(
@@ -694,6 +744,10 @@ def _run_plan_loop(
             # 2b. 审批等待
             if exec_result.get("policy") == "REQUIRE_CONFIRMATION":
                 db.commit()  # waiting_approval 状态必须持久化
+                _emit(
+                    LoopEvent.STEP_WAITING.value,
+                    {"step_id": step_id, "tool_name": tool_name, "waiting": "approval"},
+                )
                 return {
                     "status": "waiting_approval",
                     "message": f"步骤 '{tool_name}' 需要人工审批",
@@ -735,6 +789,10 @@ def _run_plan_loop(
             if decision.action == ReplanAction.RETRY:
                 skipped += 1
                 db.commit()  # 重试计数与状态重置需落库
+                _emit(
+                    LoopEvent.STEP_SKIPPED.value,
+                    {"step_id": step_id, "tool_name": tool_name, "reason": "retry"},
+                )
                 continue  # 步骤已重置为 pending，下次循环重试
 
             elif decision.action == ReplanAction.REPLAN:
@@ -746,6 +804,10 @@ def _run_plan_loop(
 
             elif decision.action == ReplanAction.WAIT:
                 db.commit()
+                _emit(
+                    LoopEvent.STEP_WAITING.value,
+                    {"step_id": step_id, "tool_name": tool_name, "waiting": "job", "reason": decision.reason},
+                )
                 return {
                     "status": "waiting_job",
                     "message": decision.reason,
@@ -761,6 +823,10 @@ def _run_plan_loop(
             elif decision.action == ReplanAction.SKIP:
                 skipped += 1
                 db.commit()
+                _emit(
+                    LoopEvent.STEP_SKIPPED.value,
+                    {"step_id": step_id, "tool_name": tool_name, "reason": decision.reason},
+                )
                 continue
 
             else:  # FAIL / CANCEL
