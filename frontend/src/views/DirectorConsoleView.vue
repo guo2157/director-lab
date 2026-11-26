@@ -24,7 +24,7 @@ import {
   restoreSession,
   updateSession,
 } from '@/api/agent'
-import type { AgentApproval, AgentMessage, AgentSession, ReviewCard } from '@/api/agent'
+import type { AgentApproval, AgentAttachment, AgentMessage, AgentSession, ReviewCard } from '@/api/agent'
 import { getProjectStyleConfig, getStyleOptions } from '@/api/projects'
 import type { StyleConfig, StyleOptions } from '@/types/project'
 import { useTaskEvents } from '@/composables/useTaskEvents'
@@ -180,12 +180,37 @@ watch(
   },
   { deep: true },
 )
+/**
+ * 生成结果回写：后端在生成任务终态时把产出图片写成一条会话消息，
+ * 因此收到任务终态事件后需重新拉取消息，气泡里才会出现结果图。
+ */
+const settledTaskIds = new Set<string>()
+watch(
+  taskSnapshots,
+  (snaps) => {
+    let needReload = false
+    for (const [tid, snap] of Object.entries(snaps)) {
+      // 仅响应真实事件：registerCard 的初始卡片没有 lastEvent，避免加载历史时重复拉取
+      if (!snap?.lastEvent) continue
+      if (!['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) continue
+      if (settledTaskIds.has(tid)) continue
+      settledTaskIds.add(tid)
+      needReload = true
+    }
+    if (needReload && activeSessionId.value && !sending.value) {
+      void loadMessages(activeSessionId.value)
+    }
+  },
+  { deep: true },
+)
 onMounted(() => {
   connectTaskEvents()
   void loadArchivedSessions()
 })
 
 const inputText = ref('')
+/** 本轮待发送的参考图（多图参考生图 / 生视频），发送成功后清空 */
+const attachments = ref<AgentAttachment[]>([])
 const sending = ref(false)
 const scrollEl = ref<HTMLElement | null>(null)
 /** 用户是否在底部附近：仅在底部时才自动跟随新消息，尊重浏览历史位置 */
@@ -227,6 +252,8 @@ function retryMessages() {
 watch(activeSessionId, (id) => {
   messages.value = []
   messagesError.value = ''
+  // 参考图按会话隔离存储，切换会话后旧的引用不可用
+  attachments.value = []
   if (id) void loadMessages(id)
 })
 
@@ -254,17 +281,23 @@ function stopThinking() {
 
 async function send() {
   const content = inputText.value.trim()
-  if (!content || !activeSessionId.value || sending.value) return
+  const sessionId = activeSessionId.value
+  // 纯参考图也可以发送（多图参考生图 / 生视频不要求文字描述）
+  const sentAttachments = attachments.value
+  if ((!content && sentAttachments.length === 0) || !sessionId || sending.value) return
   sending.value = true
   inputText.value = ''
+  attachments.value = []
   // 乐观更新：用户消息立即上屏，等待期间展示思考过程，消除阻塞感
   const optimisticId = `local-${Date.now()}`
   messages.value.push({
     id: optimisticId,
-    session_id: activeSessionId.value,
+    session_id: sessionId,
     role: 'user',
     content,
-    payload: null,
+    payload: sentAttachments.length
+      ? { attachments: sentAttachments.map((a) => ({ ...a })) }
+      : null,
     attachment_id: null,
     seq: -1,
     created_at: new Date().toISOString(),
@@ -275,7 +308,11 @@ async function send() {
     const chatRes = await post<{
       user_message: AgentMessage
       assistant_message: AgentMessage
-    }>(`/agent/sessions/${activeSessionId.value}/chat`, { content })
+    }>(`/agent/sessions/${sessionId}/chat`, {
+      content,
+      // 只回传服务端需要的引用，文件已通过 /attachments 落盘
+      attachments: sentAttachments.map((a) => ({ id: a.id, name: a.name })),
+    })
     stopThinking()
     // 用服务端消息替换乐观消息；思考气泡由最终回复无缝接管
     const optimisticIdx = messages.value.findIndex((m) => m.id === optimisticId)
@@ -296,12 +333,12 @@ async function send() {
 
     scrollToBottom(true)
     // 首条消息后自动命名：标题仍为默认『新会话』时，用用户消息摘要命名
-    const cur = sessions.value.find((s) => s.id === activeSessionId.value)
-    if (cur && (cur.title === '新会话' || !cur.title.trim())) {
+    const cur = sessions.value.find((s) => s.id === sessionId)
+    if (cur && content && (cur.title === '新会话' || !cur.title.trim())) {
       const firstLine = content.split('\n').map((l) => l.trim()).find((l) => l) ?? '新会话'
       const autoTitle = firstLine.length > 20 ? `${firstLine.slice(0, 20)}…` : firstLine
       try {
-        const updated = await updateSession(activeSessionId.value, { title: autoTitle })
+        const updated = await updateSession(sessionId, { title: autoTitle })
         cur.title = updated.title
       } catch {
         // 命名失败不影响聊天流程
@@ -321,6 +358,8 @@ async function send() {
       message.error(`发送失败: ${e instanceof Error ? e.message : String(e)}`)
     }
     inputText.value = content
+    // 参考图文件已落盘，恢复引用即可让用户重试，无需重新上传
+    attachments.value = sentAttachments
   } finally {
     sending.value = false
   }
@@ -631,6 +670,8 @@ onMounted(() => {
 
         <ChatComposer
           v-model="inputText"
+          v-model:attachments="attachments"
+          :session-id="activeSessionId"
           :disabled="!activeSessionId || sending"
           :loading="sending"
           @send="send"

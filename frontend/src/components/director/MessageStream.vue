@@ -7,10 +7,10 @@
  */
 import { ref } from 'vue'
 import { NIcon, NImage } from 'naive-ui'
-import { PlayCircleOutline } from '@vicons/ionicons5'
+import { PlayCircleOutline, DownloadOutline } from '@vicons/ionicons5'
 import TaskCard from '@/components/TaskCard.vue'
 import SearchRunCard from './SearchRunCard.vue'
-import type { AgentMessage } from '@/api/agent'
+import { agentAttachmentSrc, type AgentAttachment, type AgentMessage } from '@/api/agent'
 import type { TaskCardData, TaskEvent } from '@/api/tasks'
 import {
   assetRefsOf,
@@ -41,6 +41,21 @@ function visibleAssetRefs(m: AgentMessage) {
   return assetRefsOf(m).filter((a) => !failedAssetIds.value.has(a.asset_id))
 }
 
+/** 原图下载地址：download=true 让后端带 Content-Disposition，按资产名保存 */
+function downloadUrl(assetId: string): string {
+  return `/api/assets/${assetId}/file?download=true`
+}
+
+/** 用户消息附带的参考图（payload.attachments；历史消息中文件可能已被清理） */
+function userAttachments(m: AgentMessage): AgentAttachment[] {
+  const list = (m.payload as { attachments?: unknown } | null)?.attachments
+  if (!Array.isArray(list)) return []
+  return list.filter(
+    (a): a is AgentAttachment =>
+      !!a && typeof a === 'object' && typeof (a as AgentAttachment).url === 'string',
+  )
+}
+
 function roleLabel(role: string): string {
   if (role === 'user') return '我'
   if (role === 'assistant') return '导演台助手'
@@ -63,7 +78,34 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
     <div v-for="m in messages" :key="m.id" class="message-row" :class="m.role">
       <div class="message-bubble">
         <div class="message-role">{{ roleLabel(m.role) }}</div>
-        <div class="message-content">{{ m.content }}</div>
+        <div v-if="m.content" class="message-content">{{ m.content }}</div>
+
+        <!-- 用户消息附带的参考图（多图参考生图 / 生视频）：仅展示，点击在新标签打开原图 -->
+        <div
+          v-if="m.role === 'user' && userAttachments(m).length"
+          class="attach-thumbs"
+          aria-label="消息附带的参考图"
+        >
+          <a
+            v-for="(a, i) in userAttachments(m)"
+            :key="a.id"
+            class="attach-thumb"
+            :href="agentAttachmentSrc(a.url)"
+            target="_blank"
+            rel="noopener"
+            :title="a.name || `参考图 ${i + 1}`"
+          >
+            <img
+              v-if="!failedAssetIds.has(a.id)"
+              :src="agentAttachmentSrc(a.url)"
+              :alt="a.name || `参考图 ${i + 1}`"
+              loading="lazy"
+              @error="onThumbError(a.id)"
+            />
+            <span v-else class="attach-thumb-broken">已失效</span>
+            <span class="attach-thumb-index">{{ i + 1 }}</span>
+          </a>
+        </div>
 
         <div v-if="m.role === 'assistant' && visibleAssetRefs(m).length" class="asset-thumbs">
           <template v-for="a in visibleAssetRefs(m)" :key="a.asset_id">
@@ -84,6 +126,16 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
                 @error="onThumbError(a.asset_id)"
               />
               <span class="asset-thumb-label">{{ a.asset_type }}</span>
+              <a
+                class="asset-thumb-download"
+                :href="downloadUrl(a.asset_id)"
+                :download="a.name || a.asset_id"
+                title="下载原图"
+                aria-label="下载原图"
+                @click.stop
+              >
+                <n-icon :component="DownloadOutline" :size="14" />
+              </a>
             </div>
             <a
               v-else
@@ -306,6 +358,32 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
   text-align: center;
 }
 
+.asset-thumb-download {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: var(--text-primary);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.asset-thumb:hover .asset-thumb-download,
+.asset-thumb-download:focus-visible {
+  opacity: 1;
+}
+
+.asset-thumb-download:hover {
+  color: var(--brand-hover);
+}
+
 .asset-thumb-link {
   display: flex;
   align-items: center;
@@ -325,6 +403,57 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
 }
 
 /* 联网搜索执行卡片（agent web_search payload.search）：见 SearchRunCard */
+
+/* 用户消息参考图缩略图（payload.attachments） */
+.attach-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.attach-thumb {
+  position: relative;
+  display: block;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background: var(--media-backdrop);
+}
+
+.attach-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attach-thumb-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.attach-thumb-index {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--scrim);
+  color: var(--text-primary);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
 
 @media (max-width: 768px) {
   .message-list {

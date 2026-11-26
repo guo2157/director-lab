@@ -484,3 +484,73 @@ def test_e2e_repeat_request_reuses_confirmation(client, project_env):
     a2 = (resp2["assistant_message"].get("payload") or {}).get("approval") or {}
     assert a1.get("ok") and a2.get("ok")
     assert a1["confirmation_id"] == a2["confirmation_id"]
+
+
+def test_e2e_quick_generate_creates_real_job_and_result_message(client):
+    """无项目的『生成一张小狗的图片』：真实创建生成任务，完成后回写图片到会话气泡。"""
+    import app.core.database as db_mod
+    from app.models import AgentSession, Job, Project, Workflow, ids
+    from app.models.agent import AgentMessage
+    from app.models.task import Task
+    from app.services import task_orchestrator as to
+
+    db = db_mod.SessionLocal()
+    db.add(
+        Workflow(
+            id=ids.workflow_id(),
+            name="随手文生图",
+            workflow_type="image",
+            version=1,
+            definition={},
+            status="published",
+            is_builtin=True,
+            capabilities={"generation_modes": ["text_to_image"], "reference_slots": []},
+        )
+    )
+    db.commit()
+    db.close()
+
+    sid = _make_session(client)
+    resp = _chat(client, sid, "生成一张小狗的图片")
+    approval = (resp["assistant_message"].get("payload") or {}).get("approval") or {}
+    assert approval.get("quick_generate") is True, resp["assistant_message"]["content"]
+    assert "完成后图片会直接出现在这条对话里" in resp["assistant_message"]["content"]
+
+    db = db_mod.SessionLocal()
+    job = db.get(Job, approval["job_id"])
+    assert job is not None and job.status == "queued"
+    assert job.params["__quick_generate__"] is True
+    assert job.params["prompt"] == "生成一张小狗的图片"
+    assert job.shot_id is None
+    project = db.get(Project, job.project_id)
+    assert project.name == "随手生成"
+    task = (
+        db.query(Task)
+        .filter(Task.session_id == sid, Task.task_type == "generate")
+        .one()
+    )
+
+    # 模拟 worker 完成：桥接回写结果图片，气泡据此渲染缩略图
+    to.bridge_job_event(
+        db,
+        job_id=job.id,
+        event_type="job.finished",
+        payload={
+            "status": "succeeded",
+            "result": {
+                "assets": [
+                    {"asset_id": "ast_quick", "asset_type": "keyframe", "out_name": "quick.png"}
+                ],
+            },
+        },
+    )
+    assert db.get(Task, task.id).status == "completed"
+    msg = (
+        db.query(AgentMessage)
+        .filter(AgentMessage.session_id == sid, AgentMessage.role == "assistant")
+        .order_by(AgentMessage.seq.desc())
+        .first()
+    )
+    assert msg.payload["asset_refs"][0]["asset_id"] == "ast_quick"
+    assert db.get(AgentSession, sid) is not None
+    db.close()

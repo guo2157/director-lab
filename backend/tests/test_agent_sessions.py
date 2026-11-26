@@ -263,3 +263,75 @@ def test_chat_asset_refs_gated_by_keywords(client: TestClient, monkeypatch):
     # tool_event 不进入对话上下文（仅 user/assistant 参与）
     roles = {m["role"] for m in msgs}
     assert "tool_event" in roles
+
+
+def test_chat_attachments_upload_and_reference(client: TestClient, monkeypatch, tmp_path):
+    """多图参考：上传 → 读取 → 挂到用户消息 → 注入 LLM 上下文；非法输入拒绝。"""
+    import app.api.v1.agent as agent_mod
+    from types import SimpleNamespace
+
+    # 附件落盘到临时目录，避免污染真实 media_dir
+    monkeypatch.setattr(
+        agent_mod, "get_settings", lambda: SimpleNamespace(media_dir=str(tmp_path / "media"))
+    )
+    captured: dict = {}
+
+    def fake_chat_messages(self, messages, *, json_mode=False, max_tokens=None):
+        captured["messages"] = messages
+        return "收到参考图"
+
+    monkeypatch.setattr(agent_mod.LLMClient, "chat_messages", fake_chat_messages)
+
+    sid = client.post("/api/agent/sessions", json={"title": "多图参考"}).json()["id"]
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+    r = client.post(
+        f"/api/agent/sessions/{sid}/attachments",
+        files=[
+            ("files", ("a.png", png, "image/png")),
+            ("files", ("b.jpg", png, "image/jpeg")),
+        ],
+    )
+    assert r.status_code == 201, r.text
+    items = r.json()["items"]
+    assert [it["name"] for it in items] == ["a.png", "b.jpg"]
+    assert all(it["url"].startswith(f"/api/agent/sessions/{sid}/attachments/") for it in items)
+
+    # 文件可读取且内容一致
+    r = client.get(items[0]["url"])
+    assert r.status_code == 200
+    assert r.content == png
+
+    # 聊天：附件元数据落到用户消息 payload，并注入本轮 LLM 上下文
+    refs = [{"id": it["id"], "name": it["name"]} for it in items]
+    r = client.post(f"/api/agent/sessions/{sid}/chat", json={"content": "你好", "attachments": refs})
+    assert r.status_code == 200, r.text
+    stored = r.json()["user_message"]["payload"]["attachments"]
+    assert [a["name"] for a in stored] == ["a.png", "b.jpg"]
+    assert all(a["url"] and a["size"] > 0 for a in stored)
+
+    last_user = [m for m in captured["messages"] if m["role"] == "user"][-1]
+    assert "a.png" in last_user["content"] and "b.jpg" in last_user["content"]
+    assert "不要虚构图片内容" in last_user["content"]
+
+    # 纯图片消息（content 为空）允许发送
+    r = client.post(
+        f"/api/agent/sessions/{sid}/chat", json={"content": "", "attachments": refs[:1]}
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["user_message"]["payload"]["attachments"]) == 1
+
+    # 非图片扩展名拒绝
+    r = client.post(
+        f"/api/agent/sessions/{sid}/attachments",
+        files=[("files", ("x.txt", b"hi", "text/plain"))],
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "invalid_attachment"
+
+    # 伪造附件标识（路径穿越）在 chat 阶段被拒绝
+    r = client.post(
+        f"/api/agent/sessions/{sid}/chat",
+        json={"content": "hi", "attachments": [{"id": "../../etc/passwd", "name": "x"}]},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "invalid_attachment"

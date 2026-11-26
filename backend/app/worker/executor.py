@@ -1171,10 +1171,13 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
         # 仍提交 ComfyUI。实体资产图（定妆/基准/锚定图）自身不适用该门禁。
         if job.job_type == "generate_keyframe":
             _params_peek = dict(job.params or {})
-            _is_entity_asset = any(
-                k in _params_peek for k in ("__character_id__", "__scene_id__", "__prop_id__")
+            # 实体资产图（定妆/基准/锚定图）与对话内随手生成（无镜头、无项目分镜上下文）
+            # 自身不适用资产就绪门禁
+            _skip_assets_gate = any(
+                k in _params_peek
+                for k in ("__character_id__", "__scene_id__", "__prop_id__", "__quick_generate__")
             )
-            if not _is_entity_asset:
+            if not _skip_assets_gate:
                 from app.services.assets_gate import evaluate_assets_gate
 
                 _gate = evaluate_assets_gate(db, job.project_id)

@@ -7,12 +7,18 @@
 - 消息列表按 seq 升序分页，支持 after_seq 增量加载
 - 归档会话只读：追加消息返回 409 session_archived
 """
+import mimetypes
+import re
 from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query, Response
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import AgentConfirmation, AgentMessage, AgentSession, AgentTask, Project
 from app.models.ids import agent_message_id, agent_session_id
@@ -567,6 +573,180 @@ def _try_create_generate_approval(
     return reply, {"ok": True, **data}
 
 
+# ── 对话内随手生成（文生图 / 图生图） ──
+# 用户直接说「生成一张小狗的图片」或只上传参考图时，不落审批、不要求先建项目，
+# 直接创建真实生成任务；结果由任务桥接回写为会话消息，在气泡内展示图片。
+_QUICK_VIDEO_RE = re.compile(r"(视频|短片|片段|动画|音频|配音|音乐)")
+# 管线语义（分镜/资产/合成/解析）不能当随手生成，必须走原审批或流程链路
+_QUICK_PIPELINE_RE = re.compile(
+    r"(镜头|分镜|第\s*\d+\s*镜|定妆|基准图|锚定图|资产|合成|导出|解析)"
+)
+_QUICK_IMAGE_RE = re.compile(r"(图片|图像|画面|插画|海报|壁纸|头像|出图|画一张|画一幅)")
+_QUICK_PROJECT_NAME = "随手生成"
+
+
+def _wants_quick_generation(text: str, has_refs: bool) -> bool:
+    """判断是否为『直接出图』请求（排除视频与分镜/资产等管线语义）。"""
+    t = (text or "").strip()
+    if _QUICK_VIDEO_RE.search(t) or _QUICK_PIPELINE_RE.search(t):
+        return False
+    if not t:
+        # 只上传参考图、无文字：按图生图处理
+        return bool(has_refs)
+    if has_refs:
+        return True
+    return bool(_QUICK_IMAGE_RE.search(t))
+
+
+def _pick_quick_workflow(db: Session, *, need_reference: bool):
+    """挑选随手生成用的图片工作流：有参考图选图生图，否则选纯文生图。"""
+    from app.models import Workflow
+    from app.services.workflow.capabilities import declared_reference_slots
+
+    mode = "image_to_image" if need_reference else "text_to_image"
+    candidates = (
+        db.query(Workflow)
+        .filter(Workflow.workflow_type == "image", Workflow.status == "published")
+        .order_by(
+            Workflow.is_default.desc(),
+            Workflow.is_builtin.desc(),
+            Workflow.created_at.asc(),
+        )
+        .all()
+    )
+    for wf in candidates:
+        caps = wf.capabilities or {}
+        if mode not in (caps.get("generation_modes") or []):
+            continue
+        has_slots = bool(declared_reference_slots(caps))
+        # 文生图必须无参考槽位：槽位全空会被执行器判为缺少参考图并阻断提交
+        if need_reference == has_slots:
+            return wf
+    return None
+
+
+def _quick_reference_slots(caps: dict | None, count: int) -> list[str]:
+    """按工作流声明的槽位顺序取前 count 个参考图槽位。"""
+    from app.services.workflow.capabilities import declared_reference_slots
+
+    names: list[str] = []
+    for item in declared_reference_slots(caps):
+        name = item.get("param") if isinstance(item, dict) else item
+        if name:
+            names.append(name)
+    return names[:count]
+
+
+def _ensure_quick_project(db: Session) -> Project:
+    """随手生成草稿项目：产物统一落到这个项目的资产库，便于后续转正。"""
+    from app.models import ids
+
+    project = (
+        db.query(Project)
+        .filter(Project.name == _QUICK_PROJECT_NAME, Project.deleted_at.is_(None))
+        .order_by(Project.created_at.asc())
+        .first()
+    )
+    if project is not None:
+        return project
+    now = datetime.now()
+    project = Project(
+        id=ids.project_id(),
+        name=_QUICK_PROJECT_NAME,
+        creation_type="manual",
+        aspect_ratio="9:16",
+        status="draft",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(project)
+    db.flush()
+    return project
+
+
+def _try_quick_generate(
+    db: Session,
+    session_id: str,
+    text: str,
+    attachments: list[dict],
+    unified_task=None,
+) -> dict | None:
+    """对话内随手生成：真实创建生成任务（文生图 / 图生图），结果回写气泡。
+
+    返回 {"reply", "job_id", "task"}；未命中随手生成（或缺少可用工作流）时返回 None，
+    由调用方回落到原有审批/主对话链路。
+    """
+    from app.models import Job, ids
+    from app.services import task_orchestrator
+
+    has_refs = bool(attachments)
+    if not _wants_quick_generation(text, has_refs):
+        return None
+    workflow = _pick_quick_workflow(db, need_reference=has_refs)
+    if workflow is None:
+        return None
+
+    media: dict[str, str] = {}
+    if has_refs:
+        root = _attachment_root(session_id)
+        slots = _quick_reference_slots(workflow.capabilities, len(attachments))
+        for slot, item in zip(slots, attachments):
+            path = root / item["id"]
+            if path.is_file():
+                media[slot] = str(path)
+        if not media:
+            return None
+
+    prompt = (text or "").strip() or "以参考图为主体，保持主体一致，生成一张高质量图片"
+    project = _ensure_quick_project(db)
+    job = Job(
+        id=ids.job_id(),
+        project_id=project.id,
+        shot_id=None,
+        job_type="generate_keyframe",
+        workflow_id=workflow.id,
+        workflow_version=workflow.version,
+        params={
+            "__quick_generate__": True,
+            "prompt": prompt,
+            **({"__media__": media} if media else {}),
+        },
+        status="queued",
+        created_at=datetime.now(),
+    )
+    db.add(job)
+    db.flush()
+
+    title = f"生成：{prompt[:30]}"
+    if unified_task is None:
+        unified_task = task_orchestrator.create_task(
+            db,
+            session_id=session_id,
+            task_type="generate",
+            title=title,
+            project_id=project.id,
+        )
+    else:
+        # 复用本轮统一任务，改挂到生成类型：任务桥接只认 task_type=generate
+        unified_task.task_type = "generate"
+        unified_task.title = title[:200]
+        unified_task.project_id = project.id
+    task_orchestrator.add_stage(
+        db,
+        unified_task,
+        stage_key="generate_keyframe",
+        stage_name="分镜图生成",
+        job_id=job.id,
+    )
+    mode_text = "图生图" if media else "文生图"
+    reply = (
+        f"已提交{mode_text}任务（提示词：{prompt[:60]}），任务 {job.id} 已入队。"
+        "完成后图片会直接出现在这条对话里，并保存到草稿项目"
+        f"「{_QUICK_PROJECT_NAME}」的资产库。"
+    )
+    return {"reply": reply, "job_id": job.id, "task": unified_task}
+
+
 def _resolve_regen_target(db: Session, project_id: str, text: str) -> tuple[dict, str | None]:
     """从消息中解析返工操作的目标（资产 ast_ / 镜头 sht_ 或『第 N 镜』）。
 
@@ -957,10 +1137,73 @@ def _handle_pipeline_action(
     return reply, {"ok": True, "tool": action, **{k: v for k, v in data.items() if k != "pipeline_node"}}
 
 
-class ChatRequest(BaseModel):
-    """聊天请求：用户输入文本。"""
+class ChatAttachment(BaseModel):
+    """聊天附件引用：id 为上传接口返回的文件标识，name 仅用于展示。"""
 
-    content: str = Field(min_length=1, max_length=50_000)
+    id: str = Field(min_length=1, max_length=80)
+    name: str = Field(default="", max_length=120)
+
+
+class ChatRequest(BaseModel):
+    """聊天请求：用户输入文本 + 可选参考图（多图参考生图 / 生视频）。"""
+
+    content: str = Field(default="", max_length=50_000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=9)
+
+    @model_validator(mode="after")
+    def _require_content_or_attachments(self):
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content 与 attachments 至少提供一项")
+        return self
+
+
+# 聊天参考图：单次最多 9 张（对应 H3 的 ref_image_0..8），单张 ≤20MB，仅常见图片格式
+_ATTACH_MAX_FILES = 9
+_ATTACH_MAX_BYTES = 20 * 1024 * 1024
+_ATTACH_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_ATTACH_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(?:png|jpe?g|webp|gif)$")
+
+
+def _attachment_root(session_id: str) -> Path:
+    """会话附件目录（只计算路径，不建目录，供读取接口使用）。"""
+    return Path(get_settings().media_dir) / "agent_attachments" / session_id
+
+
+def _attachment_url(session_id: str, file_name: str) -> str:
+    return f"/api/agent/sessions/{session_id}/attachments/{file_name}"
+
+
+def _resolve_attachments(session_id: str, refs: list[ChatAttachment]) -> list[dict]:
+    """校验前端回传的附件标识确实存在，并补齐 name/size/mime/url。"""
+    root = _attachment_root(session_id)
+    out: list[dict] = []
+    for ref in refs:
+        if not _ATTACH_NAME_RE.match(ref.id):
+            raise biz_error(code="invalid_attachment", http=422, message=f"附件标识无效：{ref.id}")
+        path = root / ref.id
+        if not path.is_file():
+            raise biz_error(code="attachment_not_found", http=422, message=f"附件不存在或已过期：{ref.id}")
+        out.append(
+            {
+                "id": ref.id,
+                "name": (ref.name or ref.id)[:120],
+                "url": _attachment_url(session_id, ref.id),
+                "size": path.stat().st_size,
+                "mime": mimetypes.guess_type(ref.id)[0] or "application/octet-stream",
+            }
+        )
+    return out
+
+
+def _attachment_context(attachments: list[dict]) -> str:
+    """把本轮附件写进 LLM 上下文（只描述引用，不伪造图片内容）。"""
+    lines = [
+        "【本轮用户附带的参考图（按上传顺序，可作为多图参考生图/生视频的参考素材）】",
+    ]
+    for idx, item in enumerate(attachments, 1):
+        lines.append(f"{idx}. {item['name']} → {item['url']}")
+    lines.append("你无法直接查看图片像素内容，只能按序号/名称引用这些参考图，不要虚构图片内容。")
+    return "\n".join(lines)
 
 
 def _open_script_review(
@@ -1453,6 +1696,79 @@ def _handle_pending_confirmation(
     )
 
 
+@router.post("/{session_id}/attachments", status_code=201)
+async def upload_attachments(
+    session_id: str,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    """上传聊天参考图（多图参考生图/生视频）：单次最多 9 张、单张 ≤20MB。
+
+    文件按会话隔离存到 `media_dir/agent_attachments/{session_id}/`，
+    返回的 id 在 chat 请求的 `attachments` 里回传即可挂到用户消息上。
+    """
+    s = _get_session(db, session_id)
+    if s.status == "archived":
+        raise biz_error(code="session_archived", http=409, message="会话已归档，不能上传附件")
+    if not files:
+        raise biz_error(code="invalid_request", http=422, message="请选择要上传的图片")
+    if len(files) > _ATTACH_MAX_FILES:
+        raise biz_error(
+            code="invalid_request",
+            http=422,
+            message=f"单次最多上传 {_ATTACH_MAX_FILES} 张参考图",
+        )
+
+    root = _attachment_root(session_id)
+    root.mkdir(parents=True, exist_ok=True)
+    items: list[dict] = []
+    for upload in files:
+        original = Path(upload.filename or "").name
+        suffix = Path(original).suffix.lower()
+        if suffix not in _ATTACH_EXTS:
+            raise biz_error(
+                code="invalid_attachment",
+                http=422,
+                message=f"仅支持 PNG/JPG/WEBP/GIF 图片：{original or '未命名文件'}",
+            )
+        data = await upload.read()
+        if not data:
+            raise biz_error(code="invalid_attachment", http=422, message=f"文件为空：{original}")
+        if len(data) > _ATTACH_MAX_BYTES:
+            raise biz_error(
+                code="invalid_attachment",
+                http=422,
+                message=f"单张图片不能超过 20MB：{original}",
+            )
+        file_name = f"{uuid4().hex}{suffix}"
+        (root / file_name).write_bytes(data)
+        items.append(
+            {
+                "id": file_name,
+                "name": original or file_name,
+                "url": _attachment_url(session_id, file_name),
+                "size": len(data),
+                "mime": mimetypes.guess_type(file_name)[0] or "application/octet-stream",
+            }
+        )
+    return {"items": items}
+
+
+@router.get("/{session_id}/attachments/{file_name}")
+def get_attachment(session_id: str, file_name: str, db: Session = Depends(get_db)) -> FileResponse:
+    """读取聊天参考图（仅允许本会话上传目录内的图片文件）。"""
+    _get_session(db, session_id)
+    if not _ATTACH_NAME_RE.match(file_name):
+        raise biz_error(code="attachment_not_found", http=404, message="附件不存在")
+    path = _attachment_root(session_id) / file_name
+    if not path.is_file():
+        raise biz_error(code="attachment_not_found", http=404, message="附件不存在")
+    return FileResponse(
+        path,
+        media_type=mimetypes.guess_type(file_name)[0] or "application/octet-stream",
+    )
+
+
 @router.post("/{session_id}/chat")
 def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -> dict:
     """导演台聊天：用户消息持久化 → LLM 多轮对话 → 助手回复持久化。
@@ -1466,6 +1782,9 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     s = _get_session(db, session_id)
     if s.status == "archived":
         raise biz_error(code="session_archived", http=409, message="会话已归档，不能发送消息")
+
+    # 0. 解析本轮参考图（多图参考生图/生视频）；只校验已上传的附件，不在此处落盘
+    attachments = _resolve_attachments(session_id, payload.attachments)
 
     # 1. 持久化用户消息（seq 并发冲突重试：并发 chat 撞 (session_id, seq) 唯一索引时
     # 回滚并重新计算 max_seq，最多 3 次，避免直接 500）
@@ -1482,6 +1801,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             session_id=session_id,
             role="user",
             content=payload.content,
+            payload={"attachments": attachments} if attachments else None,
             seq=max_seq + 1,
             created_at=datetime.now(),
         )
@@ -1770,14 +2090,31 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # 结构化意图（B 档）：ambiguous 且带缺失信息时向用户澄清，不进入主对话（不虚构目标）
     if intent.intent == "ambiguous" and intent.missing_information:
         action = NextAction.CLARIFY
+    # 纯参考图消息（只上传图片、无文字）：按图生图直接出图，不要求用户再描述
+    if attachments and not payload.content.strip():
+        action = NextAction.GUIDE
     # 生成请求预解析：定位不到目标时不落固定文案，回落主对话由大模型结合上下文兜底
     guide_reply, guide_approval = None, None
+    quick_generation = False
     # 导航请求单独承载（Phase 1.5）：导航是意图层产物，不能混进 approval 字段
     nav_request: dict | None = None
     if action == NextAction.GUIDE:
-        guide_reply, guide_approval = _try_create_generate_approval(db, s, session_id, payload.content)
-        if guide_reply is None:
-            action = None  # 回落主对话：大模型上下文兜底（规则不兜底）
+        # 先尝试对话内随手生成（文生图/图生图）：真实建任务并回写结果图片，
+        # 避免「无项目/无镜头」时回落到大模型编造『已提交任务』
+        quick = _try_quick_generate(
+            db, session_id, payload.content, attachments, unified_task
+        )
+        if quick is not None:
+            guide_reply = quick["reply"]
+            guide_approval = {"ok": True, "quick_generate": True, "job_id": quick["job_id"]}
+            unified_task = quick["task"]
+            quick_generation = True
+        else:
+            guide_reply, guide_approval = _try_create_generate_approval(
+                db, s, session_id, payload.content
+            )
+            if guide_reply is None:
+                action = None  # 回落主对话：大模型上下文兜底（规则不兜底）
     if action in (NextAction.REJECT, NextAction.GUIDE, NextAction.CLARIFY, NextAction.PIPELINE):
         # unsafe：直接拒绝；generate_request：不执行生成，引导到对应页面（P0：生成不在 Agent 直接执行范围）；
         # pipeline：流程节点操作，经状态机门禁执行流程工具（高风险操作只建审批申请）；
@@ -1808,7 +2145,11 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             )
         # Parent Agent 任务状态流转（Phase 3）：本轮同步分支结束时按结果落终态
         if task is not None:
-            if action == NextAction.GUIDE and approval_info:
+            if quick_generation:
+                # 随手生成已入队：上层 AgentTask 完成（提交动作成功），
+                # 统一 Task 保持 queued/running，由 job 事件桥接闭环并回写结果图片
+                parent_agent.complete_task(db, task, "已提交生成任务，等待出图")
+            elif action == NextAction.GUIDE and approval_info:
                 # 生成请求落地为审批申请：成功则任务完成（后续由审批流接管），
                 # 提交失败则任务标 failed（摘要与事实一致，不虚报成功）
                 if approval_info.get("ok"):
@@ -2045,6 +2386,13 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     messages = [{"role": "system", "content": system_prompt}] + [
         {"role": m.role, "content": m.content} for m in history
     ]
+    # 本轮参考图注入最后一条 user 消息：仅影响本次 LLM 上下文，不改写已持久化的消息正文
+    if attachments:
+        block = _attachment_context(attachments)
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                msg["content"] = f"{msg['content']}\n\n{block}".strip()
+                break
 
     # 3. 调用 LLM（会话 model 覆盖默认；网络调用在数据库事务之外）
     # 瞬态错误指数退避重试（单 Agent 框架 P2-1）：unreachable/timeout/llm_error 最多 3 次；

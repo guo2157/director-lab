@@ -1,4 +1,4 @@
-import { del, get, patch, post } from './client'
+import { apiClient, apiUrl, del, get, patch, post } from './client'
 
 /** 导演台会话 */
 export interface AgentSession {
@@ -106,6 +106,48 @@ export function listMessages(
   params?: { after_seq?: number; page?: number; page_size?: number },
 ) {
   return get<MessageListResult>(`/agent/sessions/${sessionId}/messages`, params)
+}
+
+// ── 参考图附件（多图参考生图 / 多图参考生视频） ──
+
+/** 已上传的参考图（后端 /attachments 返回项） */
+export interface AgentAttachment {
+  id: string
+  /** 原始文件名（用于展示与提示，不参与路径拼接） */
+  name: string
+  /** 后端相对地址，如 /api/agent/sessions/<sid>/attachments/<file> */
+  url: string
+  size: number
+  mime: string
+}
+
+/** 单次最多上传 9 张（对应视频参考图槽位 $ref_image_0..8） */
+export const MAX_ATTACHMENTS = 9
+/** 单张上限 20MB，与后端校验一致 */
+export const MAX_ATTACHMENT_MB = 20
+
+/**
+ * 上传参考图到会话隔离目录。
+ * 必须显式声明 multipart/form-data，否则 axios 默认的 application/json 会让后端解析失败。
+ */
+export async function uploadAttachments(
+  sessionId: string,
+  files: File[],
+): Promise<AgentAttachment[]> {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  const res = await apiClient.post<{ items: AgentAttachment[] }>(
+    `/agent/sessions/${sessionId}/attachments`,
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000 },
+  )
+  return res.data.items
+}
+
+/** 把后端附件地址转成浏览器可加载地址（兼容子路径部署） */
+export function agentAttachmentSrc(url: string): string {
+  const path = url.startsWith('/api/') ? url.slice(4) : url
+  return apiUrl(path)
 }
 
 /** 待审批的生成申请 */
