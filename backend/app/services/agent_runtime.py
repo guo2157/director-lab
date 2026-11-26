@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -318,6 +319,7 @@ def run_agent_loop(
     constraints: dict | None = None,
     success_criteria: list | None = None,
     approved: bool = False,
+    progress_callback: Callable[[str, dict], None] | None = None,
 ) -> AgentLoopResult:
     """Agent Loop 完整编排入口。
 
@@ -331,7 +333,19 @@ def run_agent_loop(
     G. 目标终结
 
     返回 AgentLoopResult 供 Agent API 消费。
+
+    progress_callback(event_type, payload) 可选，用于 SSE 实时推送。
+    event_type: goal_created | plan_generated | step_started | step_completed |
+                step_failed | step_skipped | loop_completed | loop_failed |
+                waiting_approval | waiting_job | blocked
     """
+    def _emit(ev_type: str, payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(ev_type, payload)
+            except Exception:
+                pass  # 回调异常不影响主流程
+
     result = AgentLoopResult()
 
     # ── A. Goal 解析 ──
@@ -423,6 +437,15 @@ def run_agent_loop(
     # ── G. 汇总结果 ──
     result.status = loop_result["status"]
     result.message = loop_result["message"]
+    _emit(result.status, {
+        "goal_id": goal.goal_id,
+        "plan_id": plan.plan_id,
+        "status": result.status,
+        "message": result.message,
+        "completed": result.completed_steps,
+        "failed": result.failed_steps,
+        "total": result.total_steps,
+    })
     result.total_steps = loop_result["total_steps"]
     result.completed_steps = loop_result["completed_steps"]
     result.failed_steps = loop_result["failed_steps"]
@@ -498,6 +521,7 @@ def _execute_plan_loop(
     session_id: str,
     project_id: str | None = None,
     approved: bool = False,
+    progress_callback: Callable[[str, dict], None] | None = None,
 ) -> dict:
     """执行 Plan 步骤循环。
 
@@ -510,6 +534,13 @@ def _execute_plan_loop(
         ReplanAction,
         replan_from_verification,
     )
+
+    def _emit(ev_type: str, payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(ev_type, payload)
+            except Exception:
+                pass
 
     completed = 0
     failed = 0
@@ -569,6 +600,8 @@ def _execute_plan_loop(
             tool_name = step_info.get("tool_name", "")
 
             # 2a. 执行
+            _emit("step_started", {"step_id": step_id, "tool_name": tool_name,
+                   "description": step_info.get("description", "")})
             exec_result = execute_step(
                 db,
                 step_id=step_id,
@@ -604,6 +637,7 @@ def _execute_plan_loop(
 
             if verification.verified:
                 completed += 1
+                _emit("step_completed", {"step_id": step_id, "tool_name": tool_name})
                 continue
 
             # 2d. Replan
@@ -645,6 +679,8 @@ def _execute_plan_loop(
                 continue
 
             else:  # FAIL / CANCEL
+                _emit("step_failed", {"step_id": step_id, "tool_name": tool_name,
+                       "error": exec_result.get("error", "未知错误")})
                 failed += 1
                 errors.append({
                     "step_id": step_id,
