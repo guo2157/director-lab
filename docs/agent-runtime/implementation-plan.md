@@ -4,8 +4,8 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase A · 止血与正确性（已完成，等待 Phase B） |
-| 下一个任务 | Phase B · B0 迁移与事件白名单 |
+| 当前阶段 | Phase B · 最小可用版本（进行中：B0 完成） |
+| 下一个任务 | B1 抽出 tick（幂等单次推进） |
 | 最近提交 | A12b（本提交）、`57149be` 交接文档、`3cc9490` A11、`5e335b1` A10 |
 | 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（基线 1445 passed / 1 failed，2026-11-26） |
 | 更新时间 | 2026-11-26 19:10（Asia/Shanghai） |
@@ -72,7 +72,7 @@
 - 验收门禁：B10 端到端 MVP（7 个场景）
 - 任务说明：[plan/phase-b-agent-prompts.md](plan/phase-b-agent-prompts.md)
 
-- [ ] **B0** 迁移与事件白名单
+- [x] **B0** 迁移与事件白名单（`a1b2c3d4e5fb`）
 - [ ] **B1** 抽出 `tick`：幂等的单次推进
 - [ ] **B2** Agent 事件发布（给前端看的事实流）
 - [ ] **B3** Job 终态 → 恢复标记

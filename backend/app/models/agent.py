@@ -156,6 +156,13 @@ class AgentPlanStep(Base, TimestampMixin):
     # 执行锁持有者（A11）：条件 UPDATE 抢锁时写入，释放时校验，防止跨线程误释放
     lock_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
+    # ── Agent Runtime Phase B 扩展列 ──
+    # 恢复请求标志位（B0）：Job 终态 / 审批裁决 / 兜底扫描只打标记，
+    # 由 Worker 的 agent-resume 线程或下一次 tick 认领并清除；不再在写路径里同步调用 Runtime
+    resume_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    # 标记来源：job_terminal / approval_resolved / sweep / manual
+    resume_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
 
 class AgentConfirmation(Base, TimestampMixin):
     """确认事项记录：统一承载两类人工确认（B 档）。
@@ -280,6 +287,18 @@ class AgentGoal(Base, TimestampMixin):
     fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Goal 级执行锁（A11）：条件 UPDATE 设置 locked_until，防止同一 Goal 并发推进
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # ── Agent Runtime Phase B 扩展列 ──
+    # 对应的 AgentTask（用户级任务，承载意图快照与状态机）
+    agent_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # 对应的统一 Task（承载本 Goal 下所有 Job 阶段；一个 Goal ↔ 一个 AgentTask ↔ 一个 Task）
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # TickResult 推导的生命周期，供前端直接读取：
+    # planning / running / waiting_job / waiting_approval / waiting_user / paused /
+    # partially_completed / completed / failed / cancelled
+    lifecycle_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 最近一次 tick 时间（崩溃恢复判定用）
+    last_tick_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AgentPlan(Base, TimestampMixin):

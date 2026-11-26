@@ -36,6 +36,22 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "workspace.approval_executed",
         # 任务：工作台侧观察到任务状态变化（只转发 task_event 的事实，不重复生成进度）
         "workspace.task_updated",
+        # ── Agent Runtime（Phase B）：给前端看的事实流，只放 id/状态/错误码，不放自由文本 ──
+        # payload: goal_id, status, lifecycle_state, description_len
+        "agent.goal.created",
+        # payload: goal_id, status, lifecycle_state
+        "agent.goal.updated",
+        # payload: goal_id, superseded_by
+        "agent.goal.superseded",
+        # payload: goal_id, status, lifecycle_state
+        "agent.goal.finished",
+        # payload: goal_id, plan_id, revision, steps[{step_id, step_key, tool_name, status}]
+        "agent.plan.created",
+        # payload: goal_id, plan_id, step_id, step_key, tool_name, status,
+        #          job_id?, confirmation_id?, error_code?
+        "agent.step.updated",
+        # payload: goal_id, lifecycle_state, counts{succeeded, failed, waiting, pending}
+        "agent.tick.finished",
     }
 )
 

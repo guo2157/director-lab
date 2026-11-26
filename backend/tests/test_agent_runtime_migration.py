@@ -29,7 +29,7 @@ NEW_COLUMNS = {
     for table in set(PHASE_A_COLUMNS) | set(A11_COLUMNS)
 }
 PHASE_A_HEAD = "a1b2c3d4e5f9"
-HEAD = "a1b2c3d4e5fa"
+A11_HEAD = "a1b2c3d4e5fa"
 
 
 def _config(db_url: str) -> Config:
@@ -79,12 +79,12 @@ def test_phase_a_columns_upgrade_and_downgrade(tmp_db):
     db_url, db_path = tmp_db
     cfg = _config(db_url)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, A11_HEAD)
     assert db_path.exists(), "upgrade 后 tmp 库文件不存在，说明迁移没有连到 tmp 库"
     cols = _columns(db_url)
     for table, expected in NEW_COLUMNS.items():
         assert expected <= cols[table], f"{table} missing {expected - cols[table]}"
-    assert _alembic_version(db_url) == HEAD
+    assert _alembic_version(db_url) == A11_HEAD
 
     # 先回退 A11（锁字段），再回退 A0（Phase A 列）
     command.downgrade(cfg, PHASE_A_HEAD)
@@ -100,7 +100,7 @@ def test_phase_a_columns_upgrade_and_downgrade(tmp_db):
         assert not (expected & cols[table]), f"{table} still has {expected & cols[table]}"
     assert _alembic_version(db_url) == "g1a2b3c4d5e7"
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, A11_HEAD)
     cols = _columns(db_url)
     for table, expected in NEW_COLUMNS.items():
         assert expected <= cols[table]

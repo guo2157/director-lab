@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     # 唯一用户入口仍是 /api/agent/{session_id}/chat（Phase B 接入 Runtime）。
     agent_loop_debug_enabled: bool = False
 
+    # --- Agent Runtime 主链路接入（Phase B B6） ---
+    # 关闭时 /chat 行为与接入前逐字节一致（有回归测试保证）。
+    # 默认关闭：先在本机示例项目验收，再按 B11 的策略在 .env.example 中改为 true。
+    agent_runtime_chat_enabled: bool = False
+    # Worker 中的 agent-resume 线程（B5）。默认开启；chat 开关关闭时它遇不到任何待恢复步骤。
+    agent_resume_enabled: bool = True
+    # 单次 tick 最多推进的步骤数（B1）
+    agent_max_steps_per_tick: int = 10
+    # 单次 tick 的墙钟上限（秒，B1）
+    agent_tick_timeout_seconds: float = 60.0
+    # 模板计划单批最多步骤数（B7）
+    agent_max_batch_steps: int = 30
+
     # --- Mock 渲染（D-11：开启后跳过 ComfyUI 交互，生成占位产物，用于无 ComfyUI 环境的演示与端到端测试） ---
     render_mock: bool = False
     # --- ComfyUI 集成（远端渲染底座） ---
