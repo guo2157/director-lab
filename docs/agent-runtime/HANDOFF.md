@@ -78,8 +78,9 @@
 ### Phase A · 止血与正确性
 
 - 状态：**已完成**（A00 → A12b；A12b 为回归汇总与文档收尾）
-- 关键提交：A00 `0eaac87`、A0 `63b624a`、A12a `f99b886`、A1 `5a54196`、A2 `654a785`、A3 `2223d14`、A4 `4c039a4`、A5 `a6b2348`、A6 `cace2f0`、A7 `e8c2f38`、A8 `8131b61`、A9 `ca0fe1c`、A10 `5e335b1`、A11 `3cc9490`
-- 全量 pytest：1547 passed / 0 failed（基线 1445 passed / 1 failed）
+- 关键提交：A00 `0eaac87`、A0 `63b624a`、A12a `f99b886`、A1 `5a54196`、A2 `654a785`、A3 `2223d14`、A4 `4c039a4`、A5 `a6b2348`、A6 `cace2f0`、A7 `e8c2f38`、A8 `8131b61`、A9 `ca0fe1c`、A10 `5e335b1`、A11 `3cc9490`、A12b（本提交）
+- 门禁：`tests/test_agent_runtime_*.py` + `tests/test_agent_loop_api.py` 101 passed / 1 xfailed（P0-9 占位）
+- 全量 pytest：1560 passed / 1 xfailed / 0 failed（基线 1445 passed / 1 failed）
 
 ### Phase B–F
 

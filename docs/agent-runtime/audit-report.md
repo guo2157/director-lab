@@ -104,3 +104,29 @@
 | Phase 4 | Human Gate | 恢复资产/分镜审核门禁+版本绑定 |
 | Phase 5 | Frontend Agent Workbench | Plan/Step/Replan/Job展示 |
 | Phase 6 | Memory/评估 | 分层记忆检索/成本控制/评估优化 |
+
+---
+
+## 2026-11 Phase A 修复记录
+
+每个 P0 缺陷一条命名回归用例，集中在 `backend/tests/test_agent_runtime_regression.py`。
+
+| 缺陷编号 | 修复提交 | 回归用例 |
+|---|---|---|
+| P0-1 | `5a54196` A1 | `test_p0_1_persisted`、`test_loop_persists_across_sessions` |
+| P0-2 | `654a785` A2 | `test_p0_2_no_request_session_in_thread` |
+| P0-3 | `654a785` A2 | `test_p0_3_sse_events_delivered` |
+| P0-4 | `2223d14` A3 | `test_p0_4_progress_events` |
+| P0-5 | `4c039a4` A4 | `test_p0_5_gateway_only`、`test_p0_5_no_direct_tool_fn_access` |
+| P0-6 | `a6b2348` A5 | `test_p0_6_job_waits` |
+| P0-7 | `cace2f0` A6 | `test_p0_7_failed_not_verified` |
+| P0-8 | `e8c2f38` A7 | `test_p0_8_approval_per_step` |
+| P0-9 | Phase B | `test_p0_9_resume_has_caller`（xfail，Phase B 移除标记） |
+| P0-10 | `8131b61` A8 | `test_p0_10_new_intent_new_goal` |
+| P0-11 | `ca0fe1c` A9 | `test_p0_11_replan_revision` |
+| P0-12 | `5e335b1` A10 | `test_p0_12_status_by_goal_id` |
+| P0-13 | `0eaac87` A00 / `f1bb505` A00b | `test_p0_13_no_real_db` |
+
+门禁：`pytest -q tests/test_agent_runtime_*.py tests/test_agent_loop_api.py` 101 passed / 1 xfailed；
+全量 `pytest -q` 1560 passed / 1 xfailed / 0 failed（Phase A 前基线 1445 passed / 1 failed）。
+`backend/data/director_lab.db` 在测试前后保持只读核对一致（alembic_version / schema 哈希 / 行数）。

@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase A · 止血与正确性（A12b 收尾中） |
-| 下一个任务 | A12b 回归汇总与文档收尾，随后进入 Phase B（B0 迁移与事件白名单） |
-| 最近提交 | `3cc9490` A11、`5e335b1` A10、`ca0fe1c` A9、`8131b61` A8 |
-| 最近全量 pytest | 1547 passed / 0 failed（基线 1445 passed / 1 failed，2026-11-26） |
-| 更新时间 | 2026-11-26 18:00（Asia/Shanghai） |
+| 当前阶段 | Phase A · 止血与正确性（已完成，等待 Phase B） |
+| 下一个任务 | Phase B · B0 迁移与事件白名单 |
+| 最近提交 | A12b（本提交）、`57149be` 交接文档、`3cc9490` A11、`5e335b1` A10 |
+| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（基线 1445 passed / 1 failed，2026-11-26） |
+| 更新时间 | 2026-11-26 19:10（Asia/Shanghai） |
 | 工作区 | 干净（每次任务一个本地提交，不推送） |
 
 > 本文件替换 Phase 0 时期的旧版 implementation-plan.md。
@@ -40,13 +40,31 @@
 - [x] **A9** Replan 产生新 revision 并复用已完成步骤（P0-11）— `ca0fe1c`
 - [x] **A10** 状态接口、终态与词表收敛（P0-12 及相关）— `5e335b1`
 - [x] **A11** 原子执行锁（P1）— `3cc9490`
-- [ ] **A12b** 回归汇总与文档收尾（最后执行）
+- [x] **A12b** 回归汇总与文档收尾（最后执行）
 
 | 阶段完成记录 | 内容 |
 |---|---|
-| 合并的 PR | |
-| 全量 pytest（修复前 → 修复后） | |
-| 遗留问题 | |
+| 合并的 PR | 无（按用户要求仅本地提交，不推送、不开 PR） |
+| 全量 pytest（修复前 → 修复后） | 基线 1445 passed / 1 failed → 1560 passed / 1 xfailed / 0 failed |
+| 遗留问题 | P0-9（resume 无调用方）、approval_required 自动建审批、批量步骤拆分、Worker 消费事件均在 Phase B/C 处理；reclaim_stale_steps 未接入调度（Phase B Worker 调用） |
+
+### Phase A 止血 · 逐条勾选
+
+- [x] A00 测试隔离（`0eaac87`）/ A00b 网络守卫（`f1bb505`）
+- [x] A0 数据模型补丁（`63b624a`）/ A12a 测试基建（`f99b886`）
+- [x] A1 事务边界（`5a54196`）/ A2 调试接口线程与 SSE（`654a785`）/ A3 进度回调（`2223d14`）
+- [x] A4 只走 execute_tool 网关（`4c039a4`）/ A5 Job 与审批分流（`a6b2348`）
+- [x] A6 Verifier 真实状态（`cace2f0`）/ A7 审批按步骤绑定（`e8c2f38`）
+- [x] A8 目标指纹（`8131b61`）/ A9 Replan revision（`ca0fe1c`）
+- [x] A10 状态接口与终态（`5e335b1`）/ A11 原子执行锁（`3cc9490`）
+- [x] A12b 回归汇总与文档收尾（本提交）
+
+### Phase B 前置条件
+
+- `resume_after_job` / `resume_after_approval` 需要真实调用方：`task_orchestrator.bridge_job_event` 与审批裁决处接入。
+- Worker 需要消费 `agent.resume_requested` 事件并推进 tick。
+- `/api/agent/{session_id}/chat` 主链路接入 Goal Manager → tick（Phase A 明确未改动）。
+- `approval_required` 时自动创建 `AgentConfirmation`（Phase A 只做状态映射）。
 
 ## Phase B · 最小可用版本（接入主链路与恢复闭环）
 
