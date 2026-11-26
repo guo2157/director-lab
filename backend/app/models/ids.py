@@ -170,3 +170,17 @@ def episode_context_manifest_id() -> str:
 
 def plot_thread_id() -> str:
     return new_id("plt")
+
+
+# --- Agent Runtime（Phase 1）---
+
+def agent_goal_id() -> str:
+    return new_id("gol")
+
+
+def agent_plan_id() -> str:
+    return new_id("pln")
+
+
+def agent_execution_log_id() -> str:
+    return new_id("ael")

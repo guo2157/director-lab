@@ -2,7 +2,7 @@
 /**
  * 导演台（会话工作台）。
  *
- * 布局：PageHeader（标题 + 当前会话模型 + 主操作「新建会话」）
+ * 布局：PageHeader（compact 单行操作条：当前会话 + 模型 + 主操作「新建会话」）
  *      + 三栏：会话导航 / 消息流（含审核时间线 + 输入区）/ 任务上下文。
  *
  * 本文件只保留数据获取、SSE 订阅与状态机；呈现层拆到 components/director/。
@@ -10,11 +10,19 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import { NButton, NSelect } from 'naive-ui'
+import { NButton, NIcon, NSelect } from 'naive-ui'
+import {
+  ArrowDownOutline,
+  ChatbubblesOutline,
+  ChevronBack,
+  ChevronForward,
+  SparklesOutline,
+} from '@vicons/ionicons5'
 import { ApiError, get, post } from '@/api/client'
 import {
   archiveSession,
   createSession,
+  deleteSession,
   executeApproval,
   listApprovals,
   listMessages,
@@ -47,7 +55,8 @@ const router = useRouter()
 
 // --- 面板折叠 ---
 const sessionsCollapsed = ref(typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches)
-const contextCollapsed = ref(false)
+// 窄屏下上下文栏默认收起（展开时以浮层覆盖聊天区），避免把消息区压到无法阅读
+const contextCollapsed = ref(typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches)
 
 // --- 左栏：历史会话导航（唯一职责：找到/切换/管理会话） ---
 const sessions = ref<AgentSession[]>([])
@@ -58,11 +67,18 @@ const activeSession = computed(
   () => sessions.value.find((s) => s.id === activeSessionId.value) ?? null,
 )
 
-const headerSubtitle = computed(() =>
-  activeSession.value
-    ? `当前会话：${activeSession.value.title}`
-    : '选择或新建会话，开始与导演台助手协作',
-)
+/** 空会话引导：点击即填入输入框并聚焦，减少从零开始写的成本 */
+const quickPrompts = [
+  '帮我把这一场拆成分镜',
+  '看看当前项目的镜头进度',
+  '为这个场景生成一张风格参考图',
+]
+const composerRef = ref<{ focus: () => void } | null>(null)
+
+function usePrompt(prompt: string) {
+  inputText.value = prompt
+  composerRef.value?.focus()
+}
 
 async function loadSessions() {
   sessionsLoading.value = true
@@ -85,9 +101,9 @@ async function loadSessions() {
 }
 
 /*
- * 已归档会话（「最近删除」）。
- * 为什么需要：删除会话实际是置 archived，接口默认只返回 active，
- * 没有这个入口时用户会以为会话被彻底删除、无法找回。
+ * 已归档会话。
+ * 归档与删除是两条路径：归档（POST /archive）保留消息、可恢复；
+ * 删除（DELETE）物理清理会话与上下文，不会再出现在这里。
  */
 const archivedSessions = ref<AgentSession[]>([])
 const archivedLoading = ref(false)
@@ -145,17 +161,33 @@ async function renameSession(s: AgentSession, title: string) {
   }
 }
 
-async function removeSession(s: AgentSession) {
+async function archiveCurrentSession(s: AgentSession) {
   try {
     await archiveSession(s.id)
-    // 删除即归档：同步刷新已归档列表，用户才能在同屏看到并可恢复
+    // 归档是软删除：消息保留，刷新归档列表让用户能立刻在同屏恢复
     await Promise.all([loadSessions(), loadArchivedSessions()])
     if (activeSessionId.value === s.id) {
       activeSessionId.value = sessions.value[0]?.id ?? null
       messages.value = []
       await loadContext()
     }
-    message.success('会话已删除')
+    message.success(`已归档「${s.title}」，可在「已归档」中恢复`)
+  } catch (e) {
+    message.error(`归档失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+/** 删除：物理删除会话及其全部对话上下文，不进入归档 */
+async function removeSession(s: AgentSession) {
+  try {
+    await deleteSession(s.id)
+    await Promise.all([loadSessions(), loadArchivedSessions()])
+    if (activeSessionId.value === s.id) {
+      activeSessionId.value = sessions.value[0]?.id ?? null
+      messages.value = []
+      await loadContext()
+    }
+    message.success('会话及对话上下文已删除')
   } catch (e) {
     message.error(`删除失败: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -204,6 +236,9 @@ function scrollToBottom(force = false) {
     if (el) el.scrollTop = el.scrollHeight
   })
 }
+
+/** 有消息且已上滑时才显示「回到最新」按钮 */
+const showJumpToBottom = computed(() => messages.value.length > 0 && !nearBottom.value)
 
 async function loadMessages(sessionId: string) {
   messagesLoading.value = true
@@ -532,10 +567,16 @@ onMounted(() => {
 
 <template>
   <div class="console-page">
-    <PageHeader title="导演台" :subtitle="headerSubtitle">
+    <!-- compact：顶部导航已高亮「导演台」，页内不再重复大标题，页头收敛为单行操作条 -->
+    <PageHeader title="导演台" compact>
       <template #status>
         <StatusTag v-if="!activeSession" status="locked" label="未选择会话" />
         <template v-else>
+          <span class="session-status" :title="activeSession.title">
+            <span class="session-dot" aria-hidden="true"></span>
+            <span class="session-status-title">{{ activeSession.title }}</span>
+          </span>
+          <span class="header-divider" aria-hidden="true"></span>
           <span class="model-caption">模型</span>
           <NSelect
             :value="modelSelectValue"
@@ -577,13 +618,22 @@ onMounted(() => {
         @select="selectSession"
         @create="newSession"
         @rename="renameSession"
+        @archive="archiveCurrentSession"
         @remove="removeSession"
         @restore="restoreArchivedSession"
         @collapse="sessionsCollapsed = true"
         @retry="loadSessions"
       />
-      <button v-else class="expand-btn left" type="button" @click="sessionsCollapsed = false">
-        会话 ›
+      <button
+        v-else
+        class="expand-btn left"
+        type="button"
+        aria-label="展开会话列表"
+        title="展开会话列表"
+        @click="sessionsCollapsed = false"
+      >
+        <NIcon :component="ChevronForward" :size="15" />
+        <span>会话</span>
       </button>
 
       <!-- 中栏：对话与执行主区 -->
@@ -605,13 +655,31 @@ onMounted(() => {
               description="选择左侧会话，或新建一个会话开始与导演台助手协作"
               action-text="新建会话"
               @action="newSession"
-            />
+            >
+              <template #icon><NIcon :component="ChatbubblesOutline" :size="20" /></template>
+            </EmptyState>
           </div>
           <div v-else-if="!messages.length && !thinking" class="chat-state">
-            <EmptyState
-              title="还没有消息"
-              description="发送第一条消息，描述你要推进的创作任务"
-            />
+            <div class="welcome">
+              <span class="welcome-icon" aria-hidden="true">
+                <NIcon :component="SparklesOutline" :size="20" />
+              </span>
+              <h2 class="welcome-title">今天想推进什么？</h2>
+              <p class="welcome-desc">
+                描述你的创作任务，导演台助手会帮你拆解分镜、生成画面与音频。
+              </p>
+              <div class="prompt-chips">
+                <button
+                  v-for="p in quickPrompts"
+                  :key="p"
+                  type="button"
+                  class="prompt-chip"
+                  @click="usePrompt(p)"
+                >
+                  {{ p }}
+                </button>
+              </div>
+            </div>
           </div>
           <MessageStream
             v-else
@@ -620,6 +688,19 @@ onMounted(() => {
             :thinking-stage="thinkingStage"
             :snapshots="taskSnapshots"
           />
+
+          <!-- 浏览历史消息时，提供一键回到最新位置 -->
+          <div v-if="showJumpToBottom" class="jump-wrap">
+            <button
+              type="button"
+              class="jump-bottom"
+              aria-label="回到最新消息"
+              title="回到最新消息"
+              @click="scrollToBottom(true)"
+            >
+              <NIcon :component="ArrowDownOutline" :size="16" />
+            </button>
+          </div>
         </div>
 
         <!-- 审核记录：同类连续记录合并为时间线，默认只展开最新一组 -->
@@ -630,6 +711,7 @@ onMounted(() => {
         />
 
         <ChatComposer
+          ref="composerRef"
           v-model="inputText"
           :disabled="!activeSessionId || sending"
           :loading="sending"
@@ -656,8 +738,16 @@ onMounted(() => {
         @run="runApproved"
         @collapse="contextCollapsed = true"
       />
-      <button v-else class="expand-btn right" type="button" @click="contextCollapsed = false">
-        ‹ 上下文
+      <button
+        v-else
+        class="expand-btn right"
+        type="button"
+        aria-label="展开任务上下文"
+        title="展开任务上下文"
+        @click="contextCollapsed = false"
+      >
+        <NIcon :component="ChevronBack" :size="15" />
+        <span>上下文</span>
       </button>
     </div>
   </div>
@@ -693,6 +783,40 @@ onMounted(() => {
   display: none;
 }
 
+/* 页头会话标识：小圆点 + 会话名，比「当前会话：xxx」更像当前上下文 */
+.session-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 260px;
+}
+
+.session-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-primary);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+  flex-shrink: 0;
+}
+
+.session-status-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+}
+
 .model-caption {
   font-size: 12px;
   color: var(--text-tertiary);
@@ -703,16 +827,24 @@ onMounted(() => {
   width: 180px;
 }
 
+/* 折叠把手：整列高度的窄条，点击区域更大，也提示「这里可以拉开」 */
 .expand-btn {
-  align-self: flex-start;
+  align-self: stretch;
   flex-shrink: 0;
-  padding: var(--sp-1) var(--sp-2);
+  width: 34px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-secondary);
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-sheen);
   cursor: pointer;
   transition: color var(--transition-fast), border-color var(--transition-fast);
 }
@@ -732,6 +864,7 @@ onMounted(() => {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+  box-shadow: var(--card-sheen);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -783,11 +916,116 @@ onMounted(() => {
   max-width: 520px;
 }
 
-/* 响应式：窄屏自动收起右栏，避免挤压聊天主区 */
+/* 空会话欢迎区：用一句话说明能做什么，并给出可点击的起点 */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--sp-2);
+}
+
+.welcome-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: var(--sp-1);
+  color: var(--brand-primary);
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-line);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-glow);
+}
+
+.welcome-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+  color: var(--text-primary);
+}
+
+.welcome-desc {
+  margin: 0;
+  max-width: 420px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text-secondary);
+}
+
+.prompt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+.prompt-chip {
+  padding: var(--sp-1) var(--sp-3);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.prompt-chip:hover {
+  color: var(--brand-hover);
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
+}
+
+.prompt-chip:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 2px;
+}
+
+/* 「回到最新」：吸附在消息区底部右侧，不遮挡输入框 */
+.jump-wrap {
+  position: sticky;
+  bottom: var(--sp-3);
+  align-self: flex-end;
+  margin-right: var(--sp-4);
+  flex-shrink: 0;
+}
+
+.jump-bottom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--card-sheen);
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.jump-bottom:hover {
+  color: var(--brand-hover);
+  border-color: var(--brand-line);
+}
+
+.jump-bottom:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 2px;
+}
+
+/* 响应式：窄屏收窄右栏；折叠把手必须始终可用，否则收起后无法恢复 */
 @media (max-width: 1100px) {
-  .expand-btn.right {
-    display: none;
-  }
   .chat-panel {
     min-width: 0;
   }
@@ -809,6 +1047,16 @@ onMounted(() => {
     left: 0;
     bottom: 0;
     width: min(260px, 72vw);
+    z-index: 20;
+    box-shadow: var(--shadow-lg);
+  }
+  /* 上下文栏同为浮层，从右侧覆盖，不挤占消息区宽度 */
+  .console-body :deep(.context-panel) {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(280px, 78vw);
     z-index: 20;
     box-shadow: var(--shadow-lg);
   }

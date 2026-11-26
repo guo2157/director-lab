@@ -3,7 +3,12 @@
  * 消息输入区：多行输入 + 内嵌发送按钮。
  * 键盘可访问：输入框与按钮均有 aria-label，焦点态沿用 --focus-ring 语义（不写死颜色）。
  */
+import { ref } from 'vue'
 import { NButton, NInput } from 'naive-ui'
+
+const inputRef = ref<{ focus: () => void } | null>(null)
+/** 供父级（快捷提示词）把焦点交还输入框 */
+defineExpose({ focus: () => inputRef.value?.focus() })
 
 const props = withDefaults(
   defineProps<{
@@ -15,7 +20,7 @@ const props = withDefaults(
   {
     disabled: false,
     loading: false,
-    placeholder: '输入消息，Enter 发送（Shift+Enter 换行）',
+    placeholder: '描述你想推进的创作任务…',
   },
 )
 
@@ -31,6 +36,7 @@ const canSend = () => !props.disabled && !props.loading && props.modelValue.trim
   <div class="chat-input">
     <div class="composer">
       <NInput
+        ref="inputRef"
         :value="modelValue"
         type="textarea"
         :rows="2"
@@ -51,13 +57,19 @@ const canSend = () => !props.disabled && !props.loading && props.modelValue.trim
         发送
       </NButton>
     </div>
+    <div class="composer-foot">
+      <span v-if="disabled && !loading" class="composer-hint">选择或新建会话后即可输入</span>
+      <span v-else class="composer-hint">
+        <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行
+      </span>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .chat-input {
   display: block;
-  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4) var(--sp-2);
   border-top: 1px solid var(--border-subtle);
   flex-shrink: 0;
   background: var(--bg-panel);
@@ -74,6 +86,12 @@ const canSend = () => !props.disabled && !props.loading && props.modelValue.trim
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
+/* 聚焦：组件自身边框提亮 + 一圈极淡品牌光晕，替代被移除的内嵌 outline */
+.composer :deep(.n-input.n-input--focus) {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+
 .composer :deep(.n-input .n-input__textarea) {
   font-size: 14px;
   line-height: 1.7;
@@ -82,12 +100,6 @@ const canSend = () => !props.disabled && !props.loading && props.modelValue.trim
 /* 让输入文字避开右下角的发送按钮，避免被遮挡 */
 .composer :deep(.n-input .n-input__textarea-el) {
   padding-right: 92px;
-}
-
-.composer :deep(.n-input .n-input__textarea-el:focus-visible) {
-  outline: 2px solid var(--brand-hover);
-  outline-offset: -2px;
-  border-radius: var(--radius);
 }
 
 .composer-send {
@@ -107,12 +119,41 @@ const canSend = () => !props.disabled && !props.loading && props.modelValue.trim
   outline-offset: 2px;
 }
 
+/* 键位提示：说明「Enter 发送」，不占用输入区视觉重心 */
+.composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  min-height: 18px;
+  padding: var(--sp-1) var(--sp-1) 0;
+}
+
+.composer-hint {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-tertiary);
+}
+
+.composer-hint kbd {
+  padding: 0 4px;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
 @media (max-width: 768px) {
   .chat-input {
-    padding: var(--sp-2) var(--sp-3) var(--sp-3);
+    padding: var(--sp-2) var(--sp-3) var(--sp-2);
   }
   .composer :deep(.n-input .n-input__textarea-el) {
     padding-right: 82px;
+  }
+  .composer-foot {
+    display: none;
   }
 }
 </style>

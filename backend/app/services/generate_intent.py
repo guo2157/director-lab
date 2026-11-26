@@ -41,6 +41,45 @@ def resolve_target(text: str) -> str:
     return "keyframe"
 
 
+# 随手生成（A 方案）：从「帮我生成一只小狗的图片」这类请求里剥离命令词，留下主体当提示词
+_IMAGE_CMD_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:请|帮我|帮忙|麻烦|给我|替我|我想|我要|想要|需要|再))*\s*"
+    r"(?:生成|画|绘制|出|做|来)\s*(?:一(?:张|幅|个|只|条|位|段)|[张幅个只条])?\s*"
+)
+_IMAGE_NOUN_SUFFIX_RE = re.compile(r"\s*(?:的)?(?:图片|图像|插画|照片|壁纸|图)\s*$")
+# 分镜/镜头相关请求依赖项目上下文（分镜提示词、参考图、阶段门禁），不能随手出图
+_SHOT_SCOPED_RE = re.compile(
+    r"(?:分镜|镜头|镜号|第\s*\d+\s*镜|本镜|该镜|这镜|关键帧|首帧|尾帧|画面)"
+)
+_IMAGE_NOUN_HINTS = ("图片", "图像", "插画", "海报", "照片", "壁纸", "图")
+_IMAGE_QUANTIFIER_RE = re.compile(r"一(?:张|幅)|[张幅]")
+_IMAGE_VERB_RE = re.compile(r"(?:画|绘制)")
+
+
+def extract_image_prompt(text: str) -> str:
+    """从明确的出图请求中提取提示词主体；不是「随手出图」请求时返回空串。
+
+    只有满足以下条件才视为随手出图：
+    - 不含镜头/分镜/关键帧等依赖项目上下文的词；
+    - 含图片类名词（图片/插画/海报…）、图片量词（一张/一幅）或作画动词（画/绘制）。
+
+    提取只做机械剥离（命令词 / 量词 / 结尾名词），不做语义改写；
+    返回空串说明请求过于笼统或需要项目上下文，由调用方走原有引导。
+    """
+    t = (text or "").strip()
+    if not t or _SHOT_SCOPED_RE.search(t):
+        return ""
+    if not (
+        any(k in t for k in _IMAGE_NOUN_HINTS)
+        or _IMAGE_QUANTIFIER_RE.search(t)
+        or _IMAGE_VERB_RE.search(t)
+    ):
+        return ""
+    t = _IMAGE_CMD_PREFIX_RE.sub("", t)
+    t = _IMAGE_NOUN_SUFFIX_RE.sub("", t)
+    return t.strip(" ，。,.!！?？~～、:：")
+
+
 def resolve_shot(db: Session, project_id: str, text: str) -> tuple[Shot | None, str | None]:
     """定位消息所指镜头。
     返回 (shot, None) 表示唯一定位成功；

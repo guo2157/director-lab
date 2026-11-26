@@ -244,6 +244,38 @@ def add_stage(
     return stage
 
 
+def attach_job_stage(
+    db: Session,
+    task: Task,
+    *,
+    job_id: str | None,
+    stage_key: str,
+    stage_name: str,
+) -> TaskStage | None:
+    """把已提交的 Job 挂为任务阶段，让 Job 终态能桥接闭环并回写结果。
+
+    适用场景：对话里「提交即完成」的轻任务（随手生成）——提交动作不是终态，
+    真正的终态由 Job 决定。Job 可能已经跑完（极快成功/失败），因此建阶段后
+    立即按 Job 当前状态收敛一次，不依赖后续事件。
+    """
+    if not job_id:
+        return None
+    job = db.get(Job, job_id)
+    if job is None:
+        return None
+    if not start_task(db, task):
+        return None
+    stage = add_stage(db, task, stage_key=stage_key, stage_name=stage_name, job_id=job_id)
+    start_stage(db, task, stage)
+    if job.status in ("queued", "running"):
+        set_task_step(db, task, step="generating", message="生成中，完成后结果会出现在对话里")
+        return stage
+    stage_status = _JOB_STATUS_TO_STAGE.get(job.status, "succeeded")
+    finish_stage(db, task, stage, stage_status, result=job.result)
+    _auto_close_task_if_done(db, task)
+    return stage
+
+
 def start_stage(db: Session, task: Task, stage: TaskStage) -> bool:
     if stage.status == "running":
         return True
@@ -319,6 +351,8 @@ def complete_task(db: Session, task: Task, *, summary: str, result_data: dict | 
         return False
     task.status = "completed"
     task.progress = 100
+    task.current_step = "completed"
+    task.current_message = summary[:500]
     if result_data is not None:
         db.add(
             TaskResult(
@@ -337,6 +371,8 @@ def fail_task(db: Session, task: Task, *, error_code: str, error_msg: str) -> bo
     if "failed" not in _TASK_TRANSITIONS.get(task.status, set()):
         return False
     task.status = "failed"
+    task.current_step = "failed"
+    task.current_message = error_msg[:500]
     task.error_code = error_code[:48]
     task.error_msg = error_msg[:4000]
     db.flush()
@@ -359,6 +395,8 @@ def cancel_task(db: Session, task: Task, reason: str | None = None) -> bool:
                 {"stage_id": s.id, "stage_key": s.stage_key, "reason": reason},
             )
     task.status = "cancelled"
+    task.current_step = "cancelled"
+    task.current_message = (reason or "任务已取消")[:500]
     db.flush()
     write_event(db, task, "task.cancelled", {"reason": reason})
     return True
@@ -373,6 +411,15 @@ _JOB_STATUS_TO_STAGE = {
     "cancelled": "cancelled",
 }
 
+# 终止型 Job 事件 → 兜底状态（job.finished 的 payload 自带 status，恢复路径的
+# job.succeeded / job.failed 只带统计字段，需按事件名兜底）
+_TERMINAL_JOB_EVENTS = {
+    "job.finished": None,
+    "job.succeeded": "succeeded",
+    "job.failed": "failed",
+    "job.cancelled": "cancelled",
+}
+
 
 def bridge_job_event(
     db: Session,
@@ -384,8 +431,9 @@ def bridge_job_event(
     """把 Job 事件桥接为 Task 事件（按 task_stage.job_id 找归属任务）。
 
     - job.started → task.stage_started（阶段 running）
-    - job.finished + job.status=succeeded → task.stage_succeeded
-    - job.finished + job.status=failed → task.stage_failed
+    - job.finished / job.succeeded / job.failed / job.cancelled → 阶段终态
+      （正常执行发 job.finished；worker 重启后的恢复/对账路径直接发 job.succeeded，
+      只认 job.finished 会让阶段永远 running、结果图也回写不到对话）
     - job.retry / job.quality_retry → task.stage_progress（透传进度信息）
     返回桥接的事件数（0 表示该 Job 不属于任何任务）。
     """
@@ -399,8 +447,8 @@ def bridge_job_event(
             continue
         if event_type == "job.started":
             start_stage(db, task, stage)
-        elif event_type == "job.finished":
-            job_status = (payload or {}).get("status")
+        elif event_type in _TERMINAL_JOB_EVENTS:
+            job_status = (payload or {}).get("status") or _TERMINAL_JOB_EVENTS[event_type]
             if not job_status:
                 job = db.get(Job, job_id)
                 job_status = getattr(job, "status", None) if job else None
@@ -445,6 +493,162 @@ def _sync_agent_task_retry(db: Session, task: Task, source: str) -> None:
     retry_task(db, agent_task, note="agent task retried by " + source)
 
 
+def _assets_of_task(db: Session, task: Task) -> list[dict]:
+    """按任务下各阶段的 job_id 查真实产出资产。
+
+    恢复/对账路径的终态 payload 只有 {"assets": N} 这类统计字段，没有资产明细；
+    此时以资产表为准，保证结果图仍能回写到对话气泡。
+    """
+    from app.models import Asset
+
+    job_ids = [
+        s.job_id
+        for s in db.query(TaskStage).filter(TaskStage.task_id == task.id).all()
+        if s.job_id
+    ]
+    if not job_ids:
+        return []
+    rows = (
+        db.query(Asset)
+        .filter(Asset.source_job_id.in_(job_ids))
+        .order_by(Asset.id)
+        .all()
+    )
+    seen: set[str] = set()
+    refs: list[dict] = []
+    for a in rows:
+        if a.id in seen:
+            continue
+        seen.add(a.id)
+        refs.append(
+            {
+                "asset_id": a.id,
+                "asset_type": a.asset_type or "",
+                "name": a.name or "",
+                "has_thumb": (a.asset_type or "") not in ("clip", "video"),
+            }
+        )
+    return refs
+
+
+def _stage_job_key(db: Session, task: Task) -> str | None:
+    """任务首个阶段绑定的 job_id（会话消息去重键：同一 Job 只回写一条消息）。"""
+    row = (
+        db.query(TaskStage)
+        .filter(TaskStage.task_id == task.id, TaskStage.job_id.isnot(None))
+        .order_by(TaskStage.stage_index)
+        .first()
+    )
+    return row.job_id if row else None
+
+
+def _has_notice(db: Session, session_id: str, job_key: str) -> bool:
+    from app.models.agent import AgentMessage
+
+    rows = (
+        db.query(AgentMessage)
+        .filter(AgentMessage.session_id == session_id, AgentMessage.role == "assistant")
+        .all()
+    )
+    return any((m.payload or {}).get("job_id") == job_key for m in rows)
+
+
+def _notify_session_failed(db: Session, task: Task, error_msg: str) -> None:
+    """生成任务失败时在会话里说明原因，避免气泡只停在「已提交」。"""
+    if task.task_type not in ("generate", "generate_request") or not task.session_id:
+        return
+    from sqlalchemy import func
+
+    from app.models.agent import AgentMessage, AgentSession
+    from app.models.ids import agent_message_id
+
+    session = db.get(AgentSession, task.session_id)
+    if session is None or session.status == "archived":
+        return
+    job_key = _stage_job_key(db, task)
+    if job_key and _has_notice(db, task.session_id, job_key):
+        return
+    max_seq = (
+        db.query(func.max(AgentMessage.seq))
+        .filter(AgentMessage.session_id == task.session_id)
+        .scalar()
+        or 0
+    )
+    db.add(
+        AgentMessage(
+            id=agent_message_id(),
+            session_id=task.session_id,
+            role="assistant",
+            content=f"生成失败：{error_msg}",
+            payload={"task_id": task.id, "generated": False, "error": error_msg, "job_id": job_key},
+            seq=int(max_seq) + 1,
+            created_at=datetime.now(),
+        )
+    )
+    db.flush()
+
+
+def _notify_session_generated(db: Session, task: Task, result_data: dict | None) -> None:
+    """生成任务完成后把产出图片回写为会话消息，导演台气泡内直接展示结果。
+
+    约束：
+    - 只处理归属会话的 generate 任务；API 通道任务无 session_id，跳过
+    - asset_refs 只引用真实产出的 asset_id，不臆造；前端经 /api/assets/{id}/file 取图
+    - 归档会话不再追加消息
+    """
+    if task.task_type not in ("generate", "generate_request") or not task.session_id:
+        return
+    assets = (result_data or {}).get("assets")
+    refs: list[dict] = []
+    if isinstance(assets, list):
+        refs = [
+            {
+                "asset_id": a["asset_id"],
+                "asset_type": a.get("asset_type") or "",
+                "name": a.get("out_name") or "",
+                "has_thumb": (a.get("asset_type") or "") not in ("clip", "video"),
+            }
+            for a in assets
+            if isinstance(a, dict) and a.get("asset_id")
+        ]
+    if not refs:
+        # 恢复/对账路径的终态 payload 只有 {"assets": N}，没有资产明细；
+        # 以资产表为准（source_job_id → 阶段 job_id）取真实产出
+        refs = _assets_of_task(db, task)
+    if not refs:
+        return
+
+    from app.models.agent import AgentMessage, AgentSession
+    from app.models.ids import agent_message_id
+
+    session = db.get(AgentSession, task.session_id)
+    if session is None or session.status == "archived":
+        return
+    from sqlalchemy import func
+
+    job_key = _stage_job_key(db, task)
+    if job_key and _has_notice(db, task.session_id, job_key):
+        return
+    max_seq = (
+        db.query(func.max(AgentMessage.seq))
+        .filter(AgentMessage.session_id == task.session_id)
+        .scalar()
+        or 0
+    )
+    db.add(
+        AgentMessage(
+            id=agent_message_id(),
+            session_id=task.session_id,
+            role="assistant",
+            content=f"生成完成：{len(refs)} 个结果已入库，可在下方查看或到资产库继续处理。",
+            payload={"asset_refs": refs, "task_id": task.id, "generated": True, "job_id": job_key},
+            seq=int(max_seq) + 1,
+            created_at=datetime.now(),
+        )
+    )
+    db.flush()
+
+
 def _auto_close_task_if_done(db: Session, task: Task) -> None:
     """所有阶段到达终态时闭环任务：全 succeeded → completed（写结果卡片）；任一 failed → failed。"""
     if task.status not in ("queued", "pending", "running"):
@@ -454,11 +658,14 @@ def _auto_close_task_if_done(db: Session, task: Task) -> None:
         return
     if any(s.status == "failed" for s in stages):
         failed = next(s for s in stages if s.status == "failed")
-        fail_task(
+        error_msg = str((failed.result or {}).get("error_msg") or failed.stage_name)[:2000]
+        if fail_task(
             db, task,
             error_code=(failed.result or {}).get("error_code", "stage_failed"),
-            error_msg=str((failed.result or {}).get("error_msg") or failed.stage_name)[:2000],
-        )
+            error_msg=error_msg,
+        ):
+            # 失败同样回写会话：气泡里给出真实失败原因，不静默
+            _notify_session_failed(db, task, error_msg)
     else:
         last_ok = next((s for s in reversed(stages) if s.status == "succeeded" and s.result), None)
         result_data = None
@@ -470,8 +677,15 @@ def _auto_close_task_if_done(db: Session, task: Task) -> None:
             if isinstance(inner, dict):
                 r = {**{k: v for k, v in r.items() if k not in ("status", "result")}, **inner}
             result_data = {"result_type": "shots", **{k: v for k, v in r.items() if k != "status"}}
-            summary = f"解析完成：{r.get('shots', 0)} 个镜头"
-        complete_task(db, task, summary=summary, result_data=result_data)
+            assets = r.get("assets")
+            if task.task_type in ("generate", "generate_request"):
+                count = len(assets) if isinstance(assets, list) else len(_assets_of_task(db, task))
+                summary = f"生成完成：{count} 个结果"
+            else:
+                summary = f"解析完成：{r.get('shots', 0)} 个镜头"
+        if complete_task(db, task, summary=summary, result_data=result_data):
+            # 生成结果回写会话：任务卡片之外，气泡内直接展示产出图片
+            _notify_session_generated(db, task, result_data)
 
 
 def set_task_step_by_job(db: Session, job_id: str, *, step: str, message: str,
@@ -655,8 +869,15 @@ def reconcile_orphan_tasks(db: Session) -> int:
             summary = "任务完成（恢复对账闭环）"
             if last_ok is not None and isinstance(last_ok.result, dict):
                 result_data = {"result_type": "shots", **last_ok.result}
-                summary = f"解析完成：{last_ok.result.get('shots', 0)} 个镜头"
-            complete_task(db, task, summary=summary, result_data=result_data)
+                if task.task_type in ("generate", "generate_request"):
+                    assets = last_ok.result.get("assets")
+                    count = len(assets) if isinstance(assets, list) else len(_assets_of_task(db, task))
+                    summary = f"生成完成：{count} 个结果"
+                else:
+                    summary = f"解析完成：{last_ok.result.get('shots', 0)} 个镜头"
+            if complete_task(db, task, summary=summary, result_data=result_data):
+                # 恢复对账闭环同样回写结果图，避免气泡缺图
+                _notify_session_generated(db, task, result_data)
         closed += 1
     if closed:
         db.commit()

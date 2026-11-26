@@ -853,6 +853,11 @@ class RequestGenerateInput(BaseModel):
     speed: str | None = Field(
         default=None, description="视频生成速度档位：fast/std/quality，仅对 clip 生效"
     )
+    quick_prompt: str | None = Field(
+        default=None,
+        max_length=4000,
+        description="随手生成：无镜头/实体归属的纯文生图提示词（仅草稿项目内部链路使用）",
+    )
 
 
 class RunGenerateInput(BaseModel):
@@ -988,15 +993,49 @@ def tool_request_generate(
     prompt: str | None = None,
     entity_id: str | None = None,
     speed: str | None = None,
+    quick_prompt: str | None = None,
 ) -> dict:
     """提交生成审批申请（不建任务、不触发生成、不消耗算力）。
 
     镜头目标（keyframe/clip/audio/bgm/sfx）须给出 shot_id；
-    实体目标（character/scene/prop 公共资产）须给出 entity_id。
+    实体目标（character/scene/prop 公共资产）须给出 entity_id；
+    随手生成（quick_prompt）用于未关联项目的明确出图请求：无镜头/实体归属，
+    走无参考槽位的纯文生图工作流，产物落草稿项目资产库。
     同会话同入参重复申请复用同一条待审记录（幂等）。
     审批通过后由 run_generate 执行。
     """
     from app.services import approvals
+
+    if quick_prompt:
+        # 随手生成：跳过阶段门禁与资产门禁（草稿项目没有剧本/镜头/阶段）
+        from app.api.v1.asset_plans import _find_plain_image_workflow
+
+        wf = _find_plain_image_workflow(db)
+        if wf is None:
+            raise ToolError("no_matching_workflow", "没有可用的纯文生图工作流，无法随手出图")
+        args = {
+            "project_id": project_id,
+            "target": "keyframe",
+            "prompt": quick_prompt,
+            "workflow_id": wf.id,
+            "quick": True,
+        }
+        confirmation = approvals.create_confirmation(
+            db,
+            session_id=session_id,
+            tool_name="request_generate",
+            args=args,
+            goal=f"随手生成图片：{quick_prompt[:24]}",
+        )
+        return {
+            "confirmation_id": confirmation.id,
+            "status": confirmation.status,
+            "target": "keyframe",
+            "workflow_id": wf.id,
+            "workflow_name": wf.name,
+            "quick": True,
+            "next_step": "需人工审批通过后才会创建生成任务",
+        }
 
     if target in _ENTITY_TARGETS:
         entity, owner_key = _assert_entity_in_project(db, entity_id or "", target, project_id)
@@ -1113,15 +1152,28 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
     shot_id = args.get("shot_id")
     entity_id = args.get("entity_id")
     target = args.get("target", "keyframe")
-    if not project_id or not (shot_id or entity_id):
+    quick = bool(args.get("quick"))
+    if not project_id or not (shot_id or entity_id or quick):
         raise ToolError("tool_invalid_args", "审批记录缺少必要参数")
     # 状态机门禁（纵深防御）：执行侧再次校验，
-    # 防止审批通过后项目阶段回退（如剧本变更回到 estimate）仍执行生成
-    _assert_stage_gate(db, project_id, target)
+    # 防止审批通过后项目阶段回退（如剧本变更回到 estimate）仍执行生成；
+    # 随手生成落在草稿项目（无剧本、无阶段），不适用阶段门禁
+    if not quick:
+        _assert_stage_gate(db, project_id, target)
 
     owner_key = None
     entity = None
-    if shot_id:
+    wf = None
+    if quick:
+        # 随手生成：无镜头/实体归属，用申请时匹配好的纯文生图工作流
+        from app.models import Workflow as _Workflow
+
+        if args.get("workflow_id"):
+            wf = db.get(_Workflow, args["workflow_id"])
+        if wf is None:
+            wf = _match_generate_workflow(db, "keyframe")
+        job_type = "generate_keyframe"
+    elif shot_id:
         shot = _assert_shot_in_project(db, shot_id, project_id)
         # 分镜图就绪校验：生成 clip 前该镜必须有当前有效且文件存在的分镜图，
         # 与 API 通道（generate.py _check_keyframe_ready）同等校验，不可绕过。
@@ -1159,10 +1211,11 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
                 )
     else:
         entity, owner_key = _assert_entity_in_project(db, entity_id or "", target, project_id)
-    # 实体目标（公共资产）走 keyframe 图像工作流
-    wf_target = "keyframe" if target in _ENTITY_TARGETS else target
-    wf = _match_generate_workflow(db, wf_target)
-    job_type = f"generate_{wf_target}"
+    if wf is None:
+        # 实体目标（公共资产）走 keyframe 图像工作流
+        wf_target = "keyframe" if target in _ENTITY_TARGETS else target
+        wf = _match_generate_workflow(db, wf_target)
+        job_type = f"generate_{wf_target}"
 
     # 幂等：同一审批只产生一个任务；已有同 request_key 的任务直接复用
     request_key = f"agc:{confirmation.id}"
@@ -1177,7 +1230,10 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
 
     params: dict = {}
     prev_frame_info: dict | None = None
-    if owner_key is not None:
+    if quick:
+        # 随手生成：用户提示词即最终提示词，不做镜头/实体提示词编译与参考图注入
+        params = {"prompt": args.get("prompt") or "", "__quick_image__": True}
+    elif owner_key is not None:
         # 实体目标（公共资产）：与 API 通道（generate.py 实体端点）行为一致
         params["prompt"] = args.get("prompt") or ""
         params[owner_key] = entity.id
@@ -1295,7 +1351,7 @@ def tool_run_generate(db: Session, confirmation_id: str) -> dict:
     try:
         from app.models.agent import AgentTask
         from app.services import task_orchestrator
-        _stage_name = {
+        _stage_name = "随手生成" if quick else {
             'keyframe': '分镜图生成', 'clip': '分镜视频生成', 'audio': '音频生成',
             'character': '角色形象生成', 'scene': '场景基准图生成', 'prop': '道具锚定图生成',
         }.get(target, '资产生成')

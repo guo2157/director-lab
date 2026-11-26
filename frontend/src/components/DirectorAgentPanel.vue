@@ -119,8 +119,8 @@ function confirmDelete() {
     title: '删除会话',
     message: `确定要删除会话「${cur.title}」吗？`,
     impact: [
-      `${cur.message_count} 条消息将归档`,
-      '归档后不再出现在会话列表',
+      `${cur.message_count} 条消息将永久删除`,
+      '删除后无法恢复，也不会进入归档列表',
       '不会删除项目、资产或生成产物',
     ],
     confirmText: '删除',

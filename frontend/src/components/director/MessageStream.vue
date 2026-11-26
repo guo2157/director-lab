@@ -5,9 +5,9 @@
  * 纯展示组件：所有真实执行数据来自消息 payload 与 SSE 快照，组件自身只维护
  * 「缩略图加载失败」这一处纯 UI 状态（破图即隐藏，不回写数据）。
  */
-import { ref } from 'vue'
+import { onUnmounted, ref } from 'vue'
 import { NIcon, NImage } from 'naive-ui'
-import { PlayCircleOutline } from '@vicons/ionicons5'
+import { CheckmarkOutline, CopyOutline, DownloadOutline, PlayCircleOutline } from '@vicons/ionicons5'
 import TaskCard from '@/components/TaskCard.vue'
 import SearchRunCard from './SearchRunCard.vue'
 import type { AgentMessage } from '@/api/agent'
@@ -41,11 +41,37 @@ function visibleAssetRefs(m: AgentMessage) {
   return assetRefsOf(m).filter((a) => !failedAssetIds.value.has(a.asset_id))
 }
 
+/** 原图下载地址：download=true 让后端带 Content-Disposition，按资产名保存 */
+function downloadUrl(assetId: string): string {
+  return `/api/assets/${assetId}/file?download=true`
+}
+
 function roleLabel(role: string): string {
   if (role === 'user') return '我'
   if (role === 'assistant') return '导演台助手'
   return role
 }
+
+/** 复制成功的短暂反馈（仅 UI 状态，不写回消息） */
+const copiedId = ref<string | null>(null)
+let copyTimer: ReturnType<typeof setTimeout> | null = null
+
+async function copyMessage(id: string, text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+    copiedId.value = id
+    if (copyTimer) clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => {
+      copiedId.value = null
+    }, 1600)
+  } catch {
+    // 剪贴板不可用（如非安全上下文）时静默失败，不打断阅读
+  }
+}
+
+onUnmounted(() => {
+  if (copyTimer) clearTimeout(copyTimer)
+})
 
 /** 搜索任务实时快照（仅 running 时展示阶段与进度，终态回落到最终记录） */
 function searchLive(m: AgentMessage): { phase: string; progress: number } | null {
@@ -62,8 +88,21 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
   <div class="message-list">
     <div v-for="m in messages" :key="m.id" class="message-row" :class="m.role">
       <div class="message-bubble">
-        <div class="message-role">{{ roleLabel(m.role) }}</div>
+        <div class="message-role">
+          <span v-if="m.role === 'assistant'" class="role-dot" aria-hidden="true"></span>
+          {{ roleLabel(m.role) }}
+        </div>
         <div class="message-content">{{ m.content }}</div>
+        <button
+          v-if="m.role === 'assistant' && m.content"
+          type="button"
+          class="copy-btn"
+          :aria-label="copiedId === m.id ? '已复制' : '复制消息'"
+          :title="copiedId === m.id ? '已复制' : '复制消息'"
+          @click="copyMessage(m.id, m.content)"
+        >
+          <NIcon :component="copiedId === m.id ? CheckmarkOutline : CopyOutline" :size="13" />
+        </button>
 
         <div v-if="m.role === 'assistant' && visibleAssetRefs(m).length" class="asset-thumbs">
           <template v-for="a in visibleAssetRefs(m)" :key="a.asset_id">
@@ -84,6 +123,16 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
                 @error="onThumbError(a.asset_id)"
               />
               <span class="asset-thumb-label">{{ a.asset_type }}</span>
+              <a
+                class="asset-thumb-download"
+                :href="downloadUrl(a.asset_id)"
+                :download="a.name || a.asset_id"
+                title="下载原图"
+                aria-label="下载原图"
+                @click.stop
+              >
+                <n-icon :component="DownloadOutline" :size="14" />
+              </a>
             </div>
             <a
               v-else
@@ -163,6 +212,7 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
 }
 
 .message-bubble {
+  position: relative;
   max-width: 76%;
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--radius-sm) var(--radius-xl) var(--radius-xl) var(--radius-xl);
@@ -219,10 +269,57 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
 }
 
 .message-role {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
   font-size: 11px;
   line-height: 19px;
   color: var(--text-tertiary);
   margin-bottom: var(--sp-1);
+}
+
+.role-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-primary);
+  flex-shrink: 0;
+}
+
+/* 复制：悬停气泡时出现，复制后短暂显示对勾 */
+.copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-tertiary);
+  background: var(--bg-panel);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.message-bubble:hover .copy-btn,
+.copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  color: var(--brand-hover);
+  border-color: var(--brand-line);
+}
+
+.copy-btn:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 1px;
 }
 
 .message-content {
@@ -306,6 +403,32 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
   text-align: center;
 }
 
+.asset-thumb-download {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: var(--text-primary);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.asset-thumb:hover .asset-thumb-download,
+.asset-thumb-download:focus-visible {
+  opacity: 1;
+}
+
+.asset-thumb-download:hover {
+  color: var(--brand-hover);
+}
+
 .asset-thumb-link {
   display: flex;
   align-items: center;
@@ -333,6 +456,10 @@ function searchLive(m: AgentMessage): { phase: string; progress: number } | null
   }
   .message-bubble {
     max-width: 88%;
+  }
+  /* 触屏没有 hover：常显复制按钮，避免功能不可达 */
+  .copy-btn {
+    opacity: 0.65;
   }
 }
 </style>

@@ -385,8 +385,10 @@ def test_e2e_stage_gate_blocks_early_generate(client, project_env):
 
 
 def test_e2e_no_project_session(client, project_env):
-    """未关联项目的会话（P0-1 修复 2026-11-25）：生成请求不再自动创建项目，
-    而是如实说明阻塞原因并引导用户创建或关联项目——禁止默认名静默建项目。"""
+    """未关联项目的会话：镜头/分镜类生成请求仍如实说明阻塞原因并引导用户创建或关联项目。
+
+    A 方案（2026-11-25）只放开「明确的随手出图」请求（见 test_e2e_quick_image_without_project），
+    镜头目标依赖分镜提示词与阶段门禁，禁止默认名静默建正式项目。"""
     # 记录聊天前项目数（project_env 夹具可能已建项目），验证聊天后项目数不增
     import app.core.database as db_mod
     from app.models import Project
@@ -413,6 +415,57 @@ def test_e2e_no_project_session(client, project_env):
         assert count_after == count_before, (
             f"无项目会话不应自动创建项目，聊天前 {count_before} 个，聊天后 {count_after} 个"
         )
+    finally:
+        session.close()
+
+
+def test_e2e_quick_image_without_project(client, project_env):
+    """A 方案（2026-11-25）：未关联项目时明确的出图请求落到全局草稿项目「随手生成」。
+
+    对话即授权：直接建审批记录（approved）并提交生成任务，不再要求先建正式项目；
+    第二次随手出图复用同一个草稿项目，避免项目列表膨胀。
+    """
+    import app.core.database as db_mod
+    from app.models import AgentMessage, Job, Project
+
+    sid = _make_session(client)
+    resp = _chat(client, sid, "帮我生成一个小狗的图片")
+    assistant = resp["assistant_message"]
+    approval = (assistant.get("payload") or {}).get("approval") or {}
+    assert approval.get("quick") is True, assistant["content"]
+    assert approval.get("project_name") == "随手生成"
+    job_id = approval.get("job_id")
+    assert job_id
+    assert "随手生成" in assistant["content"]
+
+    session = db_mod.SessionLocal()
+    try:
+        project = session.query(Project).filter(Project.name == "随手生成").one()
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.project_id == project.id
+        assert (job.params or {}).get("__quick_image__") is True
+        assert (job.params or {}).get("prompt") == "小狗"
+        # 回归（2026-11-25 线上 500）：审批留痕与助手回复共用 seq 序列，
+        # 助手回复必须排在自动审批消息之后，固定 +2 会撞 (session_id, seq) 唯一索引
+        roles = [
+            m.role
+            for m in session.query(AgentMessage)
+            .filter(AgentMessage.session_id == sid)
+            .order_by(AgentMessage.seq)
+        ]
+        assert roles == ["user", "approval", "assistant"]
+    finally:
+        session.close()
+
+    # 第二次随手出图复用同一个草稿项目
+    resp2 = _chat(client, sid, "再生成一张海边日落的图片")
+    approval2 = (resp2["assistant_message"].get("payload") or {}).get("approval") or {}
+    assert approval2.get("project_name") == "随手生成", resp2["assistant_message"]["content"]
+    assert approval2.get("prompt") == "海边日落", approval2
+    session = db_mod.SessionLocal()
+    try:
+        assert session.query(Project).filter(Project.name == "随手生成").count() == 1
     finally:
         session.close()
 

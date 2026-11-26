@@ -31,8 +31,11 @@ from app.models.prop_lifecycle import PropEpisodeSnapshot, PropLifecycleEvent, P
 from app.models.prop_binding import CharacterPropBinding
 from app.models.agent import (
     AgentConfirmation,
+    AgentExecutionLog,
+    AgentGoal,
     AgentMemory,
     AgentMessage,
+    AgentPlan,
     AgentPlanStep,
     AgentSession,
     AgentTask,
@@ -104,7 +107,10 @@ __all__ = [
     "AudioSegment",
     "AudioReview",
     "AgentConfirmation",
+    "AgentExecutionLog",
+    "AgentGoal",
     "AgentMemory",
+    "AgentPlan",
     "WorkspaceEvent",
     "WorkspacePageContext",
     "WORKSPACE_CONTEXT_ID",

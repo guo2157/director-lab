@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /** 作品卡片：封面 + 状态 + 标题 + 元信息 + 进度。整卡可点，右上角「⋯」走操作菜单。 */
 import { computed, ref, watch } from 'vue'
-import { NButton, NDropdown, NProgress } from 'naive-ui'
+import { NButton, NDropdown, NIcon, NProgress } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
+import { Checkmark } from '@vicons/ionicons5'
 import type { CreationType, Project } from '@/types/project'
 import { stageLabel } from '@/constants/stages'
 import { relativeTime } from '@/utils/time'
@@ -215,7 +216,9 @@ function onCardKey(e: KeyboardEvent) {
             class="progress-done"
             :class="{ 'is-placeholder': progressState !== 'done' }"
             aria-hidden="true"
-          >{{ progressState === 'done' ? '✓' : '' }}</span>
+          >
+            <n-icon v-if="progressState === 'done'" :component="Checkmark" :size="12" />
+          </span>
         </div>
         <div v-else class="progress-track is-empty" aria-hidden="true" />
       </div>
@@ -607,7 +610,7 @@ function onCardKey(e: KeyboardEvent) {
   display: flex;
   align-items: center;
   gap: 6px;
-  /* 固定高度：有无 ✓ 图标都不改变行高，保证四张卡进度条基线一致 */
+  /* 固定高度：有无完成图标都不改变行高，保证四张卡进度条基线一致 */
   height: 12px;
   margin-top: 6px;
 }
@@ -615,12 +618,14 @@ function onCardKey(e: KeyboardEvent) {
   flex: 1;
   min-width: 0;
 }
-/* ✓ 占据固定 14px 槽位：所有卡的进度条右端都在同一 x，满格卡不因勾选而缩短 */
+/* 完成图标占据固定 14px 槽位：所有卡的进度条右端都在同一 x，满格卡不因勾选而缩短 */
 .progress-done {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 14px;
-  text-align: center;
-  font-size: 12px;
+  height: 12px;
   line-height: 1;
   color: var(--state-success);
 }
@@ -640,7 +645,7 @@ function onCardKey(e: KeyboardEvent) {
 .progress-block.is-zero .progress-text {
   color: var(--text-tertiary);
 }
-/* 已完成：只让进度条（绿 + ✓）表达完成，阶段 chip 保持中性 */
+/* 已完成：只让进度条（绿 + 完成图标）表达完成，阶段 chip 保持中性 */
 .progress-block.is-done .progress-text {
   color: var(--state-success);
 }

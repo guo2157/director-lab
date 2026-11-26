@@ -573,7 +573,8 @@
 | GET | /api/agent/sessions | 会话列表（分页） |
 | GET | /api/agent/sessions/{session_id} | 会话详情 |
 | PATCH | /api/agent/sessions/{session_id} | 更新会话（标题/关联项目/模型） |
-| DELETE | /api/agent/sessions/{session_id} | 归档会话（软删除，status=archived） |
+| DELETE | /api/agent/sessions/{session_id} | 删除会话（物理删除，级联清理消息/任务/计划/审批上下文，不可恢复） |
+| POST | /api/agent/sessions/{session_id}/archive | 归档会话（软删除，status=archived，消息保留） |
 | POST | /api/agent/sessions/{session_id}/restore | 恢复归档会话 |
 | POST | /api/agent/sessions/{session_id}/messages | 追加消息 |
 | GET | /api/agent/sessions/{session_id}/messages | 消息列表（支持 after_seq 增量） |
@@ -588,6 +589,7 @@
 - 消息 `role` 取值：`user` / `assistant` / `system` / `tool_event`（工具调用事件）/ `approval`（人工审批事件）。
 - 消息 `seq` 会话内自增（唯一索引兜底并发），前端按 seq 排序与增量加载（`after_seq`）。
 - 归档会话只读：追加消息/聊天返回 409 `session_archived`。
+- 删除与会话归档是两条路径：DELETE 物理删除会话及消息、意图任务/计划/确认事项/目标与执行日志；归档仅置 `status=archived`，消息保留且可恢复。项目、资产、生成产物均不级联删除。
 
 ### 聊天流程（POST /chat）
 1. 持久化 user 消息。

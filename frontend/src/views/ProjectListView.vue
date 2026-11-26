@@ -279,6 +279,7 @@ function clearFilters() {
             clearable
             class="search-input"
             size="medium"
+            :input-props="{ 'aria-label': '搜索作品' }"
           >
             <template #prefix>
               <n-icon :component="SearchOutline" :size="15" class="search-mark" />

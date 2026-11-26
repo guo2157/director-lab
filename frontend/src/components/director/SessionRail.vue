@@ -1,10 +1,20 @@
 <script setup lang="ts">
 /**
- * 左栏：历史会话导航。唯一职责是「找到 / 切换 / 重命名 / 删除」会话。
+ * 左栏：历史会话导航。唯一职责是「找到 / 切换 / 重命名 / 归档 / 删除」会话。
  * 三态：加载中骨架、空列表说明、加载失败可重试。
  */
 import { computed, ref } from 'vue'
-import { NButton, NInput, NPopconfirm } from 'naive-ui'
+import { NButton, NIcon, NInput, NPopconfirm } from 'naive-ui'
+import {
+  Add,
+  ArchiveOutline,
+  ChatbubblesOutline,
+  ChevronBack,
+  ChevronDown,
+  ChevronForward,
+  Search,
+  TrashOutline,
+} from '@vicons/ionicons5'
 import type { AgentSession } from '@/api/agent'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import ErrorRetry from '@/components/ui/ErrorRetry.vue'
@@ -17,7 +27,7 @@ const props = defineProps<{
   activeId: string | null
   /** 加载失败信息（空串表示无错误） */
   error: string
-  /** 已归档会话（删除即归档，可从这里恢复） */
+  /** 已归档会话（归档可恢复；删除为物理删除） */
   archived: AgentSession[]
 }>()
 
@@ -25,6 +35,7 @@ const emit = defineEmits<{
   select: [session: AgentSession]
   create: []
   rename: [session: AgentSession, title: string]
+  archive: [session: AgentSession]
   remove: [session: AgentSession]
   restore: [session: AgentSession]
   collapse: []
@@ -57,10 +68,26 @@ function confirmRename(s: AgentSession): void {
 <template>
   <aside class="panel sessions-panel">
     <div class="panel-header">
-      <span class="panel-title">会话</span>
+      <div class="panel-heading">
+        <NIcon :component="ChatbubblesOutline" :size="15" class="panel-icon" />
+        <span class="panel-title">会话</span>
+        <span v-if="sessions.length" class="panel-count">{{ sessions.length }}</span>
+      </div>
       <div class="header-actions">
-        <NButton size="tiny" quaternary aria-label="收起会话栏" @click="emit('collapse')">收起</NButton>
-        <NButton size="tiny" type="primary" @click="emit('create')">新建</NButton>
+        <NButton size="tiny" type="primary" @click="emit('create')">
+          <template #icon><NIcon :component="Add" /></template>
+          新建
+        </NButton>
+        <NButton
+          size="tiny"
+          quaternary
+          class="icon-btn"
+          aria-label="收起会话栏"
+          title="收起会话栏"
+          @click="emit('collapse')"
+        >
+          <template #icon><NIcon :component="ChevronBack" /></template>
+        </NButton>
       </div>
     </div>
 
@@ -71,7 +98,9 @@ function confirmRename(s: AgentSession): void {
         placeholder="搜索会话"
         clearable
         :input-props="{ 'aria-label': '搜索会话' }"
-      />
+      >
+        <template #prefix><NIcon :component="Search" :size="14" /></template>
+      </NInput>
     </div>
 
     <div class="session-scroll">
@@ -116,6 +145,7 @@ function confirmRename(s: AgentSession): void {
             />
           </template>
           <template v-else>
+            <span class="active-bar" aria-hidden="true"></span>
             <div class="session-info">
               <div class="session-title" :title="s.title" @dblclick.stop="startRename(s)">
                 {{ s.title }}
@@ -124,26 +154,44 @@ function confirmRename(s: AgentSession): void {
                 <span class="session-time">{{ fmtTime(s.last_message_at ?? s.updated_at) }}</span>
               </div>
             </div>
-            <NPopconfirm @positive-click="emit('remove', s)">
-              <template #trigger>
-                <NButton
-                  size="tiny"
-                  quaternary
-                  type="error"
-                  class="archive-btn"
-                  aria-label="删除会话"
-                  @click.stop
-                >
-                  删除
-                </NButton>
-              </template>
-              删除后该会话将从列表移除。确认删除？
-            </NPopconfirm>
+            <div class="session-actions">
+              <NPopconfirm @positive-click="emit('archive', s)">
+                <template #trigger>
+                  <NButton
+                    size="tiny"
+                    quaternary
+                    class="row-action"
+                    aria-label="归档会话"
+                    title="归档会话"
+                    @click.stop
+                  >
+                    <template #icon><NIcon :component="ArchiveOutline" /></template>
+                  </NButton>
+                </template>
+                归档后对话内容保留，可在「已归档」中恢复。
+              </NPopconfirm>
+              <NPopconfirm @positive-click="emit('remove', s)">
+                <template #trigger>
+                  <NButton
+                    size="tiny"
+                    quaternary
+                    type="error"
+                    class="row-action"
+                    aria-label="删除会话"
+                    title="删除会话"
+                    @click.stop
+                  >
+                    <template #icon><NIcon :component="TrashOutline" /></template>
+                  </NButton>
+                </template>
+                将永久删除该会话及其全部对话上下文，不可恢复。确认删除？
+              </NPopconfirm>
+            </div>
           </template>
         </div>
       </div>
 
-      <!-- 已归档：删除即归档，没有这个入口用户会以为数据被彻底删掉 -->
+      <!-- 已归档：归档可恢复；删除则连同上下文物理删除 -->
       <div v-if="archived.length" class="archived-block">
         <button
           class="archived-toggle"
@@ -152,12 +200,22 @@ function confirmRename(s: AgentSession): void {
           @click="showArchived = !showArchived"
         >
           <span class="archived-label">已归档 {{ archived.length }}</span>
-          <span class="archived-chev" aria-hidden="true">{{ showArchived ? '▾' : '▸' }}</span>
+          <NIcon
+            :component="showArchived ? ChevronDown : ChevronForward"
+            :size="12"
+            class="archived-chev"
+          />
         </button>
         <div v-if="showArchived" class="archived-list">
           <div v-for="s in archived" :key="s.id" class="archived-item">
             <span class="archived-title" :title="s.title">{{ s.title }}</span>
             <NButton size="tiny" quaternary @click="emit('restore', s)">恢复</NButton>
+            <NPopconfirm @positive-click="emit('remove', s)">
+              <template #trigger>
+                <NButton size="tiny" quaternary type="error" @click.stop>删除</NButton>
+              </template>
+              将永久删除该会话及其全部对话上下文，不可恢复。确认删除？
+            </NPopconfirm>
           </div>
         </div>
       </div>
@@ -170,6 +228,7 @@ function confirmRename(s: AgentSession): void {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+  box-shadow: var(--card-sheen);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -188,6 +247,18 @@ function confirmRename(s: AgentSession): void {
   min-width: 0;
 }
 
+.panel-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.panel-icon {
+  color: var(--brand-primary);
+  flex-shrink: 0;
+}
+
 .panel-title {
   font-size: 13px;
   font-weight: 600;
@@ -195,6 +266,22 @@ function confirmRename(s: AgentSession): void {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 会话数量：中性胶囊，不与「新建」主按钮争色 */
+.panel-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  background: var(--neutral-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
 }
 
 .header-actions {
@@ -228,14 +315,32 @@ function confirmRename(s: AgentSession): void {
 }
 
 .session-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
   border: 1px solid transparent;
   border-radius: var(--radius);
   cursor: pointer;
   transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+/* 选中态：品牌底色 + 左侧发光竖条（双重编码，不只靠颜色） */
+.active-bar {
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-gradient-line);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.session-item.active .active-bar {
+  opacity: 1;
 }
 
 .session-item:hover {
@@ -252,6 +357,10 @@ function confirmRename(s: AgentSession): void {
   border-color: var(--brand-line);
 }
 
+.session-item.active:hover {
+  background: var(--overlay-selected);
+}
+
 .session-info {
   flex: 1;
   min-width: 0;
@@ -265,6 +374,10 @@ function confirmRename(s: AgentSession): void {
   text-overflow: ellipsis;
 }
 
+.session-item.active .session-title {
+  font-weight: 600;
+}
+
 .session-meta {
   display: flex;
   gap: var(--sp-2);
@@ -273,17 +386,21 @@ function confirmRename(s: AgentSession): void {
   margin-top: 2px;
 }
 
-.archive-btn {
-  opacity: 0;
+.session-actions {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
 }
 
-.session-item:hover .archive-btn,
-.session-item.is-editing .archive-btn {
-  opacity: 1;
+/* 归档 / 删除：默认隐藏，悬停或键盘聚焦时出现，避免列表噪声 */
+.row-action {
+  opacity: 0;
+  transition: opacity var(--transition-fast);
 }
 
-.archive-btn:focus-visible {
+.session-item:hover .row-action,
+.session-item:focus-within .row-action,
+.row-action:focus-visible {
   opacity: 1;
 }
 
@@ -320,7 +437,12 @@ function confirmRename(s: AgentSession): void {
 }
 
 .archived-chev {
-  font-size: 10px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.archived-toggle:hover .archived-chev {
+  color: var(--text-secondary);
 }
 
 .archived-list {

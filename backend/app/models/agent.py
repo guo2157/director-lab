@@ -8,7 +8,7 @@
 - 软删除：会话删除仅置 status=archived，不物理删除消息，保护审计记录
 """
 from datetime import datetime
-from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TimestampMixin
 
@@ -60,7 +60,6 @@ class AgentMessage(Base, TimestampMixin):
     attachment_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # 消息序号（会话内递增，用于排序与增量加载）
     seq: Mapped[int] = mapped_column(nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class AgentTask(Base, TimestampMixin):
@@ -88,7 +87,15 @@ class AgentTask(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
     # 执行结果摘要（completed/failed 时填写）
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    # ── Agent Runtime M1 扩展列 ──
+    goal_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    plan_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    current_step_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lifecycle_state: Mapped[str | None] = mapped_column(String(32), nullable=True, default="created", server_default="created")
+    progress_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    resume_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AgentPlanStep(Base, TimestampMixin):
@@ -118,7 +125,22 @@ class AgentPlanStep(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     # 执行结果摘要（错误码/耗时等）
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=func.now(), server_default=func.now())
+
+    # ── Agent Runtime M1 扩展列 ──
+    plan_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    depends_on: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    preconditions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    verification: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    requires_approval: Mapped[bool | None] = mapped_column(nullable=True, default=False, server_default="0")
+    retry_count: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0, server_default="0")
+    max_retries: Mapped[int | None] = mapped_column(Integer, nullable=True, default=3, server_default="3")
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True, default=600, server_default="600")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AgentConfirmation(Base, TimestampMixin):
@@ -158,7 +180,6 @@ class AgentConfirmation(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     # 审批意见 / 修改要求
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     # --- 业务对象审核字段（kind=artifact_review）---
     # 所属会话与项目：可直接查询，页面刷新后无需经 task 反查即可重建确认卡片
@@ -215,3 +236,73 @@ class AgentMemory(Base, TimestampMixin):
     )
     # 替代本条记忆的新记忆 ID（status=superseded 时填写）
     superseded_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class AgentGoal(Base, TimestampMixin):
+    """Agent 用户目标：一次用户意图的结构化持久化（Agent Runtime Phase 1）。
+    设计约束：
+    - 每个 session 同一时间只有一个 active 目标
+    - 目标类型：user_request / system_continuation / recovery
+    - 约束与成功标准以 JSON 存储，供 Constraint Manager 与 Verifier 消费
+    - 状态机：active → paused/completed/failed/cancelled；failed 可恢复为 active
+    """
+
+    __tablename__ = "agent_goal"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    goal_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="user_request", server_default="user_request"
+    )
+    constraints: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    success_criteria: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active", index=True
+    )
+
+
+class AgentPlan(Base, TimestampMixin):
+    """Agent 执行计划：每个 Goal 可有多个 Revision（Agent Runtime Phase 1）。
+    设计约束：
+    - 计划版本号 revision 递增，旧版本 status=superseded 保留审计
+    - plan_json 存储完整计划快照（含 steps 列表）
+    - 状态机：active → superseded/completed/failed
+    """
+
+    __tablename__ = "agent_plan"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    plan_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+
+
+class AgentExecutionLog(Base, TimestampMixin):
+    """Agent 执行审计日志：每次工具调用/Step 执行的完整记录（Agent Runtime Phase 1）。
+    设计约束：
+    - 记录 tool_name、input、output 完整快照
+    - 记录耗时 duration_ms 供性能分析
+    - 失败时记录 error_code 与 error_message，不丢失现场
+    - 关联 goal_id/plan_id/step_id 三级，支持逐层追溯
+    """
+
+    __tablename__ = "agent_execution_log"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    goal_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    plan_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    step_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    tool_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

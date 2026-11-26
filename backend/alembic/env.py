@@ -6,7 +6,9 @@ from sqlalchemy import engine_from_config, event, pool
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 迁移在应用进程内执行，fileConfig 默认会禁用已存在的 logger，
+    # 导致 uvicorn 的访问日志与异常堆栈从此静默；这里保留现有 logger
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 from app.core.config import get_settings  # noqa: E402
 from app.models.base import Base  # noqa: E402

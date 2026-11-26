@@ -106,9 +106,12 @@ def list_assets(
 
 
 @router.get("/{asset_id}/file")
-def get_asset_file(asset_id: str, thumb: bool = False, db: Session = Depends(get_db)) -> FileResponse:
+def get_asset_file(
+    asset_id: str, thumb: bool = False, download: bool = False, db: Session = Depends(get_db)
+) -> FileResponse:
     """媒体文件服务：返回资产原文件或缩略图（thumb=true 且缩略图存在时）。
-    缩略图缺失时回退原文件，保证前端展示不中断。"""
+    缩略图缺失时回退原文件，保证前端展示不中断。
+    download=true 时以附件形式返回（按资产名命名），供对话气泡内直接下载原图。"""
     a = _get_asset(db, asset_id)
     path_str = a.file_path
     if thumb and a.thumb_path:
@@ -118,6 +121,8 @@ def get_asset_file(asset_id: str, thumb: bool = False, db: Session = Depends(get
         raise errors.AppError("asset_file_missing", "资产文件不存在或已被清理", 404)
     import mimetypes
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if download:
+        return FileResponse(path, media_type=media_type, filename=f"{a.name or a.id}{path.suffix}")
     return FileResponse(path, media_type=media_type)
 
 

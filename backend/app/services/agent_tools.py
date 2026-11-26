@@ -126,6 +126,9 @@ def _precheck_script_parsed(db: Session, **kwargs: object) -> tuple[bool, str]:
     """剧本必须已解析并产出镜头。"""
     from app.models import ParseVersion
 
+    # 随手生成（草稿项目）：无剧本/解析版本，纯文生图不依赖剧本与镜头
+    if kwargs.get("quick_prompt"):
+        return True, ""
     project_id = str(kwargs.get("project_id", "") or "")
     p = db.get(Project, project_id)
     if not p:

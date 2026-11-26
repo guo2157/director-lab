@@ -9,7 +9,7 @@ import {
   listReviews,
   listSessions,
   resolveApproval,
-  archiveSession,
+  deleteSession,
   restoreSession,
   updateSession,
 } from '@/api/agent'
@@ -181,11 +181,11 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   /**
-   * 归档（软删除）会话：后端仅置 status=archived，消息保留供审计。
+   * 删除会话：物理删除会话及其全部对话上下文，不可恢复。
    * 删掉的是当前会话时，自动切到剩余的第一个，没有则清空选中态。
    */
   async function removeSession(id: string): Promise<void> {
-    await archiveSession(id)
+    await deleteSession(id)
     const wasActive = activeSessionId.value === id
     await loadSessions()
     if (wasActive) {

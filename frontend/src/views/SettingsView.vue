@@ -4,10 +4,12 @@ import { useRoute } from 'vue-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import WorkflowTestPanel from '@/components/workflow/WorkflowTestPanel.vue'
 import {
-  NCard, NButton, NSpin, NInput, NInputNumber, NSelect, NSwitch,
-  NTag, NEmpty, NUpload, NTooltip, NModal, NPopconfirm, NIcon, useMessage,
+  NCard, NButton, NInput, NInputNumber, NSelect, NSwitch,
+  NTag, NUpload, NTooltip, NModal, NIcon, useMessage,
 } from 'naive-ui'
-import { FilmOutline } from '@vicons/ionicons5'
+import {
+  AddOutline, FilmOutline, LayersOutline, ServerOutline, SparklesOutline,
+} from '@vicons/ionicons5'
 import type { UploadFileInfo } from 'naive-ui'
 import {
   getSettings, updateSettings, testLlm, listLlmModels,
@@ -25,9 +27,12 @@ import {
   type WorkflowClassifiedItem,
   type WorkflowClassificationGroup,
 } from '@/types/workflow'
+import EmptyState from '@/components/ui/EmptyState.vue'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 
 const message = useMessage()
 const queryClient = useQueryClient()
+const confirmDialog = useConfirmDialog()
 
 // --- Tabs（带图标与描述） ---
 const route = useRoute()
@@ -97,10 +102,20 @@ const confirmAddInstance = () => {
   saveInstancesMutation.mutate(editInstances.value)
 }
 
-// 删除实例行（自动保存）
+// 删除实例行（确认后自动保存）
 const removeInstance = (idx: number) => {
-  editInstances.value.splice(idx, 1)
-  saveInstancesMutation.mutate(editInstances.value)
+  const inst = editInstances.value[idx]
+  const label = inst?.base_url || '未填写地址的实例'
+  confirmDialog({
+    title: '删除实例',
+    message: `删除后「${label}」不再参与任务分配，已提交的任务不受影响。`,
+    impact: [`实例「${label}」`, ...(inst ? [`权重 ${inst.weight}`] : [])],
+    confirmText: '删除实例',
+    onConfirm: () => {
+      editInstances.value.splice(idx, 1)
+      saveInstancesMutation.mutate(editInstances.value)
+    },
+  })
 }
 
 // 行内编辑（权重/启用）自动保存（防抖 500ms，避免高频 API 调用）
@@ -195,6 +210,8 @@ const openLlmModal = (inst?: LlmInstance) => {
   }
   showLlmModal.value = true
 }
+// 弹窗标题按「是否已在列表中」判断，不能看 id：新增时也会先生成一个本地 id
+const llmEditing = computed(() => editLlmInstances.value.some((i) => i.id === llmForm.value.id))
 // 弹窗确定：新增或回写编辑结果并保存
 const confirmLlmModal = () => {
   const form = llmForm.value
@@ -211,10 +228,20 @@ const confirmLlmModal = () => {
   showLlmModal.value = false
   saveLlmMutation.mutate()
 }
-// 删除模型卡片（自动保存）
+// 删除模型卡片（确认后自动保存）
 const removeLlmCard = (idx: number) => {
-  editLlmInstances.value.splice(idx, 1)
-  saveLlmMutation.mutate()
+  const inst = editLlmInstances.value[idx]
+  const label = inst?.name || inst?.model || `模型 ${idx + 1}`
+  confirmDialog({
+    title: '删除模型配置',
+    message: `删除后「${label}」不再出现在模型列表中；若它正在启用，删除后需另选一个模型。`,
+    impact: [`模型「${label}」`, ...(inst?.base_url ? [`API ${inst.base_url}`] : [])],
+    confirmText: '删除模型',
+    onConfirm: () => {
+      editLlmInstances.value.splice(idx, 1)
+      saveLlmMutation.mutate()
+    },
+  })
 }
 // 开启一个模型时自动关闭其余（同一时刻仅一个启用），切换后自动保存
 const handleLlmEnable = (inst: LlmInstance, value: boolean) => {
@@ -468,6 +495,8 @@ const saveDescMutation = useMutation({
 
 <template>
   <div class="settings-page">
+    <!-- 顶栏已高亮「设置」：页内不再重复同名可视标题，H1 只保留语义 -->
+    <h1 class="visually-hidden">设置</h1>
     <div class="settings-layout">
       <!-- Sidebar nav：用 button 保证键盘可聚焦与可访问名，激活态同时给出 aria-current -->
       <aside class="settings-nav">
@@ -501,19 +530,33 @@ const saveDescMutation = useMutation({
 
         <!-- ComfyUI -->
         <template v-else-if="activeTab === 'comfyui'">
-          <div class="page-header">
-            <h2 class="page-title">ComfyUI 配置</h2>
+          <!-- 左侧导航已用「品牌底 + 品牌字 + 内描边」标出当前档，页内不再重复同名标题 -->
+          <div class="tab-head">
+            <h2 class="visually-hidden">ComfyUI 配置</h2>
             <p class="page-subtitle">多实例加权负载均衡：权重越大分配任务越多，实例不可用时自动切换</p>
           </div>
           <n-card class="settings-card" :bordered="false">
             <div class="section-label">
               <span>实例列表</span>
-              <div style="display: flex; align-items: center; gap: 10px">
+              <div class="section-tools">
                 <n-tag size="small" :bordered="false" type="info">{{ editInstances.length }} 个实例</n-tag>
-                <n-button size="small" type="primary" @click="openInstanceModal">+ 新增实例</n-button>
+                <n-button size="small" type="primary" @click="openInstanceModal">
+                  <template #icon><n-icon :component="AddOutline" /></template>
+                  新增实例
+                </n-button>
               </div>
             </div>
-            <n-empty v-if="!editInstances.length" description="暂无实例，点击右上角按钮新增" style="margin: 12px 0" />
+            <EmptyState
+              v-if="!editInstances.length"
+              compact
+              class="in-card-empty"
+              title="还没有 ComfyUI 实例"
+              description="添加实例地址后，生成任务会按权重分配到各实例。"
+              action-text="新增实例"
+              @action="openInstanceModal"
+            >
+              <template #icon><n-icon :component="ServerOutline" :size="22" /></template>
+            </EmptyState>
             <div v-else class="wf-table inst-table">
               <div class="wf-thead">
                 <span class="col-name">实例地址</span>
@@ -524,8 +567,8 @@ const saveDescMutation = useMutation({
               </div>
               <div v-for="(inst, idx) in editInstances" :key="idx" class="wf-tr">
                 <span class="col-name inst-url" data-label="实例地址">{{ inst.base_url || '（未填写）' }}</span>
-                <span class="col-weight" data-label="权重"><n-input-number v-model:value="inst.weight" :min="1" size="small" style="width: 90px" @update:value="handleInstanceChange" /></span>
-                <span class="col-enabled" data-label="启用"><n-switch v-model:value="inst.enabled" size="small" @update:value="handleInstanceChange" /></span>
+                <span class="col-weight" data-label="权重"><n-input-number v-model:value="inst.weight" :min="1" size="small" class="weight-input" :aria-label="`实例权重 ${inst.base_url || idx + 1}`" @update:value="handleInstanceChange" /></span>
+                <span class="col-enabled" data-label="启用"><n-switch v-model:value="inst.enabled" size="small" :aria-label="`启用实例 ${inst.base_url || idx + 1}`" @update:value="handleInstanceChange" /></span>
                 <span class="col-test" data-label="测试结果">
                   <n-tag
                     v-if="instanceTestResults[inst.base_url]"
@@ -533,18 +576,15 @@ const saveDescMutation = useMutation({
                     size="small"
                     :bordered="false"
                   >
-                    {{ instanceTestResults[inst.base_url].ok ? `${instanceTestResults[inst.base_url].latency_ms ?? 0}ms` : (instanceTestResults[inst.base_url].message || '连接失败') }}
+                    {{ instanceTestResults[inst.base_url].ok
+                      ? `连接正常 ${instanceTestResults[inst.base_url].latency_ms ?? 0}ms`
+                      : (instanceTestResults[inst.base_url].message || '连接失败') }}
                   </n-tag>
                   <span v-else class="hint-text">未测试</span>
                 </span>
                 <span class="col-actions" data-label="操作">
                   <n-button size="tiny" quaternary @click="testInstanceMutation.mutate(inst.base_url)" :loading="testingUrl === inst.base_url">测试</n-button>
-                  <n-popconfirm @positive-click="removeInstance(idx)">
-                    <template #trigger>
-                      <n-button size="tiny" quaternary type="error">删除</n-button>
-                    </template>
-                    确认删除该实例？
-                  </n-popconfirm>
+                  <n-button size="tiny" quaternary type="error" @click="removeInstance(idx)">删除</n-button>
                 </span>
               </div>
             </div>
@@ -564,30 +604,44 @@ const saveDescMutation = useMutation({
             </div>
             <div class="form-item">
               <label class="field-label">权重（正整数，越大分配任务越多）</label>
-              <n-input-number v-model:value="instanceForm.weight" :min="1" style="width: 100%" />
+              <n-input-number v-model:value="instanceForm.weight" :min="1" class="field-full" />
             </div>
-            <div class="meta-item" style="margin: 12px 0 16px">
+            <div class="switch-row">
               <span>启用该实例</span>
-              <n-switch v-model:value="instanceForm.enabled" size="small" />
+              <n-switch v-model:value="instanceForm.enabled" size="small" aria-label="启用该实例" />
             </div>
-            <div class="card-actions" style="margin-top: 0">
-              <n-button type="primary" @click="confirmAddInstance">添加</n-button>
+            <div class="modal-actions">
+              <span class="spacer" />
               <n-button quaternary @click="showInstanceModal = false">取消</n-button>
+              <n-button type="primary" @click="confirmAddInstance">添加实例</n-button>
             </div>
           </n-modal>
         </template>
 
         <!-- LLM（多模型卡片配置：同一时刻仅一个启用，后端实时调用启用中的模型） -->
         <template v-else-if="activeTab === 'llm'">
-          <div class="page-header">
-            <h2 class="page-title">语言模型配置</h2>
+          <div class="tab-head">
+            <h2 class="visually-hidden">语言模型配置</h2>
             <p class="page-subtitle">多模型卡片配置：开启一个模型后其余自动关闭，后端实时调用启用中的模型</p>
           </div>
           <div class="llm-card-toolbar">
             <n-tag size="small" :bordered="false" type="info">{{ editLlmInstances.length }} 个模型</n-tag>
-            <n-button size="small" type="primary" @click="openLlmModal()">+ 新增模型</n-button>
+            <n-button size="small" type="primary" @click="openLlmModal()">
+              <template #icon><n-icon :component="AddOutline" /></template>
+              新增模型
+            </n-button>
           </div>
-          <n-empty v-if="!editLlmInstances.length" description="暂无模型，点击右上角按钮新增" style="margin: 12px 0" />
+          <EmptyState
+            v-if="!editLlmInstances.length"
+            compact
+            class="in-card-empty"
+            title="还没有语言模型"
+            description="添加模型地址与 API Key 后，剧本评估与解析会调用启用中的模型。"
+            action-text="新增模型"
+            @action="openLlmModal()"
+          >
+            <template #icon><n-icon :component="SparklesOutline" :size="22" /></template>
+          </EmptyState>
           <div v-else class="llm-mini-grid">
             <div v-for="(inst, idx) in editLlmInstances" :key="inst.id" class="llm-mini-card" :class="{ active: inst.enabled }">
               <div class="llm-mini-head">
@@ -601,15 +655,15 @@ const saveDescMutation = useMutation({
               </div>
               <div class="llm-mini-url hint-text">{{ inst.base_url || '未设置 API URL' }}</div>
               <div class="llm-mini-ops">
-                <n-switch :value="inst.enabled" size="small" @update:value="handleLlmEnable(inst, $event)" />
+                <n-switch
+                  :value="inst.enabled"
+                  size="small"
+                  :aria-label="`启用模型 ${inst.name || inst.model || idx + 1}`"
+                  @update:value="handleLlmEnable(inst, $event)"
+                />
                 <div class="llm-mini-btns">
                   <n-button size="tiny" quaternary @click="openLlmModal(inst)">编辑</n-button>
-                  <n-popconfirm @positive-click="removeLlmCard(idx)">
-                    <template #trigger>
-                      <n-button size="tiny" quaternary type="error">删除</n-button>
-                    </template>
-                    确认删除该模型配置？
-                  </n-popconfirm>
+                  <n-button size="tiny" quaternary type="error" @click="removeLlmCard(idx)">删除</n-button>
                 </div>
               </div>
             </div>
@@ -619,7 +673,7 @@ const saveDescMutation = useMutation({
           <n-modal
             v-model:show="showLlmModal"
             preset="card"
-            :title="llmForm.id ? '编辑模型' : '新增模型'"
+            :title="llmEditing ? '编辑模型' : '新增模型'"
             style="width: 560px; max-width: 92vw"
             :bordered="false"
           >
@@ -643,7 +697,7 @@ const saveDescMutation = useMutation({
             </div>
             <div class="form-item">
               <label class="field-label">模型名称（点击查询按钮拉取列表，也可手动输入）</label>
-              <div style="display: flex; gap: 8px; width: 100%">
+              <div class="field-row">
                 <n-select
                   v-model:value="llmForm.model"
                   :options="llmModelOptionsMap[llmForm.id] ?? []"
@@ -652,23 +706,24 @@ const saveDescMutation = useMutation({
                   clearable
                   :loading="llmModelsLoadingMap[llmForm.id]"
                   placeholder="查询模型列表后选择，或直接输入"
-                  style="flex: 1"
+                  class="field-grow"
                 />
                 <n-button :loading="llmModelsLoadingMap[llmForm.id]" @click="fetchLlmModels(llmForm)">查询模型</n-button>
               </div>
             </div>
-            <div class="card-actions" style="margin-top: 0">
+            <div class="modal-actions">
               <n-button :loading="testingLlmId === llmForm.id" @click="testLlmMutation.mutate(llmForm)">测试连接</n-button>
-              <n-button type="primary" @click="confirmLlmModal">确定</n-button>
+              <span class="spacer" />
               <n-button quaternary @click="showLlmModal = false">取消</n-button>
+              <n-button type="primary" @click="confirmLlmModal">保存模型</n-button>
             </div>
           </n-modal>
         </template>
 
         <!-- Workflows -->
         <template v-else-if="activeTab === 'workflows'">
-          <div class="page-header">
-            <h2 class="page-title">工作流管理</h2>
+          <div class="tab-head">
+            <h2 class="visually-hidden">工作流管理</h2>
             <p class="page-subtitle">
               按真实能力自动细分（文生图 / 图生图 / 首尾帧 / 文生视频 / 参考图生视频 / TTS / BGM / SFX），
               共 {{ classifiedCount }} 个；描述可在行内编辑，内置工作流默认优先执行且不可删除
@@ -678,23 +733,47 @@ const saveDescMutation = useMutation({
           <!-- 列表 -->
           <n-card class="settings-card" :bordered="false">
             <div class="wf-toolbar">
-              <div class="wf-type-tabs">
-                <div
+              <div class="wf-type-tabs" role="group" aria-label="按工作流类型筛选">
+                <button
                   v-for="opt in workflowTypeOptions"
                   :key="opt.value"
+                  type="button"
                   class="wf-type-tab"
                   :class="{ active: workflowTypeFilter === opt.value }"
+                  :aria-pressed="workflowTypeFilter === opt.value"
                   @click="workflowTypeFilter = opt.value"
-                >{{ opt.label }}</div>
+                >{{ opt.label }}</button>
               </div>
-              <n-button size="small" type="primary" @click="openUploadModal">+ 新增工作流</n-button>
+              <n-button size="small" type="primary" @click="openUploadModal">
+                <template #icon><n-icon :component="AddOutline" /></template>
+                新增工作流
+              </n-button>
             </div>
-            <n-spin v-if="classificationQuery.isLoading.value" style="padding: 24px 0; width: 100%" />
-            <n-empty
+            <div v-if="classificationQuery.isLoading.value" class="wf-skeleton" aria-hidden="true">
+              <div v-for="i in 5" :key="i" class="sk-item sk-row" />
+            </div>
+            <EmptyState
+              v-else-if="classificationQuery.isError.value"
+              compact
+              class="in-card-empty"
+              title="工作流分类加载失败"
+              description="无法获取工作流列表，请确认后端服务可用后重试。"
+              action-text="重新加载"
+              @action="classificationQuery.refetch()"
+            >
+              <template #icon><n-icon :component="LayersOutline" :size="22" /></template>
+            </EmptyState>
+            <EmptyState
               v-else-if="!renderGroups.length"
-              :description="classificationQuery.isError.value ? '工作流分类加载失败，请检查后端服务' : '暂无工作流'"
-              style="padding: 24px 0"
-            />
+              compact
+              class="in-card-empty"
+              title="还没有工作流"
+              description="上传 ComfyUI 导出的工作流 JSON，即可在生成任务中选用。"
+              action-text="新增工作流"
+              @action="openUploadModal"
+            >
+              <template #icon><n-icon :component="LayersOutline" :size="22" /></template>
+            </EmptyState>
             <div v-else class="wf-groups">
               <section v-for="group in renderGroups" :key="group.key" class="wf-group">
                 <div class="wf-group-head">
@@ -749,7 +828,7 @@ const saveDescMutation = useMutation({
             style="width: 460px; max-width: 92vw"
             :bordered="false"
           >
-            <p class="hint-text" style="margin: 0 0 12px">
+            <p class="hint-text modal-hint">
               描述显示在资产库、分镜图、分镜看板的工作流选择器中，技术名只在悬停时提示。
             </p>
             <div class="form-item">
@@ -760,21 +839,22 @@ const saveDescMutation = useMutation({
                 maxlength="60"
                 show-count
               />
-              <span class="hint-text" :style="descTooLong ? 'color: var(--state-danger)' : ''">
+              <span class="hint-text" :class="{ 'is-danger': descTooLong }">
                 当前 {{ descCharCount.nonAscii }} 个汉字 / {{ descCharCount.ascii }} 个英文字符，上限 20 个汉字或 40 个英文字符
               </span>
             </div>
-            <p v-if="descWorkflow" class="hint-text" style="margin: 4px 0 0">
+            <p v-if="descWorkflow" class="hint-text modal-hint-sub">
               技术名：{{ descWorkflow.name }}（v{{ descWorkflow.version }}）
             </p>
-            <div class="card-actions" style="margin-top: 16px">
+            <div class="modal-actions">
+              <span class="spacer" />
+              <n-button quaternary @click="showDescModal = false">取消</n-button>
               <n-button
                 type="primary"
                 :disabled="!descValue.trim() || descTooLong"
                 :loading="saveDescMutation.isPending.value"
                 @click="saveDescMutation.mutate()"
-              >保存</n-button>
-              <n-button quaternary @click="showDescModal = false">取消</n-button>
+              >保存描述</n-button>
             </div>
           </n-modal>
 
@@ -817,18 +897,19 @@ const saveDescMutation = useMutation({
                 <n-button size="small">选择文件</n-button>
               </n-upload>
             </div>
-            <div class="meta-item" style="margin: 12px 0 16px">
+            <div class="switch-row">
               <span>设为该类型默认</span>
-              <n-switch v-model:value="uploadForm.is_default" size="small" />
+              <n-switch v-model:value="uploadForm.is_default" size="small" aria-label="设为该类型默认" />
             </div>
-            <div class="card-actions" style="margin-top: 0">
+            <div class="modal-actions">
+              <span class="spacer" />
+              <n-button quaternary @click="showUploadModal = false">取消</n-button>
               <n-button
                 type="primary"
                 :loading="uploadWorkflowMutation.isPending.value"
                 :disabled="!uploadModelTypeValid"
                 @click="uploadWorkflowMutation.mutate()"
-              >上传</n-button>
-              <n-button quaternary @click="showUploadModal = false">取消</n-button>
+              >上传工作流</n-button>
             </div>
           </n-modal>
 
@@ -836,10 +917,7 @@ const saveDescMutation = useMutation({
 
         <!-- About -->
         <template v-else-if="activeTab === 'about'">
-          <div class="page-header">
-            <h2 class="page-title">关于</h2>
-            <p class="page-subtitle">系统信息</p>
-          </div>
+          <h2 class="visually-hidden">关于</h2>
           <n-card class="settings-card" :bordered="false">
             <div class="about-brand"><n-icon :component="FilmOutline" :size="40" /></div>
             <h3 class="about-title">Director Lab 漫剧生产系统</h3>
@@ -866,8 +944,8 @@ const saveDescMutation = useMutation({
 }
 .settings-layout {
   display: flex;
-  gap: 20px;
-  padding: 24px;
+  gap: var(--sp-5);
+  padding: var(--sp-6);
   align-items: stretch;
   min-height: 100%;
   max-width: var(--page-max);
@@ -882,30 +960,30 @@ const saveDescMutation = useMutation({
   flex-direction: column;
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  padding: 10px;
+  border-radius: var(--radius-lg);
+  padding: var(--sp-3);
   align-self: stretch;
 }
 .nav-header {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text-secondary);
-  padding: 8px 12px 10px;
-  letter-spacing: 1px;
+  color: var(--text-tertiary);
+  padding: var(--sp-1) var(--sp-3) var(--sp-2);
+  letter-spacing: 0.08em;
 }
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-3);
   width: 100%;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 10px;
+  padding: var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
   background: transparent;
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 0.18s ease, color 0.18s ease;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   color: var(--text-primary);
 }
 .nav-item:hover {
@@ -915,12 +993,18 @@ const saveDescMutation = useMutation({
   outline: 2px solid var(--brand-hover);
   outline-offset: 2px;
 }
+/* 当前档三重编码：品牌 soft 底 + 品牌字 + 内描边，另加 600 字重。
+   不用品牌实色填充 —— 青底配 --text-primary 只有 1.9:1，是 DESIGN 明令禁止的组合。 */
 .nav-item.active {
-  background: var(--brand-primary);
-  color: var(--text-primary);
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
+  color: var(--brand-hover);
+}
+.nav-item.active .nav-label {
+  font-weight: 600;
 }
 .nav-item.active .nav-desc {
-  color: var(--overlay-active);
+  color: var(--text-secondary);
 }
 .nav-text {
   display: flex;
@@ -933,12 +1017,12 @@ const saveDescMutation = useMutation({
 }
 .nav-desc {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: color 0.18s ease;
+  transition: color var(--transition-fast);
 }
 
 /* --- Content --- */
@@ -946,16 +1030,13 @@ const saveDescMutation = useMutation({
   flex: 1;
   min-width: 0;
 }
-.page-header {
-  margin: 4px 0 16px;
+/* 页内不重复左侧导航已高亮的档名，只保留一行说明（H2 见 .visually-hidden） */
+.tab-head {
+  margin: 0 0 var(--sp-4);
 }
-/* 设置页是二级页面：沿用全局衬线标题，字号收敛一级 */
-.settings-content .page-title {
-  font-size: 20px;
-  margin: 0 0 4px;
-}
-.settings-content .page-subtitle {
+.tab-head .page-subtitle {
   margin: 0;
+  max-width: 72ch;
 }
 .settings-card {
   border-radius: var(--radius-lg);
@@ -967,10 +1048,16 @@ const saveDescMutation = useMutation({
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--sp-3);
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 12px;
+  margin-bottom: var(--sp-3);
+}
+.section-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
 }
 
 /* --- Instance table --- */
@@ -978,11 +1065,17 @@ const saveDescMutation = useMutation({
 .inst-table .wf-tr {
   grid-template-columns: minmax(200px, 1fr) 90px 70px 120px 120px;
 }
-.meta-item {
-  display: inline-flex;
+.weight-input {
+  width: 90px;
+}
+/* 弹窗内的开关行：左标签、右控件，与表单字段同节奏 */
+.switch-row {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: var(--sp-3) 0 var(--sp-4);
+  font-size: 13px;
   color: var(--text-secondary);
 }
 
@@ -1038,7 +1131,7 @@ const saveDescMutation = useMutation({
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--sp-3);
 }
 .wf-type-tabs {
   display: flex;
@@ -1050,20 +1143,40 @@ const saveDescMutation = useMutation({
   overflow-x: auto;
 }
 .wf-type-tab {
-  padding: 8px 14px;
+  flex: none;
+  white-space: nowrap;
+  padding: var(--sp-2) var(--sp-3);
+  font-family: inherit;
   font-size: 13px;
+  line-height: 20px;
   color: var(--text-secondary);
-  cursor: pointer;
+  background: transparent;
+  border: 0;
   border-bottom: 2px solid transparent;
-  transition: color 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
 }
 .wf-type-tab:hover {
   color: var(--text-primary);
+}
+.wf-type-tab:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: -2px;
 }
 .wf-type-tab.active {
   color: var(--brand-primary);
   border-bottom-color: var(--brand-primary);
   font-weight: 600;
+}
+/* 加载态：与工作流行同高的骨架条，不用转圈遮罩 */
+.wf-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--sp-3);
+}
+.wf-skeleton .sk-row {
+  height: 44px;
 }
 .wf-table {
   display: flex;
@@ -1145,8 +1258,8 @@ const saveDescMutation = useMutation({
 .form-item {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-1);
 }
 .field-label {
   font-size: 13px;
@@ -1155,14 +1268,38 @@ const saveDescMutation = useMutation({
 }
 /* 表单字段的补充说明（如视频模型类型的预留能力提示） */
 .field-hint {
-  margin-top: 4px;
+  margin-top: var(--sp-1);
   font-size: 12px;
   color: var(--text-tertiary);
 }
-.card-actions {
+.field-row {
   display: flex;
-  gap: 12px;
-  margin-top: 16px;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+}
+.field-grow {
+  flex: 1;
+  min-width: 0;
+}
+.field-full {
+  width: 100%;
+}
+/* 弹窗操作区：次要动作靠左，取消在左、主操作在右（DESIGN §13） */
+.modal-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+}
+.modal-actions .spacer {
+  flex: 1;
+}
+.modal-hint {
+  margin: 0 0 var(--sp-3);
+}
+.modal-hint-sub {
+  margin: var(--sp-1) 0 0;
 }
 
 .inst-url {
@@ -1192,6 +1329,14 @@ const saveDescMutation = useMutation({
   font-size: 13px;
   color: var(--text-secondary);
   margin: 0;
+}
+.hint-text.is-danger {
+  color: var(--danger-text);
+}
+/* 卡片内空态：用凹陷底，避免面板里再叠一层亮面板 */
+.in-card-empty {
+  margin-top: var(--sp-1);
+  background: var(--bg-sunken);
 }
 .about-summary {
   margin-top: 18px;
@@ -1273,23 +1418,24 @@ const saveDescMutation = useMutation({
 .llm-card-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
 }
 .llm-mini-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
+  gap: var(--sp-3);
 }
 .llm-mini-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--bg-panel);
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 .llm-mini-card:hover {
   background: var(--bg-elevated);
@@ -1346,13 +1492,64 @@ const saveDescMutation = useMutation({
 }
 
 /* --- Responsive --- */
+@media (max-width: 1100px) {
+  .settings-layout {
+    gap: var(--sp-4);
+    padding: var(--sp-5);
+  }
+}
 @media (max-width: 768px) {
   .settings-layout {
     flex-direction: column;
-    padding: 12px;
+    padding: var(--sp-3);
+    gap: var(--sp-4);
   }
+  /* 竖排 4 项要吃掉约 200px 首屏高度，且说明文字与档名重复：
+     窄屏改为横向分段，只留档名，可横向滚动。 */
   .settings-nav {
     width: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: var(--sp-2);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+  .nav-header {
+    display: none;
+  }
+  .nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .nav-desc {
+    display: none;
+  }
+  .nav-label {
+    font-size: 13.5px;
+  }
+  /* 筛选 tab 与主按钮同排时会被挤成两字一行：窄屏让按钮留在首行右侧，
+     tab 独占第二行，避免文字竖排。 */
+  .wf-toolbar {
+    flex-wrap: wrap;
+    row-gap: var(--sp-2);
+  }
+  .wf-type-tabs {
+    order: 2;
+    width: 100%;
+    flex: 1 0 100%;
+    scrollbar-width: none;
+  }
+  .wf-type-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .wf-toolbar > .n-button {
+    order: 1;
+    margin-left: auto;
   }
   .form-grid {
     grid-template-columns: 1fr;

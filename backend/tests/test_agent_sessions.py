@@ -45,7 +45,7 @@ def test_session_crud_flow(client: TestClient):
     assert r.json()["title"] == "改名后"
 
     # 归档（软删除）
-    r = client.delete(f"/api/agent/sessions/{sid}")
+    r = client.post(f"/api/agent/sessions/{sid}/archive")
     assert r.status_code == 200
     assert r.json()["status"] == "archived"
 
@@ -57,6 +57,14 @@ def test_session_crud_flow(client: TestClient):
     r = client.post(f"/api/agent/sessions/{sid}/restore")
     assert r.status_code == 200
     assert r.json()["status"] == "active"
+
+    # 物理删除：会话及其上下文一并清理，不可恢复
+    r = client.delete(f"/api/agent/sessions/{sid}")
+    assert r.status_code == 200
+    assert r.json()["status"] == "deleted"
+    assert client.get(f"/api/agent/sessions/{sid}").status_code == 404
+    r = client.get("/api/agent/sessions", params={"include_archived": True})
+    assert not any(s["id"] == sid for s in r.json()["items"])
 
 
 def test_message_append_and_seq(client: TestClient):
@@ -107,12 +115,28 @@ def test_archived_session_rejects_append(client: TestClient):
     """归档会话只读：追加消息返回 409。"""
     r = client.post("/api/agent/sessions", json={"title": "归档测试"})
     sid = r.json()["id"]
-    client.delete(f"/api/agent/sessions/{sid}")
+    client.post(f"/api/agent/sessions/{sid}/archive")
     r = client.post(
         f"/api/agent/sessions/{sid}/messages", json={"role": "user", "content": "x"}
     )
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "session_archived"
+
+
+def test_delete_session_purges_messages(client: TestClient):
+    """物理删除：会话与消息一起清理，且不进入归档列表。"""
+    r = client.post("/api/agent/sessions", json={"title": "删除测试"})
+    sid = r.json()["id"]
+    client.post(
+        f"/api/agent/sessions/{sid}/messages", json={"role": "user", "content": "hello"}
+    )
+    r = client.delete(f"/api/agent/sessions/{sid}")
+    assert r.status_code == 200
+    assert r.json()["status"] == "deleted"
+    assert client.get(f"/api/agent/sessions/{sid}").status_code == 404
+    assert client.get(f"/api/agent/sessions/{sid}/messages").status_code == 404
+    r = client.get("/api/agent/sessions", params={"include_archived": True})
+    assert not any(s["id"] == sid for s in r.json()["items"])
 
 
 def test_invalid_role_rejected(client: TestClient):

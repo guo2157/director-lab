@@ -548,15 +548,22 @@ def _try_create_generate_approval(
     from app.services.generate_intent import resolve_entity, resolve_shot, resolve_target
 
     if not session.project_id:
-        # P0-1 修复（2026-11-25）：移除『未关联项目时默认名自动创建项目』路径——
-        # 此前会以『新项目』为默认名、默认 9:16 画幅静默建项目并绑定会话，
-        # 违反『只有用户明确表达创建意图且项目名称明确时才创建正式项目』的规则。
-        # 现在如实说明阻塞原因，引导用户先创建或关联项目，不越权代建。
+        # A 方案（2026-11-25）：明确的出图请求落到全局草稿项目「随手生成」，直接出图。
+        # 视频/音频依赖剧本、镜头与阶段门禁，仍要求关联正式项目；
+        # 普通问答/闲聊不建项目（只有明确生成意图才会走到这里）。
+        from app.services.quickgen import try_quick_image
+
+        quick = try_quick_image(db, session, text)
+        if quick is not None:
+            return quick
+        # 非出图请求（视频/音频/笼统描述）：如实说明阻塞原因，不越权代建正式项目
         return (
             "当前会话还没有关联项目，暂时无法提交生成申请。\n"
             "您可以：\n"
             "1. 告诉我您想创建的项目名称，我帮您创建新项目（名称需您明确提供）；\n"
-            "2. 或在右侧把本会话关联到已有项目。",
+            "2. 或在右侧把本会话关联到已有项目。\n"
+            "（如果只是想要一张图看看效果，可以直接说「生成一张 XX 的图片」，"
+            "我会放进草稿项目「随手生成」。）",
             {"ok": False, "error_code": "no_project", "requires_project": True},
         )
 
@@ -1618,6 +1625,44 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
             "assistant_message": AgentMessageOut.model_validate(assistant_msg).model_dump(mode="json"),
         }
 
+    # 1.36 随手生成（A 方案）：会话已绑定草稿项目「随手生成」时，明确的出图请求
+    # 继续走随手出图，不要求对象 ID（草稿项目没有分镜/实体，普通生成路径会追问对象）
+    if s.project_id:
+        _quick_proj = db.get(Project, s.project_id)
+        if _quick_proj is not None and (_quick_proj.settings or {}).get("origin") == "quickgen":
+            from app.services.quickgen import try_quick_image
+
+            quick_reply, quick_payload = try_quick_image(db, s, payload.content)
+            if quick_reply is not None:
+                # 随手生成会写审批/工具事件消息占用 seq，助手回复须重新取号
+                next_seq = (
+                    db.scalar(
+                        select(func.max(AgentMessage.seq)).where(
+                            AgentMessage.session_id == session_id
+                        )
+                    )
+                    or 0
+                ) + 1
+                assistant_msg = AgentMessage(
+                    id=agent_message_id(),
+                    session_id=session_id,
+                    role="assistant",
+                    content=quick_reply,
+                    payload=_build_assistant_payload(
+                        {"route_action": "quick_image", "approval": quick_payload}
+                    ),
+                    seq=next_seq,
+                    created_at=datetime.now(),
+                )
+                db.add(assistant_msg)
+                s.updated_at = datetime.now()
+                db.commit()
+                db.refresh(assistant_msg)
+                return {
+                    "user_message": AgentMessageOut.model_validate(user_msg).model_dump(mode="json"),
+                    "assistant_message": AgentMessageOut.model_validate(assistant_msg).model_dump(mode="json"),
+                }
+
     # 1.3.5 联网搜索分支（联网搜索整改 Phase 3）：
     # 确定性识别搜索请求（『搜索/搜一下/查一下/联网查』等指令前缀），
     # 执行真实搜索（SearchRun 状态机 + 日志先行 + 结果验证 + 网页读取），
@@ -1862,7 +1907,20 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 # 申请提交成功只代表『等待人工审批』，任务置 waiting_approval，
                 # 不再误标 completed（审批裁决/执行结果由 approvals 链路回写）；
                 # 提交失败则任务标 failed（摘要与事实一致，不虚报成功）
-                if approval_info.get("ok"):
+                if approval_info.get("quick"):
+                    # 随手生成：对话即授权，任务已直接入队。
+                    # 提交动作本身完成；统一 Task 不在此闭环，而是挂上 Job 阶段，
+                    # 等 Job 终态桥接后把结果图回写到会话气泡（否则气泡永远没有图）。
+                    parent_agent.complete_task(db, task, "已提交随手生成任务")
+                    if unified_task is not None:
+                        task_orchestrator.attach_job_stage(
+                            db,
+                            unified_task,
+                            job_id=approval_info.get("job_id"),
+                            stage_key="generate",
+                            stage_name="生成图片",
+                        )
+                elif approval_info.get("ok"):
                     parent_agent.transition_task(db, task, "waiting_approval", result_summary="已创建生成审批申请，等待人工审批")
                     if unified_task is not None:
                         task_orchestrator.set_task_step(
@@ -1883,6 +1941,14 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 parent_agent.cancel_task(db, task, f"route={action}")
                 if unified_task is not None:
                     task_orchestrator.cancel_task(db, unified_task, reason=f"route={action}")
+        # 本分支内可能已写入审批/工具审计消息（如随手生成的自动审批留痕）占用 seq，
+        # 助手回复必须按当前最大 seq 取号，否则撞 (session_id, seq) 唯一索引
+        _assistant_seq = (
+            db.scalar(
+                select(func.max(AgentMessage.seq)).where(AgentMessage.session_id == session_id)
+            )
+            or 0
+        ) + 1
         assistant_msg = AgentMessage(
             id=agent_message_id(),
             session_id=session_id,
@@ -1919,7 +1985,7 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
                 db=db,
                 nav_request=nav_request,
             ),
-            seq=max_seq + 2,
+            seq=_assistant_seq,
             created_at=datetime.now(),
         )
         db.add(assistant_msg)

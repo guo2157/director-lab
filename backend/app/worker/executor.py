@@ -1183,7 +1183,9 @@ def _execute_generate_job_once(job_id: str, exclude_instances: list[str]) -> dic
             _is_entity_asset = any(
                 k in _params_peek for k in ("__character_id__", "__scene_id__", "__prop_id__")
             )
-            if not _is_entity_asset:
+            # 随手生成（A 方案）：草稿项目没有剧本/镜头/角色资产，纯文生图不适用资产门禁
+            _is_quick_image = bool(_params_peek.get("__quick_image__"))
+            if not _is_entity_asset and not _is_quick_image:
                 from app.services.assets_gate import evaluate_assets_gate
 
                 _gate = evaluate_assets_gate(db, job.project_id)

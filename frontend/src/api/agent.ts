@@ -67,8 +67,13 @@ export function updateSession(
   return patch<AgentSession>(`/agent/sessions/${id}`, payload)
 }
 
-/** 归档（软删除） */
+/** 归档（软删除，可在归档列表恢复） */
 export function archiveSession(id: string) {
+  return post<{ id: string; status: string }>(`/agent/sessions/${id}/archive`)
+}
+
+/** 物理删除会话及其全部对话上下文（不可恢复） */
+export function deleteSession(id: string) {
   return del<{ id: string; status: string }>(`/agent/sessions/${id}`)
 }
 
