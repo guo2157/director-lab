@@ -271,6 +271,68 @@ def resolve_confirmation(
     return confirmation
 
 
+def cancel_confirmation(
+    db: Session,
+    *,
+    confirmation_id: str,
+    reason: str | None = None,
+) -> AgentConfirmation:
+    """取消一条 pending 审批（Phase B B9：Goal 取消时级联）。
+
+    只处理 pending 记录；已裁决的审批保持不变（裁决事实不可改写）。
+    与 resolve_confirmation 同口径：写审计消息 + 工作台事件，然后提交。
+    """
+    confirmation = get_confirmation(db, confirmation_id)
+    if confirmation.status != "pending":
+        return confirmation
+
+    confirmation.status = "cancelled"
+    confirmation.comment = reason
+
+    task = db.get(AgentTask, confirmation.task_id)
+    if task is not None:
+        db.add(
+            AgentMessage(
+                id=agent_message_id(),
+                session_id=task.session_id,
+                role="approval",
+                content="",
+                payload={
+                    "confirmation_id": confirmation.id,
+                    "tool_name": confirmation.tool_name,
+                    "action": "cancelled",
+                    "comment": reason,
+                },
+                seq=_next_seq(db, task.session_id),
+                created_at=datetime.now(),
+            )
+        )
+    try:
+        from app.services.workspace_event import write_workspace_event
+
+        write_workspace_event(
+            db,
+            "workspace.approval_resolved",
+            session_id=getattr(confirmation, "session_id", None),
+            payload={
+                "confirmation_id": confirmation.id,
+                "tool_name": confirmation.tool_name,
+                "status": "cancelled",
+                "approved": False,
+                "comment": reason,
+            },
+        )
+    except Exception:
+        _log.warning(
+            "write workspace.approval_resolved(cancelled) failed (confirmation_id=%s): %s",
+            confirmation_id, __import__("traceback").format_exc(),
+        )
+
+    db.commit()
+    db.refresh(confirmation)
+    return confirmation
+
+
 def mark_task_finished(db: Session, confirmation_id: str, summary: str) -> None:
     """执行结束后回写任务状态，保留审批链路可追溯。
     P0 状态语义修复（2026-11-25）：不再直接赋值 task.status，统一经 parent_agent

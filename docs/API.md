@@ -683,6 +683,13 @@ assistant 消息 payload 中的 `asset_refs` 为本轮可展示的资产引用�
 | `GET /api/agent/{session_id}/goal` | 当前 active Goal 的完整状态；没有则返回 `{"goal": null}` |
 | `GET /api/agent/{session_id}/goals` | 该会话历史 Goal（`page` / `page_size`，按 `updated_at` 倒序） |
 | `GET /api/agent/goals/{goal_id}` | 按 goal_id 查询同一份载荷 |
+| `POST /api/agent/goals/{goal_id}/pause` | 暂停：不再推进新步骤，已在跑的 Job 不取消 |
+| `POST /api/agent/goals/{goal_id}/resume` | 恢复并同步推进一次（受 MAX_STEPS 与 60 秒上限约束） |
+| `POST /api/agent/goals/{goal_id}/cancel` | 取消：在途 Job 与 pending 审批一并取消，执行记录保留；请求体可带 `reason` |
+
+暂停 / 恢复 / 取消对已终态目标返回 409 `agent_goal_terminal`，目标不存在返回 404。
+`/chat` 也识别「暂停当前任务 / 继续当前任务 / 取消当前任务」这类短语，但只在存在 active Goal
+且开关打开时生效，回复 payload 的 `route_action` 为 `agent_runtime_control`。
 
 `goal` 载荷字段：`goal_id`、`description`、`goal_type`、`status`、`lifecycle_state`
 （planning / running / waiting_job / waiting_approval / waiting_user / paused /

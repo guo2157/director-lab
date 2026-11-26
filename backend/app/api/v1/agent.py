@@ -1825,6 +1825,99 @@ def get_attachment(session_id: str, file_name: str, db: Session = Depends(get_db
     )
 
 
+def _handle_agent_goal_control(
+    db: Session,
+    s: AgentSession,
+    session_id: str,
+    user_msg: AgentMessage,
+    *,
+    control: str,
+    task,
+    unified_task,
+    intent,
+    resolved,
+) -> dict | None:
+    """暂停 / 继续 / 取消当前 active Goal（Phase B B9）。"""
+    from app.services import agent_runtime
+    from app.services.goal_manager import get_active_goal
+
+    goal = get_active_goal(db, session_id)
+    if goal is None:
+        return None
+
+    if control == "pause":
+        outcome = agent_runtime.pause_goal(db, goal.goal_id)
+        reply = "已暂停当前任务。已经提交的生成任务不会被取消，完成后状态照常记录；回复「继续当前任务」可恢复。"
+    elif control == "resume":
+        outcome = agent_runtime.resume_goal_control(db, goal.goal_id)
+        if outcome.get("ok"):
+            db.commit()
+            tick_result = agent_runtime.tick(None, goal.goal_id, trigger="chat", db=db)
+            reply = tick_result.message or "已恢复当前任务，正在继续推进。"
+        else:
+            reply = "当前任务已经结束，无法恢复。"
+    else:
+        outcome = agent_runtime.cancel_goal_run(db, goal.goal_id, reason="用户在对话中取消")
+        reply = "已取消当前任务：在途生成任务与待审批申请都已取消，执行记录保留。"
+
+    if not outcome.get("ok"):
+        reply = f"当前任务状态为 {outcome.get('status') or '已结束'}，无法执行该操作。"
+
+    lifecycle = (
+        "cancelled" if control == "cancel"
+        else ("paused" if control == "pause" else "running")
+    )
+
+    from app.services import parent_agent, task_orchestrator
+
+    if task is not None:
+        if control == "cancel":
+            parent_agent.cancel_task(db, task, "agent_goal_cancelled")
+        elif task.status == "pending":
+            parent_agent.transition_task(db, task, "running", result_summary=reply[:2000])
+    if unified_task is not None:
+        if control == "cancel":
+            task_orchestrator.cancel_task(db, unified_task, reason="agent_goal_cancelled")
+        else:
+            task_orchestrator.set_task_step(
+                db, unified_task, step=lifecycle, message=reply[:500]
+            )
+
+    _seq = (
+        db.scalar(select(func.max(AgentMessage.seq)).where(AgentMessage.session_id == session_id))
+        or 0
+    ) + 1
+    assistant_msg = AgentMessage(
+        id=agent_message_id(),
+        session_id=session_id,
+        role="assistant",
+        content=reply,
+        payload=_build_assistant_payload(
+            {
+                "intent": intent.intent,
+                "route_action": "agent_runtime_control",
+                "control": control,
+                "goal_id": goal.goal_id,
+                "lifecycle_state": lifecycle,
+                "task_id": task.id if task is not None else None,
+                "task_status": task.status if task is not None else None,
+            },
+            unified_task=unified_task,
+            db=db,
+        ),
+        seq=_seq,
+        created_at=datetime.now(),
+    )
+    db.add(assistant_msg)
+    s.updated_at = datetime.now()
+    db.commit()
+    db.refresh(assistant_msg)
+    return {
+        "user_message": AgentMessageOut.model_validate(user_msg).model_dump(mode="json"),
+        "assistant_message": AgentMessageOut.model_validate(assistant_msg).model_dump(mode="json"),
+    }
+
+
 def _handle_agent_runtime_route(
     db: Session,
     s: AgentSession,
@@ -2343,10 +2436,23 @@ def chat(session_id: str, payload: ChatRequest, db: Session = Depends(get_db)) -
     # Phase B B6：多步生产类请求交给 Agent Runtime（开关后面）。
     # should_use_runtime 在 agent_runtime_chat_enabled=False 时恒返回 None，
     # 因此开关关闭时本段不改变任何既有行为。
-    from app.services.agent_runtime_router import should_use_runtime
+    from app.services.agent_runtime_router import detect_control, should_use_runtime
 
     _rt_route = None
     if not resolved.requires_clarification and _nav_action != "navigate_workspace":
+        # B9：暂停 / 继续 / 取消当前任务（仅在存在 active Goal 时接管）
+        from app.services.goal_manager import get_active_goal as _get_active_goal
+
+        _control = detect_control(
+            payload.content, has_active_goal=_get_active_goal(db, session_id) is not None
+        )
+        if _control is not None:
+            _control_response = _handle_agent_goal_control(
+                db, s, session_id, user_msg, control=_control,
+                task=task, unified_task=unified_task, intent=intent, resolved=resolved,
+            )
+            if _control_response is not None:
+                return _control_response
         _rt_route = should_use_runtime(
             intent, resolved, payload.content, project_id=s.project_id
         )

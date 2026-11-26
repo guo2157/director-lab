@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前阶段 | Phase B · 最小可用版本（进行中：B8 完成） |
-| 下一个任务 | B9 暂停、继续、取消 |
-| 最近提交 | B8（本提交）、`84a47fb` B7、`76c6795` B6、`7ca4668` B5 |
-| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线）；B8 后 tests/test_agent_*.py = 318 passed / 1 xfailed |
-| 更新时间 | 2026-11-27 00:05（Asia/Shanghai） |
+| 当前阶段 | Phase B · 最小可用版本（进行中：B9 完成） |
+| 下一个任务 | B10 端到端 MVP 验收（阶段门禁） |
+| 最近提交 | B9（本提交）、`84cb666` B8、`84a47fb` B7、`76c6795` B6 |
+| 最近全量 pytest | 1560 passed / 1 xfailed / 0 failed（Phase A 结束时基线）；B9 后 tests/test_agent_*.py = 323 passed / 1 xfailed |
+| 更新时间 | 2026-11-27 00:35（Asia/Shanghai） |
 | 工作区 | 干净（每次任务一个本地提交，不推送） |
 
 > 本文件替换 Phase 0 时期的旧版 implementation-plan.md。
@@ -81,7 +81,7 @@
 - [x] **B6** `/chat` 接入 Runtime（开关后面）（本提交）
 - [x] **B7** 最小计划模板：资产生成与分镜图生成（本提交）
 - [x] **B8** 确定性回复与状态查询接口（本提交）
-- [ ] **B9** 暂停、继续、取消
+- [x] **B9** 暂停、继续、取消（本提交）
 - [ ] **B10** 端到端 MVP 验收测试
 - [ ] **B11** 收尾：文档、开关策略、清理
 

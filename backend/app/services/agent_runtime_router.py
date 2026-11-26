@@ -94,3 +94,25 @@ def should_use_runtime(
             scope=_detect_scope(text),
         )
     return None
+
+
+# ── Goal 控制（B9）：只在存在 active Goal 时生效的严格关键词匹配 ──
+# 用完整短语而不是单词，避免「暂停一下这个想法」「继续看剧本」这类闲聊误触发。
+_CONTROL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("pause", ("暂停当前任务", "暂停这个任务", "暂停当前目标", "暂停任务")),
+    ("resume", ("继续当前任务", "继续这个任务", "继续当前目标", "恢复任务", "恢复当前任务")),
+    ("cancel", ("取消当前任务", "取消这个任务", "取消当前目标", "终止当前任务")),
+)
+
+
+def detect_control(content: str, *, has_active_goal: bool) -> str | None:
+    """返回 pause / resume / cancel；没有 active Goal 时恒返回 None（不接管）。"""
+    if not has_active_goal or not bool(getattr(get_settings(), "agent_runtime_chat_enabled", False)):
+        return None
+    text = (content or "").strip()
+    if len(text) > 24:
+        return None
+    for action, phrases in _CONTROL_PATTERNS:
+        if text in phrases:
+            return action
+    return None

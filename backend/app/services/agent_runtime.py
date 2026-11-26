@@ -35,13 +35,15 @@ from sqlalchemy.orm import Session
 
 from app.models.ids import agent_execution_log_id
 from app.services.goal_manager import (
-    cancel_goal,
+    cancel_goal as cancel_goal_status,
     check_goal_completion,
     complete_goal,
     fail_goal,
     get_active_goal,
     get_goal_by_id,
     get_or_create_goal,
+    pause_goal as pause_goal_status,
+    resume_goal as resume_goal_status,
     Goal,
 )
 from app.services.context_resolver import ContextSnapshot, snapshot
@@ -1811,6 +1813,150 @@ def _tick_locked(
     return result
 
 
+# ── Goal 控制（Phase B B9：暂停 / 继续 / 取消）─────────────────────────
+
+_TERMINAL_GOAL_STATUSES = ("completed", "failed", "cancelled", "superseded")
+
+
+def pause_goal(db: Session, goal_id: str) -> dict:
+    """暂停目标：lifecycle_state=paused，tick 不再推进（已跑的 Job 不取消）。"""
+    from app.models.agent import AgentGoal
+
+    row = db.get(AgentGoal, goal_id)
+    if row is None:
+        return {"ok": False, "error": "goal_not_found"}
+    if row.status in _TERMINAL_GOAL_STATUSES:
+        return {"ok": False, "error": "goal_terminal", "status": row.status}
+
+    if row.status == "active":
+        pause_goal_status(db, goal_id)
+    row.lifecycle_state = "paused"
+    db.flush()
+    log_execution(db, ExecutionRecord(goal_id=goal_id, status="goal_paused"))
+    return {"ok": True, "goal_id": goal_id, "status": row.status, "lifecycle_state": "paused"}
+
+
+def resume_goal_control(db: Session, goal_id: str) -> dict:
+    """恢复暂停的目标：status=active、lifecycle_state=running，由调用方立即 tick。"""
+    from app.models.agent import AgentGoal
+
+    row = db.get(AgentGoal, goal_id)
+    if row is None:
+        return {"ok": False, "error": "goal_not_found"}
+    if row.status in _TERMINAL_GOAL_STATUSES:
+        return {"ok": False, "error": "goal_terminal", "status": row.status}
+
+    if row.status == "paused":
+        resume_goal_status(db, goal_id)
+    row.lifecycle_state = "running"
+    db.flush()
+    log_execution(db, ExecutionRecord(goal_id=goal_id, status="goal_resumed"))
+    return {"ok": True, "goal_id": goal_id, "status": row.status, "lifecycle_state": "running"}
+
+
+def cancel_goal_run(db: Session, goal_id: str, *, reason: str | None = None) -> dict:
+    """取消目标：取消在途 Job 与 pending 审批，所有非终态步骤 → cancelled。
+
+    执行记录全部保留（不删除任何行）。
+    """
+    from sqlalchemy import select as _select
+
+    from app.models.agent import AgentGoal, AgentPlan, AgentPlanStep
+
+    row = db.get(AgentGoal, goal_id)
+    if row is None:
+        return {"ok": False, "error": "goal_not_found"}
+    if row.status in _TERMINAL_GOAL_STATUSES:
+        return {"ok": False, "error": "goal_terminal", "status": row.status}
+
+    reason_text = (reason or "用户取消目标")[:200]
+    plans = db.scalars(_select(AgentPlan).where(AgentPlan.goal_id == goal_id)).all()
+    steps: list[AgentPlanStep] = []
+    for plan in plans:
+        steps.extend(
+            db.scalars(
+                _select(AgentPlanStep).where(AgentPlanStep.plan_id == plan.id)
+            ).all()
+        )
+
+    # a. waiting_job 的 Job → 取消（cancel_jobs 只处理仍在途的任务）
+    from app.models import Job
+    from app.services.job_cancel_ops import cancel_jobs
+
+    job_ids = [s.job_id for s in steps if s.job_id]
+    cancelled_jobs: list[str] = []
+    if job_ids:
+        jobs = db.scalars(_select(Job).where(Job.id.in_(job_ids))).all()
+        receipt = cancel_jobs(db, list(jobs), reason=reason_text)
+        cancelled_jobs = list(receipt.get("job_ids") or [])
+
+    # b. pending 审批 → cancelled
+    from app.services import approvals
+
+    cancelled_confirmations: list[str] = []
+    for confirmation_id in {s.confirmation_id for s in steps if s.confirmation_id}:
+        confirmation = approvals.get_confirmation(db, confirmation_id)
+        if confirmation.status == "pending":
+            approvals.cancel_confirmation(
+                db, confirmation_id=confirmation_id, reason=reason_text
+            )
+            cancelled_confirmations.append(confirmation_id)
+
+    # c. 非终态步骤 → cancelled；Plan → cancelled；Goal → cancelled
+    terminal_step = ("succeeded", "failed", "skipped", "cancelled")
+    for step in steps:
+        if step.status not in terminal_step:
+            step.status = "cancelled"
+            step.error_code = "goal_cancelled"
+            step.error_message = reason_text
+            step.lock_owner = None
+            step.resume_requested_at = None
+            step.resume_reason = None
+    for plan in plans:
+        if plan.status not in ("completed", "cancelled"):
+            plan.status = "cancelled"
+    db.flush()
+
+    cancel_goal_status(db, goal_id)
+    row.lifecycle_state = "cancelled"
+    db.flush()
+
+    # d. AgentTask / 统一 Task 经各自状态机置为 cancelled
+    if row.agent_task_id:
+        from app.models.agent import AgentTask
+        from app.services import parent_agent
+
+        agent_task = db.get(AgentTask, row.agent_task_id)
+        if agent_task is not None:
+            parent_agent.cancel_task(db, agent_task, reason_text)
+    if row.task_id:
+        from app.models.task import Task
+        from app.services import task_orchestrator
+
+        unified = db.get(Task, row.task_id)
+        if unified is not None:
+            task_orchestrator.cancel_task(db, unified, reason=reason_text)
+
+    log_execution(
+        db,
+        ExecutionRecord(
+            goal_id=goal_id,
+            status="goal_cancelled",
+            output_data={
+                "jobs": cancelled_jobs,
+                "confirmations": cancelled_confirmations,
+            },
+        ),
+    )
+    return {
+        "ok": True,
+        "goal_id": goal_id,
+        "status": "cancelled",
+        "cancelled_jobs": cancelled_jobs,
+        "cancelled_confirmations": cancelled_confirmations,
+    }
+
+
 def _post_lifecycle_message(db: Session, goal: Goal, result: "TickResult") -> None:
     """生命周期变化时向会话写一条 assistant 消息（B8，Worker tick 用）。
 
@@ -1910,6 +2056,13 @@ def tick(
             return result
 
         if goal.status != "active" or goal.lifecycle_state in _PAUSED_LIFECYCLES:
+            # 暂停/取消：不推进下游，但仍处理已到达的恢复标记，
+            # 让「暂停前已提交的 Job」完成后步骤状态照常收敛（B9）。
+            if goal.status == "paused":
+                plan = get_latest_plan(db, goal_id) or get_latest_plan_any(db, goal_id)
+                if plan is not None:
+                    _resume_marked_steps(db, goal)
+                    db.commit()
             result.lifecycle_state = goal.lifecycle_state or goal.status
             result.status = goal.lifecycle_state or goal.status
             result.message = f"目标当前状态为 {result.status}，不推进"
