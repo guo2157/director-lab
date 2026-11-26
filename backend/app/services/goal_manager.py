@@ -55,6 +55,10 @@ class Goal:
         fingerprint: str | None = None,
         created_at: datetime | None = None,
         updated_at: datetime | None = None,
+        agent_task_id: str | None = None,
+        task_id: str | None = None,
+        lifecycle_state: str | None = None,
+        last_tick_at: datetime | None = None,
     ):
         self.goal_id = goal_id
         self.session_id = session_id
@@ -67,6 +71,10 @@ class Goal:
         self.fingerprint = fingerprint
         self.created_at = created_at or datetime.now()
         self.updated_at = updated_at or datetime.now()
+        self.agent_task_id = agent_task_id
+        self.task_id = task_id
+        self.lifecycle_state = lifecycle_state
+        self.last_tick_at = last_tick_at
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +89,10 @@ class Goal:
             "fingerprint": self.fingerprint,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "agent_task_id": self.agent_task_id,
+            "task_id": self.task_id,
+            "lifecycle_state": self.lifecycle_state,
+            "last_tick_at": self.last_tick_at.isoformat() if self.last_tick_at else None,
         }
 
 
@@ -106,6 +118,10 @@ def _row_to_goal(row) -> Goal:
         fingerprint=getattr(row, "fingerprint", None),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        agent_task_id=getattr(row, "agent_task_id", None),
+        task_id=getattr(row, "task_id", None),
+        lifecycle_state=getattr(row, "lifecycle_state", None),
+        last_tick_at=getattr(row, "last_tick_at", None),
     )
 
 

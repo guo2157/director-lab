@@ -14,8 +14,11 @@
 
 事务边界（Phase A A1，硬性约定）：
 - 内部函数（goal_manager / planner / execution_manager / verifier / replanner）只 flush，不 commit。
-- 只有 Runtime 对外入口负责提交：run_agent_loop、resume_after_job、resume_after_approval、
+- 只有 Runtime 对外入口负责提交：run_agent_loop、tick、resume_after_job、resume_after_approval、
   run_agent_loop_in_new_session。
+- tick 是幂等的「单次推进」：自建 Session、自管 Goal 锁、每次最多推进
+  agent_max_steps_per_tick 步且不超过 agent_tick_timeout_seconds；/chat、Worker、
+  调试接口共用它（Phase B B1）。
 - _execute_plan_loop 在每个步骤完成「执行 → 验证 → 重规划」后提交一次，
   进程崩溃时已完成的步骤不会丢失；未捕获异常时先 rollback，再在新事务中把步骤标记为 failed。
 - 禁止把请求作用域的 Session 传入其他线程；后台执行请用 run_agent_loop_in_new_session。
@@ -178,6 +181,61 @@ class AgentLoopResult:
             "context_snapshot": self.context_snapshot,
             "next_action": self.next_action,
             "wait_step_id": self.wait_step_id,
+        }
+
+
+@dataclass
+class TickResult:
+    """单次 tick 的推进结果（Phase B B1）。
+
+    幂等：对同一 Goal 重复调用不会重复执行已终态步骤；
+    一次最多推进 agent_max_steps_per_tick 步，遇等待态立即返回。
+    """
+
+    goal_id: str | None = None
+    plan_id: str | None = None
+    lifecycle_state: str = "unknown"
+    advanced_steps: list[str] = field(default_factory=list)
+    waiting: dict = field(
+        default_factory=lambda: {"job": [], "approval": [], "user": []}
+    )
+    failed: list[dict] = field(default_factory=list)
+    counts: dict = field(
+        default_factory=lambda: {"succeeded": 0, "failed": 0, "waiting": 0, "pending": 0}
+    )
+    message: str = ""
+    busy: bool = False
+    trigger: str = ""
+    # 兼容 AgentLoopResult 的字段（run_agent_loop 映射用）
+    status: str = ""
+    total_steps: int = 0
+    completed_steps: int = 0
+    failed_steps: int = 0
+    skipped_steps: int = 0
+    next_action: str | None = None
+    wait_step_id: str | None = None
+    errors: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "goal_id": self.goal_id,
+            "plan_id": self.plan_id,
+            "lifecycle_state": self.lifecycle_state,
+            "advanced_steps": self.advanced_steps,
+            "waiting": self.waiting,
+            "failed": self.failed,
+            "counts": self.counts,
+            "message": self.message,
+            "busy": self.busy,
+            "trigger": self.trigger,
+            "status": self.status,
+            "total_steps": self.total_steps,
+            "completed_steps": self.completed_steps,
+            "failed_steps": self.failed_steps,
+            "skipped_steps": self.skipped_steps,
+            "next_action": self.next_action,
+            "wait_step_id": self.wait_step_id,
+            "errors": self.errors,
         }
 
 
@@ -642,26 +700,27 @@ def _run_agent_loop_locked(
         },
     )
 
-    # ── F. 执行循环 ──
-    loop_result = _execute_plan_loop(
+    # ── F. 执行循环（Phase B B1：与 tick 共用同一推进实现） ──
+    tick_result = _tick_locked(
         db,
         goal=goal,
         plan=plan,
-        session_id=session_id,
-        project_id=project_id,
+        trigger="manual",
+        max_steps=None,
+        deadline=None,
         progress_callback=progress_callback,
     )
 
     # ── G. 汇总结果（先写全字段，再发最终事件，A3/P0-4） ──
-    result.status = loop_result["status"]
-    result.message = loop_result["message"]
-    result.total_steps = loop_result["total_steps"]
-    result.completed_steps = loop_result["completed_steps"]
-    result.failed_steps = loop_result["failed_steps"]
-    result.skipped_steps = loop_result["skipped_steps"]
-    result.next_action = loop_result["next_action"]
-    result.wait_step_id = loop_result.get("wait_step_id")
-    result.errors = loop_result["errors"]
+    result.status = tick_result.status
+    result.message = tick_result.message
+    result.total_steps = tick_result.total_steps
+    result.completed_steps = tick_result.completed_steps
+    result.failed_steps = tick_result.failed_steps
+    result.skipped_steps = tick_result.skipped_steps
+    result.next_action = tick_result.next_action
+    result.wait_step_id = tick_result.wait_step_id
+    result.errors = tick_result.errors
     _emit(result.status, result.to_dict())
 
     # 记录 Loop 完成日志
@@ -678,9 +737,6 @@ def _run_agent_loop_locked(
             },
         ),
     )
-
-    # 终态处理（A10：按步骤真实状态同步 plan / goal，partially_completed 保持 goal active）
-    _sync_plan_goal_status(db, goal.goal_id, plan.plan_id, result.status)
 
     return result
 
@@ -769,6 +825,8 @@ def _execute_plan_loop(
     session_id: str,
     project_id: str | None = None,
     progress_callback: Callable[[str, dict], None] | None = None,
+    max_steps: int | None = None,
+    deadline: float | None = None,
 ) -> dict:
     """执行 Plan 步骤循环（崩溃隔离包装）。
 
@@ -783,6 +841,8 @@ def _execute_plan_loop(
             session_id=session_id,
             project_id=project_id,
             progress_callback=progress_callback,
+            max_steps=max_steps,
+            deadline=deadline,
         )
     except Exception as exc:  # noqa: BLE001 - 崩溃隔离
         db.rollback()
@@ -822,8 +882,14 @@ def _run_plan_loop(
     session_id: str,
     project_id: str | None = None,
     progress_callback: Callable[[str, dict], None] | None = None,
+    max_steps: int | None = None,
+    deadline: float | None = None,
 ) -> dict:
-    """执行 Plan 步骤循环主体。每个步骤的「执行 → 验证 → 重规划」结束后提交一次。"""
+    """执行 Plan 步骤循环主体。每个步骤的「执行 → 验证 → 重规划」结束后提交一次。
+
+    Phase B B1：max_steps 限制单次推进的步骤数，deadline（time.monotonic 绝对时刻）
+    限制墙钟；任一触达即提交当前状态并返回 status="running"（还有可推进步骤）。
+    """
     from app.services.planner import get_next_pending_steps
     from app.services.execution_manager import execute_step
     from app.services.verifier import verify_step
@@ -854,13 +920,21 @@ def _run_plan_loop(
             except Exception:
                 pass
 
+    import time as _time
+
     completed = 0
     failed = 0
     skipped = 0
+    executed = 0
     errors: list[dict] = []
     iterations = 0
     current_plan = plan
     total_steps = len(plan.steps)
+
+    def _budget_exhausted() -> bool:
+        if max_steps is not None and executed >= max_steps:
+            return True
+        return deadline is not None and _time.monotonic() >= deadline
 
     while iterations < _MAX_LOOP_ITERATIONS:
         iterations += 1
@@ -947,12 +1021,28 @@ def _run_plan_loop(
         # 2. 逐步骤执行
         waiting_hit: dict | None = None  # A5：本批出现的等待态（不阻塞同批其他分支）
         for step_info in pending:
+            if _budget_exhausted():
+                db.commit()
+                return {
+                    "status": "running",
+                    "message": (
+                        f"本次推进已达上限（{max_steps} 步或时间上限），"
+                        f"剩余步骤将在下一次 tick 继续"
+                    ),
+                    "total_steps": total_steps,
+                    "completed_steps": completed,
+                    "failed_steps": failed,
+                    "skipped_steps": skipped,
+                    "next_action": "pending",
+                    "errors": errors,
+                }
             step_id = step_info["id"]
             tool_name = step_info.get("tool_name", "")
 
             # 2a. 执行
             _emit("step_started", {"step_id": step_id, "tool_name": tool_name,
                    "description": step_info.get("description", "")})
+            executed += 1
             exec_result = execute_step(
                 db,
                 step_id=step_id,
@@ -1144,6 +1234,343 @@ def _run_plan_loop(
         "next_action": "none",
         "errors": errors,
     }
+
+
+# ── Phase B B1：幂等单次推进 tick ─────────────────────────────────────
+
+_PAUSED_LIFECYCLES = ("paused", "cancelled")
+
+
+def _resume_marked_steps(db: Session, goal: Goal) -> list[str]:
+    """处理带 resume_requested_at 的步骤（B1 骨架，B3/B4 细化各 reason 的语义）。
+
+    只处理属于该 Goal 计划链的步骤；处理完一律清除标记（认领语义）。
+    返回被处理的 step_id 列表。
+    """
+    from sqlalchemy import select
+
+    from app.models.agent import AgentPlan, AgentPlanStep
+
+    plan_ids = list(
+        db.scalars(select(AgentPlan.id).where(AgentPlan.goal_id == goal.goal_id)).all()
+    )
+    if not plan_ids:
+        return []
+    steps = db.scalars(
+        select(AgentPlanStep)
+        .where(
+            AgentPlanStep.plan_id.in_(plan_ids),
+            AgentPlanStep.resume_requested_at.isnot(None),
+        )
+        .order_by(AgentPlanStep.step_index)
+    ).all()
+    if not steps:
+        return []
+
+    handled: list[str] = []
+    for step in steps:
+        reason = step.resume_reason or "manual"
+        step.resume_requested_at = None
+        step.resume_reason = None
+        if reason == "job_terminal":
+            _resume_step_after_job(db, step)
+        elif reason == "approval_resolved":
+            _resume_step_after_approval(db, step)
+        handled.append(step.id)
+    db.flush()
+    return handled
+
+
+def _resume_step_after_job(db: Session, step) -> None:
+    """Job 终态后的步骤收敛（B3 会补充多 Job / 失败分支细节）。"""
+    from app.models import Job
+
+    if step.status != "waiting_job":
+        return
+    job = db.get(Job, step.job_id) if step.job_id else None
+    if job is None:
+        step.status = "failed"
+        step.error_code = "job_not_found"
+        step.error_message = "恢复时找不到步骤关联的 Job"
+        step.completed_at = datetime.now()
+        return
+    if job.status == "succeeded":
+        step.status = "succeeded"
+        step.completed_at = datetime.now()
+        step.error_code = None
+        step.error_message = None
+    elif job.status in ("failed", "cancelled"):
+        step.status = "failed"
+        step.error_code = f"job_failed:{job.error_code or job.status}"
+        step.error_message = job.error_msg or f"Job {job.id} 状态为 {job.status}"
+        step.completed_at = datetime.now()
+    else:
+        step.status = "waiting_job"
+
+
+def _resume_step_after_approval(db: Session, step) -> None:
+    """审批裁决后的步骤收敛（B4 会补 run_generate 自动执行）。"""
+    from app.models.agent import AgentConfirmation
+
+    if step.status != "waiting_approval":
+        return
+    confirmation = (
+        db.get(AgentConfirmation, step.confirmation_id) if step.confirmation_id else None
+    )
+    if confirmation is None or confirmation.status == "pending":
+        return
+    if confirmation.status == "approved":
+        step.status = "pending"
+        step.error_code = None
+        step.error_message = None
+    else:
+        step.status = "waiting_user"
+        step.error_code = "approval_rejected"
+        step.error_message = confirmation.comment or f"审批结果：{confirmation.status}"
+
+
+def _sync_agent_task_lifecycle(db: Session, goal: Goal, lifecycle: str) -> None:
+    """把生命周期同步到 Goal 关联的 AgentTask（经 parent_agent 状态机，不裸赋值 status）。"""
+    from app.models.agent import AgentTask
+    from app.services import parent_agent
+
+    task_id = getattr(goal, "agent_task_id", None)
+    if not task_id:
+        return
+    task = db.get(AgentTask, task_id)
+    if task is None:
+        return
+    task.lifecycle_state = lifecycle
+    if lifecycle == "completed":
+        parent_agent.complete_task(db, task, "Agent Runtime 目标完成")
+    elif lifecycle == "failed":
+        parent_agent.fail_task(db, task, "Agent Runtime 目标失败")
+    elif lifecycle == "cancelled":
+        parent_agent.cancel_task(db, task, "Agent Runtime 目标已取消")
+    elif lifecycle == "waiting_approval":
+        parent_agent.transition_task(db, task, "waiting_approval", result_summary="等待人工审批")
+    elif lifecycle == "running" and task.status in ("pending", "waiting_approval"):
+        parent_agent.transition_task(db, task, "running", result_summary="Agent Runtime 推进中")
+    db.flush()
+
+
+def _tick_locked(
+    db: Session,
+    *,
+    goal: Goal,
+    plan: Any | None,
+    trigger: str,
+    max_steps: int | None,
+    deadline: float | None,
+    progress_callback: Callable[[str, dict], None] | None = None,
+) -> TickResult:
+    """tick 主体（调用方必须已持有 Goal 锁）。
+
+    run_agent_loop（调试接口 / 同步调用）与 tick（chat / Worker）共用同一段推进逻辑，
+    保证「执行 → 验证 → 重规划 → 生命周期」只有一份实现。
+    """
+    from app.models.agent import AgentGoal
+    from app.services.planner import get_plan_steps
+
+    result = TickResult(goal_id=goal.goal_id, trigger=trigger)
+
+    if plan is None:
+        result.lifecycle_state = "planning"
+        result.status = "planning"
+        result.message = "目标还没有计划，等待 Planner 生成"
+        db.flush()
+        return result
+
+    result.plan_id = plan.plan_id
+    _resume_marked_steps(db, goal)
+    db.flush()
+
+    loop_result = _execute_plan_loop(
+        db,
+        goal=goal,
+        plan=plan,
+        session_id=goal.session_id,
+        project_id=goal.project_id,
+        progress_callback=progress_callback,
+        max_steps=max_steps,
+        deadline=deadline,
+    )
+
+    result.status = loop_result["status"]
+    result.message = loop_result["message"]
+    result.total_steps = loop_result["total_steps"]
+    result.completed_steps = loop_result["completed_steps"]
+    result.failed_steps = loop_result["failed_steps"]
+    result.skipped_steps = loop_result["skipped_steps"]
+    result.next_action = loop_result["next_action"]
+    result.wait_step_id = loop_result.get("wait_step_id")
+    result.errors = loop_result["errors"]
+
+    _sync_plan_goal_status(db, goal.goal_id, plan.plan_id, result.status)
+
+    steps = get_plan_steps(db, plan.plan_id)
+    lifecycle = _derive_loop_status(steps)
+    if result.status == "running":
+        lifecycle = "running"
+    result.lifecycle_state = lifecycle
+
+    row = db.get(AgentGoal, goal.goal_id)
+    if row is not None:
+        row.lifecycle_state = lifecycle
+        row.last_tick_at = datetime.now()
+    _sync_agent_task_lifecycle(db, goal, lifecycle)
+
+    waiting: dict = {"job": [], "approval": [], "user": []}
+    failed_items: list[dict] = []
+    counts = {"succeeded": 0, "failed": 0, "waiting": 0, "pending": 0}
+    for s in steps:
+        status = s["status"]
+        if status == "waiting_job":
+            waiting["job"].append(s["id"])
+        elif status == "waiting_approval":
+            waiting["approval"].append(
+                {"step_id": s["id"], "confirmation_id": s.get("confirmation_id")}
+            )
+        elif status == "waiting_user":
+            waiting["user"].append(
+                {
+                    "step_id": s["id"],
+                    "error_code": s.get("error_code"),
+                    "message": s.get("error_message"),
+                }
+            )
+        if status == "succeeded":
+            counts["succeeded"] += 1
+        elif status == "failed":
+            counts["failed"] += 1
+            failed_items.append(
+                {
+                    "step_id": s["id"],
+                    "tool_name": s.get("tool_name"),
+                    "error_code": s.get("error_code"),
+                    "message": s.get("error_message"),
+                }
+            )
+        elif status.startswith("waiting"):
+            counts["waiting"] += 1
+        elif status in ("pending", "ready", "running"):
+            counts["pending"] += 1
+    result.waiting = waiting
+    result.failed = failed_items
+    result.counts = counts
+    db.flush()
+    return result
+
+
+def tick(
+    session_factory: Callable[[], Session] | None = None,
+    goal_id: str | None = None,
+    *,
+    trigger: str = "manual",
+    progress_callback: Callable[[str, dict], None] | None = None,
+) -> TickResult:
+    """幂等单次推进：自建 Session、抢 Goal 锁、认领恢复标记、最多推进 N 步。
+
+    trigger 取值：chat / worker_resume / worker_sweep / debug / manual（写入执行日志）。
+    """
+    from app.core.config import get_settings
+    from app.services.execution_manager import _acquire_goal_lock, _release_goal_lock
+    from app.services.goal_manager import get_goal_by_id
+    from app.services.planner import get_latest_plan, get_latest_plan_any
+
+    if session_factory is None:
+        from app.core.database import SessionLocal as session_factory  # noqa: N813
+
+    result = TickResult(goal_id=goal_id, trigger=trigger)
+    if not goal_id:
+        result.lifecycle_state = "failed"
+        result.status = "failed"
+        result.message = "缺少 goal_id"
+        return result
+
+    settings = get_settings()
+    max_steps = int(getattr(settings, "agent_max_steps_per_tick", 10) or 10)
+    timeout_seconds = float(getattr(settings, "agent_tick_timeout_seconds", 60.0) or 60.0)
+
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_seconds
+    db = session_factory()
+    lock_held = False
+    try:
+        goal = get_goal_by_id(db, goal_id)
+        if goal is None:
+            result.lifecycle_state = "unknown"
+            result.status = "failed"
+            result.message = f"Goal {goal_id} 不存在"
+            return result
+
+        if goal.status != "active" or goal.lifecycle_state in _PAUSED_LIFECYCLES:
+            result.lifecycle_state = goal.lifecycle_state or goal.status
+            result.status = goal.lifecycle_state or goal.status
+            result.message = f"目标当前状态为 {result.status}，不推进"
+            return result
+
+        if not _acquire_goal_lock(db, goal_id):
+            db.commit()
+            result.busy = True
+            result.lifecycle_state = goal.lifecycle_state or "running"
+            result.status = "busy"
+            result.message = f"Goal {goal_id} 正在由其他执行者推进"
+            return result
+        lock_held = True
+
+        log_execution(
+            db,
+            ExecutionRecord(
+                goal_id=goal_id,
+                status=f"tick_{trigger}",
+                input_data={"trigger": trigger},
+            ),
+        )
+
+        plan = get_latest_plan(db, goal_id) or get_latest_plan_any(db, goal_id)
+        result = _tick_locked(
+            db,
+            goal=goal,
+            plan=plan,
+            trigger=trigger,
+            max_steps=max_steps,
+            deadline=deadline,
+            progress_callback=progress_callback,
+        )
+        db.commit()
+        return result
+    except Exception as exc:  # noqa: BLE001 - tick 不向调用方抛异常
+        db.rollback()
+        error_code = type(exc).__name__
+        error_message = (str(exc) or error_code)[:1000]
+        try:
+            log_execution(
+                db,
+                ExecutionRecord(
+                    goal_id=goal_id,
+                    status="tick_error",
+                    error_code=error_code,
+                    error_message=error_message,
+                ),
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        result.lifecycle_state = "failed"
+        result.status = "failed"
+        result.message = f"tick 异常：{error_code}: {error_message}"
+        result.errors = [{"error": f"{error_code}: {error_message}"}]
+        return result
+    finally:
+        if lock_held:
+            try:
+                _release_goal_lock(db, goal_id)
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+        db.close()
 
 
 def run_agent_loop_in_new_session(
